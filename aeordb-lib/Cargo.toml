@@ -48,3 +48,15 @@ path = "spec/storage/redb_wrapper_spec.rs"
 [[test]]
 name = "http_spec"
 path = "spec/http/server_spec.rs"
+
+[[test]]
+name = "jwt_spec"
+path = "spec/auth/jwt_spec.rs"
+
+[[test]]
+name = "api_key_spec"
+path = "spec/auth/api_key_spec.rs"
+
+[[test]]
+name = "auth_middleware_spec"
+path = "spec/auth/auth_middleware_spec.rs"

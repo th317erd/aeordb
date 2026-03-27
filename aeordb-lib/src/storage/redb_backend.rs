@@ -4,6 +4,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::document::{Document, MetadataUpdates};
+use crate::auth::api_key::ApiKeyRecord;
 
 /// Each table stores documents keyed by UUID (as 128-bit value).
 /// The value is a byte blob we encode ourselves (not user data format --
@@ -368,5 +369,82 @@ impl RedbStorage {
     }
 
     Ok(documents)
+  }
+
+  // -------------------------------------------------------------------------
+  // System API key storage (table: "_system:api_keys")
+  // -------------------------------------------------------------------------
+
+  const API_KEYS_TABLE: TableDefinition<'static, u128, &'static [u8]> =
+    TableDefinition::new("_system:api_keys");
+
+  /// Store an API key record.
+  pub fn store_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
+    let encoded = serde_json::to_vec(record)
+      .map_err(|_| StorageError::CorruptData)?;
+
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::API_KEYS_TABLE)?;
+      let key = uuid_to_key(&record.key_id);
+      table.insert(key, encoded.as_slice())?;
+    }
+    write_transaction.commit()?;
+    Ok(())
+  }
+
+  /// List all API key records.
+  pub fn list_system_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
+    let read_transaction = self.database.begin_read()?;
+    let table = match read_transaction.open_table(Self::API_KEYS_TABLE) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+      Err(error) => return Err(StorageError::RedbTable(error)),
+    };
+
+    let mut records = Vec::new();
+    for result in table.iter()? {
+      let (_, value_guard) = result?;
+      let record: ApiKeyRecord = serde_json::from_slice(value_guard.value())
+        .map_err(|_| StorageError::CorruptData)?;
+      records.push(record);
+    }
+
+    Ok(records)
+  }
+
+  /// Revoke an API key by setting is_revoked = true.
+  /// Returns true if the key was found, false otherwise.
+  pub fn revoke_api_key(&self, key_id: Uuid) -> Result<bool> {
+    let write_transaction = self.database.begin_write()?;
+    let found = {
+      let mut table = write_transaction.open_table(Self::API_KEYS_TABLE)?;
+      let key = uuid_to_key(&key_id);
+
+      let existing_bytes = {
+        match table.get(key)? {
+          Some(guard) => {
+            let bytes = guard.value().to_vec();
+            Some(bytes)
+          }
+          None => None,
+        }
+      };
+
+      match existing_bytes {
+        Some(bytes) => {
+          let mut record: ApiKeyRecord = serde_json::from_slice(&bytes)
+            .map_err(|_| StorageError::CorruptData)?;
+          record.is_revoked = true;
+          let encoded = serde_json::to_vec(&record)
+            .map_err(|_| StorageError::CorruptData)?;
+          table.insert(key, encoded.as_slice())?;
+          true
+        }
+        None => false,
+      }
+    };
+    write_transaction.commit()?;
+    Ok(found)
   }
 }

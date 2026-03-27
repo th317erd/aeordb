@@ -5,13 +5,35 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use aeordb::server::create_app;
+use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::server::create_app_with_jwt;
 use aeordb::storage::RedbStorage;
 
-/// Create a fresh in-memory app for each test.
-fn test_app() -> axum::Router {
+/// Create a fresh in-memory app with a shared JwtManager.
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  create_app(storage)
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  (app, jwt_manager, storage)
+}
+
+/// Helper: build app from shared storage + jwt_manager.
+fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>) -> axum::Router {
+  create_app_with_jwt(storage.clone(), jwt_manager.clone())
+}
+
+/// Create an admin Bearer token value (including "Bearer " prefix).
+fn bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "test-admin".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    roles: vec!["admin".to_string()],
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
 }
 
 /// Helper to collect the response body into bytes.
@@ -31,7 +53,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_health_check_returns_200() {
-  let app = test_app();
+  let (app, _, _) = test_app();
   let request = Request::builder()
     .uri("/admin/health")
     .body(Body::empty())
@@ -50,11 +72,13 @@ async fn test_health_check_returns_200() {
 
 #[tokio::test]
 async fn test_create_document_returns_201_with_id() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("hello world"))
     .unwrap();
 
@@ -70,11 +94,13 @@ async fn test_create_document_returns_201_with_id() {
 
 #[tokio::test]
 async fn test_create_document_returns_body_with_mandatory_fields() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
     .body(Body::from("some data"))
     .unwrap();
 
@@ -89,13 +115,15 @@ async fn test_create_document_returns_body_with_mandatory_fields() {
 
 #[tokio::test]
 async fn test_create_document_preserves_content_type() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "image/png")
+    .header("authorization", &auth)
     .body(Body::from(vec![0x89, 0x50, 0x4e, 0x47]))
     .unwrap();
 
@@ -106,9 +134,10 @@ async fn test_create_document_preserves_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Now fetch it and confirm the content-type was preserved
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -126,14 +155,16 @@ async fn test_create_document_preserves_content_type() {
 
 #[tokio::test]
 async fn test_create_with_json_content_type() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   let json_body = r#"{"name":"alice","age":30}"#;
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "application/json")
+    .header("authorization", &auth)
     .body(Body::from(json_body))
     .unwrap();
 
@@ -144,9 +175,10 @@ async fn test_create_with_json_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch back and verify raw data integrity
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -162,14 +194,16 @@ async fn test_create_with_json_content_type() {
 
 #[tokio::test]
 async fn test_create_with_binary_content_type() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   let binary_data: Vec<u8> = (0u8..=255).collect();
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/blobs")
     .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
     .body(Body::from(binary_data.clone()))
     .unwrap();
 
@@ -180,9 +214,10 @@ async fn test_create_with_binary_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch back and verify binary data roundtrip
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/blobs/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -197,14 +232,16 @@ async fn test_create_with_binary_content_type() {
 
 #[tokio::test]
 async fn test_get_document_returns_200_with_data() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create a document first
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("hello"))
     .unwrap();
 
@@ -213,9 +250,10 @@ async fn test_get_document_returns_200_with_data() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Get it
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -228,13 +266,15 @@ async fn test_get_document_returns_200_with_data() {
 
 #[tokio::test]
 async fn test_get_document_returns_correct_content_type() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "application/xml")
+    .header("authorization", &auth)
     .body(Body::from("<root/>"))
     .unwrap();
 
@@ -242,9 +282,10 @@ async fn test_get_document_returns_correct_content_type() {
   let json = body_json(response.into_body()).await;
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -267,10 +308,12 @@ async fn test_get_document_returns_correct_content_type() {
 
 #[tokio::test]
 async fn test_get_document_returns_404_for_missing() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .uri(format!("/mydb/users/{}", fake_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -280,14 +323,16 @@ async fn test_get_document_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_get_deleted_document_returns_404() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create a document
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("to be deleted"))
     .unwrap();
 
@@ -296,10 +341,11 @@ async fn test_get_deleted_document_returns_404() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Delete it
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -307,9 +353,10 @@ async fn test_get_deleted_document_returns_404() {
   assert_eq!(delete_response.status(), StatusCode::OK);
 
   // Try to get it -- should be 404
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -323,14 +370,16 @@ async fn test_get_deleted_document_returns_404() {
 
 #[tokio::test]
 async fn test_update_document_returns_200() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("original"))
     .unwrap();
 
@@ -339,10 +388,11 @@ async fn test_update_document_returns_200() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Update
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let update_request = Request::builder()
     .method("PATCH")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::from("updated"))
     .unwrap();
 
@@ -355,9 +405,10 @@ async fn test_update_document_returns_200() {
   assert!(update_json["updated_at"].is_string());
 
   // Verify data was actually updated
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -368,11 +419,13 @@ async fn test_update_document_returns_200() {
 
 #[tokio::test]
 async fn test_update_document_returns_404_for_missing() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("PATCH")
     .uri(format!("/mydb/users/{}", fake_id))
+    .header("authorization", &auth)
     .body(Body::from("data"))
     .unwrap();
 
@@ -386,14 +439,16 @@ async fn test_update_document_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_delete_document_returns_200() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("deleteme"))
     .unwrap();
 
@@ -402,10 +457,11 @@ async fn test_delete_document_returns_200() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Delete
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -419,14 +475,16 @@ async fn test_delete_document_returns_200() {
 
 #[tokio::test]
 async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Completely missing document
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", fake_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -434,10 +492,11 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
   // Create then delete, then try to delete again
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let create_request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::from("temp"))
     .unwrap();
 
@@ -446,10 +505,11 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   let document_id = create_json["document_id"].as_str().unwrap().to_string();
 
   // First delete succeeds
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -458,20 +518,16 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
 
   // Second delete -- the storage layer will still find the document (it's
   // soft-deleted, not removed), so this will actually return 200 again.
-  // This is correct behaviour: delete is idempotent. The test name covers
-  // the "missing" case (which is 404 above).
-  // However, if the spec truly wants 404 for already-deleted, we'd need to
-  // check is_deleted in the route handler. Let's verify current behaviour:
-  let app4 = create_app(storage.clone());
+  // This is correct behaviour: delete is idempotent.
+  let app4 = rebuild_app(&storage, &jwt_manager);
   let delete_request2 = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
   let delete_response2 = app4.oneshot(delete_request2).await.unwrap();
-  // The storage layer currently allows re-deleting a soft-deleted document
-  // (it's idempotent). This returns 200.
   assert!(
     delete_response2.status() == StatusCode::OK
       || delete_response2.status() == StatusCode::NOT_FOUND,
@@ -486,31 +542,35 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
 
 #[tokio::test]
 async fn test_list_documents_returns_200_with_array() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create two documents
   let request1 = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("alice"))
     .unwrap();
   app.oneshot(request1).await.unwrap();
 
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let request2 = Request::builder()
     .method("POST")
     .uri("/mydb/users")
     .header("content-type", "text/plain")
+    .header("authorization", &auth)
     .body(Body::from("bob"))
     .unwrap();
   app2.oneshot(request2).await.unwrap();
 
   // List
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let list_request = Request::builder()
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -532,9 +592,11 @@ async fn test_list_documents_returns_200_with_array() {
 
 #[tokio::test]
 async fn test_list_documents_empty_table_returns_empty_array() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/mydb/empty_table")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -548,13 +610,15 @@ async fn test_list_documents_empty_table_returns_empty_array() {
 
 #[tokio::test]
 async fn test_list_documents_excludes_deleted_by_default() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create a document
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::from("will-be-deleted"))
     .unwrap();
 
@@ -563,27 +627,30 @@ async fn test_list_documents_excludes_deleted_by_default() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Create another that stays alive
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let request2 = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::from("stays"))
     .unwrap();
   app2.oneshot(request2).await.unwrap();
 
   // Delete the first one
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
   app3.oneshot(delete_request).await.unwrap();
 
   // List without include_deleted -- should get only 1
-  let app4 = create_app(storage.clone());
+  let app4 = rebuild_app(&storage, &jwt_manager);
   let list_request = Request::builder()
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -596,13 +663,15 @@ async fn test_list_documents_excludes_deleted_by_default() {
 
 #[tokio::test]
 async fn test_list_documents_includes_deleted_with_query_param() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // Create and delete a document
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::from("deleted-one"))
     .unwrap();
 
@@ -610,18 +679,20 @@ async fn test_list_documents_includes_deleted_with_query_param() {
   let json = body_json(response.into_body()).await;
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
   app2.oneshot(delete_request).await.unwrap();
 
   // List with include_deleted=true
-  let app3 = create_app(storage.clone());
+  let app3 = rebuild_app(&storage, &jwt_manager);
   let list_request = Request::builder()
     .uri("/mydb/users?include_deleted=true")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -638,9 +709,11 @@ async fn test_list_documents_includes_deleted_with_query_param() {
 
 #[tokio::test]
 async fn test_nonexistent_route_returns_404() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/this/does/not/exist/at/all")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -654,13 +727,15 @@ async fn test_nonexistent_route_returns_404() {
 
 #[tokio::test]
 async fn test_empty_table_name_handling() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
   // Axum won't match "/{database}/{table}" if table is empty, so
   // a URI like "/mydb/" should 404 (no route match).
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/")
+    .header("authorization", &auth)
     .body(Body::from("test"))
     .unwrap();
 
@@ -671,9 +746,11 @@ async fn test_empty_table_name_handling() {
 
 #[tokio::test]
 async fn test_get_document_with_invalid_uuid_returns_400() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/mydb/users/not-a-uuid")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -686,10 +763,12 @@ async fn test_get_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_update_document_with_invalid_uuid_returns_400() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("PATCH")
     .uri("/mydb/users/garbage")
+    .header("authorization", &auth)
     .body(Body::from("data"))
     .unwrap();
 
@@ -699,10 +778,12 @@ async fn test_update_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_delete_document_with_invalid_uuid_returns_400() {
-  let app = test_app();
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("DELETE")
     .uri("/mydb/users/not-valid")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -712,13 +793,15 @@ async fn test_delete_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_create_document_without_content_type() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   // No content-type header
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::from("raw bytes"))
     .unwrap();
 
@@ -729,9 +812,10 @@ async fn test_create_document_without_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch and verify no content-type is set
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -746,12 +830,14 @@ async fn test_create_document_without_content_type() {
 
 #[tokio::test]
 async fn test_create_empty_body() {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let app = create_app(storage.clone());
+  let (_, jwt_manager, storage) = test_app();
+  let auth = bearer_token(&jwt_manager);
 
+  let app = rebuild_app(&storage, &jwt_manager);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
@@ -762,9 +848,10 @@ async fn test_create_empty_body() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch and verify empty body
-  let app2 = create_app(storage.clone());
+  let app2 = rebuild_app(&storage, &jwt_manager);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
 
