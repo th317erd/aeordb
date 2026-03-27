@@ -224,6 +224,7 @@ impl RedbStorage {
 
   /// Update a document's raw data. Bumps `updated_at`, preserves
   /// `created_at` and other metadata.
+  /// Returns DocumentNotFound if the document does not exist or is soft-deleted.
   pub fn update_document(
     &self,
     table_name: &str,
@@ -244,6 +245,10 @@ impl RedbStorage {
       let existing = decode_document(guard.value())?;
       drop(guard);
 
+      if existing.is_deleted {
+        return Err(StorageError::DocumentNotFound(document_id));
+      }
+
       let updated = Document {
         document_id: existing.document_id,
         created_at: existing.created_at,
@@ -263,6 +268,8 @@ impl RedbStorage {
   }
 
   /// Update only metadata fields on a document (e.g. undelete).
+  /// Allows updating soft-deleted documents ONLY when setting is_deleted = false (undelete).
+  /// Returns DocumentNotFound for other updates on soft-deleted documents.
   pub fn update_document_metadata(
     &self,
     table_name: &str,
@@ -282,6 +289,12 @@ impl RedbStorage {
         .ok_or(StorageError::DocumentNotFound(document_id))?;
       let existing = decode_document(guard.value())?;
       drop(guard);
+
+      // If the document is soft-deleted, only allow undelete operations
+      let is_undelete = metadata_updates.is_deleted == Some(false);
+      if existing.is_deleted && !is_undelete {
+        return Err(StorageError::DocumentNotFound(document_id));
+      }
 
       let updated = Document {
         document_id: existing.document_id,
@@ -310,6 +323,7 @@ impl RedbStorage {
   }
 
   /// Soft-delete a document (sets is_deleted = true).
+  /// Returns DocumentNotFound if the document does not exist or is already soft-deleted.
   pub fn delete_document(
     &self,
     table_name: &str,
@@ -328,6 +342,10 @@ impl RedbStorage {
         .ok_or(StorageError::DocumentNotFound(document_id))?;
       let existing = decode_document(guard.value())?;
       drop(guard);
+
+      if existing.is_deleted {
+        return Err(StorageError::DocumentNotFound(document_id));
+      }
 
       let updated = Document {
         is_deleted: true,
@@ -393,6 +411,29 @@ impl RedbStorage {
     Ok(())
   }
 
+  /// Look up a single API key record by key_id prefix (first 16 hex chars
+  /// of the UUID, no dashes).
+  pub fn get_system_api_key(&self, key_id_prefix: &str) -> Result<Option<ApiKeyRecord>> {
+    let read_transaction = self.database.begin_read()?;
+    let table = match read_transaction.open_table(Self::API_KEYS_TABLE) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+      Err(error) => return Err(StorageError::RedbTable(error)),
+    };
+
+    for result in table.iter()? {
+      let (_, value_guard) = result?;
+      let record: ApiKeyRecord = serde_json::from_slice(value_guard.value())
+        .map_err(|_| StorageError::CorruptData)?;
+      let record_prefix = &record.key_id.simple().to_string()[..16];
+      if record_prefix == key_id_prefix {
+        return Ok(Some(record));
+      }
+    }
+
+    Ok(None)
+  }
+
   /// List all API key records.
   pub fn list_system_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
     let read_transaction = self.database.begin_read()?;
@@ -446,5 +487,38 @@ impl RedbStorage {
     };
     write_transaction.commit()?;
     Ok(found)
+  }
+
+  // -------------------------------------------------------------------------
+  // System config storage (table: "_system:config")
+  // -------------------------------------------------------------------------
+
+  const CONFIG_TABLE: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("_system:config");
+
+  /// Store a config value by key.
+  pub fn store_config(&self, key: &str, value: &[u8]) -> Result<()> {
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::CONFIG_TABLE)?;
+      table.insert(key, value)?;
+    }
+    write_transaction.commit()?;
+    Ok(())
+  }
+
+  /// Retrieve a config value by key.
+  pub fn get_config(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    let read_transaction = self.database.begin_read()?;
+    let table = match read_transaction.open_table(Self::CONFIG_TABLE) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+      Err(error) => return Err(StorageError::RedbTable(error)),
+    };
+
+    match table.get(key)? {
+      Some(guard) => Ok(Some(guard.value().to_vec())),
+      None => Ok(None),
+    }
   }
 }

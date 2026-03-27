@@ -20,12 +20,36 @@ pub struct ApiKeyRecord {
   pub is_revoked: bool,
 }
 
-/// Generate a new API key with the `aeor_k_` prefix followed by 32 random hex bytes.
-pub fn generate_api_key() -> String {
+/// Generate a new API key with the format `aeor_k_{key_id_prefix}_{random_hex}`
+/// where key_id_prefix is the first 16 hex chars of the key_id UUID (no dashes).
+pub fn generate_api_key(key_id: Uuid) -> String {
   let mut random_bytes = [0u8; 32];
   rand::RngCore::fill_bytes(&mut OsRng, &mut random_bytes);
   let hex_string = hex_encode(&random_bytes);
-  format!("{}{}", API_KEY_PREFIX, hex_string)
+  let key_id_prefix = &key_id.simple().to_string()[..16];
+  format!("{}{}_{}", API_KEY_PREFIX, key_id_prefix, hex_string)
+}
+
+/// Parse an API key, extracting the key_id prefix and the full key string.
+/// Returns (key_id_prefix, full_key) on success.
+pub fn parse_api_key(key: &str) -> Result<(String, String), String> {
+  let without_prefix = key
+    .strip_prefix(API_KEY_PREFIX)
+    .ok_or_else(|| "API key missing aeor_k_ prefix".to_string())?;
+
+  let underscore_position = without_prefix
+    .find('_')
+    .ok_or_else(|| "API key missing key_id separator".to_string())?;
+
+  let key_id_prefix = without_prefix[..underscore_position].to_string();
+  if key_id_prefix.len() != 16 {
+    return Err(format!(
+      "key_id prefix must be 16 hex chars, got {}",
+      key_id_prefix.len()
+    ));
+  }
+
+  Ok((key_id_prefix, key.to_string()))
 }
 
 /// Hash an API key using argon2id.

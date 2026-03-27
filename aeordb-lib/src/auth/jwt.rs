@@ -6,6 +6,10 @@ use jsonwebtoken::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+/// Error type for JwtManager construction failures.
+#[derive(Debug)]
+pub struct JwtKeyError(pub String);
+
 /// Default token expiry in seconds (1 hour).
 pub const DEFAULT_EXPIRY_SECONDS: i64 = 3600;
 
@@ -17,12 +21,17 @@ pub struct TokenClaims {
   pub iat: i64,
   pub exp: i64,
   pub roles: Vec<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub scope: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub permissions: Option<Vec<String>>,
 }
 
 /// Manages JWT signing and verification using Ed25519 (EdDSA).
 pub struct JwtManager {
   encoding_key: EncodingKey,
   decoding_key: DecodingKey,
+  signing_key_bytes: Vec<u8>,
 }
 
 impl JwtManager {
@@ -30,6 +39,7 @@ impl JwtManager {
   pub fn generate() -> Self {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
+    let seed_bytes = signing_key.to_bytes().to_vec();
 
     // jsonwebtoken (ring-backed) expects PKCS#8 DER for the signing key
     let pkcs8_der = signing_key
@@ -44,7 +54,35 @@ impl JwtManager {
     Self {
       encoding_key,
       decoding_key,
+      signing_key_bytes: seed_bytes,
     }
+  }
+
+  /// Serialize the signing key to raw bytes (32-byte Ed25519 seed).
+  pub fn to_bytes(&self) -> Vec<u8> {
+    self.signing_key_bytes.clone()
+  }
+
+  /// Reconstruct a JwtManager from raw bytes (32-byte Ed25519 seed).
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, JwtKeyError> {
+    let seed: [u8; 32] = bytes
+      .try_into()
+      .map_err(|_| JwtKeyError("expected 32-byte Ed25519 seed".to_string()))?;
+
+    let signing_key = SigningKey::from_bytes(&seed);
+    let pkcs8_der = signing_key
+      .to_pkcs8_der()
+      .map_err(|error| JwtKeyError(format!("failed to encode key: {}", error)))?;
+    let encoding_key = EncodingKey::from_ed_der(pkcs8_der.as_bytes());
+
+    let verifying_key = signing_key.verifying_key();
+    let decoding_key = DecodingKey::from_ed_der(verifying_key.as_bytes());
+
+    Ok(Self {
+      encoding_key,
+      decoding_key,
+      signing_key_bytes: seed.to_vec(),
+    })
   }
 
   /// Create a signed JWT from the given claims.

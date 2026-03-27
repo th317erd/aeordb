@@ -575,20 +575,26 @@ fn documents_are_isolated_between_tables() {
 }
 
 // ---------------------------------------------------------------------------
-// DOUBLE DELETE
+// DOUBLE DELETE (FIX 4: should return error)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn double_delete_is_idempotent() {
+fn double_delete_returns_error() {
   let storage = create_storage();
   let created = storage
     .create_document(TABLE, b"data".to_vec(), None)
     .unwrap();
 
   storage.delete_document(TABLE, created.document_id).unwrap();
-  // Second delete should also succeed (document still exists, just flagged)
-  storage.delete_document(TABLE, created.document_id).unwrap();
+  // Second delete should return DocumentNotFound since the document is already soft-deleted
+  let result = storage.delete_document(TABLE, created.document_id);
+  assert!(result.is_err(), "second delete should fail");
+  match result.unwrap_err() {
+    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
+    other => panic!("expected DocumentNotFound, got: {other}"),
+  }
 
+  // Document should still be marked as deleted in storage
   let all = storage.list_documents(TABLE, true).unwrap();
   let document = all
     .iter()
@@ -598,12 +604,11 @@ fn double_delete_is_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// UPDATE AFTER DELETE
+// UPDATE AFTER DELETE (FIX 3: should return error)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn update_document_on_soft_deleted_still_works() {
-  // A soft-deleted document still exists in storage, so update should work
+fn update_document_on_soft_deleted_returns_error() {
   let storage = create_storage();
   let created = storage
     .create_document(TABLE, b"original".to_vec(), None)
@@ -611,11 +616,97 @@ fn update_document_on_soft_deleted_still_works() {
 
   storage.delete_document(TABLE, created.document_id).unwrap();
 
-  let updated = storage
-    .update_document(TABLE, created.document_id, b"modified".to_vec())
+  let result = storage.update_document(TABLE, created.document_id, b"modified".to_vec());
+  assert!(result.is_err(), "updating a soft-deleted document should fail");
+  match result.unwrap_err() {
+    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
+    other => panic!("expected DocumentNotFound, got: {other}"),
+  }
+}
+
+#[test]
+fn update_metadata_on_soft_deleted_without_undelete_returns_error() {
+  let storage = create_storage();
+  let created = storage
+    .create_document(TABLE, b"data".to_vec(), Some("text/plain".into()))
     .unwrap();
 
-  // Data is changed but is_deleted is still true
-  assert_eq!(updated.data, b"modified");
-  assert!(updated.is_deleted);
+  storage.delete_document(TABLE, created.document_id).unwrap();
+
+  // Try to change content_type on a deleted doc (not an undelete operation)
+  let result = storage.update_document_metadata(
+    TABLE,
+    created.document_id,
+    MetadataUpdates {
+      content_type: Some(Some("application/json".into())),
+      ..Default::default()
+    },
+  );
+  assert!(result.is_err(), "metadata update on deleted doc should fail unless undeleting");
+  match result.unwrap_err() {
+    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
+    other => panic!("expected DocumentNotFound, got: {other}"),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SYSTEM CONFIG
+// ---------------------------------------------------------------------------
+
+#[test]
+fn store_and_get_config() {
+  let storage = create_storage();
+
+  storage.store_config("test_key", b"test_value").unwrap();
+
+  let value = storage.get_config("test_key").unwrap();
+  assert_eq!(value, Some(b"test_value".to_vec()));
+}
+
+#[test]
+fn get_config_returns_none_for_missing() {
+  let storage = create_storage();
+  let value = storage.get_config("nonexistent").unwrap();
+  assert!(value.is_none());
+}
+
+#[test]
+fn store_config_overwrites_existing() {
+  let storage = create_storage();
+
+  storage.store_config("key", b"v1").unwrap();
+  storage.store_config("key", b"v2").unwrap();
+
+  let value = storage.get_config("key").unwrap();
+  assert_eq!(value, Some(b"v2".to_vec()));
+}
+
+// ---------------------------------------------------------------------------
+// GET SYSTEM API KEY (targeted lookup)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn get_system_api_key_by_prefix() {
+  let storage = create_storage();
+  let key_id = uuid::Uuid::new_v4();
+  let record = aeordb::auth::api_key::ApiKeyRecord {
+    key_id,
+    key_hash: "test_hash".to_string(),
+    roles: vec!["admin".to_string()],
+    created_at: chrono::Utc::now(),
+    is_revoked: false,
+  };
+  storage.store_api_key(&record).unwrap();
+
+  let key_id_prefix = &key_id.simple().to_string()[..16];
+  let found = storage.get_system_api_key(key_id_prefix).unwrap();
+  assert!(found.is_some());
+  assert_eq!(found.unwrap().key_id, key_id);
+}
+
+#[test]
+fn get_system_api_key_returns_none_for_unknown_prefix() {
+  let storage = create_storage();
+  let found = storage.get_system_api_key("0000000000000000").unwrap();
+  assert!(found.is_none());
 }

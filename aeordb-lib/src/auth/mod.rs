@@ -2,7 +2,7 @@ pub mod api_key;
 pub mod jwt;
 pub mod middleware;
 
-pub use api_key::{ApiKeyRecord, generate_api_key, hash_api_key, verify_api_key};
+pub use api_key::{ApiKeyRecord, generate_api_key, hash_api_key, parse_api_key, verify_api_key};
 pub use jwt::{JwtManager, TokenClaims};
 pub use middleware::auth_middleware;
 
@@ -14,7 +14,6 @@ use crate::storage::RedbStorage;
 /// Returns None if any API key records are already present.
 pub fn bootstrap_root_key(
   storage: &RedbStorage,
-  _jwt_manager: &JwtManager,
 ) -> Option<String> {
   let existing_keys = storage
     .list_system_api_keys()
@@ -24,12 +23,13 @@ pub fn bootstrap_root_key(
     return None;
   }
 
-  let plaintext_key = generate_api_key();
+  let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key)
     .expect("failed to hash root API key");
 
   let record = ApiKeyRecord {
-    key_id: uuid::Uuid::new_v4(),
+    key_id,
     key_hash,
     roles: vec!["admin".to_string()],
     created_at: chrono::Utc::now(),

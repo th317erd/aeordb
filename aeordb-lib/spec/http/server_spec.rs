@@ -31,6 +31,8 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
     roles: vec!["admin".to_string()],
+    scope: None,
+    permissions: None,
   };
   let token = jwt_manager.create_token(&claims).expect("create token");
   format!("Bearer {}", token)
@@ -478,8 +480,8 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   let (_, jwt_manager, storage) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
   // Completely missing document
+  let app = rebuild_app(&storage, &jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
@@ -516,9 +518,7 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   let delete_response = app3.oneshot(delete_request).await.unwrap();
   assert_eq!(delete_response.status(), StatusCode::OK);
 
-  // Second delete -- the storage layer will still find the document (it's
-  // soft-deleted, not removed), so this will actually return 200 again.
-  // This is correct behaviour: delete is idempotent.
+  // Second delete should return 404 (already deleted)
   let app4 = rebuild_app(&storage, &jwt_manager);
   let delete_request2 = Request::builder()
     .method("DELETE")
@@ -528,11 +528,10 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
     .unwrap();
 
   let delete_response2 = app4.oneshot(delete_request2).await.unwrap();
-  assert!(
-    delete_response2.status() == StatusCode::OK
-      || delete_response2.status() == StatusCode::NOT_FOUND,
-    "Expected 200 or 404 for re-delete, got {}",
-    delete_response2.status()
+  assert_eq!(
+    delete_response2.status(),
+    StatusCode::NOT_FOUND,
+    "Deleting an already-deleted document should return 404"
   );
 }
 
@@ -595,7 +594,7 @@ async fn test_list_documents_empty_table_returns_empty_array() {
   let (app, jwt_manager, _) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
-    .uri("/mydb/empty_table")
+    .uri("/mydb/emptytable")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -858,4 +857,159 @@ async fn test_create_empty_body() {
   let get_response = app2.oneshot(get_request).await.unwrap();
   let body = body_bytes(get_response.into_body()).await;
   assert!(body.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// FIX 8: Table/database name validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_invalid_table_name_rejected() {
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/mydb/inv@lid!")
+    .header("authorization", &auth)
+    .body(Body::from("data"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(response.into_body()).await;
+  assert!(
+    json["error"].as_str().unwrap().contains("Invalid table name"),
+    "Error should mention invalid table name, got: {}",
+    json["error"]
+  );
+}
+
+#[tokio::test]
+async fn test_path_traversal_rejected() {
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/mydb/..%2F..%2Fetc")
+    .header("authorization", &auth)
+    .body(Body::from("data"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_system_table_prefix_rejected() {
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/mydb/_system")
+    .header("authorization", &auth)
+    .body(Body::from("data"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(response.into_body()).await;
+  assert!(
+    json["error"].as_str().unwrap().contains("reserved"),
+    "Error should mention reserved prefix, got: {}",
+    json["error"]
+  );
+}
+
+#[tokio::test]
+async fn test_system_database_prefix_rejected() {
+  let (app, jwt_manager, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/_internal/users")
+    .header("authorization", &auth)
+    .body(Body::from("data"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(response.into_body()).await;
+  assert!(
+    json["error"].as_str().unwrap().contains("reserved"),
+    "Error should mention reserved prefix, got: {}",
+    json["error"]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 12: Concurrent requests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_requests_handled() {
+  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a document first
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let request = Request::builder()
+    .method("POST")
+    .uri("/mydb/concurrent")
+    .header("authorization", &auth)
+    .header("content-type", "text/plain")
+    .body(Body::from("seed"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Spawn multiple concurrent create requests
+  let mut handles = Vec::new();
+  for i in 0..5 {
+    let storage_clone = storage.clone();
+    let jwt_clone = jwt_manager.clone();
+    let auth_clone = auth.clone();
+    handles.push(tokio::spawn(async move {
+      let app = create_app_with_jwt(storage_clone, jwt_clone);
+      let request = Request::builder()
+        .method("POST")
+        .uri("/mydb/concurrent")
+        .header("authorization", &auth_clone)
+        .header("content-type", "text/plain")
+        .body(Body::from(format!("concurrent-{}", i)))
+        .unwrap();
+      let response = app.oneshot(request).await.unwrap();
+      response.status()
+    }));
+  }
+
+  let mut success_count = 0;
+  for handle in handles {
+    let status = handle.await.unwrap();
+    if status == StatusCode::CREATED {
+      success_count += 1;
+    }
+  }
+
+  assert_eq!(success_count, 5, "All concurrent requests should succeed");
+
+  // Verify all documents exist
+  let app_final = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let list_request = Request::builder()
+    .uri("/mydb/concurrent")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let list_response = app_final.oneshot(list_request).await.unwrap();
+  let list_json = body_json(list_response.into_body()).await;
+  let array = list_json.as_array().unwrap();
+  assert_eq!(array.len(), 6, "Should have seed + 5 concurrent docs");
 }

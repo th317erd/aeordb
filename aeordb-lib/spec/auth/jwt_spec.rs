@@ -8,12 +8,14 @@ fn make_claims(expiry_offset: i64) -> TokenClaims {
     iat: now,
     exp: now + expiry_offset,
     roles: vec!["admin".to_string(), "reader".to_string()],
+    scope: None,
+    permissions: None,
   }
 }
 
 #[test]
 fn test_generate_ed25519_keypair() {
-  // Should not panic — just verifying construction works.
+  // Should not panic -- just verifying construction works.
   let _manager = JwtManager::generate();
 }
 
@@ -70,6 +72,8 @@ fn test_wrong_issuer_rejected() {
     iat: now,
     exp: now + 3600,
     roles: vec![],
+    scope: None,
+    permissions: None,
   };
 
   let token = manager.create_token(&claims).expect("should create token");
@@ -88,6 +92,8 @@ fn test_jwt_contains_correct_claims() {
     iat: now,
     exp: now + 3600,
     roles: vec!["reader".to_string()],
+    scope: None,
+    permissions: None,
   };
 
   let token = manager.create_token(&claims).expect("should create token");
@@ -98,6 +104,8 @@ fn test_jwt_contains_correct_claims() {
   assert_eq!(decoded.iat, now);
   assert_eq!(decoded.exp, now + 3600);
   assert_eq!(decoded.roles, vec!["reader".to_string()]);
+  assert_eq!(decoded.scope, None);
+  assert_eq!(decoded.permissions, None);
 }
 
 #[test]
@@ -129,4 +137,49 @@ fn test_garbage_token_rejected() {
   let manager = JwtManager::generate();
   let result = manager.verify_token("not.a.jwt.at.all");
   assert!(result.is_err(), "garbage token should be rejected");
+}
+
+#[test]
+fn test_to_bytes_and_from_bytes_roundtrip() {
+  let manager = JwtManager::generate();
+  let claims = make_claims(3600);
+  let token = manager.create_token(&claims).expect("should create token");
+
+  let key_bytes = manager.to_bytes();
+  let restored_manager = JwtManager::from_bytes(&key_bytes).expect("should restore from bytes");
+
+  let decoded = restored_manager.verify_token(&token).expect("restored manager should verify token");
+  assert_eq!(decoded.sub, claims.sub);
+  assert_eq!(decoded.roles, claims.roles);
+}
+
+#[test]
+fn test_from_bytes_with_invalid_length_fails() {
+  let result = JwtManager::from_bytes(&[0u8; 16]);
+  assert!(result.is_err(), "invalid key length should fail");
+}
+
+#[test]
+fn test_scope_and_permissions_serialized_when_present() {
+  let manager = JwtManager::generate();
+  let now = chrono::Utc::now().timestamp();
+
+  let claims = TokenClaims {
+    sub: "scoped-user".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + 3600,
+    roles: vec!["admin".to_string()],
+    scope: Some("read write".to_string()),
+    permissions: Some(vec!["docs:read".to_string(), "docs:write".to_string()]),
+  };
+
+  let token = manager.create_token(&claims).expect("should create token");
+  let decoded = manager.verify_token(&token).expect("should verify token");
+
+  assert_eq!(decoded.scope, Some("read write".to_string()));
+  assert_eq!(
+    decoded.permissions,
+    Some(vec!["docs:read".to_string(), "docs:write".to_string()])
+  );
 }

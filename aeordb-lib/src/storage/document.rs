@@ -18,5 +18,6 @@ pub struct MetadataUpdates {
   pub is_deleted: Option<bool>,
   pub created_at: Option<DateTime<Utc>>,
   pub updated_at: Option<DateTime<Utc>>,
+  // None = don't update, Some(None) = clear content_type, Some(Some(value)) = set content_type
   pub content_type: Option<Option<String>>,
 }

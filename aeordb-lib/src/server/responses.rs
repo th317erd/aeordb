@@ -1,3 +1,8 @@
+use axum::{
+  http::StatusCode,
+  response::{IntoResponse, Response},
+  Json,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -26,9 +31,27 @@ pub struct DeleteDocumentResponse {
   pub document_id: Uuid,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ErrorResponse {
   pub error: String,
+}
+
+impl ErrorResponse {
+  pub fn new(error: impl Into<String>) -> Self {
+    Self {
+      error: error.into(),
+    }
+  }
+
+  pub fn with_status(self, status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(self))
+  }
+}
+
+impl IntoResponse for ErrorResponse {
+  fn into_response(self) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
+  }
 }
 
 impl From<&Document> for DocumentMetadataResponse {

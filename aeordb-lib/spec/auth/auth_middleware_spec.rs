@@ -27,6 +27,8 @@ fn admin_token(jwt_manager: &JwtManager) -> String {
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
     roles: vec!["admin".to_string()],
+    scope: None,
+    permissions: None,
   };
   jwt_manager.create_token(&claims).expect("create admin token")
 }
@@ -40,6 +42,8 @@ fn reader_token(jwt_manager: &JwtManager) -> String {
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
     roles: vec!["reader".to_string()],
+    scope: None,
+    permissions: None,
   };
   jwt_manager.create_token(&claims).expect("create reader token")
 }
@@ -93,6 +97,8 @@ async fn test_expired_bearer_token_returns_401() {
     iat: now - 7200,
     exp: now - 3600, // expired 1 hour ago
     roles: vec!["admin".to_string()],
+    scope: None,
+    permissions: None,
   };
   let token = jwt_manager.create_token(&claims).expect("create expired token");
 
@@ -162,7 +168,7 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
     .method("POST")
     .uri("/auth/token")
     .header("content-type", "application/json")
-    .body(Body::from(r#"{"api_key":"aeor_k_invalid"}"#))
+    .body(Body::from(r#"{"api_key":"aeor_k_0123456789abcdef_0000000000000000000000000000000000000000000000000000000000000000"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -177,11 +183,12 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
 async fn test_auth_token_with_valid_api_key_returns_jwt() {
   let (app, _, storage) = test_app();
 
-  // Create an API key in storage
-  let plaintext_key = generate_api_key();
+  // Create an API key in storage with the new format
+  let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
   let record = ApiKeyRecord {
-    key_id: uuid::Uuid::new_v4(),
+    key_id,
     key_hash,
     roles: vec!["admin".to_string()],
     created_at: chrono::Utc::now(),
@@ -212,7 +219,7 @@ async fn test_auth_token_with_invalid_api_key_returns_401() {
     .method("POST")
     .uri("/auth/token")
     .header("content-type", "application/json")
-    .body(Body::from(r#"{"api_key":"aeor_k_0000000000000000000000000000000000000000000000000000000000000000"}"#))
+    .body(Body::from(r#"{"api_key":"aeor_k_0123456789abcdef_0000000000000000000000000000000000000000000000000000000000000000"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -264,10 +271,11 @@ async fn test_list_api_keys_returns_metadata() {
   let (app, jwt_manager, storage) = test_app();
 
   // Seed a key
-  let plaintext_key = generate_api_key();
+  let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
   let record = ApiKeyRecord {
-    key_id: uuid::Uuid::new_v4(),
+    key_id,
     key_hash,
     roles: vec!["admin".to_string()],
     created_at: chrono::Utc::now(),
@@ -301,9 +309,9 @@ async fn test_revoke_api_key_succeeds() {
   let (app, jwt_manager, storage) = test_app();
 
   // Seed a key
-  let plaintext_key = generate_api_key();
-  let key_hash = hash_api_key(&plaintext_key).unwrap();
   let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
+  let key_hash = hash_api_key(&plaintext_key).unwrap();
   let record = ApiKeyRecord {
     key_id,
     key_hash,
@@ -335,9 +343,9 @@ async fn test_revoked_api_key_cannot_get_token() {
   let jwt_manager = Arc::new(JwtManager::generate());
 
   // Create and store a key
-  let plaintext_key = generate_api_key();
-  let key_hash = hash_api_key(&plaintext_key).unwrap();
   let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
+  let key_hash = hash_api_key(&plaintext_key).unwrap();
   let record = ApiKeyRecord {
     key_id,
     key_hash,
@@ -366,9 +374,8 @@ async fn test_revoked_api_key_cannot_get_token() {
 #[tokio::test]
 async fn test_bootstrap_creates_root_key_on_first_run() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let jwt_manager = JwtManager::generate();
 
-  let result = bootstrap_root_key(&storage, &jwt_manager);
+  let result = bootstrap_root_key(&storage);
   assert!(result.is_some(), "should return a plaintext key on first run");
 
   let plaintext_key = result.unwrap();
@@ -384,14 +391,13 @@ async fn test_bootstrap_creates_root_key_on_first_run() {
 #[tokio::test]
 async fn test_bootstrap_returns_none_on_subsequent_runs() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let jwt_manager = JwtManager::generate();
 
   // First run creates the key
-  let first_result = bootstrap_root_key(&storage, &jwt_manager);
+  let first_result = bootstrap_root_key(&storage);
   assert!(first_result.is_some());
 
   // Second run should return None
-  let second_result = bootstrap_root_key(&storage, &jwt_manager);
+  let second_result = bootstrap_root_key(&storage);
   assert!(second_result.is_none(), "should return None when keys already exist");
 
   // Still only one key in storage
@@ -483,4 +489,70 @@ async fn test_revoke_api_key_requires_admin_role() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// FIX 11: Full e2e auth flow test
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_flow_bootstrap_to_token_to_crud() {
+  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
+  let jwt_manager = Arc::new(JwtManager::generate());
+
+  // Step 1: Bootstrap root key
+  let plaintext_key = bootstrap_root_key(&storage)
+    .expect("should create root key on first run");
+
+  // Step 2: Exchange API key for JWT
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let token_request = Request::builder()
+    .method("POST")
+    .uri("/auth/token")
+    .header("content-type", "application/json")
+    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, plaintext_key)))
+    .unwrap();
+
+  let token_response = app.oneshot(token_request).await.unwrap();
+  assert_eq!(token_response.status(), StatusCode::OK);
+
+  let token_json = body_json(token_response.into_body()).await;
+  let jwt_token = token_json["token"].as_str().expect("should have token");
+  let bearer = format!("Bearer {}", jwt_token);
+
+  // Step 3: Use JWT to create a document
+  let app2 = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let create_request = Request::builder()
+    .method("POST")
+    .uri("/mydb/e2e-test")
+    .header("authorization", &bearer)
+    .header("content-type", "text/plain")
+    .body(Body::from("e2e test data"))
+    .unwrap();
+
+  let create_response = app2.oneshot(create_request).await.unwrap();
+  assert_eq!(create_response.status(), StatusCode::CREATED);
+
+  let create_json = body_json(create_response.into_body()).await;
+  let document_id = create_json["document_id"].as_str().unwrap();
+
+  // Step 4: Verify the document exists by fetching it
+  let app3 = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let get_request = Request::builder()
+    .uri(format!("/mydb/e2e-test/{}", document_id))
+    .header("authorization", &bearer)
+    .body(Body::empty())
+    .unwrap();
+
+  let get_response = app3.oneshot(get_request).await.unwrap();
+  assert_eq!(get_response.status(), StatusCode::OK);
+
+  let body_bytes = get_response
+    .into_body()
+    .collect()
+    .await
+    .unwrap()
+    .to_bytes()
+    .to_vec();
+  assert_eq!(String::from_utf8(body_bytes).unwrap(), "e2e test data");
 }
