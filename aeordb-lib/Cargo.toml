@@ -28,6 +28,10 @@ argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 rand = "0.8"
 
+# Plugins
+wasmi = "0.42"
+libloading = "0.8"
+
 # Common
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -37,9 +41,11 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
+redb = "3.1"
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
+wat = "1"
 
 [[test]]
 name = "storage_spec"
@@ -60,3 +66,19 @@ path = "spec/auth/api_key_spec.rs"
 [[test]]
 name = "auth_middleware_spec"
 path = "spec/auth/auth_middleware_spec.rs"
+
+[[test]]
+name = "wasm_runtime_spec"
+path = "spec/plugins/wasm_runtime_spec.rs"
+
+[[test]]
+name = "plugin_manager_spec"
+path = "spec/plugins/plugin_manager_spec.rs"
+
+[[test]]
+name = "native_runtime_spec"
+path = "spec/plugins/native_runtime_spec.rs"
+
+[[test]]
+name = "plugin_deploy_spec"
+path = "spec/http/plugin_deploy_spec.rs"

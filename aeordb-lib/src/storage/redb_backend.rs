@@ -50,7 +50,17 @@ pub enum StorageError {
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 pub struct RedbStorage {
-  database: Database,
+  database: std::sync::Arc<Database>,
+}
+
+impl RedbStorage {
+  /// Get a shared reference to the underlying redb Database.
+  ///
+  /// This is used by subsystems (e.g. PluginManager) that need direct
+  /// access to the same database instance.
+  pub fn database_arc(&self) -> std::sync::Arc<Database> {
+    self.database.clone()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,14 +150,18 @@ impl RedbStorage {
   /// Open or create a database at the given filesystem path.
   pub fn new(path: &str) -> Result<Self> {
     let database = Database::create(path)?;
-    Ok(Self { database })
+    Ok(Self {
+      database: std::sync::Arc::new(database),
+    })
   }
 
   /// Create an in-memory database (no disk I/O -- ideal for tests).
   pub fn new_in_memory() -> Result<Self> {
     let backend = InMemoryBackend::new();
     let database = Database::builder().create_with_backend(backend)?;
-    Ok(Self { database })
+    Ok(Self {
+      database: std::sync::Arc::new(database),
+    })
   }
 
   /// Create a new document with an auto-generated UUID.

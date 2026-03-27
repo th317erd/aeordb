@@ -2,6 +2,7 @@
 members = [
     "aeordb-lib",
     "aeordb-cli",
+    "aeordb-plugin-sdk",
 ]
 resolver = "2"
 

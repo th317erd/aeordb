@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::middleware::auth_middleware;
+use crate::plugins::PluginManager;
 use crate::storage::RedbStorage;
 use state::AppState;
 
@@ -41,9 +42,12 @@ fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
 
 /// Build the application router with a specific JwtManager (useful for tests).
 pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>) -> Router {
+  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+
   let app_state = AppState {
     storage,
     jwt_manager,
+    plugin_manager,
   };
 
   // Routes that require authentication
@@ -60,6 +64,23 @@ pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManage
     )
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
+    // Plugin routes
+    .route(
+      "/{database}/{schema}/{table}/_deploy",
+      put(routes::deploy_plugin),
+    )
+    .route(
+      "/{database}/{schema}/{table}/{function_name}/_invoke",
+      post(routes::invoke_plugin),
+    )
+    .route(
+      "/{database}/_plugins",
+      get(routes::list_plugins),
+    )
+    .route(
+      "/{database}/{schema}/{table}/{function_name}/_remove",
+      delete(routes::remove_plugin),
+    )
     .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 
   // Public routes (no auth required)

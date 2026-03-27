@@ -263,6 +263,148 @@ pub async fn list_documents(
 }
 
 // ---------------------------------------------------------------------------
+// Plugin routes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct DeployPluginQuery {
+  pub name: Option<String>,
+  pub plugin_type: Option<String>,
+}
+
+/// PUT /:database/:schema/:table/_deploy — deploy a plugin.
+///
+/// Accepts the WASM binary as the raw request body.
+/// Plugin name comes from the `name` query parameter (defaults to the table segment).
+/// Plugin type comes from the `plugin_type` query parameter (defaults to "wasm").
+pub async fn deploy_plugin(
+  State(state): State<AppState>,
+  Path((database, schema, table)): Path<(String, String, String)>,
+  Query(query): Query<DeployPluginQuery>,
+  body: axum::body::Bytes,
+) -> Response {
+  let plugin_path = format!("{}/{}/{}", database, schema, table);
+  let plugin_name = query.name.unwrap_or_else(|| table.clone());
+
+  let plugin_type_string = query.plugin_type.unwrap_or_else(|| "wasm".to_string());
+  let plugin_type: crate::plugins::PluginType = match plugin_type_string.parse() {
+    Ok(parsed) => parsed,
+    Err(error) => {
+      return ErrorResponse::new(format!("Invalid plugin type: {}", error))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  if body.is_empty() {
+    return ErrorResponse::new("Plugin body must not be empty".to_string())
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  }
+
+  match state
+    .plugin_manager
+    .deploy_plugin(&plugin_name, &plugin_path, plugin_type, body.to_vec())
+  {
+    Ok(record) => {
+      let metadata = record.to_metadata();
+      (StatusCode::OK, Json(serde_json::to_value(metadata).unwrap())).into_response()
+    }
+    Err(crate::plugins::plugin_manager::PluginManagerError::InvalidPlugin(message)) => {
+      ErrorResponse::new(format!("Invalid plugin: {}", message))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Failed to deploy plugin: {}", error);
+      ErrorResponse::new(format!("Failed to deploy plugin: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+/// POST /:database/:schema/:table/:function_name/_invoke — invoke a deployed plugin.
+pub async fn invoke_plugin(
+  State(state): State<AppState>,
+  Path((database, schema, table, function_name)): Path<(String, String, String, String)>,
+  body: axum::body::Bytes,
+) -> Response {
+  let plugin_path = format!("{}/{}/{}", database, schema, table);
+
+  // For now we ignore function_name — in the future it could select a specific
+  // exported function within the plugin module.
+  let _ = function_name;
+
+  match state
+    .plugin_manager
+    .invoke_wasm_plugin(&plugin_path, &body)
+  {
+    Ok(response_bytes) => {
+      let mut response_builder = axum::http::Response::builder().status(StatusCode::OK);
+      response_builder = response_builder.header("content-type", "application/octet-stream");
+      response_builder
+        .body(axum::body::Body::from(response_bytes))
+        .unwrap_or_else(|_| {
+          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        })
+    }
+    Err(crate::plugins::plugin_manager::PluginManagerError::NotFound(path)) => {
+      ErrorResponse::new(format!("Plugin not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Plugin invocation failed: {}", error);
+      ErrorResponse::new(format!("Plugin invocation failed: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+/// GET /:database/_plugins — list all deployed plugins.
+pub async fn list_plugins(
+  State(state): State<AppState>,
+  Path(_database): Path<String>,
+) -> Response {
+  match state.plugin_manager.list_plugins() {
+    Ok(plugins) => (StatusCode::OK, Json(serde_json::to_value(plugins).unwrap())).into_response(),
+    Err(error) => {
+      tracing::error!("Failed to list plugins: {}", error);
+      ErrorResponse::new(format!("Failed to list plugins: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+/// DELETE /:database/:schema/:table/:function_name/_remove — remove a deployed plugin.
+pub async fn remove_plugin(
+  State(state): State<AppState>,
+  Path((database, schema, table, _function_name)): Path<(String, String, String, String)>,
+) -> Response {
+  let plugin_path = format!("{}/{}/{}", database, schema, table);
+
+  match state.plugin_manager.remove_plugin(&plugin_path) {
+    Ok(true) => (
+      StatusCode::OK,
+      Json(serde_json::json!({ "removed": true, "path": plugin_path })),
+    )
+      .into_response(),
+    Ok(false) => ErrorResponse::new(format!("Plugin not found: {}", plugin_path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response(),
+    Err(error) => {
+      tracing::error!("Failed to remove plugin: {}", error);
+      ErrorResponse::new(format!("Failed to remove plugin: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Auth routes
 // ---------------------------------------------------------------------------
 
