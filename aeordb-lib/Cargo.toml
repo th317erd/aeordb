@@ -113,3 +113,7 @@ path = "spec/chunks/hash_map_spec.rs"
 [[test]]
 name = "version_store_spec"
 path = "spec/chunks/version_store_spec.rs"
+
+[[test]]
+name = "scalar_ratio_spec"
+path = "spec/indexing/scalar_ratio_spec.rs"
