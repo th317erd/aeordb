@@ -10,6 +10,7 @@ use axum::routing::{delete, get, post, put};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
+use crate::auth::RateLimiter;
 use crate::auth::middleware::auth_middleware;
 use crate::plugins::PluginManager;
 use crate::storage::RedbStorage;
@@ -43,11 +44,24 @@ fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
 /// Build the application router with a specific JwtManager (useful for tests).
 pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>) -> Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
 
+  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter)
+}
+
+/// Build the application router with all dependencies injected (useful for tests
+/// that need to control the rate limiter).
+pub fn create_app_with_all(
+  storage: Arc<RedbStorage>,
+  jwt_manager: Arc<JwtManager>,
+  plugin_manager: Arc<PluginManager>,
+  rate_limiter: Arc<RateLimiter>,
+) -> Router {
   let app_state = AppState {
     storage,
     jwt_manager,
     plugin_manager,
+    rate_limiter,
   };
 
   // Routes that require authentication
@@ -86,7 +100,10 @@ pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManage
   // Public routes (no auth required)
   let public_routes = Router::new()
     .route("/admin/health", get(routes::health_check))
-    .route("/auth/token", post(routes::auth_token));
+    .route("/auth/token", post(routes::auth_token))
+    .route("/auth/magic-link", post(routes::request_magic_link))
+    .route("/auth/magic-link/verify", get(routes::verify_magic_link))
+    .route("/auth/refresh", post(routes::refresh_token));
 
   public_routes
     .merge(protected_routes)

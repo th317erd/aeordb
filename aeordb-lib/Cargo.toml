@@ -27,6 +27,7 @@ jsonwebtoken = "9"
 argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 rand = "0.8"
+sha2 = "0.10"
 
 # Plugins
 wasmi = "0.42"
@@ -82,3 +83,19 @@ path = "spec/plugins/native_runtime_spec.rs"
 [[test]]
 name = "plugin_deploy_spec"
 path = "spec/http/plugin_deploy_spec.rs"
+
+[[test]]
+name = "magic_link_spec"
+path = "spec/auth/magic_link_spec.rs"
+
+[[test]]
+name = "refresh_spec"
+path = "spec/auth/refresh_spec.rs"
+
+[[test]]
+name = "scoping_spec"
+path = "spec/plugins/scoping_spec.rs"
+
+[[test]]
+name = "rules_spec"
+path = "spec/plugins/rules_spec.rs"

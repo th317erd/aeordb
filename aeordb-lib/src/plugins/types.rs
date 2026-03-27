@@ -44,6 +44,27 @@ pub struct PluginMetadata {
   pub created_at: DateTime<Utc>,
 }
 
+/// Decision returned by a permission rule plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleDecision {
+  Allow,
+  Deny,
+  Redact,
+}
+
+/// Context passed to a permission rule plugin for evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleContext {
+  pub user_subject: String,
+  pub user_roles: Vec<String>,
+  pub operation: String,
+  pub database: String,
+  pub schema: String,
+  pub table: String,
+  pub column: Option<String>,
+}
+
 /// Serialize a value to JSON bytes for FFI transfer.
 pub fn serialize_for_ffi<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
   serde_json::to_vec(value)

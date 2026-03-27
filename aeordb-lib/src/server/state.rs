@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::auth::JwtManager;
+use crate::auth::RateLimiter;
 use crate::plugins::PluginManager;
 use crate::storage::RedbStorage;
 
@@ -9,4 +10,5 @@ pub struct AppState {
   pub storage: Arc<RedbStorage>,
   pub jwt_manager: Arc<JwtManager>,
   pub plugin_manager: Arc<PluginManager>,
+  pub rate_limiter: Arc<RateLimiter>,
 }

@@ -15,7 +15,10 @@ use super::responses::{
 use super::state::AppState;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord,
+  generate_magic_link_code, hash_magic_link_code,
+  generate_refresh_token, hash_refresh_token,
 };
+use crate::auth::refresh::DEFAULT_REFRESH_EXPIRY_SECONDS;
 use crate::storage::redb_backend::StorageError;
 
 /// Validate a database or table name for safety.
@@ -481,22 +484,42 @@ pub async fn auth_token(
     permissions: None,
   };
 
-  match state.jwt_manager.create_token(&claims) {
-    Ok(token) => (
-      StatusCode::OK,
-      Json(serde_json::json!({
-        "token": token,
-        "expires_in": crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
-      })),
-    )
-      .into_response(),
+  let token = match state.jwt_manager.create_token(&claims) {
+    Ok(token) => token,
     Err(error) => {
       tracing::error!("Failed to create JWT: {}", error);
-      ErrorResponse::new("Failed to create token".to_string())
+      return ErrorResponse::new("Failed to create token".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+        .into_response();
     }
+  };
+
+  // Generate a refresh token alongside the JWT.
+  let refresh_token_plaintext = generate_refresh_token();
+  let refresh_token_hash = hash_refresh_token(&refresh_token_plaintext);
+  let refresh_expires_at =
+    chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
+
+  if let Err(error) = state.storage.store_refresh_token(
+    &refresh_token_hash,
+    &record.key_id.to_string(),
+    refresh_expires_at,
+  ) {
+    tracing::error!("Failed to store refresh token: {}", error);
+    return ErrorResponse::new("Failed to create token".to_string())
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
   }
+
+  (
+    StatusCode::OK,
+    Json(serde_json::json!({
+      "token": token,
+      "expires_in": crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+      "refresh_token": refresh_token_plaintext,
+    })),
+  )
+    .into_response()
 }
 
 /// POST /admin/api-keys -- create a new API key (requires admin role).
@@ -628,4 +651,241 @@ pub async fn revoke_api_key(
         .into_response()
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Magic link routes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MagicLinkRequest {
+  pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyMagicLinkQuery {
+  pub code: String,
+}
+
+/// POST /auth/magic-link — request a magic link for the given email.
+///
+/// Always returns 200 to prevent email enumeration. In dev mode, the magic link
+/// URL is logged via tracing (no email is actually sent).
+pub async fn request_magic_link(
+  State(state): State<AppState>,
+  Json(payload): Json<MagicLinkRequest>,
+) -> Response {
+  // Rate-limit by email.
+  if let Err(error) = state.rate_limiter.check_rate_limit(&payload.email) {
+    return ErrorResponse::new(error.to_string())
+      .with_status(StatusCode::TOO_MANY_REQUESTS)
+      .into_response();
+  }
+
+  let code = generate_magic_link_code();
+  let code_hash = hash_magic_link_code(&code);
+  let expires_at = chrono::Utc::now()
+    + chrono::Duration::seconds(
+      crate::auth::magic_link::DEFAULT_MAGIC_LINK_EXPIRY_SECONDS,
+    );
+
+  if let Err(error) = state
+    .storage
+    .store_magic_link(&code_hash, &payload.email, expires_at)
+  {
+    tracing::error!("Failed to store magic link: {}", error);
+    // Still return 200 to prevent enumeration.
+  }
+
+  // In dev mode, log the magic link URL.
+  tracing::info!(
+    email = %payload.email,
+    magic_link_url = %format!("/auth/magic-link/verify?code={}", code),
+    "Magic link generated (dev mode — not emailed)"
+  );
+
+  (
+    StatusCode::OK,
+    Json(serde_json::json!({
+      "message": "If an account exists, a login link has been sent."
+    })),
+  )
+    .into_response()
+}
+
+/// GET /auth/magic-link/verify?code=... — verify a magic link code.
+///
+/// On success, returns a JWT. On any failure, returns 401.
+pub async fn verify_magic_link(
+  State(state): State<AppState>,
+  Query(query): Query<VerifyMagicLinkQuery>,
+) -> Response {
+  let code_hash = hash_magic_link_code(&query.code);
+
+  let record = match state.storage.get_magic_link(&code_hash) {
+    Ok(Some(record)) => record,
+    Ok(None) => {
+      return ErrorResponse::new("Invalid or expired magic link".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to look up magic link: {}", error);
+      return ErrorResponse::new("Invalid or expired magic link".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+  };
+
+  if record.is_used {
+    return ErrorResponse::new("Magic link already used".to_string())
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+  }
+
+  if record.expires_at < chrono::Utc::now() {
+    return ErrorResponse::new("Magic link expired".to_string())
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+  }
+
+  // Mark as used.
+  if let Err(error) = state.storage.mark_magic_link_used(&code_hash) {
+    tracing::error!("Failed to mark magic link as used: {}", error);
+    return ErrorResponse::new("Internal server error".to_string())
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+  }
+
+  // Issue a JWT for this email.
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: record.email.clone(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+    roles: vec!["user".to_string()],
+    scope: None,
+    permissions: None,
+  };
+
+  match state.jwt_manager.create_token(&claims) {
+    Ok(token) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "token": token,
+        "expires_in": crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+      })),
+    )
+      .into_response(),
+    Err(error) => {
+      tracing::error!("Failed to create JWT: {}", error);
+      ErrorResponse::new("Failed to create token".to_string())
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Refresh token routes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshTokenRequest {
+  pub refresh_token: String,
+}
+
+/// POST /auth/refresh — exchange a refresh token for a new JWT + new refresh token.
+///
+/// Implements token rotation: the old refresh token is revoked and a new one is issued.
+pub async fn refresh_token(
+  State(state): State<AppState>,
+  Json(payload): Json<RefreshTokenRequest>,
+) -> Response {
+  let old_token_hash = hash_refresh_token(&payload.refresh_token);
+
+  let record = match state.storage.get_refresh_token(&old_token_hash) {
+    Ok(Some(record)) => record,
+    Ok(None) => {
+      return ErrorResponse::new("Invalid refresh token".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to look up refresh token: {}", error);
+      return ErrorResponse::new("Invalid refresh token".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+  };
+
+  if record.is_revoked {
+    return ErrorResponse::new("Refresh token revoked".to_string())
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+  }
+
+  if record.expires_at < chrono::Utc::now() {
+    return ErrorResponse::new("Refresh token expired".to_string())
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+  }
+
+  // Revoke the old refresh token (rotation).
+  if let Err(error) = state.storage.revoke_refresh_token(&old_token_hash) {
+    tracing::error!("Failed to revoke old refresh token: {}", error);
+    return ErrorResponse::new("Internal server error".to_string())
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+  }
+
+  // Issue a new JWT.
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: record.user_subject.clone(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+    roles: vec!["admin".to_string()],
+    scope: None,
+    permissions: None,
+  };
+
+  let token = match state.jwt_manager.create_token(&claims) {
+    Ok(token) => token,
+    Err(error) => {
+      tracing::error!("Failed to create JWT: {}", error);
+      return ErrorResponse::new("Failed to create token".to_string())
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  // Issue a new refresh token.
+  let new_refresh_token = generate_refresh_token();
+  let new_refresh_hash = hash_refresh_token(&new_refresh_token);
+  let refresh_expires_at =
+    chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
+
+  if let Err(error) = state.storage.store_refresh_token(
+    &new_refresh_hash,
+    &record.user_subject,
+    refresh_expires_at,
+  ) {
+    tracing::error!("Failed to store new refresh token: {}", error);
+    return ErrorResponse::new("Internal server error".to_string())
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+  }
+
+  (
+    StatusCode::OK,
+    Json(serde_json::json!({
+      "token": token,
+      "expires_in": crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+      "refresh_token": new_refresh_token,
+    })),
+  )
+    .into_response()
 }

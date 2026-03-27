@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 use super::document::{Document, MetadataUpdates};
 use crate::auth::api_key::ApiKeyRecord;
+use crate::auth::magic_link::MagicLinkRecord;
+use crate::auth::refresh::RefreshTokenRecord;
 
 /// Each table stores documents keyed by UUID (as 128-bit value).
 /// The value is a byte blob we encode ourselves (not user data format --
@@ -534,5 +536,200 @@ impl RedbStorage {
       Some(guard) => Ok(Some(guard.value().to_vec())),
       None => Ok(None),
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Magic link storage (table: "_system:magic_links")
+  // -------------------------------------------------------------------------
+
+  const MAGIC_LINKS_TABLE: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("_system:magic_links");
+
+  /// Store a magic link record, keyed by code_hash.
+  pub fn store_magic_link(
+    &self,
+    code_hash: &str,
+    email: &str,
+    expires_at: DateTime<Utc>,
+  ) -> Result<()> {
+    let record = MagicLinkRecord {
+      code_hash: code_hash.to_string(),
+      email: email.to_string(),
+      created_at: Utc::now(),
+      expires_at,
+      is_used: false,
+    };
+
+    let encoded = serde_json::to_vec(&record)
+      .map_err(|_| StorageError::CorruptData)?;
+
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::MAGIC_LINKS_TABLE)?;
+      table.insert(code_hash, encoded.as_slice())?;
+    }
+    write_transaction.commit()?;
+    Ok(())
+  }
+
+  /// Retrieve a magic link record by code_hash.
+  pub fn get_magic_link(&self, code_hash: &str) -> Result<Option<MagicLinkRecord>> {
+    let read_transaction = self.database.begin_read()?;
+    let table = match read_transaction.open_table(Self::MAGIC_LINKS_TABLE) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+      Err(error) => return Err(StorageError::RedbTable(error)),
+    };
+
+    match table.get(code_hash)? {
+      Some(guard) => {
+        let record: MagicLinkRecord = serde_json::from_slice(guard.value())
+          .map_err(|_| StorageError::CorruptData)?;
+        Ok(Some(record))
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// Mark a magic link as used.
+  pub fn mark_magic_link_used(&self, code_hash: &str) -> Result<()> {
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::MAGIC_LINKS_TABLE)?;
+
+      let existing_bytes = match table.get(code_hash)? {
+        Some(guard) => guard.value().to_vec(),
+        None => return Err(StorageError::CorruptData),
+      };
+
+      let mut record: MagicLinkRecord = serde_json::from_slice(&existing_bytes)
+        .map_err(|_| StorageError::CorruptData)?;
+      record.is_used = true;
+
+      let encoded = serde_json::to_vec(&record)
+        .map_err(|_| StorageError::CorruptData)?;
+      table.insert(code_hash, encoded.as_slice())?;
+    }
+    write_transaction.commit()?;
+    Ok(())
+  }
+
+  /// Remove all expired magic links. Returns the count of removed links.
+  pub fn cleanup_expired_magic_links(&self) -> Result<u64> {
+    let now = Utc::now();
+
+    // First pass: read and collect expired keys.
+    let keys_to_remove = {
+      let read_transaction = self.database.begin_read()?;
+      let table = match read_transaction.open_table(Self::MAGIC_LINKS_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+        Err(error) => return Err(StorageError::RedbTable(error)),
+      };
+
+      let mut expired_keys: Vec<String> = Vec::new();
+      for result in table.iter()? {
+        let (key_guard, value_guard) = result?;
+        let record: MagicLinkRecord = serde_json::from_slice(value_guard.value())
+          .map_err(|_| StorageError::CorruptData)?;
+        if record.expires_at < now {
+          expired_keys.push(key_guard.value().to_string());
+        }
+      }
+      expired_keys
+    };
+
+    if keys_to_remove.is_empty() {
+      return Ok(0);
+    }
+
+    // Second pass: remove the expired keys.
+    let write_transaction = self.database.begin_write()?;
+    let mut removed_count = 0u64;
+    {
+      let mut table = write_transaction.open_table(Self::MAGIC_LINKS_TABLE)?;
+      for key in &keys_to_remove {
+        table.remove(key.as_str())?;
+        removed_count += 1;
+      }
+    }
+    write_transaction.commit()?;
+    Ok(removed_count)
+  }
+
+  // -------------------------------------------------------------------------
+  // Refresh token storage (table: "_system:refresh_tokens")
+  // -------------------------------------------------------------------------
+
+  const REFRESH_TOKENS_TABLE: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("_system:refresh_tokens");
+
+  /// Store a refresh token record, keyed by token_hash.
+  pub fn store_refresh_token(
+    &self,
+    token_hash: &str,
+    user_subject: &str,
+    expires_at: DateTime<Utc>,
+  ) -> Result<()> {
+    let record = RefreshTokenRecord {
+      token_hash: token_hash.to_string(),
+      user_subject: user_subject.to_string(),
+      created_at: Utc::now(),
+      expires_at,
+      is_revoked: false,
+    };
+
+    let encoded = serde_json::to_vec(&record)
+      .map_err(|_| StorageError::CorruptData)?;
+
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::REFRESH_TOKENS_TABLE)?;
+      table.insert(token_hash, encoded.as_slice())?;
+    }
+    write_transaction.commit()?;
+    Ok(())
+  }
+
+  /// Retrieve a refresh token record by token_hash.
+  pub fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshTokenRecord>> {
+    let read_transaction = self.database.begin_read()?;
+    let table = match read_transaction.open_table(Self::REFRESH_TOKENS_TABLE) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+      Err(error) => return Err(StorageError::RedbTable(error)),
+    };
+
+    match table.get(token_hash)? {
+      Some(guard) => {
+        let record: RefreshTokenRecord = serde_json::from_slice(guard.value())
+          .map_err(|_| StorageError::CorruptData)?;
+        Ok(Some(record))
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// Revoke a refresh token by setting is_revoked = true.
+  pub fn revoke_refresh_token(&self, token_hash: &str) -> Result<()> {
+    let write_transaction = self.database.begin_write()?;
+    {
+      let mut table = write_transaction.open_table(Self::REFRESH_TOKENS_TABLE)?;
+
+      let existing_bytes = match table.get(token_hash)? {
+        Some(guard) => guard.value().to_vec(),
+        None => return Err(StorageError::CorruptData),
+      };
+
+      let mut record: RefreshTokenRecord = serde_json::from_slice(&existing_bytes)
+        .map_err(|_| StorageError::CorruptData)?;
+      record.is_revoked = true;
+
+      let encoded = serde_json::to_vec(&record)
+        .map_err(|_| StorageError::CorruptData)?;
+      table.insert(token_hash, encoded.as_slice())?;
+    }
+    write_transaction.commit()?;
+    Ok(())
   }
 }
