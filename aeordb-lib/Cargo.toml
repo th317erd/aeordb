@@ -1,6 +1,50 @@
 [package]
 name = "aeordb"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = "1"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Storage
+redb = "3.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Authentication
+jsonwebtoken = "9"
+argon2 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+rand = "0.8"
+
+# Common
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[[test]]
+name = "storage_spec"
+path = "spec/storage/redb_wrapper_spec.rs"
+
+[[test]]
+name = "http_spec"
+path = "spec/http/server_spec.rs"
