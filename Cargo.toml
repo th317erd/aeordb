@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "aeordb-lib",
+    "aeordb-cli",
+]
+resolver = "2"
