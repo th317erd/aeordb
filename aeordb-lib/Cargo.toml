@@ -16,6 +16,8 @@ hyper = "1"
 tokio = { workspace = true }
 
 # Storage
+blake3 = "1"
+hex = "0.4"
 redb = "3.1"
 
 # Serialization
@@ -99,3 +101,11 @@ path = "spec/plugins/scoping_spec.rs"
 [[test]]
 name = "rules_spec"
 path = "spec/plugins/rules_spec.rs"
+
+[[test]]
+name = "chunk_store_spec"
+path = "spec/chunks/chunk_store_spec.rs"
+
+[[test]]
+name = "hash_map_spec"
+path = "spec/chunks/hash_map_spec.rs"
