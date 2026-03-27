@@ -35,6 +35,10 @@ sha2 = "0.10"
 wasmi = "0.42"
 libloading = "0.8"
 
+# Replication / Consensus
+openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
+futures-util = "0.3"
+
 # Common
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -43,9 +47,12 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+futures-util = "0.3"
 http-body-util = "0.1"
+openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 redb = "3.1"
 reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wat = "1"
@@ -117,3 +124,7 @@ path = "spec/chunks/version_store_spec.rs"
 [[test]]
 name = "scalar_ratio_spec"
 path = "spec/indexing/scalar_ratio_spec.rs"
+
+[[test]]
+name = "raft_spec"
+path = "spec/replication/raft_spec.rs"
