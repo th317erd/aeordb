@@ -109,3 +109,7 @@ path = "spec/chunks/chunk_store_spec.rs"
 [[test]]
 name = "hash_map_spec"
 path = "spec/chunks/hash_map_spec.rs"
+
+[[test]]
+name = "version_store_spec"
+path = "spec/chunks/version_store_spec.rs"

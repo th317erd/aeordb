@@ -7,6 +7,8 @@ pub mod hash_map_store;
 pub mod in_memory_chunk_storage;
 pub mod redb_backend;
 pub mod redb_chunk_storage;
+pub mod version_storage;
+pub mod version_store;
 
 pub use chunk::{Chunk, ChunkHash, chunk_hash_from_hex, chunk_hash_to_hex, hash_data};
 pub use chunk_config::ChunkConfig;
@@ -17,3 +19,5 @@ pub use hash_map_store::{ContentHashMap, HashMapDiff, HashMapStore};
 pub use in_memory_chunk_storage::InMemoryChunkStorage;
 pub use redb_backend::RedbStorage;
 pub use redb_chunk_storage::RedbChunkStorage;
+pub use version_storage::{InMemoryVersionStorage, Version, VersionStorage};
+pub use version_store::{VersionDiff, VersionStore};
