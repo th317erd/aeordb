@@ -12,10 +12,10 @@ A Rust-native database engine that solves the 12 fundamental problems of existin
 
 ## Core Architecture Groups
 
-### 1. [Storage Engine (Content-Addressed Chunk Store)](./storage-engine.md)
-**Status:** In Design
+### 1. [Storage Architecture](./storage-architecture.md) ([legacy details](./storage-engine.md))
+**Status:** In Design — Finalized Architecture
 
-ALL data is content-addressed chunks (configurable power-of-two size). Files, indexes, blobs, metadata — everything is chunks keyed by hash. Versioning, dedup, and diff-only replication are structural properties. Physical storage backend is pluggable.
+One primitive: the chunk (header + data, linked via next/prev). Files are linked lists of chunks. Directories are per-directory B-trees of chunks. Versioning via bases (I-frames) and diffs (P-frames). Corruption is local — never cascading. Everything is chunks.
 
 ### 2. [Indexing Engine](./indexing-engine.md)
 **Status:** Not Started
