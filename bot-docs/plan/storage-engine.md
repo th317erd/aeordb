@@ -124,7 +124,6 @@ Every document/row automatically includes:
 | `document_id` | UUID/unique | Unique document identifier |
 | `created_at` | Timestamp | When the document was created |
 | `updated_at` | Timestamp | When the document was last modified |
-| `is_deleted` | Boolean | Soft-delete flag |
 
 All of these can be set by the user, but they are mandatory parts of the default schema and will exist on every document.
 

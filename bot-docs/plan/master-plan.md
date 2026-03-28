@@ -27,12 +27,17 @@ Adaptive, automatic indexing that observes query patterns and builds/adjusts ind
 
 No query language. Compiled functions deployed to the database hierarchy and invoked over HTTP(S) with arguments. Compute happens at the data, only results return to the caller.
 
-### 4. [Schema System](./schema-system.md)
-**Status:** Not Started
+### 4. [Data Model — Paths, Parsers, Indexes](./data-model.md)
+**Status:** In Design
 
-A schema system that finds the sweet spot between relational rigidity and document chaos.
+No tables, no schemas — paths. Configuration (parsers, indexes, validators, permissions) lives at any path level and inherits downward. Multiple parser plugins extract fields from format-agnostic raw bytes. Engine indexes the extracted fields.
 
-### 5. [Concurrency & Transactions](./concurrency.md)
+### 5. [Permissions System](./permissions.md)
+**Status:** In Design
+
+Unix-inspired, evolved. Eight operations (`crudlify`) with tri-state flags (allow/deny/empty), multi-group links per path, proximity-ordered resolution with deny-wins-at-same-level. Groups own users (including per-user groups for ownership). "Others" flags on links. Built-in system runs fast; WASM rule plugins can further restrict.
+
+### 5b. [Concurrency & Transactions](./concurrency.md)
 **Status:** Not Started
 
 Concurrency control that doesn't generate garbage, create deadlocks, or waste work.
@@ -91,7 +96,7 @@ axum-based HTTP(S) server. Token-based auth: API keys, magic links, JWT (Ed25519
 - **Embedded + client-server:** Same binary. Single-node embedded mode or multi-node distributed.
 - **Auth:** API-first. JWT tokens. Ed25519 signatures. Stateless validation.
 - **Indexing:** User-requested only. No default indexes. Multiple algorithms per column. Pluggable via WASM/native.
-- **Mandatory fields:** `document_id`, `created_at`, `updated_at`, `is_deleted` on every document.
+- **Mandatory fields:** `document_id`, `created_at`, `updated_at` on every document. No engine-level soft-delete — delete is real, recovery via versioning.
 - **Versioning:** Free via content-addressed hash maps. Every state is a snapshot. Restore any version.
 
 ## Open Questions
