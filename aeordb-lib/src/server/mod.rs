@@ -5,7 +5,7 @@ pub mod state;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{delete, get, post, put};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
@@ -13,6 +13,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
 use crate::filesystem::PathResolver;
+use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
 use crate::plugins::PluginManager;
@@ -143,23 +144,14 @@ pub fn create_app_with_all(
     .merge(protected_routes)
     .with_state(app_state)
     .layer(HttpMetricsLayer)
+    .layer(from_fn(request_id_middleware))
     .layer(TraceLayer::new_for_http())
 }
 
-/// Try to initialize a Prometheus recorder. If one is already installed
-/// globally (common in test scenarios), return a handle from a standalone
-/// builder that won't fail.
+/// Initialize or retrieve the global Prometheus recorder handle.
+/// Safe to call multiple times across tests and production.
 fn try_initialize_metrics() -> PrometheusHandle {
-  let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-  match builder.install_recorder() {
-    Ok(handle) => handle,
-    Err(_) => {
-      // A recorder is already installed; build a standalone handle.
-      metrics_exporter_prometheus::PrometheusBuilder::new()
-        .build_recorder()
-        .handle()
-    }
-  }
+  initialize_metrics()
 }
 
 use crate::auth::middleware::auth_middleware;

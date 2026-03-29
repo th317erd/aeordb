@@ -160,3 +160,7 @@ path = "spec/http/filesystem_http_spec.rs"
 [[test]]
 name = "metrics_spec"
 path = "spec/metrics/metrics_spec.rs"
+
+[[test]]
+name = "logging_spec"
+path = "spec/logging/logging_spec.rs"

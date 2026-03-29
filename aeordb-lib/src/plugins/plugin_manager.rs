@@ -47,6 +47,7 @@ impl PluginManager {
   /// Deploy (or overwrite) a plugin at the given path.
   ///
   /// For WASM plugins, the bytes are validated before storage.
+  #[tracing::instrument(skip(self, wasm_bytes), fields(path = %path, plugin_type = ?plugin_type))]
   pub fn deploy_plugin(
     &self,
     name: &str,
@@ -97,6 +98,13 @@ impl PluginManager {
     write_transaction
       .commit()
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+
+    tracing::info!(
+      path = %path,
+      plugin_type = ?record.plugin_type,
+      plugin_id = %record.plugin_id,
+      "Plugin deployed"
+    );
 
     Ok(record)
   }
@@ -185,6 +193,7 @@ impl PluginManager {
   }
 
   /// Instantiate and invoke a deployed WASM plugin.
+  #[tracing::instrument(skip(self, request_bytes), fields(path = %path, request_size = request_bytes.len()))]
   pub fn invoke_wasm_plugin(
     &self,
     path: &str,
@@ -204,11 +213,13 @@ impl PluginManager {
     }
 
     let runtime = WasmPluginRuntime::new(&record.wasm_bytes).map_err(|error| {
+      tracing::error!(path = %path, error = %error, "Failed to load WASM module");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "load_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
     })?;
 
     let result = runtime.call_handle(request_bytes).map_err(|error| {
+      tracing::error!(path = %path, error = %error, "WASM execution failed");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
     });
@@ -216,6 +227,12 @@ impl PluginManager {
     let duration = start.elapsed().as_secs_f64();
     metrics::counter!(crate::metrics::definitions::PLUGIN_INVOCATIONS_TOTAL).increment(1);
     metrics::histogram!(crate::metrics::definitions::PLUGIN_DURATION).record(duration);
+
+    tracing::info!(
+      path = %path,
+      duration_ms = duration * 1000.0,
+      "Plugin invoked"
+    );
 
     result
   }

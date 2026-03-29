@@ -73,19 +73,26 @@ impl ChunkStore {
   }
 
   /// Store arbitrary data, returning a ContentHashMap describing the chunks.
+  #[tracing::instrument(skip(self, data), fields(size = data.len()))]
   pub fn store(&self, data: &[u8]) -> Result<ContentHashMap, ChunkStoreError> {
     let start = std::time::Instant::now();
     let result = self.hash_map_store.store_data(data);
     let duration = start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::CHUNK_WRITE_DURATION).record(duration);
-    if result.is_ok() {
+    if let Ok(ref content_hash_map) = result {
       metrics::counter!(crate::metrics::definitions::CHUNKS_STORED_TOTAL).increment(1);
       metrics::counter!(crate::metrics::definitions::CHUNK_STORE_BYTES).increment(data.len() as u64);
+      tracing::trace!(
+        size = data.len(),
+        chunk_count = content_hash_map.chunk_hashes.len(),
+        "Chunks stored"
+      );
     }
     result
   }
 
   /// Retrieve data by its ContentHashMap.
+  #[tracing::instrument(skip(self, hash_map))]
   pub fn retrieve(&self, hash_map: &ContentHashMap) -> Result<Vec<u8>, ChunkStoreError> {
     let start = std::time::Instant::now();
     let result = self.hash_map_store.retrieve_data(hash_map);
@@ -93,6 +100,7 @@ impl ChunkStore {
     metrics::histogram!(crate::metrics::definitions::CHUNK_READ_DURATION).record(duration);
     if result.is_ok() {
       metrics::counter!(crate::metrics::definitions::CHUNKS_READ_TOTAL).increment(1);
+      tracing::trace!("Chunks retrieved");
     }
     result
   }
@@ -123,6 +131,11 @@ impl ChunkStore {
       let chunk = self.storage.get_chunk(chunk_hash)?
         .ok_or(ChunkStoreError::ChunkNotFound(*chunk_hash))?;
       if !chunk.verify() {
+        let hash_hex = hex::encode(chunk_hash);
+        tracing::error!(
+          chunk_hash = %hash_hex,
+          "Chunk integrity failure: hash mismatch"
+        );
         corrupt_hashes.push(*chunk_hash);
       }
     }

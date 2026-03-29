@@ -63,9 +63,18 @@ impl ChunkStorage for InMemoryChunkStorage {
     use std::collections::hash_map::Entry;
     match chunks.entry(chunk.hash) {
       Entry::Occupied(_) => {
+        tracing::debug!(
+          hash_prefix = %hex::encode(&chunk.hash[..8]),
+          "Chunk dedup: already exists, skipped write"
+        );
         metrics::counter!(crate::metrics::definitions::CHUNKS_DEDUPLICATED_TOTAL).increment(1);
       }
       Entry::Vacant(entry) => {
+        tracing::trace!(
+          hash_prefix = %hex::encode(&chunk.hash[..8]),
+          size = chunk.data.len(),
+          "Chunk stored (in-memory)"
+        );
         entry.insert(serialize_chunk(chunk));
       }
     }

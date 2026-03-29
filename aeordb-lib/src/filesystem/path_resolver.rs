@@ -133,6 +133,7 @@ impl PathResolver {
 
   /// Store a file at the given path. Creates intermediate directories (mkdir -p).
   /// Returns the DirectoryEntry that was created.
+  #[tracing::instrument(skip(self, data), fields(path = %path, size = data.len()))]
   pub fn store_file(
     &self,
     path: &str,
@@ -185,11 +186,21 @@ impl PathResolver {
     metrics::counter!(crate::metrics::definitions::FILES_STORED_TOTAL).increment(1);
     metrics::counter!(crate::metrics::definitions::FILE_BYTES_STORED_TOTAL).increment(data.len() as u64);
 
+    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+    tracing::info!(
+      path = %path,
+      size = data.len(),
+      chunk_count = entry.chunk_hashes.len(),
+      duration_ms = duration_ms,
+      "File stored"
+    );
+
     Ok(entry)
   }
 
   /// Read a file at the given path. Returns a streaming iterator over chunks.
   /// NEVER loads the entire file into memory.
+  #[tracing::instrument(skip(self), fields(path = %path))]
   pub fn read_file_streaming(
     &self,
     path: &str,
@@ -220,6 +231,13 @@ impl PathResolver {
     metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(duration);
     metrics::counter!(crate::metrics::definitions::FILES_READ_TOTAL).increment(1);
     metrics::counter!(crate::metrics::definitions::FILE_BYTES_READ_TOTAL).increment(entry.total_size);
+
+    tracing::info!(
+      path = %path,
+      total_size = entry.total_size,
+      chunk_count = entry.chunk_hashes.len(),
+      "File read started (streaming)"
+    );
 
     Ok(FileStream {
       chunk_hashes: entry.chunk_hashes,
@@ -254,6 +272,7 @@ impl PathResolver {
 
   /// Delete a file at the given path. Returns the removed entry.
   /// Does NOT delete the chunks -- garbage collection handles that.
+  #[tracing::instrument(skip(self), fields(path = %path))]
   pub fn delete_file(
     &self,
     path: &str,
@@ -291,12 +310,14 @@ impl PathResolver {
     metrics::histogram!(crate::metrics::definitions::FILE_DELETE_DURATION).record(duration);
     if result.is_ok() {
       metrics::counter!(crate::metrics::definitions::FILES_DELETED_TOTAL).increment(1);
+      tracing::info!(path = %path, "File deleted");
     }
 
     result
   }
 
   /// List entries in a directory at the given path.
+  #[tracing::instrument(skip(self), fields(path = %path))]
   pub fn list_directory(
     &self,
     path: &str,
@@ -339,6 +360,12 @@ impl PathResolver {
 
     let duration = start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::DIRECTORY_LIST_DURATION).record(duration);
+
+    tracing::debug!(
+      path = %path,
+      entry_count = entries.len(),
+      "Directory listed"
+    );
 
     Ok(entries)
   }
@@ -393,6 +420,7 @@ impl PathResolver {
       let child_path = Self::build_directory_path(&segments[..=index]);
 
       // Check if an entry already exists at this name.
+      tracing::trace!(segment = %segment_name, parent = %parent_path, "Resolving path segment");
       if let Some(existing) = self.directory.get_entry(&parent_path, segment_name)? {
         if existing.entry_type != EntryType::Directory {
           return Err(PathError::NotADirectory(format!(

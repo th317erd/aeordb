@@ -79,6 +79,7 @@ impl VersionManager {
   /// metadata write), then the version metadata is stored in the same
   /// transaction.  On restore, the metadata for this version is re-inserted
   /// since it was not part of the captured snapshot.
+  #[tracing::instrument(skip(self, metadata), fields(version_name = %name))]
   pub fn create_version(
     &self,
     name: &str,
@@ -116,6 +117,12 @@ impl VersionManager {
     let duration = start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::VERSION_SNAPSHOT_DURATION).record(duration);
     metrics::counter!(crate::metrics::definitions::VERSION_SNAPSHOTS_TOTAL).increment(1);
+
+    tracing::info!(
+      version_name = %name,
+      savepoint_id = version_info.savepoint_id,
+      "Version created"
+    );
 
     Ok(version_info)
   }
@@ -170,6 +177,7 @@ impl VersionManager {
   ///
   /// The restored version's own metadata is re-written after the restore so
   /// that `get_version` / `list_versions` still return it.
+  #[tracing::instrument(skip(self), fields(version_name = %name))]
   pub fn restore_version(&self, name: &str) -> Result<()> {
     let start = std::time::Instant::now();
 
@@ -202,10 +210,16 @@ impl VersionManager {
     metrics::histogram!(crate::metrics::definitions::VERSION_RESTORE_DURATION).record(duration);
     metrics::counter!(crate::metrics::definitions::VERSION_RESTORES_TOTAL).increment(1);
 
+    tracing::warn!(
+      version_name = %name,
+      "Version restored (destructive operation)"
+    );
+
     Ok(())
   }
 
   /// Delete a named version (frees the underlying persistent savepoint).
+  #[tracing::instrument(skip(self), fields(version_name = %name))]
   pub fn delete_version(&self, name: &str) -> Result<()> {
     let version_info = self
       .get_version(name)?
@@ -223,6 +237,9 @@ impl VersionManager {
     }
 
     write_transaction.commit()?;
+
+    tracing::info!(version_name = %name, "Version deleted");
+
     Ok(())
   }
 

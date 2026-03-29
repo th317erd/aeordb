@@ -45,6 +45,7 @@ impl RedbDirectory {
   }
 
   /// Insert or update an entry in a directory.
+  #[tracing::instrument(skip(self, entry), fields(directory_path = %directory_path, entry_name = %entry.name))]
   pub fn insert_entry(&self, directory_path: &str, entry: &DirectoryEntry) -> Result<()> {
     let table_name = Self::table_name(directory_path);
     let table_definition: TableDefinition<&str, &[u8]> = TableDefinition::new(&table_name);
@@ -59,10 +60,16 @@ impl RedbDirectory {
       table.insert(entry.name.as_str(), serialized.as_slice())?;
     }
     write_transaction.commit()?;
+    tracing::debug!(
+      directory_path = %directory_path,
+      entry_name = %entry.name,
+      "Directory entry inserted"
+    );
     Ok(())
   }
 
   /// Get an entry by name from a directory.
+  #[tracing::instrument(skip(self), level = "trace")]
   pub fn get_entry(
     &self,
     directory_path: &str,
@@ -89,6 +96,7 @@ impl RedbDirectory {
   }
 
   /// Remove an entry from a directory, returns the removed entry.
+  #[tracing::instrument(skip(self))]
   pub fn remove_entry(
     &self,
     directory_path: &str,
@@ -113,6 +121,13 @@ impl RedbDirectory {
       }
     };
     write_transaction.commit()?;
+    if result.is_some() {
+      tracing::debug!(
+        directory_path = %directory_path,
+        entry_name = %entry_name,
+        "Directory entry removed"
+      );
+    }
     Ok(result)
   }
 
@@ -139,6 +154,11 @@ impl RedbDirectory {
     // redb iterates keys in sorted order already for &str keys,
     // but let's be explicit to guarantee the contract.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+    tracing::debug!(
+      directory_path = %directory_path,
+      entry_count = entries.len(),
+      "Directory entries listed"
+    );
     Ok(entries)
   }
 

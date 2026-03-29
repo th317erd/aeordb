@@ -66,8 +66,17 @@ impl ChunkStorage for RedbChunkStorage {
         ChunkStoreError::RedbError(format!("get: {error}"))
       })?.is_some();
       if exists {
+        tracing::debug!(
+          hash_prefix = %hex::encode(&chunk.hash[..8]),
+          "Chunk dedup: already exists, skipped write"
+        );
         metrics::counter!(crate::metrics::definitions::CHUNKS_DEDUPLICATED_TOTAL).increment(1);
       } else {
+        tracing::trace!(
+          hash_prefix = %hex::encode(&chunk.hash[..8]),
+          size = chunk.data.len(),
+          "Chunk stored (redb)"
+        );
         let serialized = serialize_chunk(chunk);
         table.insert(key, serialized.as_slice()).map_err(|error| {
           ChunkStoreError::RedbError(format!("insert: {error}"))
@@ -96,6 +105,10 @@ impl ChunkStorage for RedbChunkStorage {
     })? {
       Some(guard) => {
         let stored = guard.value();
+        tracing::trace!(
+          hash_prefix = %hex::encode(&hash[..8]),
+          "Chunk retrieved (redb)"
+        );
         Ok(Some(deserialize_chunk(hash, stored)?))
       }
       None => Ok(None),

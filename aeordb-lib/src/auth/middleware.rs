@@ -31,6 +31,7 @@ pub async fn auth_middleware(
   let token = match authorization_header {
     Some(ref header) if header.starts_with("Bearer ") => &header[7..],
     _ => {
+      tracing::warn!("Auth failed: missing or invalid Authorization header");
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
         "result" => "missing_header"
@@ -47,7 +48,8 @@ pub async fn auth_middleware(
 
   let claims = match state.jwt_manager.verify_token(token) {
     Ok(claims) => claims,
-    Err(_) => {
+    Err(error) => {
+      tracing::warn!(reason = %error, "JWT validation failed");
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
         "result" => "invalid"
@@ -62,6 +64,7 @@ pub async fn auth_middleware(
     }
   };
 
+  tracing::debug!(user_id = %claims.sub, "JWT validation succeeded");
   metrics::counter!(
     crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
     "result" => "success"
