@@ -34,4 +34,14 @@
 - cargo 1.94.0
 - clippy 0.1.94
 
-## Test Count: 380 (all passing)
+## Test Count: 486 (all passing, zero clippy warnings)
+
+## Filesystem Architecture (Sprint 2 — Implemented)
+- redb tables = directories ("dir:{path}" naming)
+- Chunks stored in redb via ChunkStorage trait
+- PathResolver: segment-by-segment traversal, mkdir-p, streaming reads
+- VersionManager: redb persistent savepoints with named versions
+- HTTP: /fs/* routes (PUT/GET/DELETE/HEAD) with streaming Body
+- Old document routes still exist under /:database/:table/:id (not yet deprecated)
+- Custom B-tree code backed up at backup/ (may be used for indexing engine)
+- Backup also contains: version_store, version_storage, hash_map_store, filesystem specs
