@@ -1,24 +1,30 @@
 # AeorDB — TODO
 
-## Sprint 2 — COMPLETE
+## Current: Sprint 3 — Metrics & Observability
 
-- [x] Task 1: Soft-delete cleanup
-- [x] Task 2: Chunk headers (format version + timestamps)
-- [x] Task 3: Custom B-tree (built, backed up — available for indexing)
-- [x] Task 3R: redb directory layer (table-per-directory)
-- [x] Task 4R: Path resolver (redb-native, streaming, mkdir-p)
-- [x] Task 5: HTTP wiring (/fs/* routes with streaming responses)
-- [x] Task 6R: Version management (redb persistent savepoints)
+### Task 1: Metrics System
+- [ ] Add metrics + metrics-exporter-prometheus dependencies
+- [ ] Metrics module with initialize_metrics()
+- [ ] Storage metrics (chunk read/write counters, durations, dedup ratio)
+- [ ] Filesystem metrics (path resolve, file store/read/delete durations)
+- [ ] HTTP metrics (requests/sec, latency histograms, status codes, bytes)
+- [ ] Auth metrics (validations, token exchanges, rate limit hits)
+- [ ] Plugin metrics (invocations, duration, fuel, memory, errors)
+- [ ] Version metrics (snapshots, restores, durations)
+- [ ] GET /admin/metrics endpoint (Prometheus format, auth required, rate limited)
+- [ ] Instrument all existing code with recording calls
+- [ ] Tests
 
-## Previous Work
-- [x] Sprint 1 / Phases 1-4: Storage, HTTP, Auth, Plugins, Indexing, Replication, Versioning
+### Task 2: Stress Testing Tool
+- [ ] aeordb-cli stress subcommand
+- [ ] Configurable: concurrency, duration, operation type, file size
+- [ ] Write stress (store files at random paths)
+- [ ] Read stress (read files at random paths)
+- [ ] Mixed stress (read + write)
+- [ ] Report: throughput, latency p50/p95/p99, errors
+- [ ] Tests
 
-## Test Count: 486 (all passing, zero clippy warnings)
-
-## Next Steps (Not Started)
-- [ ] Wire parsers to filesystem (extract fields on write, feed to indexes)
-- [ ] Implement permissions resolution (crudlify, proximity walk)
-- [ ] Connect indexing engine to filesystem writes
-- [ ] Build the CLI (aeordb-cli: start server, manage keys, info)
-- [ ] Deprecate old document CRUD routes (replaced by /fs/*)
-- [ ] Performance benchmarking
+## Previous Sprints (Complete)
+- [x] Sprint 1: Phases 1-4 (storage, HTTP, auth, plugins, indexing, replication)
+- [x] Sprint 2: redb-native filesystem (directories, path resolver, versioning, streaming HTTP)
+- Test count: 486 (all passing)

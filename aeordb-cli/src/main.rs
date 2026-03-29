@@ -1,3 +1,42 @@
-fn main() {
-  println!("Hello, world!");
+use aeordb_cli::commands;
+use clap::{Parser, Subcommand};
+use commands::stress::StressArgs;
+
+#[derive(Parser)]
+#[command(name = "aeordb", about = "AeorDB command-line interface")]
+struct Cli {
+  #[command(subcommand)]
+  command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+  /// Start the database server
+  Start {
+    #[arg(short, long, default_value = "3000")]
+    port: u16,
+    #[arg(short = 'D', long, default_value = "data.aeor")]
+    database: String,
+  },
+  /// Run stress tests against a running instance
+  Stress(StressArgs),
+}
+
+#[tokio::main]
+async fn main() {
+  tracing_subscriber::fmt::init();
+
+  let cli = Cli::parse();
+
+  match cli.command {
+    Commands::Start { port, database } => {
+      commands::start::run(port, &database);
+    }
+    Commands::Stress(arguments) => {
+      if let Err(error) = commands::stress::run(arguments).await {
+        eprintln!("Stress test failed: {error}");
+        std::process::exit(1);
+      }
+    }
+  }
 }

@@ -31,6 +31,10 @@ pub async fn auth_middleware(
   let token = match authorization_header {
     Some(ref header) if header.starts_with("Bearer ") => &header[7..],
     _ => {
+      metrics::counter!(
+        crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
+        "result" => "missing_header"
+      ).increment(1);
       return (
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
@@ -44,6 +48,10 @@ pub async fn auth_middleware(
   let claims = match state.jwt_manager.verify_token(token) {
     Ok(claims) => claims,
     Err(_) => {
+      metrics::counter!(
+        crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
+        "result" => "invalid"
+      ).increment(1);
       return (
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
@@ -54,6 +62,10 @@ pub async fn auth_middleware(
     }
   };
 
+  metrics::counter!(
+    crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
+    "result" => "success"
+  ).increment(1);
   request.extensions_mut().insert(claims);
   next.run(request).await
 }

@@ -139,6 +139,8 @@ impl PathResolver {
     data: &[u8],
     content_type: Option<&str>,
   ) -> Result<DirectoryEntry, PathError> {
+    let start = std::time::Instant::now();
+
     let segments = Self::parse_path(path);
     if segments.is_empty() {
       return Err(PathError::InvalidPath(
@@ -178,6 +180,11 @@ impl PathResolver {
 
     self.directory.insert_entry(&parent_path, &entry)?;
 
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(duration);
+    metrics::counter!(crate::metrics::definitions::FILES_STORED_TOTAL).increment(1);
+    metrics::counter!(crate::metrics::definitions::FILE_BYTES_STORED_TOTAL).increment(data.len() as u64);
+
     Ok(entry)
   }
 
@@ -187,6 +194,8 @@ impl PathResolver {
     &self,
     path: &str,
   ) -> Result<FileStream, PathError> {
+    let start = std::time::Instant::now();
+
     let segments = Self::parse_path(path);
     if segments.is_empty() {
       return Err(PathError::InvalidPath(
@@ -206,6 +215,11 @@ impl PathResolver {
     if entry.entry_type != EntryType::File {
       return Err(PathError::NotAFile(path.to_string()));
     }
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(duration);
+    metrics::counter!(crate::metrics::definitions::FILES_READ_TOTAL).increment(1);
+    metrics::counter!(crate::metrics::definitions::FILE_BYTES_READ_TOTAL).increment(entry.total_size);
 
     Ok(FileStream {
       chunk_hashes: entry.chunk_hashes,
@@ -244,6 +258,8 @@ impl PathResolver {
     &self,
     path: &str,
   ) -> Result<DirectoryEntry, PathError> {
+    let start = std::time::Instant::now();
+
     let segments = Self::parse_path(path);
     if segments.is_empty() {
       return Err(PathError::InvalidPath(
@@ -266,10 +282,18 @@ impl PathResolver {
       )));
     }
 
-    self
+    let result = self
       .directory
       .remove_entry(&parent_path, file_name)?
-      .ok_or_else(|| PathError::NotFound(path.to_string()))
+      .ok_or_else(|| PathError::NotFound(path.to_string()));
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_DELETE_DURATION).record(duration);
+    if result.is_ok() {
+      metrics::counter!(crate::metrics::definitions::FILES_DELETED_TOTAL).increment(1);
+    }
+
+    result
   }
 
   /// List entries in a directory at the given path.
@@ -277,6 +301,8 @@ impl PathResolver {
     &self,
     path: &str,
   ) -> Result<Vec<DirectoryEntry>, PathError> {
+    let start = std::time::Instant::now();
+
     let segments = Self::parse_path(path);
     let directory_path = Self::build_directory_path(&segments);
 
@@ -310,6 +336,10 @@ impl PathResolver {
     }
 
     let entries = self.directory.list_entries(&directory_path)?;
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::DIRECTORY_LIST_DURATION).record(duration);
+
     Ok(entries)
   }
 
@@ -380,6 +410,7 @@ impl PathResolver {
 
       // Create the table for this directory.
       self.directory.create_directory(&child_path)?;
+      metrics::counter!(crate::metrics::definitions::DIRECTORIES_CREATED_TOTAL).increment(1);
     }
 
     Ok(())

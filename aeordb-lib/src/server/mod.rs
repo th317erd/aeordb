@@ -7,11 +7,14 @@ use std::sync::Arc;
 use axum::Router;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post, put};
+use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
 use crate::filesystem::PathResolver;
+use crate::metrics::http_metrics_layer::HttpMetricsLayer;
+use crate::metrics::initialize_metrics;
 use crate::plugins::PluginManager;
 use crate::storage::{ChunkStore, RedbStorage};
 use state::AppState;
@@ -22,7 +25,8 @@ const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
 /// Loads or generates the signing key from the storage config table.
 pub fn create_app(storage: Arc<RedbStorage>) -> Router {
   let jwt_manager = load_or_create_jwt_manager(&storage);
-  create_app_with_jwt(storage, Arc::new(jwt_manager))
+  let prometheus_handle = initialize_metrics();
+  create_app_with_jwt_and_metrics(storage, Arc::new(jwt_manager), prometheus_handle)
 }
 
 /// Load an existing signing key from config, or generate a new one and persist it.
@@ -42,7 +46,20 @@ fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
+/// Initializes a fresh metrics recorder. If a global recorder is already
+/// installed (e.g. from another test), this falls back to a no-op recorder
+/// and the prometheus handle will render empty output.
 pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>) -> Router {
+  let prometheus_handle = try_initialize_metrics();
+  create_app_with_jwt_and_metrics(storage, jwt_manager, prometheus_handle)
+}
+
+/// Build the application router with an explicit PrometheusHandle.
+pub fn create_app_with_jwt_and_metrics(
+  storage: Arc<RedbStorage>,
+  jwt_manager: Arc<JwtManager>,
+  prometheus_handle: PrometheusHandle,
+) -> Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
@@ -50,7 +67,7 @@ pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManage
   let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
   let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
 
-  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver)
+  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
@@ -61,6 +78,7 @@ pub fn create_app_with_all(
   plugin_manager: Arc<PluginManager>,
   rate_limiter: Arc<RateLimiter>,
   path_resolver: Arc<PathResolver>,
+  prometheus_handle: PrometheusHandle,
 ) -> Router {
   let app_state = AppState {
     storage,
@@ -68,6 +86,7 @@ pub fn create_app_with_all(
     plugin_manager,
     rate_limiter,
     path_resolver,
+    prometheus_handle,
   };
 
   // Routes that require authentication
@@ -84,6 +103,7 @@ pub fn create_app_with_all(
     )
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
+    .route("/admin/metrics", get(routes::metrics_endpoint))
     // Filesystem routes
     .route(
       "/fs/{*path}",
@@ -122,7 +142,24 @@ pub fn create_app_with_all(
   public_routes
     .merge(protected_routes)
     .with_state(app_state)
+    .layer(HttpMetricsLayer)
     .layer(TraceLayer::new_for_http())
+}
+
+/// Try to initialize a Prometheus recorder. If one is already installed
+/// globally (common in test scenarios), return a handle from a standalone
+/// builder that won't fail.
+fn try_initialize_metrics() -> PrometheusHandle {
+  let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+  match builder.install_recorder() {
+    Ok(handle) => handle,
+    Err(_) => {
+      // A recorder is already installed; build a standalone handle.
+      metrics_exporter_prometheus::PrometheusBuilder::new()
+        .build_recorder()
+        .handle()
+    }
+  }
 }
 
 use crate::auth::middleware::auth_middleware;

@@ -35,8 +35,13 @@ sha2 = "0.10"
 wasmi = "0.42"
 libloading = "0.8"
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 # Streaming
 futures-util = "0.3"
+http-body = "1"
 
 # Replication / Consensus
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
@@ -55,6 +60,7 @@ openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 redb = "3.1"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
+serial_test = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wat = "1"
@@ -150,3 +156,7 @@ path = "spec/filesystem/path_resolver_spec.rs"
 [[test]]
 name = "filesystem_http_spec"
 path = "spec/http/filesystem_http_spec.rs"
+
+[[test]]
+name = "metrics_spec"
+path = "spec/metrics/metrics_spec.rs"

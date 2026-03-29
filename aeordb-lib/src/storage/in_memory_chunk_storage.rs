@@ -60,7 +60,15 @@ impl ChunkStorage for InMemoryChunkStorage {
     let mut chunks = self.chunks.write().map_err(|error| {
       ChunkStoreError::IoError(format!("lock poisoned: {error}"))
     })?;
-    chunks.entry(chunk.hash).or_insert_with(|| serialize_chunk(chunk));
+    use std::collections::hash_map::Entry;
+    match chunks.entry(chunk.hash) {
+      Entry::Occupied(_) => {
+        metrics::counter!(crate::metrics::definitions::CHUNKS_DEDUPLICATED_TOTAL).increment(1);
+      }
+      Entry::Vacant(entry) => {
+        entry.insert(serialize_chunk(chunk));
+      }
+    }
     Ok(())
   }
 

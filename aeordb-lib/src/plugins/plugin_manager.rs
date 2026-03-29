@@ -190,6 +190,8 @@ impl PluginManager {
     path: &str,
     request_bytes: &[u8],
   ) -> Result<Vec<u8>, PluginManagerError> {
+    let start = std::time::Instant::now();
+
     let record = self
       .get_plugin(path)?
       .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
@@ -202,12 +204,20 @@ impl PluginManager {
     }
 
     let runtime = WasmPluginRuntime::new(&record.wasm_bytes).map_err(|error| {
+      metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "load_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
     })?;
 
-    runtime.call_handle(request_bytes).map_err(|error| {
+    let result = runtime.call_handle(request_bytes).map_err(|error| {
+      metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
-    })
+    });
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::counter!(crate::metrics::definitions::PLUGIN_INVOCATIONS_TOTAL).increment(1);
+    metrics::histogram!(crate::metrics::definitions::PLUGIN_DURATION).record(duration);
+
+    result
   }
 }
 

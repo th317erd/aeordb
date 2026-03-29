@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use metrics_exporter_prometheus::PrometheusHandle;
+
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
 use crate::filesystem::PathResolver;
@@ -13,4 +15,5 @@ pub struct AppState {
   pub plugin_manager: Arc<PluginManager>,
   pub rate_limiter: Arc<RateLimiter>,
   pub path_resolver: Arc<PathResolver>,
+  pub prometheus_handle: PrometheusHandle,
 }

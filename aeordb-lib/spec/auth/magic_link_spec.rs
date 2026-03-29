@@ -19,6 +19,12 @@ fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
   Arc::new(PathResolver::new(database_arc, chunk_store))
 }
 
+fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
+  metrics_exporter_prometheus::PrometheusBuilder::new()
+    .build_recorder()
+    .handle()
+}
+
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
@@ -31,6 +37,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimit
     plugin_manager,
     rate_limiter.clone(),
     path_resolver,
+    make_prometheus_handle(),
   );
   (app, jwt_manager, storage, rate_limiter)
 }
@@ -48,6 +55,7 @@ fn rebuild_app(
     plugin_manager,
     rate_limiter.clone(),
     path_resolver,
+    make_prometheus_handle(),
   )
 }
 
@@ -311,6 +319,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
       plugin_manager.clone(),
       rate_limiter.clone(),
       path_resolver.clone(),
+      make_prometheus_handle(),
     );
     let request = Request::builder()
       .method("POST")
@@ -334,6 +343,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
     plugin_manager.clone(),
     rate_limiter.clone(),
     path_resolver.clone(),
+    make_prometheus_handle(),
   );
   let request = Request::builder()
     .method("POST")

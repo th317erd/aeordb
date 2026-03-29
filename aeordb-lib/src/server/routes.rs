@@ -426,6 +426,7 @@ pub async fn auth_token(
   let (key_id_prefix, _full_key) = match parse_api_key(&payload.api_key) {
     Ok(parsed) => parsed,
     Err(_) => {
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
       return ErrorResponse::new("Invalid API key".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
@@ -435,12 +436,14 @@ pub async fn auth_token(
   let record = match state.storage.get_system_api_key(&key_id_prefix) {
     Ok(Some(record)) => record,
     Ok(None) => {
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "not_found").increment(1);
       return ErrorResponse::new("Invalid API key".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up API key: {}", error);
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "error").increment(1);
       return ErrorResponse::new("Internal server error".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
@@ -448,6 +451,7 @@ pub async fn auth_token(
   };
 
   if record.is_revoked {
+    metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "revoked").increment(1);
     return ErrorResponse::new("Invalid API key".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
@@ -456,6 +460,7 @@ pub async fn auth_token(
   let key_valid = match verify_api_key(&payload.api_key, &record.key_hash) {
     Ok(valid) => valid,
     Err(_) => {
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
       return ErrorResponse::new("Invalid API key".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
@@ -463,6 +468,7 @@ pub async fn auth_token(
   };
 
   if !key_valid {
+    metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
     return ErrorResponse::new("Invalid API key".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
@@ -505,6 +511,8 @@ pub async fn auth_token(
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
+
+  metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "success").increment(1);
 
   (
     StatusCode::OK,
@@ -672,6 +680,7 @@ pub async fn request_magic_link(
 ) -> Response {
   // Rate-limit by email.
   if let Err(error) = state.rate_limiter.check_rate_limit(&payload.email) {
+    metrics::counter!(crate::metrics::definitions::AUTH_RATE_LIMIT_HITS_TOTAL).increment(1);
     return ErrorResponse::new(error.to_string())
       .with_status(StatusCode::TOO_MANY_REQUESTS)
       .into_response();
@@ -1064,5 +1073,21 @@ pub async fn filesystem_head(
 
   response_builder
     .body(Body::empty())
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+/// GET /admin/metrics -- render Prometheus metrics.
+pub async fn metrics_endpoint(
+  State(state): State<AppState>,
+) -> Response {
+  let output = state.prometheus_handle.render();
+  Response::builder()
+    .status(StatusCode::OK)
+    .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+    .body(Body::from(output))
     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

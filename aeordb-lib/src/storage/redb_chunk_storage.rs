@@ -65,7 +65,9 @@ impl ChunkStorage for RedbChunkStorage {
       let exists = table.get(key).map_err(|error| {
         ChunkStoreError::RedbError(format!("get: {error}"))
       })?.is_some();
-      if !exists {
+      if exists {
+        metrics::counter!(crate::metrics::definitions::CHUNKS_DEDUPLICATED_TOTAL).increment(1);
+      } else {
         let serialized = serialize_chunk(chunk);
         table.insert(key, serialized.as_slice()).map_err(|error| {
           ChunkStoreError::RedbError(format!("insert: {error}"))

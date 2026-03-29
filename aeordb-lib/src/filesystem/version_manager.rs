@@ -84,6 +84,8 @@ impl VersionManager {
     name: &str,
     metadata: HashMap<String, String>,
   ) -> Result<VersionInfo> {
+    let start = std::time::Instant::now();
+
     // Check for duplicate names before doing anything expensive.
     if self.get_version(name)?.is_some() {
       return Err(VersionError::VersionAlreadyExists(name.to_string()));
@@ -110,6 +112,11 @@ impl VersionManager {
     }
 
     write_transaction.commit()?;
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::VERSION_SNAPSHOT_DURATION).record(duration);
+    metrics::counter!(crate::metrics::definitions::VERSION_SNAPSHOTS_TOTAL).increment(1);
+
     Ok(version_info)
   }
 
@@ -164,6 +171,8 @@ impl VersionManager {
   /// The restored version's own metadata is re-written after the restore so
   /// that `get_version` / `list_versions` still return it.
   pub fn restore_version(&self, name: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+
     // Look up the version info before restoring (we need it to re-insert).
     let version_info = self
       .get_version(name)?
@@ -188,6 +197,11 @@ impl VersionManager {
     }
 
     write_transaction.commit()?;
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::VERSION_RESTORE_DURATION).record(duration);
+    metrics::counter!(crate::metrics::definitions::VERSION_RESTORES_TOTAL).increment(1);
+
     Ok(())
   }
 

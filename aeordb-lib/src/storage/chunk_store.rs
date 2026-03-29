@@ -74,12 +74,27 @@ impl ChunkStore {
 
   /// Store arbitrary data, returning a ContentHashMap describing the chunks.
   pub fn store(&self, data: &[u8]) -> Result<ContentHashMap, ChunkStoreError> {
-    self.hash_map_store.store_data(data)
+    let start = std::time::Instant::now();
+    let result = self.hash_map_store.store_data(data);
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::CHUNK_WRITE_DURATION).record(duration);
+    if result.is_ok() {
+      metrics::counter!(crate::metrics::definitions::CHUNKS_STORED_TOTAL).increment(1);
+      metrics::counter!(crate::metrics::definitions::CHUNK_STORE_BYTES).increment(data.len() as u64);
+    }
+    result
   }
 
   /// Retrieve data by its ContentHashMap.
   pub fn retrieve(&self, hash_map: &ContentHashMap) -> Result<Vec<u8>, ChunkStoreError> {
-    self.hash_map_store.retrieve_data(hash_map)
+    let start = std::time::Instant::now();
+    let result = self.hash_map_store.retrieve_data(hash_map);
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::CHUNK_READ_DURATION).record(duration);
+    if result.is_ok() {
+      metrics::counter!(crate::metrics::definitions::CHUNKS_READ_TOTAL).increment(1);
+    }
+    result
   }
 
   /// Efficiently update data: only stores new/changed chunks, reuses existing ones.
