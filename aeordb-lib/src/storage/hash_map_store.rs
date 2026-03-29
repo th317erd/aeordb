@@ -58,7 +58,7 @@ impl HashMapStore {
       });
     }
 
-    for chunk_data in data.chunks(self.config.chunk_size) {
+    for chunk_data in data.chunks(self.config.data_capacity()) {
       let chunk = Chunk::new(chunk_data.to_vec());
       self.chunk_storage.store_chunk(&chunk)?;
       chunk_hashes.push(chunk.hash);
@@ -176,14 +176,11 @@ impl HashMapStore {
       });
     }
 
-    for chunk_data in new_data.chunks(self.config.chunk_size) {
+    for chunk_data in new_data.chunks(self.config.data_capacity()) {
       let chunk_hash = hash_data(chunk_data);
       if !old_hashes.contains(&chunk_hash) {
         // New chunk, store it.
-        let chunk = Chunk {
-          hash: chunk_hash,
-          data: chunk_data.to_vec(),
-        };
+        let chunk = Chunk::new(chunk_data.to_vec());
         self.chunk_storage.store_chunk(&chunk)?;
       }
       // Chunk already exists (either in old map or from dedup). Just record the hash.

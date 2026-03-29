@@ -54,11 +54,13 @@ fn test_hash_map_hash_is_deterministic() {
 #[test]
 fn test_update_data_reuses_unchanged_chunks() {
   let config = ChunkConfig::new(64).unwrap();
+  let data_capacity = config.data_capacity(); // 31
   let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
   let store = HashMapStore::new(storage.clone(), config);
 
-  // Store 128 bytes (2 chunks of 64) with distinct content per chunk.
-  let mut data_a = vec![0xAAu8; 128];
+  // Store 2 chunks worth of data with distinct content per chunk.
+  let total = data_capacity * 2;
+  let mut data_a = vec![0xAAu8; total];
   data_a[0] = 0x01; // make first chunk distinct from second
   let map_a = store.store_data(&data_a).unwrap();
   assert_eq!(map_a.chunk_hashes.len(), 2);
@@ -66,9 +68,9 @@ fn test_update_data_reuses_unchanged_chunks() {
   let initial_count = storage.chunk_count().unwrap();
   assert_eq!(initial_count, 2);
 
-  // Update: change only the second half.
+  // Update: change only the second chunk.
   let mut data_b = data_a.clone();
-  data_b[64..].fill(0xBB);
+  data_b[data_capacity..].fill(0xBB);
   let map_b = store.update_data(&map_a, &data_b).unwrap();
 
   // First chunk hash should be unchanged.
@@ -83,19 +85,22 @@ fn test_update_data_reuses_unchanged_chunks() {
 
 #[test]
 fn test_partial_update_creates_minimal_new_chunks() {
-  let config = ChunkConfig::new(32).unwrap();
+  let config = ChunkConfig::new(64).unwrap();
+  let data_capacity = config.data_capacity(); // 31
   let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
   let store = HashMapStore::new(storage.clone(), config);
 
-  // 160 bytes = 5 chunks of 32.
-  let data_a = vec![0xAAu8; 160];
+  // 5 chunks worth of identical data.
+  let total = data_capacity * 5;
+  let data_a = vec![0xAAu8; total];
   let map_a = store.store_data(&data_a).unwrap();
   assert_eq!(map_a.chunk_hashes.len(), 5);
   assert_eq!(storage.chunk_count().unwrap(), 1); // all chunks identical (0xAA repeated)
 
   // Change only 1 byte in the middle (affects one chunk).
   let mut data_b = data_a.clone();
-  data_b[50] = 0xBB; // byte 50 is in chunk index 1 (bytes 32-63)
+  let changed_byte = data_capacity + 1; // in chunk index 1
+  data_b[changed_byte] = 0xBB;
   let map_b = store.update_data(&map_a, &data_b).unwrap();
 
   // Only the changed chunk should be new.
@@ -111,16 +116,20 @@ fn test_partial_update_creates_minimal_new_chunks() {
 
 #[test]
 fn test_diff_shows_added_and_removed_chunks() {
-  let store = make_hash_map_store(64);
+  let config = ChunkConfig::new(64).unwrap();
+  let data_capacity = config.data_capacity(); // 31
+  let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let store = HashMapStore::new(storage, config);
 
   // Use distinct data per chunk to avoid dedup conflation.
-  let mut data_a = vec![0xAAu8; 128];
+  let total = data_capacity * 2;
+  let mut data_a = vec![0xAAu8; total];
   data_a[0] = 0x01; // make first chunk different from second
   let map_a = store.store_data(&data_a).unwrap();
   assert_eq!(map_a.chunk_hashes.len(), 2);
 
   let mut data_b = data_a.clone();
-  data_b[64..].fill(0xBB);
+  data_b[data_capacity..].fill(0xBB);
   let map_b = store.store_data(&data_b).unwrap();
   assert_eq!(map_b.chunk_hashes.len(), 2);
 
@@ -202,16 +211,18 @@ fn test_hash_map_of_empty_data() {
 #[test]
 fn test_large_data_hash_map() {
   let config = ChunkConfig::new(1024).unwrap();
+  let data_capacity = config.data_capacity(); // 1024 - 33 = 991
   let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
   let store = HashMapStore::new(storage.clone(), config);
 
   // 1MB+ of varied data.
-  let data: Vec<u8> = (0..=255u8).cycle().take(1_048_576 + 123).collect();
+  let total_size = 1_048_576 + 123;
+  let data: Vec<u8> = (0..=255u8).cycle().take(total_size).collect();
   let map = store.store_data(&data).unwrap();
 
-  // Should have ceil((1048576 + 123) / 1024) = 1025 chunks.
-  assert_eq!(map.chunk_hashes.len(), 1025);
-  assert_eq!(map.total_size, 1_048_576 + 123);
+  let expected_chunks = (total_size + data_capacity - 1) / data_capacity;
+  assert_eq!(map.chunk_hashes.len(), expected_chunks);
+  assert_eq!(map.total_size, total_size as u64);
 
   let retrieved = store.retrieve_data(&map).unwrap();
   assert_eq!(retrieved.len(), data.len());

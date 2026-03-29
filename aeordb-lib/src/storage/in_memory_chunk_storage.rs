@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use super::chunk::{Chunk, ChunkHash};
+use super::chunk_header::{ChunkHeader, HEADER_SIZE};
 use super::chunk_storage::{ChunkStorage, ChunkStoreError};
 
 /// In-memory implementation of ChunkStorage for testing.
+/// Stores chunks as serialized bytes: [header][data].
 pub struct InMemoryChunkStorage {
   chunks: RwLock<HashMap<ChunkHash, Vec<u8>>>,
 }
@@ -23,12 +25,42 @@ impl Default for InMemoryChunkStorage {
   }
 }
 
+/// Serialize a chunk (header + data) into a single byte vector.
+fn serialize_chunk(chunk: &Chunk) -> Vec<u8> {
+  let header_bytes = chunk.header.serialize();
+  let mut buffer = Vec::with_capacity(HEADER_SIZE + chunk.data.len());
+  buffer.extend_from_slice(&header_bytes);
+  buffer.extend_from_slice(&chunk.data);
+  buffer
+}
+
+/// Deserialize a chunk from stored bytes (header + data).
+fn deserialize_chunk(hash: &ChunkHash, stored: &[u8]) -> Result<Chunk, ChunkStoreError> {
+  if stored.len() < HEADER_SIZE {
+    return Err(ChunkStoreError::SerializationError(format!(
+      "stored chunk too short: {} bytes, need at least {HEADER_SIZE}",
+      stored.len(),
+    )));
+  }
+
+  let header = ChunkHeader::deserialize_from_slice(stored).map_err(|error| {
+    ChunkStoreError::SerializationError(format!("chunk header: {error}"))
+  })?;
+  let data = stored[HEADER_SIZE..].to_vec();
+
+  Ok(Chunk {
+    hash: *hash,
+    data,
+    header,
+  })
+}
+
 impl ChunkStorage for InMemoryChunkStorage {
   fn store_chunk(&self, chunk: &Chunk) -> Result<(), ChunkStoreError> {
     let mut chunks = self.chunks.write().map_err(|error| {
       ChunkStoreError::IoError(format!("lock poisoned: {error}"))
     })?;
-    chunks.entry(chunk.hash).or_insert_with(|| chunk.data.clone());
+    chunks.entry(chunk.hash).or_insert_with(|| serialize_chunk(chunk));
     Ok(())
   }
 
@@ -36,10 +68,10 @@ impl ChunkStorage for InMemoryChunkStorage {
     let chunks = self.chunks.read().map_err(|error| {
       ChunkStoreError::IoError(format!("lock poisoned: {error}"))
     })?;
-    Ok(chunks.get(hash).map(|data| Chunk {
-      hash: *hash,
-      data: data.clone(),
-    }))
+    match chunks.get(hash) {
+      Some(stored) => Ok(Some(deserialize_chunk(hash, stored)?)),
+      None => Ok(None),
+    }
   }
 
   fn has_chunk(&self, hash: &ChunkHash) -> Result<bool, ChunkStoreError> {

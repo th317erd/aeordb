@@ -1,3 +1,5 @@
+use super::chunk_header::ChunkHeader;
+
 /// BLAKE3 hash, 32 bytes.
 pub type ChunkHash = [u8; 32];
 
@@ -6,16 +8,20 @@ pub type ChunkHash = [u8; 32];
 pub struct Chunk {
   pub hash: ChunkHash,
   pub data: Vec<u8>,
+  pub header: ChunkHeader,
 }
 
 impl Chunk {
   /// Create a new chunk from raw data, computing the BLAKE3 hash.
+  /// A fresh header is created automatically.
   pub fn new(data: Vec<u8>) -> Self {
     let hash = hash_data(&data);
-    Self { hash, data }
+    let header = ChunkHeader::new();
+    Self { hash, data, header }
   }
 
   /// Re-hash the data and verify it matches the stored hash.
+  /// The hash covers DATA only, not the header.
   pub fn verify(&self) -> bool {
     hash_data(&self.data) == self.hash
   }

@@ -30,7 +30,7 @@ impl ChunkStore {
   pub fn new_in_memory() -> Self {
     let config = ChunkConfig::default();
     let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
-    let hash_map_store = HashMapStore::new(storage.clone(), config.clone());
+    let hash_map_store = HashMapStore::new(storage.clone(), config);
     Self {
       storage,
       hash_map_store,
@@ -41,7 +41,7 @@ impl ChunkStore {
   /// Create an in-memory chunk store with a custom chunk size (for testing).
   pub fn new_in_memory_with_config(config: ChunkConfig) -> Self {
     let storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
-    let hash_map_store = HashMapStore::new(storage.clone(), config.clone());
+    let hash_map_store = HashMapStore::new(storage.clone(), config);
     Self {
       storage,
       hash_map_store,
@@ -53,7 +53,7 @@ impl ChunkStore {
   pub fn new_with_redb(database: Arc<Database>) -> Self {
     let config = ChunkConfig::default();
     let storage: Arc<dyn ChunkStorage> = Arc::new(RedbChunkStorage::new(database));
-    let hash_map_store = HashMapStore::new(storage.clone(), config.clone());
+    let hash_map_store = HashMapStore::new(storage.clone(), config);
     Self {
       storage,
       hash_map_store,
@@ -64,7 +64,7 @@ impl ChunkStore {
   /// Create a chunk store backed by a redb database with custom config.
   pub fn new_with_redb_and_config(database: Arc<Database>, config: ChunkConfig) -> Self {
     let storage: Arc<dyn ChunkStorage> = Arc::new(RedbChunkStorage::new(database));
-    let hash_map_store = HashMapStore::new(storage.clone(), config.clone());
+    let hash_map_store = HashMapStore::new(storage.clone(), config);
     Self {
       storage,
       hash_map_store,

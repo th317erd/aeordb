@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::thread;
 
 use aeordb::storage::{
-  Chunk, ChunkConfig, ChunkHash, ChunkStorage, ChunkStore, ChunkStoreError,
-  InMemoryChunkStorage, chunk_hash_from_hex, chunk_hash_to_hex, hash_data,
+  Chunk, ChunkConfig, ChunkHash, ChunkHeader, ChunkStorage, ChunkStore, ChunkStoreError,
+  HEADER_SIZE, InMemoryChunkStorage, chunk_hash_from_hex, chunk_hash_to_hex, hash_data,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ fn test_corrupt_chunk_detected() {
   let corrupt_chunk = Chunk {
     hash: chunk.hash,
     data: b"tampered data".to_vec(),
+    header: ChunkHeader::new(),
   };
   assert!(!corrupt_chunk.verify());
 }
@@ -89,13 +90,15 @@ fn test_store_and_retrieve_data() {
 #[test]
 fn test_large_data_split_into_chunks() {
   // Use small chunk size (64 bytes) to force splitting.
+  // Data capacity per chunk = 64 - 33 = 31 bytes.
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
 
-  // 200 bytes of data should produce ceil(200/64) = 4 chunks.
+  // 200 bytes of data with 31 bytes per chunk = ceil(200/31) = 7 chunks.
   let data = vec![0xABu8; 200];
   let map = store.store(&data).unwrap();
-  assert_eq!(map.chunk_hashes.len(), 4);
+  let expected_chunks = (200 + 30) / 31; // ceil(200/31) = 7
+  assert_eq!(map.chunk_hashes.len(), expected_chunks);
   assert_eq!(map.total_size, 200);
 
   let retrieved = store.retrieve(&map).unwrap();
@@ -104,7 +107,7 @@ fn test_large_data_split_into_chunks() {
 
 #[test]
 fn test_data_reconstruction_matches_original() {
-  let config = ChunkConfig::new(32).unwrap();
+  let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
 
   // Mixed data pattern.
@@ -141,31 +144,34 @@ fn test_single_byte_data() {
 }
 
 #[test]
-fn test_exact_chunk_size_data() {
+fn test_exact_data_capacity_data() {
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
 
-  let data = vec![0xFFu8; 64];
+  // Data capacity = 64 - 33 = 31 bytes. Exactly one chunk's worth.
+  let data_capacity = config.data_capacity();
+  let data = vec![0xFFu8; data_capacity];
   let map = store.store(&data).unwrap();
 
   assert_eq!(map.chunk_hashes.len(), 1);
-  assert_eq!(map.total_size, 64);
+  assert_eq!(map.total_size, data_capacity as u64);
 
   let retrieved = store.retrieve(&map).unwrap();
   assert_eq!(retrieved, data);
 }
 
 #[test]
-fn test_chunk_size_plus_one_data() {
+fn test_data_capacity_plus_one_data() {
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
 
-  let data = vec![0xFFu8; 65];
+  // Data capacity = 64 - 33 = 31 bytes. One byte over capacity = 2 chunks.
+  let data_capacity = config.data_capacity();
+  let data = vec![0xFFu8; data_capacity + 1];
   let map = store.store(&data).unwrap();
 
-  // 65 bytes = 1 full chunk (64) + 1 partial chunk (1 byte).
   assert_eq!(map.chunk_hashes.len(), 2);
-  assert_eq!(map.total_size, 65);
+  assert_eq!(map.total_size, (data_capacity + 1) as u64);
 
   let retrieved = store.retrieve(&map).unwrap();
   assert_eq!(retrieved, data);
@@ -173,10 +179,16 @@ fn test_chunk_size_plus_one_data() {
 
 #[test]
 fn test_configurable_chunk_size() {
-  // Power of two sizes should work.
-  for size in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+  // Power of two sizes larger than HEADER_SIZE (33) should work.
+  for size in [64, 128, 256, 512, 1024] {
     let config = ChunkConfig::new(size).unwrap();
     assert_eq!(config.chunk_size, size);
+    assert_eq!(config.data_capacity(), size - HEADER_SIZE);
+  }
+
+  // Power of two sizes <= HEADER_SIZE should fail.
+  for size in [1, 2, 4, 8, 16, 32] {
+    assert!(ChunkConfig::new(size).is_err());
   }
 
   // Non-power-of-two should fail.
@@ -194,14 +206,17 @@ fn test_configurable_chunk_size() {
 fn test_garbage_collection_removes_unreferenced_chunks() {
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
+  let data_capacity = config.data_capacity(); // 31
 
-  // Store two different data blobs.
-  let data_a = vec![0xAAu8; 100];
-  let data_b = vec![0xBBu8; 100];
+  // Store two different data blobs that each produce 2 distinct chunks.
+  // Use varied data so chunks within each blob are distinct (no dedup).
+  let data_a: Vec<u8> = (0..data_capacity * 2).map(|i| (i % 256) as u8).collect();
+  let data_b: Vec<u8> = (128..128 + data_capacity * 2).map(|i| (i % 256) as u8).collect();
   let map_a = store.store(&data_a).unwrap();
+  assert_eq!(map_a.chunk_hashes.len(), 2);
   let _map_b = store.store(&data_b).unwrap();
 
-  // Both maps use 2 chunks each (ceil(100/64) = 2), all distinct.
+  // Both maps use 2 chunks each, all distinct content.
   let initial_stats = store.stats().unwrap();
   assert_eq!(initial_stats.total_chunks, 4);
 
@@ -223,7 +238,7 @@ fn test_garbage_collection_preserves_referenced_chunks() {
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
 
-  let data = vec![0xCCu8; 100];
+  let data = vec![0xCCu8; 62];
   let map = store.store(&data).unwrap();
 
   // GC with the map as live should remove nothing.
@@ -243,6 +258,7 @@ fn test_garbage_collection_preserves_referenced_chunks() {
 fn test_stats_accurate() {
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_in_memory_with_config(config);
+  let data_capacity = config.data_capacity(); // 31
 
   // Empty store.
   let stats = store.stats().unwrap();
@@ -250,13 +266,15 @@ fn test_stats_accurate() {
   assert_eq!(stats.total_bytes, 0);
   assert_eq!(stats.chunk_size, 64);
 
-  // Store 100 bytes = 2 chunks (64 + 36).
-  let data = vec![0xAAu8; 100];
+  // Store data that spans exactly 2 chunks: data_capacity + 1 bytes.
+  // First chunk: 31 bytes, second chunk: 1 byte.
+  let total_data = data_capacity + 1; // 32
+  let data = vec![0xAAu8; total_data];
   store.store(&data).unwrap();
 
   let stats = store.stats().unwrap();
   assert_eq!(stats.total_chunks, 2);
-  assert_eq!(stats.total_bytes, 100);
+  assert_eq!(stats.total_bytes, total_data as u64);
   assert_eq!(stats.chunk_size, 64);
 }
 
@@ -380,22 +398,23 @@ fn test_chunk_config_default() {
 #[test]
 fn test_chunk_config_index_and_offset() {
   let config = ChunkConfig::new(64).unwrap();
+  let capacity = config.data_capacity() as u64; // 31
 
   assert_eq!(config.chunk_index(0), 0);
-  assert_eq!(config.chunk_index(63), 0);
-  assert_eq!(config.chunk_index(64), 1);
-  assert_eq!(config.chunk_index(128), 2);
+  assert_eq!(config.chunk_index(capacity - 1), 0);
+  assert_eq!(config.chunk_index(capacity), 1);
+  assert_eq!(config.chunk_index(capacity * 2), 2);
 
   assert_eq!(config.offset_within_chunk(0), 0);
-  assert_eq!(config.offset_within_chunk(63), 63);
-  assert_eq!(config.offset_within_chunk(64), 0);
-  assert_eq!(config.offset_within_chunk(65), 1);
+  assert_eq!(config.offset_within_chunk(capacity - 1), capacity - 1);
+  assert_eq!(config.offset_within_chunk(capacity), 0);
+  assert_eq!(config.offset_within_chunk(capacity + 1), 1);
 
   assert!(config.is_chunk_boundary(0));
-  assert!(config.is_chunk_boundary(64));
-  assert!(config.is_chunk_boundary(128));
+  assert!(config.is_chunk_boundary(capacity));
+  assert!(config.is_chunk_boundary(capacity * 2));
   assert!(!config.is_chunk_boundary(1));
-  assert!(!config.is_chunk_boundary(63));
+  assert!(!config.is_chunk_boundary(capacity - 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -448,13 +467,15 @@ fn test_redb_backed_store_and_retrieve() {
   let store = ChunkStore::new_with_redb_and_config(database, config);
 
   // Use varied data to avoid dedup across chunks.
+  // Data capacity per chunk = 64 - 33 = 31.
   let data: Vec<u8> = (0..200).map(|index| index as u8).collect();
   let map = store.store(&data).unwrap();
   let retrieved = store.retrieve(&map).unwrap();
   assert_eq!(retrieved, data);
 
+  let expected_chunks = (200 + 30) / 31; // ceil(200/31) = 7
   let stats = store.stats().unwrap();
-  assert_eq!(stats.total_chunks, 4); // ceil(200/64) = 4
+  assert_eq!(stats.total_chunks, expected_chunks as u64);
   assert_eq!(stats.total_bytes, 200);
 }
 
@@ -468,10 +489,13 @@ fn test_redb_backed_garbage_collection() {
 
   let config = ChunkConfig::new(64).unwrap();
   let store = ChunkStore::new_with_redb_and_config(database, config);
+  let data_capacity = config.data_capacity(); // 31
 
-  let data_a = vec![0xAAu8; 100];
-  let data_b = vec![0xBBu8; 100];
+  // Use varied data so chunks within each blob are distinct (no dedup).
+  let data_a: Vec<u8> = (0..data_capacity * 2).map(|i| (i % 256) as u8).collect();
+  let data_b: Vec<u8> = (128..128 + data_capacity * 2).map(|i| (i % 256) as u8).collect();
   let map_a = store.store(&data_a).unwrap();
+  assert_eq!(map_a.chunk_hashes.len(), 2);
   let _map_b = store.store(&data_b).unwrap();
 
   let removed = store.garbage_collect(&[map_a.clone()]).unwrap();

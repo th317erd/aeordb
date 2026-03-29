@@ -214,15 +214,21 @@ fn test_restore_version_data_matches_original() {
 fn test_diff_versions_shows_changes() {
   let (version_store, chunk_storage) = make_version_store();
 
-  // Two chunks of distinct content.
-  let mut data_a = vec![0xAAu8; 128];
-  data_a[0] = 0x01;
+  // With chunk_size=64 and header=33, data_capacity=31.
+  // Create 2 chunks of distinct content (62 bytes total).
+  let config = ChunkConfig::new(64).unwrap();
+  let data_capacity = config.data_capacity(); // 31
+  let total = data_capacity * 2; // 62
+  let mut data_a = vec![0xAAu8; total];
+  data_a[0] = 0x01; // make first chunk distinct from second
   let map_a = store_data(&chunk_storage, &data_a);
+  assert_eq!(map_a.chunk_hashes.len(), 2);
 
   // Change only the second chunk.
   let mut data_b = data_a.clone();
-  data_b[64..].fill(0xBB);
+  data_b[data_capacity..].fill(0xBB);
   let map_b = store_data(&chunk_storage, &data_b);
+  assert_eq!(map_b.chunk_hashes.len(), 2);
 
   let version_a = version_store
     .create_version(&map_a, Some("a".to_string()), HashMap::new())

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use super::chunk::{Chunk, ChunkHash};
+use super::chunk_header::{ChunkHeader, HEADER_SIZE};
 use super::chunk_storage::{ChunkStorage, ChunkStoreError};
 
-/// Table definition for chunk storage: key = 32-byte hash (as &[u8]), value = chunk data.
-/// We store the hash as a fixed-size byte array key.
+/// Table definition for chunk storage: key = 32-byte hash (as &[u8]), value = header+data.
 const CHUNKS_TABLE: TableDefinition<&[u8], &[u8]> =
   TableDefinition::new("_chunks:data");
 
@@ -19,6 +19,36 @@ impl RedbChunkStorage {
   pub fn new(database: Arc<Database>) -> Self {
     Self { database }
   }
+}
+
+/// Serialize a chunk (header + data) into a single byte vector.
+fn serialize_chunk(chunk: &Chunk) -> Vec<u8> {
+  let header_bytes = chunk.header.serialize();
+  let mut buffer = Vec::with_capacity(HEADER_SIZE + chunk.data.len());
+  buffer.extend_from_slice(&header_bytes);
+  buffer.extend_from_slice(&chunk.data);
+  buffer
+}
+
+/// Deserialize a chunk from stored bytes (header + data).
+fn deserialize_chunk(hash: &ChunkHash, stored: &[u8]) -> Result<Chunk, ChunkStoreError> {
+  if stored.len() < HEADER_SIZE {
+    return Err(ChunkStoreError::SerializationError(format!(
+      "stored chunk too short: {} bytes, need at least {HEADER_SIZE}",
+      stored.len(),
+    )));
+  }
+
+  let header = ChunkHeader::deserialize_from_slice(stored).map_err(|error| {
+    ChunkStoreError::SerializationError(format!("chunk header: {error}"))
+  })?;
+  let data = stored[HEADER_SIZE..].to_vec();
+
+  Ok(Chunk {
+    hash: *hash,
+    data,
+    header,
+  })
 }
 
 impl ChunkStorage for RedbChunkStorage {
@@ -36,7 +66,8 @@ impl ChunkStorage for RedbChunkStorage {
         ChunkStoreError::RedbError(format!("get: {error}"))
       })?.is_some();
       if !exists {
-        table.insert(key, chunk.data.as_slice()).map_err(|error| {
+        let serialized = serialize_chunk(chunk);
+        table.insert(key, serialized.as_slice()).map_err(|error| {
           ChunkStoreError::RedbError(format!("insert: {error}"))
         })?;
       }
@@ -61,10 +92,10 @@ impl ChunkStorage for RedbChunkStorage {
     match table.get(key).map_err(|error| {
       ChunkStoreError::RedbError(format!("get: {error}"))
     })? {
-      Some(guard) => Ok(Some(Chunk {
-        hash: *hash,
-        data: guard.value().to_vec(),
-      })),
+      Some(guard) => {
+        let stored = guard.value();
+        Ok(Some(deserialize_chunk(hash, stored)?))
+      }
       None => Ok(None),
     }
   }
