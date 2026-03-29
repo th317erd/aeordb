@@ -4,38 +4,34 @@
 - Working directory: `/home/wyatt/Projects/aeordb`
 - redb reference clone: `/tmp/claude/aeordb-research/redb`
 
-## Architecture Decisions (Settled)
-- **Storage:** Content-addressed chunk store (power-of-two configurable chunks, keyed by hash)
-- **Initial storage backend:** redb (single-file, to be replaced/augmented by chunk store in Phase 4)
-- **Replication:** openraft (Raft consensus) with custom append-only log (NOT redb for Raft log)
-- **Query interface:** Compiled function plugins (WASM sandboxed + native dlopen trusted)
+## Architecture Decisions (Settled — Revision 2)
+- **Chunks:** Immutable data blocks. Header (33 bytes: format_version u8, created_at i64, updated_at i64, reserved 16 bytes) + data (BLAKE3 hashed). NO linked list pointers.
+- **Files:** Ordered chunk hash lists in B-tree index entries (inline for small, overflow chunk for large)
+- **Directories:** Per-directory COW B-trees. Nodes stored as chunks in redb.
+- **redb role:** Layer 1 dumb chunk store (hash → bytes). Filesystem B-trees built on top.
+- **Versioning:** COW B-tree root hash = entire database state. Bases (I-frames) + diffs (P-frames).
+- **Streaming:** ALWAYS. No full-file memory loads. Non-negotiable.
+- **No soft-delete:** Delete is real. Recovery via version restore.
+- **No linked lists:** Dropped. B-tree owns all structure.
+- **Paths:** Everything is a path. Config, indexes, permissions inherit downward via dot-prefix conventions.
+- **Parsers:** Plugins at paths. Multiple per directory. Extract fields for indexing.
+- **Permissions:** `crudlify` (8 ops), tri-state flags (allow/deny/empty), multi-group links, proximity-ordered resolution.
+- **Replication:** openraft. Custom append-only log (NOT redb for Raft log).
+- **Query interface:** WASM/native function plugins invoked over HTTP.
 - **HTTP server:** axum (on hyper + tokio + tower)
-- **Auth:** JWT (Ed25519 signing), API keys (argon2id hashed), magic links
-- **Indexing:** User-requested only. Scalar ratio indexing as primary algorithm. Pluggable via WASM/native.
-- **Mandatory fields:** `document_id`, `created_at`, `updated_at`, `is_deleted` on every document
-- **Versioning:** Free via content-addressed hash maps — every state is a snapshot
-- **Permissions:** Rules are WASM plugins returning allow/deny/redact, same interface as query functions
+- **Auth:** JWT (Ed25519), API keys (argon2id), magic links, refresh tokens, rate limiting
+- **Mandatory fields:** document_id, created_at, updated_at (NO is_deleted)
 
-## Key Research Findings
-- No existing open-source FS can run both embedded and distributed (gap in ecosystem)
-- redb has 3 GiB max value size, no streaming API, COW write amplification on large values
-- redb already has a `StorageBackend` trait (6 methods: len, read, write, set_len, sync_data, close)
-- openraft: use redb for state machine, NOT for Raft log (12x slower than append-optimized stores)
-- WASM runtimes: wasmi is the leading candidate (pure Rust, small, ~5x interpreter overhead)
-- IBM Storage Scale eliminated (not fully open source)
-- ZFS eliminated for default backend (requires kernel module + root)
+## Key Plan Documents
+- `bot-docs/plan/storage-architecture.md` — Revision 2, the finalized design
+- `bot-docs/plan/data-model.md` — paths, parsers, indexes
+- `bot-docs/plan/permissions.md` — crudlify system
+- `bot-docs/plan/master-plan.md` — top-level overview
+- `.claude/conversation.md` — Sprint 2 plan with Wyatt's approvals
 
 ## Rust Toolchain
 - rustc 1.94.0
 - cargo 1.94.0
 - clippy 0.1.94
 
-## Bot-Docs Structure
-- `bot-docs/docs/` — research artifacts
-- `bot-docs/plan/` — architecture and design documents
-- `bot-docs/test/` — plan validation (not yet used)
-
-## Conversation Continuation
-- Async collaboration via `.claude/conversation.md`
-- Wyatt reviews and adds inline comments
-- Claude updates plans based on feedback
+## Test Count: 380 (all passing)

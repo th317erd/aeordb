@@ -39,16 +39,6 @@ fn create_document_sets_timestamps() {
 }
 
 #[test]
-fn create_document_sets_is_deleted_to_false() {
-  let storage = create_storage();
-  let document = storage
-    .create_document(TABLE, b"data".to_vec(), None)
-    .unwrap();
-
-  assert!(!document.is_deleted);
-}
-
-#[test]
 fn create_document_with_user_provided_id_preserves_it() {
   let storage = create_storage();
   let custom_id = Uuid::new_v4();
@@ -87,7 +77,6 @@ fn create_document_with_empty_data_gets_mandatory_fields() {
     .unwrap();
 
   assert!(!document.document_id.is_nil());
-  assert!(!document.is_deleted);
   assert_eq!(document.data, Vec::<u8>::new());
 }
 
@@ -135,23 +124,6 @@ fn get_document_returns_document() {
   assert_eq!(fetched.document_id, created.document_id);
   assert_eq!(fetched.data, b"hello world");
   assert_eq!(fetched.content_type, Some("text/plain".to_string()));
-  assert!(!fetched.is_deleted);
-}
-
-#[test]
-fn get_document_excludes_soft_deleted() {
-  let storage = create_storage();
-  let created = storage
-    .create_document(TABLE, b"will be deleted".to_vec(), None)
-    .unwrap();
-
-  storage.delete_document(TABLE, created.document_id).unwrap();
-
-  let result = storage
-    .get_document(TABLE, created.document_id)
-    .unwrap();
-
-  assert!(result.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -233,11 +205,11 @@ fn update_document_returns_error_for_nonexistent_table() {
 }
 
 // ---------------------------------------------------------------------------
-// DELETE (soft)
+// DELETE (hard)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn delete_document_sets_is_deleted_to_true() {
+fn delete_document_actually_removes() {
   let storage = create_storage();
   let created = storage
     .create_document(TABLE, b"doomed".to_vec(), None)
@@ -245,33 +217,25 @@ fn delete_document_sets_is_deleted_to_true() {
 
   storage.delete_document(TABLE, created.document_id).unwrap();
 
-  // Use list with include_deleted to verify the flag
-  let all = storage.list_documents(TABLE, true).unwrap();
-  let document = all
-    .iter()
-    .find(|d| d.document_id == created.document_id)
-    .expect("document should still exist in storage");
-
-  assert!(document.is_deleted);
+  let result = storage.get_document(TABLE, created.document_id).unwrap();
+  assert!(result.is_none(), "document should be gone after delete");
 }
 
 #[test]
-fn delete_document_preserves_data() {
+fn delete_then_list_does_not_include() {
   let storage = create_storage();
-  let created = storage
-    .create_document(TABLE, b"important data".to_vec(), Some("text/plain".into()))
+  let alive = storage
+    .create_document(TABLE, b"alive".to_vec(), None)
+    .unwrap();
+  let doomed = storage
+    .create_document(TABLE, b"doomed".to_vec(), None)
     .unwrap();
 
-  storage.delete_document(TABLE, created.document_id).unwrap();
+  storage.delete_document(TABLE, doomed.document_id).unwrap();
 
-  let all = storage.list_documents(TABLE, true).unwrap();
-  let document = all
-    .iter()
-    .find(|d| d.document_id == created.document_id)
-    .unwrap();
-
-  assert_eq!(document.data, b"important data");
-  assert_eq!(document.content_type, Some("text/plain".to_string()));
+  let documents = storage.list_documents(TABLE).unwrap();
+  assert_eq!(documents.len(), 1);
+  assert_eq!(documents[0].document_id, alive.document_id);
 }
 
 #[test]
@@ -299,44 +263,27 @@ fn delete_document_returns_error_for_nonexistent_table() {
   assert!(result.is_err());
 }
 
-// ---------------------------------------------------------------------------
-// UNDELETE (via update_document_metadata)
-// ---------------------------------------------------------------------------
-
 #[test]
-fn undelete_document_via_metadata_update() {
+fn double_delete_returns_not_found() {
   let storage = create_storage();
   let created = storage
-    .create_document(TABLE, b"revivable".to_vec(), None)
+    .create_document(TABLE, b"data".to_vec(), None)
     .unwrap();
 
   storage.delete_document(TABLE, created.document_id).unwrap();
 
-  // Verify it's gone from normal get
-  assert!(storage.get_document(TABLE, created.document_id).unwrap().is_none());
-
-  // Undelete
-  let restored = storage
-    .update_document_metadata(
-      TABLE,
-      created.document_id,
-      MetadataUpdates {
-        is_deleted: Some(false),
-        ..Default::default()
-      },
-    )
-    .unwrap();
-
-  assert!(!restored.is_deleted);
-  assert_eq!(restored.data, b"revivable");
-
-  // Now get should return it
-  let fetched = storage
-    .get_document(TABLE, created.document_id)
-    .unwrap()
-    .expect("document should be visible after undelete");
-  assert!(!fetched.is_deleted);
+  // Second delete should return DocumentNotFound since the record is gone
+  let result = storage.delete_document(TABLE, created.document_id);
+  assert!(result.is_err(), "second delete should fail");
+  match result.unwrap_err() {
+    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
+    other => panic!("expected DocumentNotFound, got: {other}"),
+  }
 }
+
+// ---------------------------------------------------------------------------
+// UPDATE DOCUMENT METADATA
+// ---------------------------------------------------------------------------
 
 #[test]
 fn update_document_metadata_returns_error_for_missing() {
@@ -350,7 +297,6 @@ fn update_document_metadata_returns_error_for_missing() {
     TABLE,
     missing_id,
     MetadataUpdates {
-      is_deleted: Some(false),
       ..Default::default()
     },
   );
@@ -388,61 +334,28 @@ fn update_document_metadata_can_change_content_type() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn list_documents_excludes_soft_deleted_by_default() {
-  let storage = create_storage();
-  let alive = storage
-    .create_document(TABLE, b"alive".to_vec(), None)
-    .unwrap();
-  let doomed = storage
-    .create_document(TABLE, b"doomed".to_vec(), None)
-    .unwrap();
-
-  storage.delete_document(TABLE, doomed.document_id).unwrap();
-
-  let documents = storage.list_documents(TABLE, false).unwrap();
-  assert_eq!(documents.len(), 1);
-  assert_eq!(documents[0].document_id, alive.document_id);
-}
-
-#[test]
-fn list_documents_includes_soft_deleted_when_requested() {
-  let storage = create_storage();
-  storage
-    .create_document(TABLE, b"alive".to_vec(), None)
-    .unwrap();
-  let doomed = storage
-    .create_document(TABLE, b"doomed".to_vec(), None)
-    .unwrap();
-
-  storage.delete_document(TABLE, doomed.document_id).unwrap();
-
-  let documents = storage.list_documents(TABLE, true).unwrap();
-  assert_eq!(documents.len(), 2);
-}
-
-#[test]
 fn list_documents_on_empty_table_returns_empty_vec() {
   let storage = create_storage();
   // Table doesn't even exist yet
-  let documents = storage.list_documents("empty_table", false).unwrap();
+  let documents = storage.list_documents("empty_table").unwrap();
   assert!(documents.is_empty());
 }
 
 #[test]
 fn list_documents_on_existing_but_empty_table() {
   let storage = create_storage();
-  // Create and immediately delete, so table exists but no visible docs
+  // Create and immediately delete, so table exists but no docs
   let document = storage
     .create_document(TABLE, b"temp".to_vec(), None)
     .unwrap();
   storage.delete_document(TABLE, document.document_id).unwrap();
 
-  let documents = storage.list_documents(TABLE, false).unwrap();
+  let documents = storage.list_documents(TABLE).unwrap();
   assert!(documents.is_empty());
 }
 
 #[test]
-fn list_documents_returns_all_non_deleted() {
+fn list_documents_returns_all() {
   let storage = create_storage();
   let first = storage
     .create_document(TABLE, b"one".to_vec(), None)
@@ -454,7 +367,7 @@ fn list_documents_returns_all_non_deleted() {
     .create_document(TABLE, b"three".to_vec(), None)
     .unwrap();
 
-  let documents = storage.list_documents(TABLE, false).unwrap();
+  let documents = storage.list_documents(TABLE).unwrap();
   assert_eq!(documents.len(), 3);
 
   let ids: Vec<Uuid> = documents.iter().map(|d| d.document_id).collect();
@@ -572,81 +485,6 @@ fn documents_are_isolated_between_tables() {
 
   assert!(storage.get_document("table_a", document_a.document_id).unwrap().is_some());
   assert!(storage.get_document("table_b", document_b.document_id).unwrap().is_some());
-}
-
-// ---------------------------------------------------------------------------
-// DOUBLE DELETE (FIX 4: should return error)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn double_delete_returns_error() {
-  let storage = create_storage();
-  let created = storage
-    .create_document(TABLE, b"data".to_vec(), None)
-    .unwrap();
-
-  storage.delete_document(TABLE, created.document_id).unwrap();
-  // Second delete should return DocumentNotFound since the document is already soft-deleted
-  let result = storage.delete_document(TABLE, created.document_id);
-  assert!(result.is_err(), "second delete should fail");
-  match result.unwrap_err() {
-    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
-    other => panic!("expected DocumentNotFound, got: {other}"),
-  }
-
-  // Document should still be marked as deleted in storage
-  let all = storage.list_documents(TABLE, true).unwrap();
-  let document = all
-    .iter()
-    .find(|d| d.document_id == created.document_id)
-    .unwrap();
-  assert!(document.is_deleted);
-}
-
-// ---------------------------------------------------------------------------
-// UPDATE AFTER DELETE (FIX 3: should return error)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn update_document_on_soft_deleted_returns_error() {
-  let storage = create_storage();
-  let created = storage
-    .create_document(TABLE, b"original".to_vec(), None)
-    .unwrap();
-
-  storage.delete_document(TABLE, created.document_id).unwrap();
-
-  let result = storage.update_document(TABLE, created.document_id, b"modified".to_vec());
-  assert!(result.is_err(), "updating a soft-deleted document should fail");
-  match result.unwrap_err() {
-    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
-    other => panic!("expected DocumentNotFound, got: {other}"),
-  }
-}
-
-#[test]
-fn update_metadata_on_soft_deleted_without_undelete_returns_error() {
-  let storage = create_storage();
-  let created = storage
-    .create_document(TABLE, b"data".to_vec(), Some("text/plain".into()))
-    .unwrap();
-
-  storage.delete_document(TABLE, created.document_id).unwrap();
-
-  // Try to change content_type on a deleted doc (not an undelete operation)
-  let result = storage.update_document_metadata(
-    TABLE,
-    created.document_id,
-    MetadataUpdates {
-      content_type: Some(Some("application/json".into())),
-      ..Default::default()
-    },
-  );
-  assert!(result.is_err(), "metadata update on deleted doc should fail unless undeleting");
-  match result.unwrap_err() {
-    StorageError::DocumentNotFound(id) => assert_eq!(id, created.document_id),
-    other => panic!("expected DocumentNotFound, got: {other}"),
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,6 @@ use crate::auth::refresh::RefreshTokenRecord;
 ///   [16 bytes] document_id (UUID)
 ///   [8 bytes]  created_at  (millis since epoch, i64)
 ///   [8 bytes]  updated_at  (millis since epoch, i64)
-///   [1 byte]   is_deleted  (0 or 1)
 ///   [4 bytes]  content_type length (u32, 0 means None)
 ///   [N bytes]  content_type UTF-8 string (if length > 0)
 ///   [remaining] raw user data
@@ -77,13 +76,12 @@ fn encode_document(document: &Document) -> Vec<u8> {
     .unwrap_or(&[]);
   let content_type_length = content_type_bytes.len() as u32;
 
-  let total_size = 16 + 8 + 8 + 1 + 4 + content_type_bytes.len() + document.data.len();
+  let total_size = 16 + 8 + 8 + 4 + content_type_bytes.len() + document.data.len();
   let mut buffer = Vec::with_capacity(total_size);
 
   buffer.extend_from_slice(document.document_id.as_bytes());
   buffer.extend_from_slice(&document.created_at.timestamp_millis().to_be_bytes());
   buffer.extend_from_slice(&document.updated_at.timestamp_millis().to_be_bytes());
-  buffer.push(if document.is_deleted { 1 } else { 0 });
   buffer.extend_from_slice(&content_type_length.to_be_bytes());
   buffer.extend_from_slice(content_type_bytes);
   buffer.extend_from_slice(&document.data);
@@ -92,8 +90,8 @@ fn encode_document(document: &Document) -> Vec<u8> {
 }
 
 fn decode_document(bytes: &[u8]) -> Result<Document> {
-  // Minimum size: 16 + 8 + 8 + 1 + 4 = 37 bytes
-  if bytes.len() < 37 {
+  // Minimum size: 16 + 8 + 8 + 4 = 36 bytes
+  if bytes.len() < 36 {
     return Err(StorageError::CorruptData);
   }
 
@@ -107,32 +105,29 @@ fn decode_document(bytes: &[u8]) -> Result<Document> {
   let updated_at = DateTime::from_timestamp_millis(updated_at_millis)
     .ok_or(StorageError::CorruptData)?;
 
-  let is_deleted = bytes[32] != 0;
-
   let content_type_length =
-    u32::from_be_bytes(bytes[33..37].try_into().unwrap()) as usize;
+    u32::from_be_bytes(bytes[32..36].try_into().unwrap()) as usize;
 
-  if bytes.len() < 37 + content_type_length {
+  if bytes.len() < 36 + content_type_length {
     return Err(StorageError::CorruptData);
   }
 
   let content_type = if content_type_length > 0 {
     let content_type_str =
-      std::str::from_utf8(&bytes[37..37 + content_type_length])
+      std::str::from_utf8(&bytes[36..36 + content_type_length])
         .map_err(|_| StorageError::CorruptData)?;
     Some(content_type_str.to_string())
   } else {
     None
   };
 
-  let data_start = 37 + content_type_length;
+  let data_start = 36 + content_type_length;
   let data = bytes[data_start..].to_vec();
 
   Ok(Document {
     document_id,
     created_at,
     updated_at,
-    is_deleted,
     data,
     content_type,
   })
@@ -189,7 +184,6 @@ impl RedbStorage {
       document_id,
       created_at: now,
       updated_at: now,
-      is_deleted: false,
       data,
       content_type,
     };
@@ -207,8 +201,7 @@ impl RedbStorage {
     Ok(document)
   }
 
-  /// Retrieve a document by ID. Returns None if not found or if the
-  /// document is soft-deleted.
+  /// Retrieve a document by ID. Returns None if not found.
   pub fn get_document(
     &self,
     table_name: &str,
@@ -230,17 +223,12 @@ impl RedbStorage {
     };
 
     let document = decode_document(guard.value())?;
-
-    if document.is_deleted {
-      return Ok(None);
-    }
-
     Ok(Some(document))
   }
 
   /// Update a document's raw data. Bumps `updated_at`, preserves
   /// `created_at` and other metadata.
-  /// Returns DocumentNotFound if the document does not exist or is soft-deleted.
+  /// Returns DocumentNotFound if the document does not exist.
   pub fn update_document(
     &self,
     table_name: &str,
@@ -261,15 +249,10 @@ impl RedbStorage {
       let existing = decode_document(guard.value())?;
       drop(guard);
 
-      if existing.is_deleted {
-        return Err(StorageError::DocumentNotFound(document_id));
-      }
-
       let updated = Document {
         document_id: existing.document_id,
         created_at: existing.created_at,
         updated_at: truncate_to_millis(Utc::now()),
-        is_deleted: existing.is_deleted,
         data,
         content_type: existing.content_type,
       };
@@ -283,9 +266,8 @@ impl RedbStorage {
     Ok(document)
   }
 
-  /// Update only metadata fields on a document (e.g. undelete).
-  /// Allows updating soft-deleted documents ONLY when setting is_deleted = false (undelete).
-  /// Returns DocumentNotFound for other updates on soft-deleted documents.
+  /// Update only metadata fields on a document.
+  /// Returns DocumentNotFound if the document does not exist.
   pub fn update_document_metadata(
     &self,
     table_name: &str,
@@ -306,12 +288,6 @@ impl RedbStorage {
       let existing = decode_document(guard.value())?;
       drop(guard);
 
-      // If the document is soft-deleted, only allow undelete operations
-      let is_undelete = metadata_updates.is_deleted == Some(false);
-      if existing.is_deleted && !is_undelete {
-        return Err(StorageError::DocumentNotFound(document_id));
-      }
-
       let updated = Document {
         document_id: existing.document_id,
         created_at: metadata_updates
@@ -320,9 +296,6 @@ impl RedbStorage {
         updated_at: metadata_updates
           .updated_at
           .unwrap_or_else(|| truncate_to_millis(Utc::now())),
-        is_deleted: metadata_updates
-          .is_deleted
-          .unwrap_or(existing.is_deleted),
         data: existing.data,
         content_type: metadata_updates
           .content_type
@@ -338,8 +311,8 @@ impl RedbStorage {
     Ok(document)
   }
 
-  /// Soft-delete a document (sets is_deleted = true).
-  /// Returns DocumentNotFound if the document does not exist or is already soft-deleted.
+  /// Hard-delete a document (removes the record entirely).
+  /// Returns DocumentNotFound if the document does not exist.
   pub fn delete_document(
     &self,
     table_name: &str,
@@ -353,36 +326,20 @@ impl RedbStorage {
       let mut table = write_transaction.open_table(table_definition)?;
       let key = uuid_to_key(&document_id);
 
-      let guard = table
-        .get(key)?
-        .ok_or(StorageError::DocumentNotFound(document_id))?;
-      let existing = decode_document(guard.value())?;
-      drop(guard);
-
-      if existing.is_deleted {
+      let removed = table.remove(key)?;
+      if removed.is_none() {
         return Err(StorageError::DocumentNotFound(document_id));
       }
-
-      let updated = Document {
-        is_deleted: true,
-        updated_at: truncate_to_millis(Utc::now()),
-        ..existing
-      };
-
-      let encoded = encode_document(&updated);
-      table.insert(key, encoded.as_slice())?;
     }
 
     write_transaction.commit()?;
     Ok(())
   }
 
-  /// List documents in a table. By default, soft-deleted documents are
-  /// excluded. Pass `include_deleted: true` to include them.
+  /// List all documents in a table.
   pub fn list_documents(
     &self,
     table_name: &str,
-    include_deleted: bool,
   ) -> Result<Vec<Document>> {
     let table_definition: TableDefinition<u128, &[u8]> =
       TableDefinition::new(table_name);
@@ -397,9 +354,7 @@ impl RedbStorage {
     for result in table.iter()? {
       let (_, value_guard) = result?;
       let document = decode_document(value_guard.value())?;
-      if include_deleted || !document.is_deleted {
-        documents.push(document);
-      }
+      documents.push(document);
     }
 
     Ok(documents)

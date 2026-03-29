@@ -323,49 +323,6 @@ async fn test_get_document_returns_404_for_missing() {
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn test_get_deleted_document_returns_404() {
-  let (_, jwt_manager, storage) = test_app();
-  let auth = bearer_token(&jwt_manager);
-
-  let app = rebuild_app(&storage, &jwt_manager);
-  // Create a document
-  let request = Request::builder()
-    .method("POST")
-    .uri("/mydb/users")
-    .header("content-type", "text/plain")
-    .header("authorization", &auth)
-    .body(Body::from("to be deleted"))
-    .unwrap();
-
-  let response = app.oneshot(request).await.unwrap();
-  let json = body_json(response.into_body()).await;
-  let document_id = json["document_id"].as_str().unwrap().to_string();
-
-  // Delete it
-  let app2 = rebuild_app(&storage, &jwt_manager);
-  let delete_request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/mydb/users/{}", document_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-
-  let delete_response = app2.oneshot(delete_request).await.unwrap();
-  assert_eq!(delete_response.status(), StatusCode::OK);
-
-  // Try to get it -- should be 404
-  let app3 = rebuild_app(&storage, &jwt_manager);
-  let get_request = Request::builder()
-    .uri(format!("/mydb/users/{}", document_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-
-  let get_response = app3.oneshot(get_request).await.unwrap();
-  assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
-}
-
 // ---------------------------------------------------------------------------
 // Update document
 // ---------------------------------------------------------------------------
@@ -473,6 +430,17 @@ async fn test_delete_document_returns_200() {
   let delete_json = body_json(delete_response.into_body()).await;
   assert_eq!(delete_json["deleted"], true);
   assert_eq!(delete_json["document_id"].as_str().unwrap(), document_id);
+
+  // Verify the document is actually gone
+  let app3 = rebuild_app(&storage, &jwt_manager);
+  let get_request = Request::builder()
+    .uri(format!("/mydb/users/{}", document_id))
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let get_response = app3.oneshot(get_request).await.unwrap();
+  assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -585,7 +553,6 @@ async fn test_list_documents_returns_200_with_array() {
     assert!(item["document_id"].is_string());
     assert!(item["created_at"].is_string());
     assert!(item["updated_at"].is_string());
-    assert!(item["is_deleted"].is_boolean());
   }
 }
 
@@ -605,101 +572,6 @@ async fn test_list_documents_empty_table_returns_empty_array() {
   let json = body_json(response.into_body()).await;
   let array = json.as_array().expect("response should be an array");
   assert!(array.is_empty());
-}
-
-#[tokio::test]
-async fn test_list_documents_excludes_deleted_by_default() {
-  let (_, jwt_manager, storage) = test_app();
-  let auth = bearer_token(&jwt_manager);
-
-  let app = rebuild_app(&storage, &jwt_manager);
-  // Create a document
-  let request = Request::builder()
-    .method("POST")
-    .uri("/mydb/users")
-    .header("authorization", &auth)
-    .body(Body::from("will-be-deleted"))
-    .unwrap();
-
-  let response = app.oneshot(request).await.unwrap();
-  let json = body_json(response.into_body()).await;
-  let document_id = json["document_id"].as_str().unwrap().to_string();
-
-  // Create another that stays alive
-  let app2 = rebuild_app(&storage, &jwt_manager);
-  let request2 = Request::builder()
-    .method("POST")
-    .uri("/mydb/users")
-    .header("authorization", &auth)
-    .body(Body::from("stays"))
-    .unwrap();
-  app2.oneshot(request2).await.unwrap();
-
-  // Delete the first one
-  let app3 = rebuild_app(&storage, &jwt_manager);
-  let delete_request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/mydb/users/{}", document_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-  app3.oneshot(delete_request).await.unwrap();
-
-  // List without include_deleted -- should get only 1
-  let app4 = rebuild_app(&storage, &jwt_manager);
-  let list_request = Request::builder()
-    .uri("/mydb/users")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-
-  let list_response = app4.oneshot(list_request).await.unwrap();
-  let list_json = body_json(list_response.into_body()).await;
-  let array = list_json.as_array().unwrap();
-  assert_eq!(array.len(), 1);
-  assert_eq!(array[0]["is_deleted"], false);
-}
-
-#[tokio::test]
-async fn test_list_documents_includes_deleted_with_query_param() {
-  let (_, jwt_manager, storage) = test_app();
-  let auth = bearer_token(&jwt_manager);
-
-  let app = rebuild_app(&storage, &jwt_manager);
-  // Create and delete a document
-  let request = Request::builder()
-    .method("POST")
-    .uri("/mydb/users")
-    .header("authorization", &auth)
-    .body(Body::from("deleted-one"))
-    .unwrap();
-
-  let response = app.oneshot(request).await.unwrap();
-  let json = body_json(response.into_body()).await;
-  let document_id = json["document_id"].as_str().unwrap().to_string();
-
-  let app2 = rebuild_app(&storage, &jwt_manager);
-  let delete_request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/mydb/users/{}", document_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-  app2.oneshot(delete_request).await.unwrap();
-
-  // List with include_deleted=true
-  let app3 = rebuild_app(&storage, &jwt_manager);
-  let list_request = Request::builder()
-    .uri("/mydb/users?include_deleted=true")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
-
-  let list_response = app3.oneshot(list_request).await.unwrap();
-  let list_json = body_json(list_response.into_body()).await;
-  let array = list_json.as_array().unwrap();
-  assert_eq!(array.len(), 1);
-  assert_eq!(array[0]["is_deleted"], true);
 }
 
 // ---------------------------------------------------------------------------

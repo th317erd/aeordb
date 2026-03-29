@@ -14,7 +14,6 @@ pub struct DocumentMetadataResponse {
   pub document_id: Uuid,
   pub created_at: DateTime<Utc>,
   pub updated_at: DateTime<Utc>,
-  pub is_deleted: bool,
   pub content_type: Option<String>,
 }
 
@@ -60,7 +59,6 @@ impl From<&Document> for DocumentMetadataResponse {
       document_id: document.document_id,
       created_at: document.created_at,
       updated_at: document.updated_at,
-      is_deleted: document.is_deleted,
       content_type: document.content_type.clone(),
     }
   }

@@ -72,11 +72,6 @@ pub async fn health_check() -> impl IntoResponse {
   Json(serde_json::json!({ "status": "ok" }))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListDocumentsQuery {
-  pub include_deleted: Option<bool>,
-}
-
 pub async fn create_document(
   State(state): State<AppState>,
   Path((database, table)): Path<(String, String)>,
@@ -242,15 +237,13 @@ pub async fn delete_document(
 pub async fn list_documents(
   State(state): State<AppState>,
   Path((database, table)): Path<(String, String)>,
-  Query(query): Query<ListDocumentsQuery>,
 ) -> Response {
   let table_name = match build_table_name(&database, &table) {
     Ok(name) => name,
     Err(response) => return *response,
   };
-  let include_deleted = query.include_deleted.unwrap_or(false);
 
-  match state.storage.list_documents(&table_name, include_deleted) {
+  match state.storage.list_documents(&table_name) {
     Ok(documents) => {
       let metadata: Vec<DocumentMetadataResponse> =
         documents.iter().map(DocumentMetadataResponse::from).collect();
