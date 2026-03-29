@@ -17,6 +17,8 @@ enum Commands {
     port: u16,
     #[arg(short = 'D', long, default_value = "data.aeor")]
     database: String,
+    #[arg(long, default_value = "pretty")]
+    log_format: String,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -24,13 +26,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-  tracing_subscriber::fmt::init();
-
   let cli = Cli::parse();
 
   match cli.command {
-    Commands::Start { port, database } => {
-      commands::start::run(port, &database);
+    Commands::Start { port, database, log_format } => {
+      commands::start::run(port, &database, &log_format).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {
