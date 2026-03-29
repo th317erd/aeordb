@@ -11,9 +11,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
-use crate::auth::middleware::auth_middleware;
+use crate::filesystem::PathResolver;
 use crate::plugins::PluginManager;
-use crate::storage::RedbStorage;
+use crate::storage::{ChunkStore, RedbStorage};
 use state::AppState;
 
 const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
@@ -46,7 +46,11 @@ pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManage
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
-  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter)
+  let database_arc = storage.database_arc();
+  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
+  let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
+
+  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
@@ -56,12 +60,14 @@ pub fn create_app_with_all(
   jwt_manager: Arc<JwtManager>,
   plugin_manager: Arc<PluginManager>,
   rate_limiter: Arc<RateLimiter>,
+  path_resolver: Arc<PathResolver>,
 ) -> Router {
   let app_state = AppState {
     storage,
     jwt_manager,
     plugin_manager,
     rate_limiter,
+    path_resolver,
   };
 
   // Routes that require authentication
@@ -78,6 +84,14 @@ pub fn create_app_with_all(
     )
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
+    // Filesystem routes
+    .route(
+      "/fs/{*path}",
+      put(routes::filesystem_store_file)
+        .get(routes::filesystem_get)
+        .delete(routes::filesystem_delete_file)
+        .head(routes::filesystem_head),
+    )
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
@@ -110,3 +124,5 @@ pub fn create_app_with_all(
     .with_state(app_state)
     .layer(TraceLayer::new_for_http())
 }
+
+use crate::auth::middleware::auth_middleware;

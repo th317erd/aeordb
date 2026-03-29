@@ -8,20 +8,29 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::JwtManager;
 use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
+use aeordb::filesystem::PathResolver;
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_app_with_all;
-use aeordb::storage::RedbStorage;
+use aeordb::storage::{ChunkStore, RedbStorage};
+
+fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
+  let database_arc = storage.database_arc();
+  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
+  Arc::new(PathResolver::new(database_arc, chunk_store))
+}
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+  let path_resolver = make_path_resolver(&storage);
   let app = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
+    path_resolver,
   );
   (app, jwt_manager, storage, rate_limiter)
 }
@@ -32,11 +41,13 @@ fn rebuild_app(
   rate_limiter: &Arc<RateLimiter>,
 ) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let path_resolver = make_path_resolver(storage);
   create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
+    path_resolver,
   )
 }
 
@@ -289,6 +300,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let path_resolver = make_path_resolver(&storage);
   // Allow only 3 requests per 60 seconds.
   let rate_limiter = Arc::new(RateLimiter::new(3, 60));
 
@@ -298,6 +310,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
       jwt_manager.clone(),
       plugin_manager.clone(),
       rate_limiter.clone(),
+      path_resolver.clone(),
     );
     let request = Request::builder()
       .method("POST")
@@ -320,6 +333,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
     jwt_manager.clone(),
     plugin_manager.clone(),
     rate_limiter.clone(),
+    path_resolver.clone(),
   );
   let request = Request::builder()
     .method("POST")

@@ -6,11 +6,13 @@ use axum::{
   response::{IntoResponse, Response},
   Json,
 };
+use futures_util::stream;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::responses::{
   CreateDocumentResponse, DeleteDocumentResponse, DocumentMetadataResponse, ErrorResponse,
+  FileEntryResponse,
 };
 use super::state::AppState;
 use crate::auth::{
@@ -881,4 +883,186 @@ pub async fn refresh_token(
     })),
   )
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem routes
+// ---------------------------------------------------------------------------
+
+/// PUT /fs/*path -- store a file at the given path.
+pub async fn filesystem_store_file(
+  State(state): State<AppState>,
+  Path(path): Path<String>,
+  headers: HeaderMap,
+  body: axum::body::Bytes,
+) -> Response {
+  let content_type = headers
+    .get("content-type")
+    .and_then(|value| value.to_str().ok());
+
+  let entry = match state.path_resolver.store_file(
+    &path,
+    &body,
+    content_type,
+  ) {
+    Ok(entry) => entry,
+    Err(error) => {
+      tracing::error!("Failed to store file at '{}': {}", path, error);
+      let status = match &error {
+        crate::filesystem::PathError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+        crate::filesystem::PathError::NotAFile(_) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+      };
+      return ErrorResponse::new(format!("Failed to store file: {}", error))
+        .with_status(status)
+        .into_response();
+    }
+  };
+
+  let response_body = FileEntryResponse::from(&entry);
+  (StatusCode::CREATED, Json(response_body)).into_response()
+}
+
+/// GET /fs/*path -- get a file or directory listing.
+pub async fn filesystem_get(
+  State(state): State<AppState>,
+  Path(path): Path<String>,
+) -> Response {
+  // First check metadata to determine if it is a file or directory.
+  let metadata = match state.path_resolver.get_metadata(&path) {
+    Ok(Some(metadata)) => metadata,
+    Ok(None) => {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to get metadata for '{}': {}", path, error);
+      return ErrorResponse::new(format!("Failed to read path: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  if metadata.entry_type == crate::filesystem::EntryType::Directory {
+    // Return directory listing as JSON.
+    return match state.path_resolver.list_directory(&path) {
+      Ok(entries) => {
+        let listing: Vec<FileEntryResponse> =
+          entries.iter().map(FileEntryResponse::from).collect();
+        (StatusCode::OK, Json(listing)).into_response()
+      }
+      Err(error) => {
+        tracing::error!("Failed to list directory '{}': {}", path, error);
+        ErrorResponse::new(format!("Failed to list directory: {}", error))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response()
+      }
+    };
+  }
+
+  // It is a file -- stream the chunks.
+  let file_stream = match state.path_resolver.read_file_streaming(&path) {
+    Ok(file_stream) => file_stream,
+    Err(error) => {
+      tracing::error!("Failed to read file '{}': {}", path, error);
+      let status = match &error {
+        crate::filesystem::PathError::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+      };
+      return ErrorResponse::new(format!("Failed to read file: {}", error))
+        .with_status(status)
+        .into_response();
+    }
+  };
+
+  // Convert the synchronous FileStream iterator into an async stream of Results.
+  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
+    chunk_result
+      .map(axum::body::Bytes::from)
+      .map_err(|error| std::io::Error::other(error.to_string()))
+  }));
+
+  let body = Body::from_stream(chunk_stream);
+
+  let mut response_builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-Document-Id", metadata.document_id.to_string())
+    .header("X-Created-At", metadata.created_at.to_rfc3339())
+    .header("X-Updated-At", metadata.updated_at.to_rfc3339())
+    .header("X-Total-Size", metadata.total_size.to_string());
+
+  if let Some(ref content_type) = metadata.content_type {
+    response_builder = response_builder.header("content-type", content_type.as_str());
+  }
+
+  response_builder
+    .body(body)
+    .unwrap_or_else(|_| {
+      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+    })
+}
+
+/// DELETE /fs/*path -- delete a file at the given path.
+pub async fn filesystem_delete_file(
+  State(state): State<AppState>,
+  Path(path): Path<String>,
+) -> Response {
+  let entry = match state.path_resolver.delete_file(&path) {
+    Ok(entry) => entry,
+    Err(error) => {
+      let status = match &error {
+        crate::filesystem::PathError::NotFound(_) => StatusCode::NOT_FOUND,
+        crate::filesystem::PathError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+        crate::filesystem::PathError::NotAFile(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+      };
+      return ErrorResponse::new(format!("Failed to delete file: {}", error))
+        .with_status(status)
+        .into_response();
+    }
+  };
+
+  let response_body = FileEntryResponse::from(&entry);
+  (StatusCode::OK, Json(response_body)).into_response()
+}
+
+/// HEAD /fs/*path -- get metadata only (no body).
+pub async fn filesystem_head(
+  State(state): State<AppState>,
+  Path(path): Path<String>,
+) -> Response {
+  let metadata = match state.path_resolver.get_metadata(&path) {
+    Ok(Some(metadata)) => metadata,
+    Ok(None) => {
+      return StatusCode::NOT_FOUND.into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to get metadata for '{}': {}", path, error);
+      return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+  };
+
+  let entry_type_string = match metadata.entry_type {
+    crate::filesystem::EntryType::File => "file",
+    crate::filesystem::EntryType::Directory => "directory",
+    crate::filesystem::EntryType::HardLink => "hard_link",
+  };
+
+  let mut response_builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-Entry-Type", entry_type_string)
+    .header("X-Document-Id", metadata.document_id.to_string())
+    .header("X-Created-At", metadata.created_at.to_rfc3339())
+    .header("X-Updated-At", metadata.updated_at.to_rfc3339())
+    .header("X-Total-Size", metadata.total_size.to_string())
+    .header("X-Name", &metadata.name);
+
+  if let Some(ref content_type) = metadata.content_type {
+    response_builder = response_builder.header("content-type", content_type.as_str());
+  }
+
+  response_builder
+    .body(Body::empty())
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

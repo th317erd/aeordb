@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::filesystem::DirectoryEntry;
 use crate::storage::Document;
 
 #[derive(Debug, Serialize)]
@@ -70,6 +71,36 @@ impl From<&Document> for CreateDocumentResponse {
       document_id: document.document_id,
       created_at: document.created_at,
       updated_at: document.updated_at,
+    }
+  }
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileEntryResponse {
+  pub name: String,
+  pub entry_type: String,
+  pub document_id: Uuid,
+  pub created_at: DateTime<Utc>,
+  pub updated_at: DateTime<Utc>,
+  pub content_type: Option<String>,
+  pub total_size: u64,
+}
+
+impl From<&DirectoryEntry> for FileEntryResponse {
+  fn from(entry: &DirectoryEntry) -> Self {
+    let entry_type = match entry.entry_type {
+      crate::filesystem::EntryType::File => "file",
+      crate::filesystem::EntryType::Directory => "directory",
+      crate::filesystem::EntryType::HardLink => "hard_link",
+    };
+    Self {
+      name: entry.name.clone(),
+      entry_type: entry_type.to_string(),
+      document_id: entry.document_id,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+      content_type: entry.content_type.clone(),
+      total_size: entry.total_size,
     }
   }
 }

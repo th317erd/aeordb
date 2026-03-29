@@ -35,9 +35,11 @@ sha2 = "0.10"
 wasmi = "0.42"
 libloading = "0.8"
 
+# Streaming
+futures-util = "0.3"
+
 # Replication / Consensus
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
-futures-util = "0.3"
 
 # Common
 uuid = { workspace = true }
@@ -144,3 +146,7 @@ path = "spec/filesystem/version_manager_spec.rs"
 [[test]]
 name = "path_resolver_spec"
 path = "spec/filesystem/path_resolver_spec.rs"
+
+[[test]]
+name = "filesystem_http_spec"
+path = "spec/http/filesystem_http_spec.rs"

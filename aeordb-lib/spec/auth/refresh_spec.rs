@@ -10,19 +10,28 @@ use aeordb::auth::refresh::{generate_refresh_token, hash_refresh_token, DEFAULT_
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::rate_limiter::RateLimiter;
+use aeordb::filesystem::PathResolver;
 use aeordb::server::create_app_with_all;
-use aeordb::storage::RedbStorage;
+use aeordb::storage::{ChunkStore, RedbStorage};
+
+fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
+  let database_arc = storage.database_arc();
+  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
+  Arc::new(PathResolver::new(database_arc, chunk_store))
+}
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
+  let path_resolver = make_path_resolver(&storage);
   let app = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
+    path_resolver,
   );
   (app, jwt_manager, storage, rate_limiter)
 }
@@ -33,11 +42,13 @@ fn rebuild_app(
   rate_limiter: &Arc<RateLimiter>,
 ) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let path_resolver = make_path_resolver(storage);
   create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
+    path_resolver,
   )
 }
 
