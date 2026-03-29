@@ -1,54 +1,32 @@
 # AeorDB — TODO
 
-## Current: Sprint 2 — The Real Filesystem Layer
+## Current: Sprint 2 — redb-Native Filesystem
 
-### Task 1: Soft-Delete Cleanup
-- [ ] Remove is_deleted from Document and MetadataUpdates
-- [ ] Remove soft-delete from redb_backend serialization
-- [ ] Make delete actually remove records
-- [ ] Remove include_deleted from list_documents
-- [ ] Update HTTP handlers
-- [ ] Update ALL affected tests
-- [ ] Verify all 380 tests still pass (minus removed soft-delete tests)
+### Task 1: Soft-Delete Cleanup — DONE
+### Task 2: Chunk Headers — DONE
+### Task 3: Custom B-tree — DONE (backed up, pivoted to redb-native)
 
-### Task 2: Chunk Header Revision
-- [ ] New ChunkHeader: format_version (u8) + created_at (i64) + updated_at (i64) + reserved (16 bytes) = 33 bytes
-- [ ] Update Chunk struct — no next/prev pointers
-- [ ] Hash covers data only (already the case)
-- [ ] Update chunk tests
+### Task 3R: Directory Entry Types + redb Directory Layer
+- [ ] DirectoryEntry struct (serializable to redb values)
+- [ ] EntryType enum (File, Directory, HardLink)
+- [ ] RedbDirectory: insert, get, remove, list entries in a redb table
+- [ ] Table-per-directory pattern: "dir:{path}" naming
+- [ ] Tests
 
-### Task 3: COW B-Tree with File Storage
-- [ ] filesystem/mod.rs — module declarations
-- [ ] filesystem/index_entry.rs — IndexEntry, EntryType, ChunkList (inline/overflow)
-- [ ] filesystem/directory.rs — COW B-tree (nodes as chunks, split/merge, COW on write)
-- [ ] B-tree handles BOTH directory structure AND file chunk ordering
-- [ ] Streaming reads only (no full-file memory loads)
-- [ ] Tests: create, insert, get, remove, list, split, merge, COW, large directory
-
-### Task 4: Path Resolver
-- [ ] filesystem/path_resolver.rs — resolve paths segment by segment
+### Task 4R: Path Resolver (redb-native)
+- [ ] Open "dir:{path}" tables segment by segment
 - [ ] Auto-create intermediate directories (mkdir -p)
 - [ ] store_file, read_file (streaming), delete_file, list_directory
-- [ ] Tests: resolve, store, read, delete, list, deep paths, dot-paths
+- [ ] Tests
 
 ### Task 5: HTTP Wiring
-- [ ] Replace redb document storage with filesystem in HTTP handlers
-- [ ] Path-based routes (not database:table concatenation)
-- [ ] System tables stay in redb
+- [ ] Replace document CRUD with path-based filesystem operations
+- [ ] System tables stay in redb (API keys, config)
 - [ ] Update HTTP tests
+- [ ] Tests
 
-### Task 6: Versioning
-- [ ] Base+diff (I-frame/P-frame) version management
-- [ ] B-tree root hash = entire database state
-- [ ] Create base, create diff, restore version
-- [ ] Tests: snapshot, restore, diff, multi-version history
-
-## Previous Work (Complete)
-- [x] Phase 1: Storage + HTTP + Auth (120 tests)
-- [x] Phase 2: WASM plugins + SDK + Native (40 tests)
-- [x] Phase 3: Magic links + Refresh + Scoping + Rules (56 tests)
-- [x] Phase 4.1: Content-addressed chunk store (44 tests)
-- [x] Phase 4.2: Scalar ratio indexing (59 tests)
-- [x] Phase 4.3: openraft integration (32 tests)
-- [x] Phase 4.4: Versioning via hash maps (28 tests)
-- [x] Code review + fixes (19 new tests)
+### Task 6R: Version Management (redb savepoints)
+- [ ] Thin wrapper around persistent savepoints
+- [ ] Named versions table mapping names → savepoint IDs
+- [ ] Create, restore, list, delete versions
+- [ ] Tests

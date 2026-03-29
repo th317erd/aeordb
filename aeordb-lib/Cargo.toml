@@ -128,3 +128,15 @@ path = "spec/indexing/scalar_ratio_spec.rs"
 [[test]]
 name = "raft_spec"
 path = "spec/replication/raft_spec.rs"
+
+[[test]]
+name = "directory_entry_spec"
+path = "spec/filesystem/directory_entry_spec.rs"
+
+[[test]]
+name = "redb_directory_spec"
+path = "spec/filesystem/redb_directory_spec.rs"
+
+[[test]]
+name = "version_manager_spec"
+path = "spec/filesystem/version_manager_spec.rs"
