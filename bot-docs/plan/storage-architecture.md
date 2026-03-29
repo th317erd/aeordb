@@ -1,68 +1,128 @@
 # Storage Architecture — The Final Design
 
 **Parent:** [Master Plan](./master-plan.md)
-**Status:** In Design — Finalized Architecture
+**Status:** In Design — Finalized Architecture (Revision 2)
 
 This document supersedes the earlier storage-engine.md for architectural decisions. The implementation details in storage-engine.md (redb backends, etc.) remain relevant for the current Phase 1-4 code, but this document describes the target architecture.
 
 ---
 
-## One Primitive: The Chunk
+## Two Primitives: Chunks and B-Trees
 
-Everything in aeordb is stored as chunks. There is exactly one storage primitive.
+### The Chunk
+
+A chunk is a block of raw data, identified by its BLAKE3 content hash. Chunks are immutable — once written, they never change. They have no structural awareness — no pointers, no links. Just data.
 
 ```
 Chunk:
-  [header]
-    next_chunk:     [u8; 32]   // hash of next sibling (zeros if last)
-    previous_chunk: [u8; 32]   // hash of previous sibling (zeros if first)
-  [data]
-    raw bytes                  // the content (hashed for integrity/naming)
+  [header: 33 bytes]
+    format_version: u8          // engine format version (starts at 1)
+    created_at:     i64         // millisecond timestamp (8 bytes)
+    updated_at:     i64         // millisecond timestamp (8 bytes)
+    reserved:       [u8; 16]    // reserved for future use
 
-chunk_hash = BLAKE3(data)      // hash covers DATA only, not header
+  [data: chunk_size - 33 bytes]
+    raw bytes                   // the content
+
+chunk_hash = BLAKE3(data)       // hash covers DATA only, not header
 ```
 
-- **Header:** Navigation metadata. next/prev pointers for linked list traversal. NOT included in the hash. Mutable by the engine.
-- **Data:** The actual content. Included in the hash. Immutable once written.
-- **Chunk size:** Configurable, power-of-two (default 256KB). The data portion is chunk_size minus header size (64 bytes for two 32-byte hashes).
+- **Header:** Engine metadata. Format version for future-proofing, timestamps for auditing, reserved space for extensibility. NOT included in the hash.
+- **Data:** The actual content. Included in the hash. Immutable.
+- **Chunk size:** Configurable, power-of-two (default 256KB). Data capacity = chunk_size - 33 bytes.
+- **No pointers.** Chunks do not know about other chunks. They are dumb data blocks. All structure lives in the B-tree.
 
-The hash is the chunk's "name" — its address in the chunk store. But it's a content hash, so identical data = identical name = automatic deduplication.
+The hash is the chunk's "name" — its address in the chunk store. Identical data = identical hash = automatic deduplication.
+
+### The B-Tree
+
+The B-tree is the structural backbone. It serves TWO purposes:
+
+1. **Directory structure** — maps names to files (which chunks compose a file, in what order)
+2. **File structure** — an ordered list of chunk hashes within each file entry
+
+B-tree nodes are themselves stored as chunks in the chunk store. The B-tree is COW (copy-on-write) — modifications create new nodes, old nodes are preserved. This gives us versioning for free.
 
 ---
 
-## Files Are Linked Lists of Chunks
-
-A file is a linked list. You need the hash of the first chunk, and you can walk the entire file by following `next_chunk` pointers.
+## Layer Separation
 
 ```
-File "abc123":
-  chunk_A: [prev: 0000, next: hash_B][...data...]
-  chunk_B: [prev: hash_A, next: hash_C][...data...]
-  chunk_C: [prev: hash_B, next: 0000][...data...]
+Layer 1: Chunk Store (redb)
+  chunk_hash → chunk_bytes
+  Dumb key-value storage. Doesn't know about files, directories, or structure.
+  redb provides ACID, crash recovery, and fast hash lookups.
+
+Layer 2: Filesystem (B-trees stored as chunks)
+  Paths, directories, file composition, versioning.
+  All stored AS chunks in Layer 1, but Layer 1 doesn't know or care.
 ```
 
-- **No file index needed.** No list of hashes stored separately. The file IS the chain.
-- **No size limits.** A file can be infinite — just keep linking chunks.
-- **Streaming reads.** Read chunk, follow `next`, repeat. No need to load a hash list first.
-- **Streaming writes.** Append = create new chunk, link it to the previous last chunk.
-- **Random access.** To seek to byte offset N: chunk_index = N / data_per_chunk, walk N chunks from the start (or use an index for O(1) seek if needed).
+redb is the block device. The B-tree filesystem sits on top. If we ever swap redb for raw files, S3, or Ceph, only Layer 1 changes.
 
 ---
 
-## Directories Are B-Trees of Chunks
+## Files
 
-A directory is a B-tree. Each B-tree node is a chunk.
+A file is an index entry in a directory B-tree. The entry contains an ordered list of chunk hashes that compose the file's data.
 
-### B-Tree Structure
+### Small Files (inline chunk list)
+
+For files with few chunks, the chunk hash list is stored directly in the B-tree leaf entry:
 
 ```
-Branch node chunk:
-  [header: next, prev]
-  [data: sorted keys + child chunk hashes]
+B-tree leaf entry:
+  name: "abc123"
+  entry_type: File
+  chunks: [hash_A, hash_B, hash_C]     // inline, no indirection
+  metadata: { document_id, created_at, updated_at, content_type }
+```
 
-Leaf node chunk:
-  [header: next, prev]         ← sibling links for range scans
-  [data: sorted index entries]
+### Large Files (overflow chunk list)
+
+For files with many chunks (hash list exceeds leaf entry space), the chunk list is stored in a separate chunk (or B-tree of chunks for massive files):
+
+```
+B-tree leaf entry:
+  name: "huge_video.mp4"
+  entry_type: File
+  chunk_list_reference: hash_X          // points to a chunk containing the hash list
+  metadata: { ... }
+```
+
+The referenced chunk contains packed hashes (32 bytes each). At 256KB chunk size, one overflow chunk holds ~8,000 hashes = ~2GB of file data. For larger files, the overflow is itself a B-tree of chunk lists.
+
+### Why Not Linked Lists
+
+An earlier design used linked lists (next/prev pointers in chunk headers). This was abandoned because:
+
+- **Immutable headers + linked lists = cascade on every write.** Inserting or appending a chunk requires updating the previous chunk's `next` pointer, which changes its header, which means a new chunk, which requires updating ITS predecessor... cascading all the way to the head. For a 1000-chunk file, appending one byte creates 1000 new chunks.
+- **Mutable headers + linked lists = versioning is impossible.** If you mutate a chunk's header, any version snapshot pointing to that chunk sees the modified chain, not the original. Versions become stale silently.
+- **B-trees solve both problems.** COW B-tree nodes only cascade to the root of that subtree (O(log n) nodes), not the entire chain. Old nodes are preserved, so versioning is automatic.
+
+---
+
+## Directories
+
+A directory is a per-directory B-tree. Each B-tree node is a chunk stored in the chunk store.
+
+### B-Tree Node Format
+
+Branch node (chunk data):
+```
+[format_version: u8]
+[node_type: u8 = 0x01]
+[num_keys: u16]
+[keys: serialized name strings]
+[children: chunk hashes of child nodes]
+```
+
+Leaf node (chunk data):
+```
+[format_version: u8]
+[node_type: u8 = 0x02]
+[num_entries: u16]
+[entries: serialized IndexEntries]
 ```
 
 ### Index Entries
@@ -71,36 +131,45 @@ Each entry in a leaf node:
 
 ```rust
 struct IndexEntry {
-  name: String,                // human-readable: "abc123", ".config", "photos"
-  entry_type: EntryType,       // File, Directory, HardLink
-  first_chunk: ChunkHash,      // hash of the first chunk of the target
+  name: String,                    // human-readable: "abc123", ".config"
+  entry_type: EntryType,           // File, Directory, HardLink
+  chunks: ChunkList,               // inline hash list or overflow reference
+  document_id: Uuid,               // unique identifier
+  created_at: DateTime<Utc>,       // when created
+  updated_at: DateTime<Utc>,       // when last modified
+  content_type: Option<String>,    // MIME type of the data
 }
 
 enum EntryType {
-  File,        // first_chunk starts a linked list of raw content chunks
-  Directory,   // first_chunk starts a B-tree (another directory)
-  HardLink,    // first_chunk points to another file's first chunk (shared data)
+  File,        // chunks compose raw content
+  Directory,   // chunks compose a child B-tree root
+  HardLink,    // shares another entry's chunk list (dedup at file level)
+}
+
+enum ChunkList {
+  Inline(Vec<ChunkHash>),          // small files: hashes stored directly
+  Overflow(ChunkHash),             // large files: points to chunk containing hash list
 }
 ```
 
 ### Per-Directory B-Trees
 
-Each directory has its OWN B-tree. Not one flat B-tree for the entire filesystem.
+Each directory has its OWN B-tree, not one flat B-tree for the entire filesystem.
 
 ```
-/ (B-tree: small, contains top-level entries)
-  └── "myapp" → Directory → B-tree root chunk
-        └── "users" → Directory → B-tree root chunk (could be huge)
-              ├── "abc123" → File → first data chunk
-              ├── "def456" → File → first data chunk
-              ├── ".config" → File → first config chunk
-              └── ".indexes" → Directory → B-tree root chunk
+/ (B-tree: small, top-level entries)
+  └── "myapp" → Directory → child B-tree root chunk
+        └── "users" → Directory → child B-tree root chunk (could be huge)
+              ├── "abc123" → File → [chunk_A, chunk_B, chunk_C]
+              ├── "def456" → File → [chunk_D]
+              ├── ".config" → File → [chunk_E]
+              └── ".indexes" → Directory → child B-tree root chunk
 ```
 
 **Why per-directory, not flat:**
-- Writing one file only COWs nodes in that directory's B-tree, not the entire index
-- The root B-tree doesn't become a hot path bottleneck
+- Writing one file only COWs nodes in that directory's B-tree
 - Small directories stay small, large directories scale independently
+- The root B-tree doesn't become a hot path bottleneck
 - Aligns with permission resolution (per path segment)
 
 ### Path Traversal
@@ -109,98 +178,109 @@ Resolving `/myapp/users/abc123`:
 1. Open root B-tree → look up "myapp" → get Directory entry
 2. Open myapp's B-tree → look up "users" → get Directory entry
 3. Open users' B-tree → look up "abc123" → get File entry
-4. Follow first_chunk → read file data
+4. Read chunks from the entry's chunk list
 
 Cost: O(depth × log n) where n is the largest directory at each level.
 
-### Range Scans (Listing)
+### Auto-Creation (mkdir -p)
 
-Leaf nodes are linked via chunk headers (next/prev). To list all entries in a directory: find the leftmost leaf, walk the linked list. No need to traverse up and down the tree.
+Writing to a path automatically creates intermediate directories. `PUT /myapp/deep/nested/path/file.json` creates `myapp/`, `deep/`, `nested/`, `path/` if they don't exist.
+
+---
+
+## Versioning: B-Tree COW = Free Snapshots
+
+Versioning is a natural consequence of COW B-trees. Every modification creates new nodes. Old nodes are preserved. A "version" is just a saved B-tree root hash.
+
+### How It Works
+
+```
+State 1: root_A → ... → leaf with "abc123" → [chunk_A, chunk_B, chunk_C]
+
+Modify abc123 (replace chunk_B with chunk_X):
+  1. Create new leaf node with [chunk_A, chunk_X, chunk_C]
+  2. COW branch nodes up to root → new root_B
+  3. Old root_A still points to old leaf with [chunk_A, chunk_B, chunk_C]
+
+State 2: root_B → ... → leaf with "abc123" → [chunk_A, chunk_X, chunk_C]
+
+Version 1 = root_A
+Version 2 = root_B
+chunk_A and chunk_C are shared between versions.
+```
+
+### Bases and Diffs (I-Frames and P-Frames)
+
+For storage efficiency, not every version needs to be a full root snapshot:
+
+**Base (I-frame):** The complete B-tree root hash + metadata. Everything needed to reconstruct the full state.
+
+**Diff (P-frame):** A minimal delta — which B-tree nodes changed, which chunks were added/removed. Applied on top of a base (or previous diff) to reconstruct state.
+
+```
+Base₁ → diff → diff → diff → Base₂ → diff → diff → diff
+```
+
+**Restoring a version:**
+1. Find nearest base at or before the target version
+2. Apply diffs sequentially
+3. Done
+
+**When to create a new base:**
+- After N diffs (configurable)
+- When cumulative diff size exceeds a threshold
+- On explicit user request
+- Engine can decide automatically
+
+### The Entire Database State Is One Hash
+
+The root B-tree root hash captures the ENTIRE database state at a point in time. Every file, every directory, every index, every config — all reachable from that one hash. Saving that hash = complete snapshot. Restoring that hash = complete rollback.
 
 ---
 
 ## Hard Links
 
-A hard link points directly to a file's first chunk hash. Unlike a symlink (which points to a path and breaks if the path changes), a hard link always resolves because it points to the data itself.
+A hard link shares another entry's chunk list. The data chunks are stored once. Both entries point to the same chunks.
 
 ```
 Directory A:
-  "report.pdf" → File → chunk_X
+  "report.pdf" → File → [chunk_X, chunk_Y]
 
 Directory B:
-  "shared_report.pdf" → HardLink → chunk_X   // same first chunk!
+  "shared_report.pdf" → HardLink → [chunk_X, chunk_Y]   // same chunks
 ```
 
-Both entries point to the same chunk chain. The data is stored once. Moving or renaming entries in either directory doesn't break the other.
+Moving or renaming either entry doesn't affect the other. The chunks exist independently of the directory entries that reference them.
 
 ---
 
-## Versioning: Bases and Diffs
+## Streaming (No Full File Reads)
 
-Versioning uses a video-compression-inspired model: bases (I-frames) and diffs (P-frames).
+File reads are ALWAYS streamed. There is no "load entire file into memory" operation. The engine provides chunk-by-chunk streaming:
 
-### Base (I-Frame)
+1. Read the chunk list from the B-tree entry
+2. Yield chunks one at a time
+3. The caller processes each chunk as it arrives
 
-A complete snapshot of all B-tree roots and the index state. Everything needed to reconstruct the full filesystem state without any diffs.
+This prevents:
+- Memory exhaustion from opening large files
+- Attack vectors (malicious large file crashes the server)
+- Accidental "oopsies" (opening a file you shouldn't have)
 
-A base does NOT copy all data chunks — it captures the B-tree structure (which nodes exist, what they point to). Data chunks are shared across versions via content addressing.
-
-### Diff (P-Frame)
-
-A minimal delta from the previous state:
-- Chunks added (new chunk hashes)
-- Chunk headers modified (next/prev pointer changes)
-- Index entries added/removed/modified in B-tree nodes
-- B-tree nodes split/merged
-
-A diff for a small change (one file updated) is tiny — a few B-tree node changes.
-
-### Version Timeline
-
-```
-Base₁ → diff → diff → diff → diff → Base₂ → diff → diff → diff → Base₃
-  v1     v2     v3     v4     v5      v6      v7     v8     v9      v10
-```
-
-### Restoring a Version
-
-1. Find the nearest base at or before the target version
-2. Apply diffs sequentially until the target version
-3. Done
-
-### When to Create a New Base
-
-- After N diffs (configurable threshold)
-- When cumulative diff size exceeds a percentage of the base size
-- On explicit user request
-- The engine can decide automatically (like a video encoder choosing I-frame intervals)
-
-### Storage Savings
-
-1000 versions with a base every 100 = 10 bases + 990 diffs. If each version changes 0.01% of the data, the diffs are minuscule versus storing 1000 full snapshots.
-
-### Replication Efficiency
-
-Syncing a new node:
-1. Send the latest base
-2. Send the diffs since that base
-3. Node is caught up
-
-No need to replay the entire history.
+Data flows on request. Pumping streams. Durability and resilience are non-negotiable.
 
 ---
 
 ## Repair and Recovery
 
-The linked chunk structure makes the database highly repairable:
+The B-tree + chunk architecture is highly repairable:
 
-- **Corrupt chunk detected:** BLAKE3 hash mismatch on read. Skip the chunk, continue following links from the previous chunk. You lose one chunk's worth of data, not the entire file.
-- **Broken link:** A chunk's `next` points to a hash that doesn't exist. The file is truncated at that point but everything before it is recoverable.
-- **Corrupt B-tree node:** Re-scan the leaf level (linked list) to reconstruct the branch nodes. The leaves contain all the data; branches are just navigation shortcuts.
-- **Lost root:** Scan all chunks, identify B-tree leaves by structure, reconstruct the tree bottom-up.
-- **Version recovery:** If the latest state is corrupt, walk backward through diffs to find the last clean base. Restore from there.
+- **Corrupt chunk:** BLAKE3 hash mismatch on read. The chunk is identified as bad. The file is partially readable (other chunks are fine). Replication can provide a clean copy.
+- **Corrupt B-tree node:** Rebuild from sibling nodes or from a known-good version snapshot.
+- **Lost root:** Scan all chunks, identify B-tree nodes by format version + node type bytes, reconstruct bottom-up.
+- **Version recovery:** Walk backward through versions to find the last clean state.
 
-Corruption is always **local**. A bad chunk doesn't cascade. The linked structure means you can always find the next good chunk and keep going.
+Corruption is always **local**. A bad chunk or bad node doesn't cascade. The content-addressed hashes detect corruption immediately on read.
 
 ---
 
@@ -214,47 +294,48 @@ System paths use dot-prefix (Unix hidden file convention):
 | `.indexes` | Search index data | engine: full, admin: full, users: read |
 | `.system` | System-level data | admin: full, users: none |
 
-These are just regular files/directories. The engine gives them special meaning by convention, not by enforcement. Permissions control access, not naming rules.
+These are regular files/directories. The engine gives them special meaning by convention. Permissions control access, not naming rules. Users can create their own dot-paths with no special engine meaning.
 
 ---
 
 ## Mandatory Document Metadata
 
-Every file stored has engine-managed metadata:
+Every file has engine-managed metadata stored in the B-tree index entry:
 
 | Field | Type | Description |
 |---|---|---|
 | `document_id` | UUID v4 | Unique identifier |
 | `created_at` | Timestamp | When created |
 | `updated_at` | Timestamp | When last modified |
+| `content_type` | Option<String> | MIME type of the data |
 
 No soft-delete. Delete is real delete. Recovery is via version restore.
 
 ---
 
-## Summary of Data Structures
+## Summary
 
 | Concept | Implementation |
 |---|---|
-| Chunk | Header (next/prev) + Data (hashed). The one primitive. |
-| File | Linked list of chunks. |
-| Directory | Per-directory B-tree. Nodes are chunks. Leaves contain index entries. |
-| Index Entry | Name + type (File/Directory/HardLink) + first chunk hash. |
-| Hard Link | Index entry pointing to another file's first chunk. |
-| Version Base | Complete B-tree root snapshot (I-frame). |
-| Version Diff | Minimal delta of B-tree changes (P-frame). |
-| Permissions | `crudlify` tri-state flags on group→path links. Resolved per segment during traversal. |
-| Configuration | Stored at `.config` files within directories. Inherited downward. |
+| Chunk | Header (format version, timestamps, reserved) + Data (BLAKE3 hashed). Immutable. Dumb. |
+| File | B-tree index entry with ordered chunk hash list (inline or overflow). |
+| Directory | Per-directory COW B-tree. Nodes stored as chunks. |
+| Index Entry | Name + type + chunk list + metadata. |
+| Hard Link | Entry sharing another entry's chunk list. |
+| Version | Saved B-tree root hash. The entire database state is one hash. |
+| Base | Full root snapshot (I-frame). |
+| Diff | Minimal B-tree delta (P-frame). |
+| Streaming | Always. No full-file memory loads. Ever. |
+| Physical storage | redb (Layer 1): dumb hash→bytes. Swappable. |
 
 ---
 
 ## Relationship to Existing Code
 
-The current Phase 1-4 implementation uses redb as the storage backend with a simpler chunk store model. The architecture described here is the **target state**. Migration path:
+The current Phase 1-4 implementation uses redb with a simpler model. Migration path:
 
-1. Current: redb-backed key-value storage with content-addressed chunks (Phase 4.1)
-2. Target: linked chunk lists with B-tree directory indexes, base+diff versioning
-3. The `ChunkStorage` trait provides the abstraction boundary — the physical chunk storage can be swapped without changing the layers above
-4. The B-tree and linked-list structures will be built on top of the existing chunk primitives
-
-The existing 380 tests continue to validate the current implementation while the new architecture is built alongside it.
+1. Current: redb-backed key-value storage with content-addressed chunks
+2. Target: COW B-tree filesystem with chunk store on redb
+3. The `ChunkStorage` trait provides the abstraction boundary
+4. Existing 380 tests continue to validate the current implementation
+5. New filesystem module (`src/filesystem/`) built alongside existing code
