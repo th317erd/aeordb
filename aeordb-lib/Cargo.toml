@@ -140,3 +140,7 @@ path = "spec/filesystem/redb_directory_spec.rs"
 [[test]]
 name = "version_manager_spec"
 path = "spec/filesystem/version_manager_spec.rs"
+
+[[test]]
+name = "path_resolver_spec"
+path = "spec/filesystem/path_resolver_spec.rs"

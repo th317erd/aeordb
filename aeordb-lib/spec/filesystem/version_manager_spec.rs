@@ -1,5 +1,5 @@
 use aeordb::filesystem::{VersionError, VersionManager};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
