@@ -143,6 +143,7 @@ pub fn create_app_with_all(
   public_routes
     .merge(protected_routes)
     .with_state(app_state)
+    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10 GB
     .layer(HttpMetricsLayer)
     .layer(from_fn(request_id_middleware))
     .layer(TraceLayer::new_for_http())
