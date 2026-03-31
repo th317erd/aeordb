@@ -14,6 +14,7 @@ pub mod kv_resize;
 pub mod kv_store;
 pub mod nvt;
 pub mod path_utils;
+pub mod scalar_converter;
 pub mod storage_engine;
 pub mod system_tables;
 pub mod version_manager;
@@ -35,7 +36,13 @@ pub use kv_store::{
   KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD, KV_TYPE_FORK, KV_TYPE_VERSION,
   KV_FLAG_PENDING, KV_FLAG_DELETED,
 };
-pub use nvt::{NVTBucket, NormalizedVectorTable, hash_to_scalar};
+pub use nvt::{NVTBucket, NormalizedVectorTable};
+pub use scalar_converter::{
+  ScalarConverter, HashConverter,
+  U8Converter, U16Converter, U32Converter, U64Converter,
+  I64Converter, F64Converter, StringConverter, TimestampConverter,
+  serialize_converter, deserialize_converter,
+};
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};

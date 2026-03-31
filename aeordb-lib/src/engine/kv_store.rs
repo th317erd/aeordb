@@ -1,6 +1,7 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::nvt::NormalizedVectorTable;
+use crate::engine::scalar_converter::HashConverter;
 
 // Lower 4 bits - type
 pub const KV_TYPE_CHUNK: u8       = 0x0;
@@ -56,7 +57,7 @@ impl KVStore {
       version: 1,
       hash_algo,
       entries: Vec::new(),
-      nvt: NormalizedVectorTable::new(hash_algo, initial_nvt_buckets),
+      nvt: NormalizedVectorTable::new(Box::new(HashConverter), initial_nvt_buckets),
     }
   }
 
@@ -78,7 +79,7 @@ impl KVStore {
   }
 
   pub fn get(&self, hash: &[u8]) -> Option<&KVEntry> {
-    let bucket_index = self.nvt.bucket_for_hash(hash);
+    let bucket_index = self.nvt.bucket_for_value(hash);
     let bucket = self.nvt.get_bucket(bucket_index);
 
     let start = bucket.kv_block_offset as usize;
@@ -308,7 +309,7 @@ impl KVStore {
     let mut bucket_count_entries: u32 = 0;
 
     for (entry_index, entry) in self.entries.iter().enumerate() {
-      let bucket_index = self.nvt.bucket_for_hash(&entry.hash);
+      let bucket_index = self.nvt.bucket_for_value(&entry.hash);
 
       if current_bucket == Some(bucket_index) {
         bucket_count_entries += 1;

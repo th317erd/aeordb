@@ -113,10 +113,6 @@ name = "chunk_header_spec"
 path = "spec/chunks/chunk_header_spec.rs"
 
 [[test]]
-name = "scalar_ratio_spec"
-path = "spec/indexing/scalar_ratio_spec.rs"
-
-[[test]]
 name = "raft_spec"
 path = "spec/replication/raft_spec.rs"
 
@@ -139,6 +135,10 @@ path = "spec/engine/append_writer_spec.rs"
 [[test]]
 name = "records_spec"
 path = "spec/engine/records_spec.rs"
+
+[[test]]
+name = "converter_spec"
+path = "spec/engine/converter_spec.rs"
 
 [[test]]
 name = "nvt_spec"

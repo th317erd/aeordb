@@ -1,5 +1,7 @@
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::scalar_converter::{
+  ScalarConverter, deserialize_converter,
+};
 
 #[derive(Debug, Clone)]
 pub struct NVTBucket {
@@ -10,18 +12,33 @@ pub struct NVTBucket {
 #[derive(Debug, Clone)]
 pub struct NormalizedVectorTable {
   version: u8,
-  hash_algo: HashAlgorithm,
   buckets: Vec<NVTBucket>,
+  converter: ConverterHolder,
 }
 
-pub fn hash_to_scalar(hash: &[u8]) -> f64 {
-  let bytes: [u8; 8] = hash[..8].try_into().unwrap();
-  let value = u64::from_be_bytes(bytes);
-  value as f64 / u64::MAX as f64
+/// Internal holder to make NVT Clone-able despite `dyn ScalarConverter`.
+/// We serialize/deserialize on clone via the converter's own serialization.
+struct ConverterHolder {
+  inner: Box<dyn ScalarConverter>,
+}
+
+impl std::fmt::Debug for ConverterHolder {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(formatter, "ConverterHolder({})", self.inner.name())
+  }
+}
+
+impl Clone for ConverterHolder {
+  fn clone(&self) -> Self {
+    let serialized = self.inner.serialize();
+    let cloned = deserialize_converter(&serialized)
+      .expect("converter roundtrip clone should never fail");
+    ConverterHolder { inner: cloned }
+  }
 }
 
 impl NormalizedVectorTable {
-  pub fn new(hash_algo: HashAlgorithm, initial_bucket_count: usize) -> Self {
+  pub fn new(converter: Box<dyn ScalarConverter>, initial_bucket_count: usize) -> Self {
     let buckets = (0..initial_bucket_count)
       .map(|_| NVTBucket {
         kv_block_offset: 0,
@@ -31,13 +48,13 @@ impl NormalizedVectorTable {
 
     NormalizedVectorTable {
       version: 1,
-      hash_algo,
       buckets,
+      converter: ConverterHolder { inner: converter },
     }
   }
 
-  pub fn bucket_for_hash(&self, hash: &[u8]) -> usize {
-    let scalar = hash_to_scalar(hash);
+  pub fn bucket_for_value(&self, value: &[u8]) -> usize {
+    let scalar = self.converter.inner.to_scalar(value);
     let index = (scalar * self.buckets.len() as f64).floor() as usize;
     // Clamp to valid range (scalar of exactly 1.0 would overflow)
     index.min(self.buckets.len().saturating_sub(1))
@@ -108,17 +125,23 @@ impl NormalizedVectorTable {
     self.version
   }
 
-  pub fn hash_algo(&self) -> HashAlgorithm {
-    self.hash_algo
+  pub fn converter(&self) -> &dyn ScalarConverter {
+    self.converter.inner.as_ref()
   }
 
   pub fn serialize(&self) -> Vec<u8> {
-    // version(1) + hash_algo(2) + bucket_count(4) + buckets(12 each)
-    let capacity = 1 + 2 + 4 + self.buckets.len() * 12;
+    let converter_data = self.converter.inner.serialize();
+    // version(1) + converter_length(4) + converter_data + bucket_count(4) + buckets(12 each)
+    let capacity = 1 + 4 + converter_data.len() + 4 + self.buckets.len() * 12;
     let mut buffer = Vec::with_capacity(capacity);
 
     buffer.push(self.version);
-    buffer.extend_from_slice(&self.hash_algo.to_u16().to_le_bytes());
+
+    // Converter section
+    buffer.extend_from_slice(&(converter_data.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&converter_data);
+
+    // Bucket section
     buffer.extend_from_slice(&(self.buckets.len() as u32).to_le_bytes());
 
     for bucket in &self.buckets {
@@ -130,8 +153,8 @@ impl NormalizedVectorTable {
   }
 
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
-    // Minimum: version(1) + hash_algo(2) + bucket_count(4) = 7 bytes
-    if data.len() < 7 {
+    // Minimum: version(1) + converter_length(4) = 5 bytes
+    if data.len() < 5 {
       return Err(EngineError::CorruptEntry {
         offset: 0,
         reason: "NVT data too short for header".to_string(),
@@ -146,13 +169,38 @@ impl NormalizedVectorTable {
       });
     }
 
-    let hash_algo_raw = u16::from_le_bytes([data[1], data[2]]);
-    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw)
-      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let mut cursor = 1;
 
-    let bucket_count = u32::from_le_bytes([data[3], data[4], data[5], data[6]]) as usize;
+    // Read converter
+    let converter_length = u32::from_le_bytes([
+      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+    ]) as usize;
+    cursor += 4;
 
-    let expected_length = 7 + bucket_count * 12;
+    if data.len() < cursor + converter_length {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "NVT data too short for converter section".to_string(),
+      });
+    }
+
+    let converter = deserialize_converter(&data[cursor..cursor + converter_length])?;
+    cursor += converter_length;
+
+    // Read bucket count
+    if data.len() < cursor + 4 {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "NVT data too short for bucket count".to_string(),
+      });
+    }
+
+    let bucket_count = u32::from_le_bytes([
+      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+    ]) as usize;
+    cursor += 4;
+
+    let expected_length = cursor + bucket_count * 12;
     if data.len() < expected_length {
       return Err(EngineError::CorruptEntry {
         offset: 0,
@@ -164,7 +212,6 @@ impl NormalizedVectorTable {
     }
 
     let mut buckets = Vec::with_capacity(bucket_count);
-    let mut cursor = 7;
     for _ in 0..bucket_count {
       let kv_block_offset = u64::from_le_bytes([
         data[cursor],
@@ -191,8 +238,8 @@ impl NormalizedVectorTable {
 
     Ok(NormalizedVectorTable {
       version,
-      hash_algo,
       buckets,
+      converter: ConverterHolder { inner: converter },
     })
   }
 }
