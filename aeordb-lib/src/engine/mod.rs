@@ -1,6 +1,7 @@
 pub mod append_writer;
 pub mod deletion_record;
 pub mod directory_entry;
+pub mod directory_ops;
 pub mod engine_chunk_storage;
 pub mod entry_header;
 pub mod entry_scanner;
@@ -13,6 +14,7 @@ pub mod kv_resize;
 pub mod kv_store;
 pub mod nvt;
 pub mod path_utils;
+pub mod storage_engine;
 pub mod void_manager;
 
 pub use append_writer::AppendWriter;
@@ -36,3 +38,5 @@ pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
 pub use engine_chunk_storage::EngineChunkStorage;
+pub use storage_engine::StorageEngine;
+pub use directory_ops::{DirectoryOps, EngineFileStream};

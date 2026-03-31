@@ -9,6 +9,8 @@ pub enum EngineError {
   InvalidHashAlgorithm(u16),
   CorruptEntry { offset: u64, reason: String },
   UnexpectedEof,
+  NotFound(String),
+  AlreadyExists(String),
 }
 
 impl fmt::Display for EngineError {
@@ -29,6 +31,8 @@ impl fmt::Display for EngineError {
         write!(formatter, "Corrupt entry at offset {}: {}", offset, reason)
       }
       EngineError::UnexpectedEof => write!(formatter, "Unexpected end of file"),
+      EngineError::NotFound(path) => write!(formatter, "Not found: {}", path),
+      EngineError::AlreadyExists(path) => write!(formatter, "Already exists: {}", path),
     }
   }
 }

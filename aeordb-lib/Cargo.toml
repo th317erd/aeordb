@@ -196,3 +196,7 @@ path = "spec/engine/void_manager_spec.rs"
 [[test]]
 name = "engine_chunk_storage_spec"
 path = "spec/engine/engine_chunk_storage_spec.rs"
+
+[[test]]
+name = "directory_ops_spec"
+path = "spec/engine/directory_ops_spec.rs"
