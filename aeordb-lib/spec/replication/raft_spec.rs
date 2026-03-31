@@ -5,9 +5,9 @@ use aeordb::replication::log_store::InMemoryLogStore;
 use aeordb::replication::state_machine::ChunkStateMachine;
 use aeordb::replication::types::{RaftNode, RaftRequest, RaftResponse};
 use aeordb::replication::RaftNodeManager;
+use aeordb::engine::EngineChunkStorage;
 use aeordb::storage::chunk::hash_data;
 use aeordb::storage::chunk_storage::ChunkStorage;
-use aeordb::storage::in_memory_chunk_storage::InMemoryChunkStorage;
 
 use openraft::entry::RaftEntry;
 use openraft::storage::{IOFlushed, RaftLogReader, RaftLogStorage, RaftStateMachine};
@@ -22,18 +22,28 @@ fn committed_leader() -> <openraft::impls::leader_id_adv::LeaderId<u64, u64> as 
   openraft::impls::leader_id_adv::LeaderId::<u64, u64>::new(1, 1).to_committed()
 }
 
-// -----------------------------------------------------------------------
-// Helper: create a RaftNodeManager backed by in-memory storage
-// -----------------------------------------------------------------------
-async fn create_single_node_manager() -> RaftNodeManager {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
-  RaftNodeManager::new(1, chunk_storage)
-    .await
-    .expect("failed to create raft node manager")
+/// Create a temporary EngineChunkStorage for tests.
+fn temp_chunk_storage() -> (Arc<dyn ChunkStorage>, tempfile::TempDir) {
+  let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+  let engine_path = temp_dir.path().join("raft_test.aeordb");
+  let storage = EngineChunkStorage::create(engine_path.to_str().unwrap())
+    .expect("failed to create engine chunk storage");
+  (Arc::new(storage), temp_dir)
 }
 
-async fn create_bootstrapped_node() -> (RaftNodeManager, Arc<dyn ChunkStorage>) {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+// -----------------------------------------------------------------------
+// Helper: create a RaftNodeManager backed by engine storage
+// -----------------------------------------------------------------------
+async fn create_single_node_manager() -> (RaftNodeManager, tempfile::TempDir) {
+  let (chunk_storage, temp_dir) = temp_chunk_storage();
+  let manager = RaftNodeManager::new(1, chunk_storage)
+    .await
+    .expect("failed to create raft node manager");
+  (manager, temp_dir)
+}
+
+async fn create_bootstrapped_node() -> (RaftNodeManager, Arc<dyn ChunkStorage>, tempfile::TempDir) {
+  let (chunk_storage, temp_dir) = temp_chunk_storage();
   let manager = RaftNodeManager::new(1, chunk_storage.clone())
     .await
     .expect("failed to create raft node manager");
@@ -45,7 +55,7 @@ async fn create_bootstrapped_node() -> (RaftNodeManager, Arc<dyn ChunkStorage>) 
   // Give the node a moment to elect itself leader.
   tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-  (manager, chunk_storage)
+  (manager, chunk_storage, temp_dir)
 }
 
 // ===================================================================
@@ -54,14 +64,14 @@ async fn create_bootstrapped_node() -> (RaftNodeManager, Arc<dyn ChunkStorage>) 
 
 #[tokio::test]
 async fn test_single_node_bootstrap() {
-  let manager = create_single_node_manager().await;
+  let (manager, _temp_dir) = create_single_node_manager().await;
   let result = manager.initialize_single_node().await;
   assert!(result.is_ok(), "single-node bootstrap should succeed");
 }
 
 #[tokio::test]
 async fn test_single_node_double_bootstrap_fails() {
-  let manager = create_single_node_manager().await;
+  let (manager, _temp_dir) = create_single_node_manager().await;
   manager
     .initialize_single_node()
     .await
@@ -76,7 +86,7 @@ async fn test_single_node_double_bootstrap_fails() {
 
 #[tokio::test]
 async fn test_raft_node_is_leader_after_bootstrap() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
   assert!(
     manager.is_leader().await,
     "single-node should be leader after bootstrap"
@@ -85,7 +95,7 @@ async fn test_raft_node_is_leader_after_bootstrap() {
 
 #[tokio::test]
 async fn test_raft_node_id() {
-  let manager = create_single_node_manager().await;
+  let (manager, _temp_dir) = create_single_node_manager().await;
   assert_eq!(manager.node_id(), 1);
 }
 
@@ -95,7 +105,7 @@ async fn test_raft_node_id() {
 
 #[tokio::test]
 async fn test_single_node_write_and_read() {
-  let (manager, storage) = create_bootstrapped_node().await;
+  let (manager, storage, _temp_dir) = create_bootstrapped_node().await;
 
   let data = b"hello world".to_vec();
   let hash = hash_data(&data).to_vec();
@@ -122,7 +132,7 @@ async fn test_single_node_write_and_read() {
 
 #[tokio::test]
 async fn test_single_node_store_chunk_via_raft() {
-  let (manager, storage) = create_bootstrapped_node().await;
+  let (manager, storage, _temp_dir) = create_bootstrapped_node().await;
 
   let data = b"aeordb raft integration test data".to_vec();
   let hash = hash_data(&data).to_vec();
@@ -146,7 +156,7 @@ async fn test_single_node_store_chunk_via_raft() {
 
 #[tokio::test]
 async fn test_single_node_multiple_writes() {
-  let (manager, storage) = create_bootstrapped_node().await;
+  let (manager, storage, _temp_dir) = create_bootstrapped_node().await;
 
   for index in 0..10u32 {
     let data = format!("chunk-{}", index).into_bytes();
@@ -168,7 +178,7 @@ async fn test_single_node_multiple_writes() {
 
 #[tokio::test]
 async fn test_single_node_delete_chunk_via_raft() {
-  let (manager, storage) = create_bootstrapped_node().await;
+  let (manager, storage, _temp_dir) = create_bootstrapped_node().await;
 
   let data = b"to be deleted".to_vec();
   let hash = hash_data(&data).to_vec();
@@ -199,7 +209,7 @@ async fn test_single_node_delete_chunk_via_raft() {
 
 #[tokio::test]
 async fn test_single_node_store_hash_map_acknowledged() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
 
   let response = manager
     .client_write(RaftRequest::StoreHashMap {
@@ -213,7 +223,7 @@ async fn test_single_node_store_hash_map_acknowledged() {
 
 #[tokio::test]
 async fn test_single_node_store_chunk_hash_mismatch() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
 
   let data = b"some data".to_vec();
   // Intentionally wrong 32-byte hash.
@@ -238,7 +248,7 @@ async fn test_single_node_store_chunk_hash_mismatch() {
 
 #[tokio::test]
 async fn test_single_node_delete_chunk_invalid_hash_length() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
 
   let response = manager
     .client_write(RaftRequest::DeleteChunk {
@@ -252,7 +262,7 @@ async fn test_single_node_delete_chunk_invalid_hash_length() {
 
 #[tokio::test]
 async fn test_single_node_delete_nonexistent_chunk() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
 
   let response = manager
     .client_write(RaftRequest::DeleteChunk {
@@ -508,7 +518,7 @@ async fn test_log_store_read_empty_range() {
 
 #[tokio::test]
 async fn test_state_machine_initial_state() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
   let mut state_machine = ChunkStateMachine::new(chunk_storage);
 
   let (last_applied, _membership) = state_machine
@@ -523,7 +533,7 @@ async fn test_state_machine_initial_state() {
 
 #[tokio::test]
 async fn test_state_machine_applies_store_chunk() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
   let mut state_machine = ChunkStateMachine::new(chunk_storage.clone());
 
   let data = b"state machine test data".to_vec();
@@ -558,7 +568,7 @@ async fn test_state_machine_applies_store_chunk() {
 
 #[tokio::test]
 async fn test_state_machine_applies_delete_chunk() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
 
   // Pre-populate a chunk.
   let data = b"to be deleted via state machine".to_vec();
@@ -593,7 +603,7 @@ async fn test_state_machine_applies_delete_chunk() {
 
 #[tokio::test]
 async fn test_state_machine_applies_multiple_entries() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
   let mut state_machine = ChunkStateMachine::new(chunk_storage.clone());
 
   let leader = committed_leader();
@@ -627,7 +637,7 @@ async fn test_state_machine_applies_multiple_entries() {
 
 #[tokio::test]
 async fn test_state_machine_snapshot_none_initially() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
   let mut state_machine = ChunkStateMachine::new(chunk_storage);
 
   let snapshot = state_machine
@@ -639,7 +649,7 @@ async fn test_state_machine_snapshot_none_initially() {
 
 #[tokio::test]
 async fn test_state_machine_snapshot_after_apply() {
-  let chunk_storage: Arc<dyn ChunkStorage> = Arc::new(InMemoryChunkStorage::new());
+  let (chunk_storage, _temp_dir) = temp_chunk_storage();
   let mut state_machine = ChunkStateMachine::new(chunk_storage);
 
   let entry = Entry::new_blank(openraft::LogId::new(committed_leader(), 1));
@@ -665,7 +675,7 @@ async fn test_state_machine_snapshot_after_apply() {
 
 #[tokio::test]
 async fn test_raft_metrics_available() {
-  let (manager, _storage) = create_bootstrapped_node().await;
+  let (manager, _storage, _temp_dir) = create_bootstrapped_node().await;
 
   use openraft::rt::WatchReceiver;
   let metrics_receiver = manager.raft.metrics();

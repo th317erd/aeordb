@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use aeordb::plugins::plugin_manager::{PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
+use aeordb::server::create_temp_engine_for_tests;
 
 /// Compile a minimal valid WASM module for testing.
 fn minimal_wasm_bytes() -> Vec<u8> {
@@ -22,13 +21,11 @@ fn minimal_wasm_bytes() -> Vec<u8> {
   wat::parse_str(wat).expect("WAT should be valid")
 }
 
-/// Create a fresh in-memory PluginManager.
-fn test_manager() -> PluginManager {
-  let backend = redb::backends::InMemoryBackend::new();
-  let database = redb::Database::builder()
-    .create_with_backend(backend)
-    .expect("in-memory database");
-  PluginManager::new(Arc::new(database))
+/// Create a fresh PluginManager backed by a temp engine.
+fn test_manager() -> (PluginManager, tempfile::TempDir) {
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine);
+  (manager, temp_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -37,7 +34,7 @@ fn test_manager() -> PluginManager {
 
 #[test]
 fn test_deploy_plugin_stores_in_database() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   let record = manager
@@ -52,7 +49,7 @@ fn test_deploy_plugin_stores_in_database() {
 
 #[test]
 fn test_get_deployed_plugin() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   manager
@@ -71,7 +68,7 @@ fn test_get_deployed_plugin() {
 
 #[test]
 fn test_list_deployed_plugins() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   manager
@@ -91,7 +88,7 @@ fn test_list_deployed_plugins() {
 
 #[test]
 fn test_remove_deployed_plugin() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   manager
@@ -111,7 +108,7 @@ fn test_remove_deployed_plugin() {
 
 #[test]
 fn test_deploy_duplicate_path_overwrites() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   let first = manager
@@ -135,7 +132,7 @@ fn test_deploy_duplicate_path_overwrites() {
 
 #[test]
 fn test_get_nonexistent_plugin_returns_none() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
 
   let result = manager
     .get_plugin("nonexistent/path")
@@ -145,7 +142,7 @@ fn test_get_nonexistent_plugin_returns_none() {
 
 #[test]
 fn test_remove_nonexistent_plugin_returns_false() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
 
   let removed = manager
     .remove_plugin("nonexistent/path")
@@ -155,7 +152,7 @@ fn test_remove_nonexistent_plugin_returns_false() {
 
 #[test]
 fn test_list_empty_returns_empty_vec() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
 
   let plugins = manager.list_plugins().expect("list should succeed");
   assert!(plugins.is_empty());
@@ -163,7 +160,7 @@ fn test_list_empty_returns_empty_vec() {
 
 #[test]
 fn test_deploy_invalid_wasm_rejected() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let garbage = vec![0x00, 0x61, 0x73, 0x6d, 0xFF, 0xFF, 0xFF, 0xFF];
 
   let result = manager.deploy_plugin("bad", "db/schema/bad", PluginType::Wasm, garbage);
@@ -176,7 +173,7 @@ fn test_deploy_invalid_wasm_rejected() {
 
 #[test]
 fn test_invoke_wasm_plugin() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
   manager
@@ -192,7 +189,7 @@ fn test_invoke_wasm_plugin() {
 
 #[test]
 fn test_invoke_nonexistent_plugin_returns_not_found() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
 
   let result = manager.invoke_wasm_plugin("missing/path", b"data");
   assert!(result.is_err());
@@ -204,7 +201,7 @@ fn test_invoke_nonexistent_plugin_returns_not_found() {
 
 #[test]
 fn test_deploy_native_plugin_skips_wasm_validation() {
-  let manager = test_manager();
+  let (manager, _temp_dir) = test_manager();
   // For a native plugin, the bytes are just stored as-is (no WASM validation).
   let dummy_bytes = b"not real wasm but that is fine for native".to_vec();
 

@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use aeordb::storage::{
-  Chunk, ChunkConfig, ChunkHeader, ChunkStorage, ChunkStore,
-  HEADER_SIZE, InMemoryChunkStorage, hash_data,
+  Chunk, ChunkConfig, ChunkHeader, ChunkStorage,
+  HEADER_SIZE, hash_data,
 };
+use aeordb::engine::EngineChunkStorage;
 
 // ---------------------------------------------------------------------------
 // ChunkHeader construction
@@ -176,29 +176,15 @@ fn test_chunk_size_too_small_for_header_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Store and retrieve with header
+// Engine chunk storage with headers
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_chunk_with_header_stores_and_retrieves_correctly() {
-  let store = ChunkStore::new_in_memory();
-  let data = b"chunk header store/retrieve roundtrip test";
-  let map = store.store(data).unwrap();
+fn test_engine_chunk_header_preserved_through_storage_roundtrip() {
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine_path = temp_dir.path().join("test.aeordb");
+  let storage = EngineChunkStorage::create(engine_path.to_str().unwrap()).unwrap();
 
-  let retrieved = store.retrieve(&map).unwrap();
-  assert_eq!(retrieved, data);
-
-  // Verify the underlying chunk has a header.
-  let chunk_hash = &map.chunk_hashes[0];
-  let chunk = store.storage().get_chunk(chunk_hash).unwrap().unwrap();
-  assert_eq!(chunk.header.format_version, 1);
-  assert_eq!(chunk.header.reserved, [0u8; 16]);
-  assert!(chunk.verify());
-}
-
-#[test]
-fn test_chunk_header_preserved_through_storage_roundtrip() {
-  let storage = InMemoryChunkStorage::new();
   let data = b"roundtrip with header".to_vec();
   let chunk = Chunk::new(data);
 
@@ -211,63 +197,21 @@ fn test_chunk_header_preserved_through_storage_roundtrip() {
   assert_eq!(retrieved.hash, chunk.hash);
 }
 
-#[test]
-fn test_multiple_chunks_each_have_own_header() {
-  let config = ChunkConfig::new(64).unwrap();
-  let store = ChunkStore::new_in_memory_with_config(config.clone());
-
-  // Data larger than one chunk's data capacity.
-  let data_capacity = config.data_capacity();
-  let data = vec![0xABu8; data_capacity * 3];
-  let map = store.store(&data).unwrap();
-  assert_eq!(map.chunk_hashes.len(), 3);
-
-  // Each chunk should have its own valid header.
-  for chunk_hash in &map.chunk_hashes {
-    let chunk = store.storage().get_chunk(chunk_hash).unwrap().unwrap();
-    assert_eq!(chunk.header.format_version, 1);
-    assert_eq!(chunk.header.reserved, [0u8; 16]);
-    assert!(chunk.verify());
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Redb backend with headers
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_redb_chunk_with_header_roundtrip() {
-  let backend = redb::backends::InMemoryBackend::new();
-  let database = redb::Database::builder()
-    .create_with_backend(backend)
-    .unwrap();
-  let database = Arc::new(database);
-
-  let store = ChunkStore::new_with_redb(database);
-  let data = b"redb header roundtrip";
-  let map = store.store(data).unwrap();
-  let retrieved = store.retrieve(&map).unwrap();
-  assert_eq!(retrieved, data);
-
-  // Verify header is present.
-  let chunk = store.storage().get_chunk(&map.chunk_hashes[0]).unwrap().unwrap();
-  assert_eq!(chunk.header.format_version, 1);
-  assert!(chunk.verify());
-}
-
 // ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_empty_data_chunk_has_header() {
-  // Even empty data should produce a valid chunk with a header when stored directly.
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine_path = temp_dir.path().join("test.aeordb");
+  let storage = EngineChunkStorage::create(engine_path.to_str().unwrap()).unwrap();
+
   let chunk = Chunk::new(Vec::new());
   assert_eq!(chunk.header.format_version, 1);
   assert!(chunk.data.is_empty());
   assert!(chunk.verify());
 
-  let storage = InMemoryChunkStorage::new();
   storage.store_chunk(&chunk).unwrap();
   let retrieved = storage.get_chunk(&chunk.hash).unwrap().unwrap();
   assert_eq!(retrieved.header.format_version, 1);
@@ -276,7 +220,10 @@ fn test_empty_data_chunk_has_header() {
 
 #[test]
 fn test_chunk_dedup_preserves_original_header() {
-  let storage = InMemoryChunkStorage::new();
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine_path = temp_dir.path().join("test.aeordb");
+  let storage = EngineChunkStorage::create(engine_path.to_str().unwrap()).unwrap();
+
   let data = b"dedup test".to_vec();
 
   let chunk_a = Chunk::new(data.clone());

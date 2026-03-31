@@ -8,24 +8,21 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::StorageEngine;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
-use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with engine support.
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>, tempfile::TempDir) {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, temp_dir) = create_temp_engine_for_tests();
-  let app = create_app_with_jwt_and_engine(storage.clone(), jwt_manager.clone(), engine.clone());
-  (app, jwt_manager, storage, engine, temp_dir)
+  let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, engine, temp_dir)
 }
 
 /// Rebuild app from shared state (for multi-request tests).
 fn rebuild_app(
-  storage: &Arc<RedbStorage>,
   jwt_manager: &Arc<JwtManager>,
   engine: &Arc<StorageEngine>,
 ) -> axum::Router {
-  create_app_with_jwt_and_engine(storage.clone(), jwt_manager.clone(), engine.clone())
+  create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).
@@ -61,7 +58,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_engine_store_file_returns_201() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -83,7 +80,7 @@ async fn test_engine_store_file_returns_201() {
 
 #[tokio::test]
 async fn test_engine_get_file_returns_data() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store a file
@@ -99,7 +96,7 @@ async fn test_engine_get_file_returns_data() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Read it back
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/test/data.bin")
@@ -116,7 +113,7 @@ async fn test_engine_get_file_returns_data() {
 
 #[tokio::test]
 async fn test_engine_get_file_returns_content_type() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -130,7 +127,7 @@ async fn test_engine_get_file_returns_content_type() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/app/config.json")
@@ -148,7 +145,7 @@ async fn test_engine_get_file_returns_content_type() {
 
 #[tokio::test]
 async fn test_engine_get_file_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -164,7 +161,7 @@ async fn test_engine_get_file_404() {
 
 #[tokio::test]
 async fn test_engine_get_directory_returns_listing() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store two files in the same directory
@@ -178,7 +175,7 @@ async fn test_engine_get_directory_returns_listing() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/engine/mydir/file2.txt")
@@ -190,7 +187,7 @@ async fn test_engine_get_directory_returns_listing() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // List the directory
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/mydir")
@@ -215,7 +212,7 @@ async fn test_engine_get_directory_returns_listing() {
 
 #[tokio::test]
 async fn test_engine_delete_file_returns_200() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store first
@@ -229,7 +226,7 @@ async fn test_engine_delete_file_returns_200() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Delete
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
     .uri("/engine/todelete/file.txt")
@@ -246,7 +243,7 @@ async fn test_engine_delete_file_returns_200() {
 
 #[tokio::test]
 async fn test_engine_delete_file_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -262,7 +259,7 @@ async fn test_engine_delete_file_404() {
 
 #[tokio::test]
 async fn test_engine_head_returns_metadata() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -275,7 +272,7 @@ async fn test_engine_head_returns_metadata() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("HEAD")
     .uri("/engine/meta/info.txt")
@@ -305,7 +302,7 @@ async fn test_engine_head_returns_metadata() {
 
 #[tokio::test]
 async fn test_engine_store_creates_intermediate_dirs() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store file at a deeply nested path
@@ -319,7 +316,7 @@ async fn test_engine_store_creates_intermediate_dirs() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Listing "a/b/c" should show "deep.txt"
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/a/b/c")
@@ -338,7 +335,7 @@ async fn test_engine_store_creates_intermediate_dirs() {
 
 #[tokio::test]
 async fn test_engine_store_and_get_roundtrip() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let original_data = "The quick brown fox jumps over the lazy dog.";
@@ -353,7 +350,7 @@ async fn test_engine_store_and_get_roundtrip() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/roundtrip/fox.txt")
@@ -370,7 +367,7 @@ async fn test_engine_store_and_get_roundtrip() {
 
 #[tokio::test]
 async fn test_engine_routes_require_auth() {
-  let (app, _, _, _, _temp_dir) = test_app();
+  let (app, _, _, _temp_dir) = test_app();
 
   // GET without auth should fail
   let request = Request::builder()
@@ -389,7 +386,7 @@ async fn test_engine_routes_require_auth() {
 
 #[tokio::test]
 async fn test_snapshot_create() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -412,7 +409,7 @@ async fn test_snapshot_create() {
 
 #[tokio::test]
 async fn test_snapshot_list() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create two snapshots
@@ -426,7 +423,7 @@ async fn test_snapshot_list() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/version/snapshot")
@@ -438,7 +435,7 @@ async fn test_snapshot_list() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // List snapshots
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/version/snapshots")
@@ -456,7 +453,7 @@ async fn test_snapshot_list() {
 
 #[tokio::test]
 async fn test_snapshot_restore() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create a snapshot
@@ -471,7 +468,7 @@ async fn test_snapshot_restore() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Restore it
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/version/restore")
@@ -490,7 +487,7 @@ async fn test_snapshot_restore() {
 
 #[tokio::test]
 async fn test_snapshot_delete() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create a snapshot
@@ -505,7 +502,7 @@ async fn test_snapshot_delete() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Delete it
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
     .uri("/version/snapshot/to-delete")
@@ -520,7 +517,7 @@ async fn test_snapshot_delete() {
   assert_eq!(json["deleted"], true);
 
   // Should be gone from list
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/version/snapshots")
@@ -540,7 +537,7 @@ async fn test_snapshot_delete() {
 
 #[tokio::test]
 async fn test_fork_create() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -562,7 +559,7 @@ async fn test_fork_create() {
 
 #[tokio::test]
 async fn test_fork_list() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create a fork
@@ -577,7 +574,7 @@ async fn test_fork_list() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // List forks
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/version/forks")
@@ -596,7 +593,7 @@ async fn test_fork_list() {
 
 #[tokio::test]
 async fn test_fork_promote() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create a fork
@@ -611,7 +608,7 @@ async fn test_fork_promote() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Promote it
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/version/fork/promote-me/promote")
@@ -627,7 +624,7 @@ async fn test_fork_promote() {
   assert_eq!(json["name"], "promote-me");
 
   // Fork should be gone after promote
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/version/forks")
@@ -643,7 +640,7 @@ async fn test_fork_promote() {
 
 #[tokio::test]
 async fn test_fork_abandon() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create a fork
@@ -658,7 +655,7 @@ async fn test_fork_abandon() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Abandon it
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
     .uri("/version/fork/abandon-me")
@@ -673,7 +670,7 @@ async fn test_fork_abandon() {
   assert_eq!(json["abandoned"], true);
 
   // Fork should be gone
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/version/forks")
@@ -693,7 +690,7 @@ async fn test_fork_abandon() {
 
 #[tokio::test]
 async fn test_engine_large_file() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Create data larger than one chunk (256 KB)
@@ -714,7 +711,7 @@ async fn test_engine_large_file() {
   assert_eq!(json["total_size"], 300_000);
 
   // Read it back and verify roundtrip
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/big/largefile.bin")
@@ -736,7 +733,7 @@ async fn test_engine_large_file() {
 
 #[tokio::test]
 async fn test_snapshot_create_duplicate_returns_conflict() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -750,7 +747,7 @@ async fn test_snapshot_create_duplicate_returns_conflict() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Duplicate
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/version/snapshot")
@@ -765,7 +762,7 @@ async fn test_snapshot_create_duplicate_returns_conflict() {
 
 #[tokio::test]
 async fn test_snapshot_restore_nonexistent_returns_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -782,7 +779,7 @@ async fn test_snapshot_restore_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_snapshot_delete_nonexistent_returns_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -798,7 +795,7 @@ async fn test_snapshot_delete_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_fork_create_duplicate_returns_conflict() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -811,7 +808,7 @@ async fn test_fork_create_duplicate_returns_conflict() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/version/fork")
@@ -826,7 +823,7 @@ async fn test_fork_create_duplicate_returns_conflict() {
 
 #[tokio::test]
 async fn test_fork_promote_nonexistent_returns_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -842,7 +839,7 @@ async fn test_fork_promote_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_fork_abandon_nonexistent_returns_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -858,7 +855,7 @@ async fn test_fork_abandon_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_version_routes_require_auth() {
-  let (app, _, _, _, _temp_dir) = test_app();
+  let (app, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -873,7 +870,7 @@ async fn test_version_routes_require_auth() {
 
 #[tokio::test]
 async fn test_engine_head_nonexistent_returns_404() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -889,7 +886,7 @@ async fn test_engine_head_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_engine_store_empty_file() {
-  let (app, jwt_manager, storage, engine, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -907,7 +904,7 @@ async fn test_engine_store_empty_file() {
   assert_eq!(json["total_size"], 0);
 
   // Read it back
-  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/engine/empty/zero.txt")

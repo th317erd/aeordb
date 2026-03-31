@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod engine;
-pub mod filesystem;
 pub mod indexing;
 pub mod logging;
 pub mod metrics;

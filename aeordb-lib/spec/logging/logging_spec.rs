@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{
   Router,
   body::Body,
@@ -263,12 +261,8 @@ fn test_log_config_custom_level_string() {
 async fn test_request_id_on_real_server_routes() {
   // Build the real app and check that the health endpoint returns a request_id.
   let temp_dir = tempfile::tempdir().unwrap();
-  let database_path = temp_dir.path().join("test.redb");
-  let storage = Arc::new(
-    aeordb::storage::RedbStorage::new(database_path.to_str().unwrap()).unwrap(),
-  );
   let engine_path = temp_dir.path().join("test.aeordb");
-  let app = aeordb::server::create_app(storage, engine_path.to_str().unwrap());
+  let app = aeordb::server::create_app(engine_path.to_str().unwrap());
 
   let response = app
     .oneshot(
@@ -292,12 +286,8 @@ async fn test_request_id_on_real_server_routes() {
 #[tokio::test]
 async fn test_client_request_id_preserved_on_real_server() {
   let temp_dir = tempfile::tempdir().unwrap();
-  let database_path = temp_dir.path().join("test.redb");
-  let storage = Arc::new(
-    aeordb::storage::RedbStorage::new(database_path.to_str().unwrap()).unwrap(),
-  );
   let engine_path = temp_dir.path().join("test.aeordb");
-  let app = aeordb::server::create_app(storage, engine_path.to_str().unwrap());
+  let app = aeordb::server::create_app(engine_path.to_str().unwrap());
 
   let client_id = "integration-test-id-abc123";
 

@@ -2,18 +2,14 @@ use axum::{
   Extension,
   body::Body,
   extract::{Path, Query, State},
-  http::{HeaderMap, StatusCode},
+  http::StatusCode,
   response::{IntoResponse, Response},
   Json,
 };
-use futures_util::stream;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::responses::{
-  CreateDocumentResponse, DeleteDocumentResponse, DocumentMetadataResponse, ErrorResponse,
-  FileEntryResponse,
-};
+use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord,
@@ -21,243 +17,10 @@ use crate::auth::{
   generate_refresh_token, hash_refresh_token,
 };
 use crate::auth::refresh::DEFAULT_REFRESH_EXPIRY_SECONDS;
-use crate::storage::redb_backend::StorageError;
-
-/// Validate a database or table name for safety.
-/// Allows: alphanumeric, underscores, hyphens.
-/// Rejects: empty, starts with underscore (reserved for system tables),
-/// longer than 255 chars, path traversal characters.
-fn validate_resource_name(name: &str) -> Result<(), String> {
-  if name.is_empty() {
-    return Err("Resource name must not be empty".to_string());
-  }
-
-  if name.len() > 255 {
-    return Err("Resource name must not exceed 255 characters".to_string());
-  }
-
-  if name.starts_with('_') {
-    return Err("Resource names starting with underscore are reserved for system use".to_string());
-  }
-
-  if name.contains('/') || name.contains('\\') || name.contains("..") {
-    return Err("Resource name contains invalid path traversal characters".to_string());
-  }
-
-  if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-    return Err("Resource name must only contain alphanumeric characters, underscores, or hyphens".to_string());
-  }
-
-  Ok(())
-}
-
-/// Build a fully qualified table name from the database and table path segments.
-fn build_table_name(database: &str, table: &str) -> Result<String, Box<Response>> {
-  if let Err(message) = validate_resource_name(database) {
-    return Err(Box::new(
-      ErrorResponse::new(format!("Invalid database name: {}", message))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response(),
-    ));
-  }
-  if let Err(message) = validate_resource_name(table) {
-    return Err(Box::new(
-      ErrorResponse::new(format!("Invalid table name: {}", message))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response(),
-    ));
-  }
-  Ok(format!("{}:{}", database, table))
-}
+use crate::engine::SystemTables;
 
 pub async fn health_check() -> impl IntoResponse {
   Json(serde_json::json!({ "status": "ok" }))
-}
-
-pub async fn create_document(
-  State(state): State<AppState>,
-  Path((database, table)): Path<(String, String)>,
-  headers: HeaderMap,
-  body: axum::body::Bytes,
-) -> Response {
-  let table_name = match build_table_name(&database, &table) {
-    Ok(name) => name,
-    Err(response) => return *response,
-  };
-
-  let content_type = headers
-    .get("content-type")
-    .and_then(|value| value.to_str().ok())
-    .map(|value| value.to_string());
-
-  let document = match state.storage.create_document(&table_name, body.to_vec(), content_type) {
-    Ok(document) => document,
-    Err(error) => {
-      tracing::error!("Failed to create document: {}", error);
-      return ErrorResponse::new(format!("Failed to create document: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  let response_body = CreateDocumentResponse::from(&document);
-  (StatusCode::CREATED, Json(response_body)).into_response()
-}
-
-pub async fn get_document(
-  State(state): State<AppState>,
-  Path((database, table, document_id)): Path<(String, String, String)>,
-) -> Response {
-  let parsed_id = match Uuid::parse_str(&document_id) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new(format!("Invalid document ID: {}", document_id))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
-  };
-
-  let table_name = match build_table_name(&database, &table) {
-    Ok(name) => name,
-    Err(response) => return *response,
-  };
-
-  let document = match state.storage.get_document(&table_name, parsed_id) {
-    Ok(Some(document)) => document,
-    Ok(None) => {
-      return ErrorResponse::new(format!("Document not found: {}", parsed_id))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-    Err(error) => {
-      tracing::error!("Failed to get document: {}", error);
-      return ErrorResponse::new(format!("Failed to get document: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  let mut response_builder = Response::builder()
-    .status(StatusCode::OK)
-    .header("X-Document-Id", document.document_id.to_string())
-    .header("X-Created-At", document.created_at.to_rfc3339())
-    .header("X-Updated-At", document.updated_at.to_rfc3339());
-
-  if let Some(ref content_type) = document.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
-  }
-
-  response_builder
-    .body(Body::from(document.data))
-    .unwrap_or_else(|_| {
-      (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Failed to build response",
-      )
-        .into_response()
-    })
-}
-
-pub async fn update_document(
-  State(state): State<AppState>,
-  Path((database, table, document_id)): Path<(String, String, String)>,
-  body: axum::body::Bytes,
-) -> Response {
-  let parsed_id = match Uuid::parse_str(&document_id) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new(format!("Invalid document ID: {}", document_id))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
-  };
-
-  let table_name = match build_table_name(&database, &table) {
-    Ok(name) => name,
-    Err(response) => return *response,
-  };
-
-  let document = match state.storage.update_document(&table_name, parsed_id, body.to_vec()) {
-    Ok(document) => document,
-    Err(StorageError::DocumentNotFound(id)) => {
-      return ErrorResponse::new(format!("Document not found: {}", id))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-    Err(error) => {
-      tracing::error!("Failed to update document: {}", error);
-      return ErrorResponse::new(format!("Failed to update document: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  let response_body = CreateDocumentResponse::from(&document);
-  (StatusCode::OK, Json(response_body)).into_response()
-}
-
-pub async fn delete_document(
-  State(state): State<AppState>,
-  Path((database, table, document_id)): Path<(String, String, String)>,
-) -> Response {
-  let parsed_id = match Uuid::parse_str(&document_id) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new(format!("Invalid document ID: {}", document_id))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
-  };
-
-  let table_name = match build_table_name(&database, &table) {
-    Ok(name) => name,
-    Err(response) => return *response,
-  };
-
-  match state.storage.delete_document(&table_name, parsed_id) {
-    Ok(()) => {
-      let response_body = DeleteDocumentResponse {
-        deleted: true,
-        document_id: parsed_id,
-      };
-      (StatusCode::OK, Json(response_body)).into_response()
-    }
-    Err(StorageError::DocumentNotFound(id)) => {
-      ErrorResponse::new(format!("Document not found: {}", id))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Failed to delete document: {}", error);
-      ErrorResponse::new(format!("Failed to delete document: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-pub async fn list_documents(
-  State(state): State<AppState>,
-  Path((database, table)): Path<(String, String)>,
-) -> Response {
-  let table_name = match build_table_name(&database, &table) {
-    Ok(name) => name,
-    Err(response) => return *response,
-  };
-
-  match state.storage.list_documents(&table_name) {
-    Ok(documents) => {
-      let metadata: Vec<DocumentMetadataResponse> =
-        documents.iter().map(DocumentMetadataResponse::from).collect();
-      (StatusCode::OK, Json(metadata)).into_response()
-    }
-    Err(error) => {
-      tracing::error!("Failed to list documents: {}", error);
-      ErrorResponse::new(format!("Failed to list documents: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +196,8 @@ pub async fn auth_token(
     }
   };
 
-  let record = match state.storage.get_system_api_key(&key_id_prefix) {
+  let system_tables = SystemTables::new(&state.engine);
+  let record = match system_tables.get_system_api_key(&key_id_prefix) {
     Ok(Some(record)) => record,
     Ok(None) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "not_found").increment(1);
@@ -501,7 +265,7 @@ pub async fn auth_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
-  if let Err(error) = state.storage.store_refresh_token(
+  if let Err(error) = system_tables.store_refresh_token(
     &refresh_token_hash,
     &record.key_id.to_string(),
     refresh_expires_at,
@@ -558,7 +322,8 @@ pub async fn create_api_key(
     is_revoked: false,
   };
 
-  if let Err(error) = state.storage.store_api_key(&record) {
+  let system_tables = SystemTables::new(&state.engine);
+  if let Err(error) = system_tables.store_api_key(&record) {
     tracing::error!("Failed to store API key: {}", error);
     return ErrorResponse::new("Failed to store API key".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -588,7 +353,8 @@ pub async fn list_api_keys(
       .into_response();
   }
 
-  match state.storage.list_system_api_keys() {
+  let system_tables = SystemTables::new(&state.engine);
+  match system_tables.list_system_api_keys() {
     Ok(keys) => {
       let metadata: Vec<serde_json::Value> = keys
         .iter()
@@ -633,7 +399,8 @@ pub async fn revoke_api_key(
     }
   };
 
-  match state.storage.revoke_api_key(parsed_key_id) {
+  let system_tables = SystemTables::new(&state.engine);
+  match system_tables.revoke_api_key(parsed_key_id) {
     Ok(true) => (
       StatusCode::OK,
       Json(serde_json::json!({
@@ -693,10 +460,8 @@ pub async fn request_magic_link(
       crate::auth::magic_link::DEFAULT_MAGIC_LINK_EXPIRY_SECONDS,
     );
 
-  if let Err(error) = state
-    .storage
-    .store_magic_link(&code_hash, &payload.email, expires_at)
-  {
+  let system_tables = SystemTables::new(&state.engine);
+  if let Err(error) = system_tables.store_magic_link(&code_hash, &payload.email, expires_at) {
     tracing::error!("Failed to store magic link: {}", error);
     // Still return 200 to prevent enumeration.
   }
@@ -726,7 +491,8 @@ pub async fn verify_magic_link(
 ) -> Response {
   let code_hash = hash_magic_link_code(&query.code);
 
-  let record = match state.storage.get_magic_link(&code_hash) {
+  let system_tables = SystemTables::new(&state.engine);
+  let record = match system_tables.get_magic_link(&code_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return ErrorResponse::new("Invalid or expired magic link".to_string())
@@ -754,7 +520,7 @@ pub async fn verify_magic_link(
   }
 
   // Mark as used.
-  if let Err(error) = state.storage.mark_magic_link_used(&code_hash) {
+  if let Err(error) = system_tables.mark_magic_link_used(&code_hash) {
     tracing::error!("Failed to mark magic link as used: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -809,7 +575,8 @@ pub async fn refresh_token(
 ) -> Response {
   let old_token_hash = hash_refresh_token(&payload.refresh_token);
 
-  let record = match state.storage.get_refresh_token(&old_token_hash) {
+  let system_tables = SystemTables::new(&state.engine);
+  let record = match system_tables.get_refresh_token(&old_token_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return ErrorResponse::new("Invalid refresh token".to_string())
@@ -837,7 +604,7 @@ pub async fn refresh_token(
   }
 
   // Revoke the old refresh token (rotation).
-  if let Err(error) = state.storage.revoke_refresh_token(&old_token_hash) {
+  if let Err(error) = system_tables.revoke_refresh_token(&old_token_hash) {
     tracing::error!("Failed to revoke old refresh token: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -872,7 +639,7 @@ pub async fn refresh_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
-  if let Err(error) = state.storage.store_refresh_token(
+  if let Err(error) = system_tables.store_refresh_token(
     &new_refresh_hash,
     &record.user_subject,
     refresh_expires_at,
@@ -892,188 +659,6 @@ pub async fn refresh_token(
     })),
   )
     .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// Filesystem routes
-// ---------------------------------------------------------------------------
-
-/// PUT /fs/*path -- store a file at the given path.
-pub async fn filesystem_store_file(
-  State(state): State<AppState>,
-  Path(path): Path<String>,
-  headers: HeaderMap,
-  body: axum::body::Bytes,
-) -> Response {
-  let content_type = headers
-    .get("content-type")
-    .and_then(|value| value.to_str().ok());
-
-  let entry = match state.path_resolver.store_file(
-    &path,
-    &body,
-    content_type,
-  ) {
-    Ok(entry) => entry,
-    Err(error) => {
-      tracing::error!("Failed to store file at '{}': {}", path, error);
-      let status = match &error {
-        crate::filesystem::PathError::InvalidPath(_) => StatusCode::BAD_REQUEST,
-        crate::filesystem::PathError::NotAFile(_) => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-      };
-      return ErrorResponse::new(format!("Failed to store file: {}", error))
-        .with_status(status)
-        .into_response();
-    }
-  };
-
-  let response_body = FileEntryResponse::from(&entry);
-  (StatusCode::CREATED, Json(response_body)).into_response()
-}
-
-/// GET /fs/*path -- get a file or directory listing.
-pub async fn filesystem_get(
-  State(state): State<AppState>,
-  Path(path): Path<String>,
-) -> Response {
-  // First check metadata to determine if it is a file or directory.
-  let metadata = match state.path_resolver.get_metadata(&path) {
-    Ok(Some(metadata)) => metadata,
-    Ok(None) => {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-    Err(error) => {
-      tracing::error!("Failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new(format!("Failed to read path: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  if metadata.entry_type == crate::filesystem::EntryType::Directory {
-    // Return directory listing as JSON.
-    return match state.path_resolver.list_directory(&path) {
-      Ok(entries) => {
-        let listing: Vec<FileEntryResponse> =
-          entries.iter().map(FileEntryResponse::from).collect();
-        (StatusCode::OK, Json(listing)).into_response()
-      }
-      Err(error) => {
-        tracing::error!("Failed to list directory '{}': {}", path, error);
-        ErrorResponse::new(format!("Failed to list directory: {}", error))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-      }
-    };
-  }
-
-  // It is a file -- stream the chunks.
-  let file_stream = match state.path_resolver.read_file_streaming(&path) {
-    Ok(file_stream) => file_stream,
-    Err(error) => {
-      tracing::error!("Failed to read file '{}': {}", path, error);
-      let status = match &error {
-        crate::filesystem::PathError::NotFound(_) => StatusCode::NOT_FOUND,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-      };
-      return ErrorResponse::new(format!("Failed to read file: {}", error))
-        .with_status(status)
-        .into_response();
-    }
-  };
-
-  // Convert the synchronous FileStream iterator into an async stream of Results.
-  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-    chunk_result
-      .map(axum::body::Bytes::from)
-      .map_err(|error| std::io::Error::other(error.to_string()))
-  }));
-
-  let body = Body::from_stream(chunk_stream);
-
-  let mut response_builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
-    .header("X-Document-Id", metadata.document_id.to_string())
-    .header("X-Created-At", metadata.created_at.to_rfc3339())
-    .header("X-Updated-At", metadata.updated_at.to_rfc3339())
-    .header("X-Total-Size", metadata.total_size.to_string());
-
-  if let Some(ref content_type) = metadata.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
-  }
-
-  response_builder
-    .body(body)
-    .unwrap_or_else(|_| {
-      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-    })
-}
-
-/// DELETE /fs/*path -- delete a file at the given path.
-pub async fn filesystem_delete_file(
-  State(state): State<AppState>,
-  Path(path): Path<String>,
-) -> Response {
-  let entry = match state.path_resolver.delete_file(&path) {
-    Ok(entry) => entry,
-    Err(error) => {
-      let status = match &error {
-        crate::filesystem::PathError::NotFound(_) => StatusCode::NOT_FOUND,
-        crate::filesystem::PathError::InvalidPath(_) => StatusCode::BAD_REQUEST,
-        crate::filesystem::PathError::NotAFile(_) => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-      };
-      return ErrorResponse::new(format!("Failed to delete file: {}", error))
-        .with_status(status)
-        .into_response();
-    }
-  };
-
-  let response_body = FileEntryResponse::from(&entry);
-  (StatusCode::OK, Json(response_body)).into_response()
-}
-
-/// HEAD /fs/*path -- get metadata only (no body).
-pub async fn filesystem_head(
-  State(state): State<AppState>,
-  Path(path): Path<String>,
-) -> Response {
-  let metadata = match state.path_resolver.get_metadata(&path) {
-    Ok(Some(metadata)) => metadata,
-    Ok(None) => {
-      return StatusCode::NOT_FOUND.into_response();
-    }
-    Err(error) => {
-      tracing::error!("Failed to get metadata for '{}': {}", path, error);
-      return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-  };
-
-  let entry_type_string = match metadata.entry_type {
-    crate::filesystem::EntryType::File => "file",
-    crate::filesystem::EntryType::Directory => "directory",
-    crate::filesystem::EntryType::HardLink => "hard_link",
-  };
-
-  let mut response_builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
-    .header("X-Entry-Type", entry_type_string)
-    .header("X-Document-Id", metadata.document_id.to_string())
-    .header("X-Created-At", metadata.created_at.to_rfc3339())
-    .header("X-Updated-At", metadata.updated_at.to_rfc3339())
-    .header("X-Total-Size", metadata.total_size.to_string())
-    .header("X-Name", &metadata.name);
-
-  if let Some(ref content_type) = metadata.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
-  }
-
-  response_builder
-    .body(Body::empty())
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 // ---------------------------------------------------------------------------

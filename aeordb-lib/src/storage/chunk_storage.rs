@@ -19,9 +19,6 @@ pub enum ChunkStoreError {
 
   #[error("serialization error: {0}")]
   SerializationError(String),
-
-  #[error("redb error: {0}")]
-  RedbError(String),
 }
 
 /// Trait for physical storage of content-addressed chunks.

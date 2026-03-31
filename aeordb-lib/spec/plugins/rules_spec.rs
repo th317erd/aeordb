@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use aeordb::plugins::rule_engine::{combine_decisions, RuleEngine};
 use aeordb::plugins::types::{PluginType, RuleContext, RuleDecision};
 use aeordb::plugins::PluginManager;
-use aeordb::storage::RedbStorage;
+use aeordb::server::create_temp_engine_for_tests;
 
-fn test_storage_and_manager() -> (Arc<RedbStorage>, PluginManager) {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
-  let plugin_manager = PluginManager::new(storage.database_arc());
-  (storage, plugin_manager)
+fn test_manager() -> (PluginManager, tempfile::TempDir) {
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let plugin_manager = PluginManager::new(engine);
+  (plugin_manager, temp_dir)
 }
 
 fn sample_context() -> RuleContext {
@@ -41,7 +39,7 @@ fn dummy_wasm_bytes() -> Vec<u8> {
 
 #[test]
 fn test_no_rules_means_allow() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
   let engine = RuleEngine::new(&plugin_manager);
   let context = sample_context();
 
@@ -51,7 +49,7 @@ fn test_no_rules_means_allow() {
 
 #[test]
 fn test_deploy_rule_plugin() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   let result = plugin_manager.deploy_plugin(
     "test-rule",
@@ -68,7 +66,7 @@ fn test_deploy_rule_plugin() {
 
 #[test]
 fn test_rule_collected_from_hierarchy() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a rule at the database level.
   plugin_manager
@@ -103,7 +101,7 @@ fn test_rule_collected_from_hierarchy() {
 
 #[test]
 fn test_rule_inherits_to_child_scopes() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   plugin_manager
     .deploy_plugin(
@@ -126,7 +124,7 @@ fn test_rule_inherits_to_child_scopes() {
 
 #[test]
 fn test_rule_does_not_apply_to_sibling_scopes() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   plugin_manager
     .deploy_plugin(
@@ -189,7 +187,7 @@ fn test_most_restrictive_rule_wins() {
 
 #[test]
 fn test_evaluate_with_no_rules_returns_allow() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
   let engine = RuleEngine::new(&plugin_manager);
   let context = sample_context();
 
@@ -199,7 +197,7 @@ fn test_evaluate_with_no_rules_returns_allow() {
 
 #[test]
 fn test_evaluate_with_deployed_rules_does_not_crash() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a rule that returns an empty response (which defaults to Allow).
   plugin_manager
@@ -221,7 +219,7 @@ fn test_evaluate_with_deployed_rules_does_not_crash() {
 
 #[test]
 fn test_non_rule_plugins_ignored_by_rule_engine() {
-  let (_, plugin_manager) = test_storage_and_manager();
+  let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a regular WASM plugin (not a rule).
   plugin_manager

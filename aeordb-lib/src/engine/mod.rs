@@ -15,6 +15,7 @@ pub mod kv_store;
 pub mod nvt;
 pub mod path_utils;
 pub mod storage_engine;
+pub mod system_tables;
 pub mod version_manager;
 pub mod void_manager;
 
@@ -41,4 +42,5 @@ pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
 pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::StorageEngine;
 pub use directory_ops::{DirectoryOps, EngineFileStream};
+pub use system_tables::{SystemTables, SystemTableError};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};

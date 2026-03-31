@@ -12,16 +12,18 @@ pub use middleware::auth_middleware;
 pub use rate_limiter::RateLimiter;
 pub use refresh::{RefreshTokenRecord, generate_refresh_token, hash_refresh_token};
 
-use crate::storage::RedbStorage;
+use crate::engine::{StorageEngine, SystemTables};
 
 /// Bootstrap a root API key if no keys exist yet.
 ///
 /// Returns the plaintext key ONLY on first startup (when no keys exist).
 /// Returns None if any API key records are already present.
 pub fn bootstrap_root_key(
-  storage: &RedbStorage,
+  engine: &StorageEngine,
 ) -> Option<String> {
-  let existing_keys = storage
+  let system_tables = SystemTables::new(engine);
+
+  let existing_keys = system_tables
     .list_system_api_keys()
     .unwrap_or_default();
 
@@ -42,7 +44,7 @@ pub fn bootstrap_root_key(
     is_revoked: false,
   };
 
-  storage
+  system_tables
     .store_api_key(&record)
     .expect("failed to store root API key");
 

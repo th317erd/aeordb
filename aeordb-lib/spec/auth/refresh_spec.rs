@@ -8,17 +8,10 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::refresh::{generate_refresh_token, hash_refresh_token, DEFAULT_REFRESH_EXPIRY_SECONDS};
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::plugins::PluginManager;
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::filesystem::PathResolver;
+use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
-use aeordb::storage::{ChunkStore, RedbStorage};
-
-fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
-  let database_arc = storage.database_arc();
-  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
-  Arc::new(PathResolver::new(database_arc, chunk_store))
-}
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
   metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -26,43 +19,34 @@ fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     .handle()
 }
 
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>, tempfile::TempDir) {
-  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLimiter>, tempfile::TempDir) {
   let jwt_manager = Arc::new(JwtManager::generate());
-  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
-  let rate_limiter = Arc::new(RateLimiter::default_config());
-  let path_resolver = make_path_resolver(&storage);
   let (engine, temp_dir) = create_temp_engine_for_tests();
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
   let app = create_app_with_all(
-    storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
-    path_resolver,
     make_prometheus_handle(),
-    engine,
+    engine.clone(),
   );
-  (app, jwt_manager, storage, rate_limiter, temp_dir)
+  (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
 
 fn rebuild_app(
-  storage: &Arc<RedbStorage>,
   jwt_manager: &Arc<JwtManager>,
+  engine: &Arc<StorageEngine>,
   rate_limiter: &Arc<RateLimiter>,
-) -> (axum::Router, tempfile::TempDir) {
-  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
-  let path_resolver = make_path_resolver(storage);
-  let (engine, temp_dir) = create_temp_engine_for_tests();
-  let router = create_app_with_all(
-    storage.clone(),
+) -> axum::Router {
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  create_app_with_all(
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
-    path_resolver,
     make_prometheus_handle(),
-    engine,
-  );
-  (router, temp_dir)
+    engine.clone(),
+  )
 }
 
 async fn body_json(body: Body) -> serde_json::Value {
@@ -70,8 +54,9 @@ async fn body_json(body: Body) -> serde_json::Value {
   serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
-/// Helper: create an API key in storage and return the plaintext key.
-fn seed_api_key(storage: &RedbStorage) -> String {
+/// Helper: create an API key in engine and return the plaintext key.
+fn seed_api_key(engine: &StorageEngine) -> String {
+  let system_tables = SystemTables::new(engine);
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -82,7 +67,7 @@ fn seed_api_key(storage: &RedbStorage) -> String {
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
-  storage.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&record).unwrap();
   plaintext_key
 }
 
@@ -92,10 +77,10 @@ fn seed_api_key(storage: &RedbStorage) -> String {
 
 #[tokio::test]
 async fn test_auth_token_endpoint_returns_refresh_token() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
-  let plaintext_key = seed_api_key(&storage);
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let plaintext_key = seed_api_key(&engine);
 
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/token")
@@ -118,17 +103,17 @@ async fn test_auth_token_endpoint_returns_refresh_token() {
 
 #[tokio::test]
 async fn test_refresh_returns_new_jwt() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
-  // Seed a refresh token directly.
+  let system_tables = SystemTables::new(&engine);
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  storage
+  system_tables
     .store_refresh_token(&token_hash, "test-user", expires_at)
     .unwrap();
 
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -149,16 +134,17 @@ async fn test_refresh_returns_new_jwt() {
 
 #[tokio::test]
 async fn test_refresh_rotates_refresh_token() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
+  let system_tables = SystemTables::new(&engine);
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  storage
+  system_tables
     .store_refresh_token(&token_hash, "rotate-user", expires_at)
     .unwrap();
 
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -174,25 +160,24 @@ async fn test_refresh_rotates_refresh_token() {
 
   let json = body_json(response.into_body()).await;
   let new_refresh_token = json["refresh_token"].as_str().unwrap();
-
-  // New refresh token should be different from the old one.
   assert_ne!(new_refresh_token, refresh_token);
   assert!(new_refresh_token.starts_with("aeor_r_"));
 }
 
 #[tokio::test]
 async fn test_old_refresh_token_rejected_after_rotation() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
+  let system_tables = SystemTables::new(&engine);
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  storage
+  system_tables
     .store_refresh_token(&token_hash, "rotation-user", expires_at)
     .unwrap();
 
   // First refresh succeeds and rotates.
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -206,7 +191,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
   assert_eq!(response.status(), StatusCode::OK);
 
   // Using the old token again should fail.
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -222,17 +207,17 @@ async fn test_old_refresh_token_rejected_after_rotation() {
 
 #[tokio::test]
 async fn test_expired_refresh_token_rejected() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
+  let system_tables = SystemTables::new(&engine);
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
-  // Expired 1 hour ago.
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
-  storage
+  system_tables
     .store_refresh_token(&token_hash, "expired-user", expires_at)
     .unwrap();
 
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -279,11 +264,11 @@ async fn test_refresh_missing_body_field() {
 
 #[tokio::test]
 async fn test_full_refresh_flow_from_api_key() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
-  let plaintext_key = seed_api_key(&storage);
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let plaintext_key = seed_api_key(&engine);
 
   // Step 1: Get initial token + refresh token.
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/token")
@@ -296,10 +281,9 @@ async fn test_full_refresh_flow_from_api_key() {
 
   let json = body_json(response.into_body()).await;
   let initial_refresh_token = json["refresh_token"].as_str().unwrap().to_string();
-  let _initial_jwt = json["token"].as_str().unwrap().to_string();
 
   // Step 2: Use refresh token to get new JWT.
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
@@ -317,29 +301,27 @@ async fn test_full_refresh_flow_from_api_key() {
   let new_jwt = json["token"].as_str().unwrap().to_string();
   let new_refresh_token = json["refresh_token"].as_str().unwrap().to_string();
 
-  // New refresh token should be different from the old one.
   assert_ne!(new_refresh_token, initial_refresh_token);
 
-  // New JWT should be valid and verifiable.
   let claims = jwt_manager.verify_token(&new_jwt);
   assert!(claims.is_ok(), "new JWT should be valid");
 }
 
 #[tokio::test]
 async fn test_revoked_refresh_token_rejected() {
-  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
+  let system_tables = SystemTables::new(&engine);
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  storage
+  system_tables
     .store_refresh_token(&token_hash, "revoke-test-user", expires_at)
     .unwrap();
 
-  // Manually revoke it.
-  storage.revoke_refresh_token(&token_hash).unwrap();
+  system_tables.revoke_refresh_token(&token_hash).unwrap();
 
-  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")

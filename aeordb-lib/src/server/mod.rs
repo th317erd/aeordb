@@ -13,29 +13,28 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, StorageEngine};
-use crate::filesystem::PathResolver;
+use crate::engine::{DirectoryOps, StorageEngine, SystemTables};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
 use crate::plugins::PluginManager;
-use crate::storage::{ChunkStore, RedbStorage};
 use state::AppState;
 
 const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
 
 /// Build the full application router with all routes and middleware.
-/// Loads or generates the signing key from the storage config table.
-pub fn create_app(storage: Arc<RedbStorage>, engine_path: &str) -> Router {
-  let jwt_manager = load_or_create_jwt_manager(&storage);
-  let prometheus_handle = initialize_metrics();
+/// Loads or generates the signing key from the engine's system tables.
+pub fn create_app(engine_path: &str) -> Router {
   let engine = create_engine_for_storage(engine_path);
-  create_app_with_jwt_and_metrics(storage, Arc::new(jwt_manager), prometheus_handle, engine)
+  let jwt_manager = load_or_create_jwt_manager(&engine);
+  let prometheus_handle = initialize_metrics();
+  create_app_with_jwt_and_metrics(Arc::new(jwt_manager), prometheus_handle, engine)
 }
 
 /// Load an existing signing key from config, or generate a new one and persist it.
-fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
-  if let Ok(Some(key_bytes)) = storage.get_config(SIGNING_KEY_CONFIG) {
+fn load_or_create_jwt_manager(engine: &StorageEngine) -> JwtManager {
+  let system_tables = SystemTables::new(engine);
+  if let Ok(Some(key_bytes)) = system_tables.get_config(SIGNING_KEY_CONFIG) {
     if let Ok(manager) = JwtManager::from_bytes(&key_bytes) {
       return manager;
     }
@@ -43,101 +42,66 @@ fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
 
   let manager = JwtManager::generate();
   let key_bytes = manager.to_bytes();
-  storage
+  system_tables
     .store_config(SIGNING_KEY_CONFIG, &key_bytes)
     .expect("failed to persist JWT signing key");
   manager
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
-/// Initializes a fresh metrics recorder. If a global recorder is already
-/// installed (e.g. from another test), this falls back to a no-op recorder
-/// and the prometheus handle will render empty output.
-pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
+pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
   let prometheus_handle = try_initialize_metrics();
-  create_app_with_jwt_and_metrics(storage, jwt_manager, prometheus_handle, engine)
+  create_app_with_jwt_and_metrics(jwt_manager, prometheus_handle, engine)
 }
 
 /// Build the application router with a specific JwtManager and engine (useful
 /// for tests that need to reuse the same StorageEngine across rebuilds).
 pub fn create_app_with_jwt_and_engine(
-  storage: Arc<RedbStorage>,
   jwt_manager: Arc<JwtManager>,
   engine: Arc<StorageEngine>,
 ) -> Router {
   let prometheus_handle = try_initialize_metrics();
-  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
-  let database_arc = storage.database_arc();
-  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
-  let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
-
-  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle, engine)
+  create_app_with_all(jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
 }
 
 /// Build the application router with an explicit PrometheusHandle.
 pub fn create_app_with_jwt_and_metrics(
-  storage: Arc<RedbStorage>,
   jwt_manager: Arc<JwtManager>,
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
 ) -> Router {
-  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
-  let database_arc = storage.database_arc();
-  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
-  let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
-
-  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle, engine)
+  create_app_with_all(jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
 /// that need to control the rate limiter).
 pub fn create_app_with_all(
-  storage: Arc<RedbStorage>,
   jwt_manager: Arc<JwtManager>,
   plugin_manager: Arc<PluginManager>,
   rate_limiter: Arc<RateLimiter>,
-  path_resolver: Arc<PathResolver>,
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
 ) -> Router {
   let app_state = AppState {
-    storage,
     jwt_manager,
     plugin_manager,
     rate_limiter,
-    path_resolver,
     prometheus_handle,
     engine,
   };
 
   // Routes that require authentication
   let protected_routes = Router::new()
-    .route(
-      "/{database}/{table}",
-      post(routes::create_document).get(routes::list_documents),
-    )
-    .route(
-      "/{database}/{table}/{id}",
-      get(routes::get_document)
-        .patch(routes::update_document)
-        .delete(routes::delete_document),
-    )
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
     .route("/admin/metrics", get(routes::metrics_endpoint))
-    // Filesystem routes (existing redb-based)
-    .route(
-      "/fs/{*path}",
-      put(routes::filesystem_store_file)
-        .get(routes::filesystem_get)
-        .delete(routes::filesystem_delete_file)
-        .head(routes::filesystem_head),
-    )
-    // Engine routes (new custom storage engine)
+    // Engine routes (custom storage engine)
     .route(
       "/engine/{*path}",
       put(engine_routes::engine_store_file)

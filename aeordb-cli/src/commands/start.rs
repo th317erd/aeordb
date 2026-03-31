@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::net::SocketAddr;
 
 use aeordb::auth::bootstrap_root_key;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::create_app;
-use aeordb::storage::RedbStorage;
+use aeordb::server::{create_app, create_engine_for_storage};
 
 pub async fn run(port: u16, database: &str, log_format: &str) {
   let log_config = LogConfig {
@@ -17,33 +15,24 @@ pub async fn run(port: u16, database: &str, log_format: &str) {
 
   initialize_logging(&log_config);
 
-  // The engine file IS the database file (.aeordb).
-  // redb system tables get a separate file with a .sys suffix.
-  let system_tables_path = format!("{database}.sys");
-
   println!("AeorDB v{}", env!("CARGO_PKG_VERSION"));
   println!("Database: {database}");
-  println!("System tables: {system_tables_path}");
   println!("Port: {port}");
   println!();
 
-  let storage = match RedbStorage::new(&system_tables_path) {
-    Ok(storage) => Arc::new(storage),
-    Err(error) => {
-      eprintln!("Failed to open system tables at '{system_tables_path}': {error}");
-      std::process::exit(1);
-    }
-  };
-
-  if let Some(root_key) = bootstrap_root_key(&storage) {
+  // Bootstrap root key using the engine before building the app.
+  let engine = create_engine_for_storage(database);
+  if let Some(root_key) = bootstrap_root_key(&engine) {
     println!("==========================================================");
     println!("  ROOT API KEY (shown once, save it now!):");
     println!("  {root_key}");
     println!("==========================================================");
     println!();
   }
+  // Drop the engine Arc so create_app can open it fresh.
+  drop(engine);
 
-  let application = create_app(storage, database);
+  let application = create_app(database);
 
   let address = SocketAddr::from(([0, 0, 0, 0], port));
   println!("Listening on http://{address}");

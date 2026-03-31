@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
-use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::types::{PluginMetadata, PluginType};
 use super::wasm_runtime::WasmPluginRuntime;
+use crate::engine::StorageEngine;
+use crate::engine::SystemTables;
 
 /// Persistent record for a deployed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,18 +31,19 @@ impl PluginRecord {
   }
 }
 
-/// Manages the lifecycle of deployed plugins backed by redb storage.
+/// Manages the lifecycle of deployed plugins backed by the StorageEngine.
 pub struct PluginManager {
-  database: std::sync::Arc<redb::Database>,
+  engine: std::sync::Arc<StorageEngine>,
 }
 
-const PLUGINS_TABLE: TableDefinition<'static, &str, &[u8]> =
-  TableDefinition::new("_system:plugins");
-
 impl PluginManager {
-  /// Create a new PluginManager sharing the given redb Database handle.
-  pub fn new(database: std::sync::Arc<redb::Database>) -> Self {
-    Self { database }
+  /// Create a new PluginManager sharing the given StorageEngine.
+  pub fn new(engine: std::sync::Arc<StorageEngine>) -> Self {
+    Self { engine }
+  }
+
+  fn system_tables(&self) -> SystemTables<'_> {
+    SystemTables::new(&self.engine)
   }
 
   /// Deploy (or overwrite) a plugin at the given path.
@@ -83,20 +85,8 @@ impl PluginManager {
     let encoded = serde_json::to_vec(&record)
       .map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
 
-    let write_transaction = self
-      .database
-      .begin_write()
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-    {
-      let mut table = write_transaction
-        .open_table(PLUGINS_TABLE)
-        .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-      table
-        .insert(path, encoded.as_slice())
-        .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-    }
-    write_transaction
-      .commit()
+    self.system_tables()
+      .store_plugin(path, &encoded)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     tracing::info!(
@@ -111,52 +101,29 @@ impl PluginManager {
 
   /// Retrieve a deployed plugin by its path.
   pub fn get_plugin(&self, path: &str) -> Result<Option<PluginRecord>, PluginManagerError> {
-    let read_transaction = self
-      .database
-      .begin_read()
+    let data = self.system_tables()
+      .get_plugin(path)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
-    let table = match read_transaction.open_table(PLUGINS_TABLE) {
-      Ok(table) => table,
-      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-      Err(error) => return Err(PluginManagerError::Storage(error.to_string())),
-    };
-
-    let guard = match table
-      .get(path)
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?
-    {
-      Some(guard) => guard,
-      None => return Ok(None),
-    };
-
-    let record: PluginRecord = serde_json::from_slice(guard.value())
-      .map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
-
-    Ok(Some(record))
+    match data {
+      Some(bytes) => {
+        let record: PluginRecord = serde_json::from_slice(&bytes)
+          .map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
+        Ok(Some(record))
+      }
+      None => Ok(None),
+    }
   }
 
   /// List metadata for all deployed plugins.
   pub fn list_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
-    let read_transaction = self
-      .database
-      .begin_read()
+    let entries = self.system_tables()
+      .list_plugins()
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
-    let table = match read_transaction.open_table(PLUGINS_TABLE) {
-      Ok(table) => table,
-      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-      Err(error) => return Err(PluginManagerError::Storage(error.to_string())),
-    };
-
     let mut plugins = Vec::new();
-    for result in table
-      .iter()
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?
-    {
-      let (_, value_guard) =
-        result.map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-      let record: PluginRecord = serde_json::from_slice(value_guard.value()).map_err(|error| {
+    for (_path, bytes) in entries {
+      let record: PluginRecord = serde_json::from_slice(&bytes).map_err(|error| {
         PluginManagerError::Storage(format!("deserialization failed: {}", error))
       })?;
       plugins.push(record.to_metadata());
@@ -169,27 +136,9 @@ impl PluginManager {
   ///
   /// Returns true if the plugin existed and was removed, false if not found.
   pub fn remove_plugin(&self, path: &str) -> Result<bool, PluginManagerError> {
-    let write_transaction = self
-      .database
-      .begin_write()
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-
-    let removed = {
-      let mut table = write_transaction
-        .open_table(PLUGINS_TABLE)
-        .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-      let existed = table
-        .remove(path)
-        .map_err(|error| PluginManagerError::Storage(error.to_string()))?
-        .is_some();
-      existed
-    };
-
-    write_transaction
-      .commit()
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
-
-    Ok(removed)
+    self.system_tables()
+      .remove_plugin(path)
+      .map_err(|error| PluginManagerError::Storage(error.to_string()))
   }
 
   /// Instantiate and invoke a deployed WASM plugin.
