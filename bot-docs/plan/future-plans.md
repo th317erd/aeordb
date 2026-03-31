@@ -186,6 +186,87 @@ The server resolves `mod` imports by looking up files in the database filesystem
 
 **Inspiration:** Mythix ORM's proxy-based chainable query engine (JavaScript). The Rust equivalent uses proc macros for compile-time code generation instead of runtime proxies.
 
+### Functions as Endpoints (Programmable Schema)
+
+Published functions are **callable endpoints**. They receive arguments from HTTP request bodies and return results. The database serves them like an API.
+
+**Publishing:**
+```
+PUT /engine/myapp/.functions/find_users.rs
+Body: raw Rust source
+```
+
+**Invoking with arguments:**
+```
+POST /engine/myapp/.functions/find_users/_invoke
+{
+  "name": "Bob",
+  "max_age": 30,
+  "limit": 10
+}
+```
+
+**The function receives typed arguments:**
+```rust
+#[query_function]
+fn find_users(args: Args) -> QueryResult {
+  let name: String = args.get("name")?;
+  let max_age: u64 = args.get("max_age")?;
+  let limit: usize = args.get_or("limit", 100);
+
+  User::query()
+    .name().fuzzy(&name)
+    .age().lt(max_age)
+    .limit(limit)
+    .all()
+}
+```
+
+**Every published function is a custom API endpoint.** The user defines the interface (arguments), the logic (query + computation), and the output (response format). The database serves it over HTTP.
+
+### The Programmable Namespace
+
+Data and code live in the same filesystem, versioned together:
+
+```
+/myapp/
+  .functions/
+    models/
+      user.rs              ← schema definition
+      product.rs           ← schema definition
+    find_users.rs          ← queryable endpoint (accepts arguments)
+    create_report.rs       ← computation endpoint
+    migrate_data.rs        ← admin operation
+    validate_email.rs      ← utility (callable by other functions)
+  users/
+    alice.json             ← actual data
+    bob.json
+  products/
+    widget.json
+```
+
+**Rolling back a version rolls back BOTH the data AND the functions.** The query logic that operated on the data at v1 is preserved with the data from v1. Functions and data are first-class citizens of the same filesystem.
+
+**Functions can call other functions:**
+```rust
+#[query_function]
+fn create_report(args: Args) -> QueryResult {
+  let users = invoke("find_users", json!({ "name": args.get("name")? }))?;
+  let products = invoke("list_products", json!({ "category": "widgets" }))?;
+  // ... compute report from users + products ...
+  Response::json(200, &report)
+}
+```
+
+### What This Makes Possible
+
+- **Custom APIs** — every function is an endpoint. No API server needed.
+- **Parameterized queries** — same function, different arguments, different results.
+- **Composable logic** — functions call functions. Build complex operations from simple ones.
+- **Versioned logic** — roll back data + code together. Test against historical state.
+- **Forkable logic** — fork the database, modify the functions, test, promote.
+- **Self-documenting** — the function source IS the API documentation. It's right there in the filesystem.
+
 ---
 
 ## HTTP-to-DB User Mapping + Permission Resolution
