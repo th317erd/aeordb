@@ -184,3 +184,15 @@ path = "spec/engine/nvt_spec.rs"
 [[test]]
 name = "kv_store_spec"
 path = "spec/engine/kv_store_spec.rs"
+
+[[test]]
+name = "kv_resize_spec"
+path = "spec/engine/kv_resize_spec.rs"
+
+[[test]]
+name = "void_manager_spec"
+path = "spec/engine/void_manager_spec.rs"
+
+[[test]]
+name = "engine_chunk_storage_spec"
+path = "spec/engine/engine_chunk_storage_spec.rs"
