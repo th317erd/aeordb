@@ -204,3 +204,7 @@ path = "spec/engine/directory_ops_spec.rs"
 [[test]]
 name = "versioning_spec"
 path = "spec/engine/versioning_spec.rs"
+
+[[test]]
+name = "engine_http_spec"
+path = "spec/http/engine_http_spec.rs"

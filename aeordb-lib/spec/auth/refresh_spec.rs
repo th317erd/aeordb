@@ -11,7 +11,7 @@ use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::filesystem::PathResolver;
-use aeordb::server::create_app_with_all;
+use aeordb::server::{create_app_with_all, create_engine_for_storage};
 use aeordb::storage::{ChunkStore, RedbStorage};
 
 fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
@@ -32,6 +32,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimit
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let path_resolver = make_path_resolver(&storage);
+  let engine = create_engine_for_storage();
   let app = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
@@ -39,6 +40,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimit
     rate_limiter.clone(),
     path_resolver,
     make_prometheus_handle(),
+    engine,
   );
   (app, jwt_manager, storage, rate_limiter)
 }
@@ -50,6 +52,7 @@ fn rebuild_app(
 ) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let path_resolver = make_path_resolver(storage);
+  let engine = create_engine_for_storage();
   create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
@@ -57,6 +60,7 @@ fn rebuild_app(
     rate_limiter.clone(),
     path_resolver,
     make_prometheus_handle(),
+    engine,
   )
 }
 

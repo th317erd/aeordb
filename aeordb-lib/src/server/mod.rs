@@ -1,3 +1,4 @@
+pub mod engine_routes;
 pub mod responses;
 pub mod routes;
 pub mod state;
@@ -12,6 +13,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
+use crate::engine::{DirectoryOps, StorageEngine};
 use crate::filesystem::PathResolver;
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
@@ -55,6 +57,24 @@ pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManage
   create_app_with_jwt_and_metrics(storage, jwt_manager, prometheus_handle)
 }
 
+/// Build the application router with a specific JwtManager and engine (useful
+/// for tests that need to reuse the same StorageEngine across rebuilds).
+pub fn create_app_with_jwt_and_engine(
+  storage: Arc<RedbStorage>,
+  jwt_manager: Arc<JwtManager>,
+  engine: Arc<StorageEngine>,
+) -> Router {
+  let prometheus_handle = try_initialize_metrics();
+  let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+
+  let database_arc = storage.database_arc();
+  let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
+  let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
+
+  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle, engine)
+}
+
 /// Build the application router with an explicit PrometheusHandle.
 pub fn create_app_with_jwt_and_metrics(
   storage: Arc<RedbStorage>,
@@ -68,7 +88,8 @@ pub fn create_app_with_jwt_and_metrics(
   let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
   let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
 
-  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle)
+  let engine = create_engine_for_storage();
+  create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle, engine)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
@@ -80,6 +101,7 @@ pub fn create_app_with_all(
   rate_limiter: Arc<RateLimiter>,
   path_resolver: Arc<PathResolver>,
   prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
 ) -> Router {
   let app_state = AppState {
     storage,
@@ -88,6 +110,7 @@ pub fn create_app_with_all(
     rate_limiter,
     path_resolver,
     prometheus_handle,
+    engine,
   };
 
   // Routes that require authentication
@@ -105,7 +128,7 @@ pub fn create_app_with_all(
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
     .route("/admin/metrics", get(routes::metrics_endpoint))
-    // Filesystem routes
+    // Filesystem routes (existing redb-based)
     .route(
       "/fs/{*path}",
       put(routes::filesystem_store_file)
@@ -113,6 +136,24 @@ pub fn create_app_with_all(
         .delete(routes::filesystem_delete_file)
         .head(routes::filesystem_head),
     )
+    // Engine routes (new custom storage engine)
+    .route(
+      "/engine/{*path}",
+      put(engine_routes::engine_store_file)
+        .get(engine_routes::engine_get)
+        .delete(engine_routes::engine_delete_file)
+        .head(engine_routes::engine_head),
+    )
+    // Version: snapshot routes
+    .route("/version/snapshot", post(engine_routes::snapshot_create))
+    .route("/version/snapshots", get(engine_routes::snapshot_list))
+    .route("/version/restore", post(engine_routes::snapshot_restore))
+    .route("/version/snapshot/{name}", delete(engine_routes::snapshot_delete))
+    // Version: fork routes
+    .route("/version/fork", post(engine_routes::fork_create))
+    .route("/version/forks", get(engine_routes::fork_list))
+    .route("/version/fork/{name}/promote", post(engine_routes::fork_promote))
+    .route("/version/fork/{name}", delete(engine_routes::fork_abandon))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
@@ -156,3 +197,20 @@ fn try_initialize_metrics() -> PrometheusHandle {
 }
 
 use crate::auth::middleware::auth_middleware;
+
+/// Create a new in-memory StorageEngine for use alongside redb storage.
+/// Initializes the root directory so the engine is ready for file operations.
+pub fn create_engine_for_storage() -> Arc<StorageEngine> {
+  let temp_dir = std::env::temp_dir();
+  let engine_file = temp_dir
+    .join(format!("aeordb-engine-{}.aeordb", uuid::Uuid::new_v4()));
+  let engine_path = engine_file.to_str().expect("valid temp path");
+  let engine = StorageEngine::create(engine_path)
+    .expect("failed to create storage engine");
+  let engine = Arc::new(engine);
+  let directory_ops = DirectoryOps::new(&engine);
+  directory_ops
+    .ensure_root_directory()
+    .expect("failed to create engine root directory");
+  engine
+}

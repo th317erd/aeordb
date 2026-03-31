@@ -4,6 +4,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
+use crate::engine::StorageEngine;
 use crate::filesystem::PathResolver;
 use crate::plugins::PluginManager;
 use crate::storage::RedbStorage;
@@ -16,4 +17,5 @@ pub struct AppState {
   pub rate_limiter: Arc<RateLimiter>,
   pub path_resolver: Arc<PathResolver>,
   pub prometheus_handle: PrometheusHandle,
+  pub engine: Arc<StorageEngine>,
 }

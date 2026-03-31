@@ -1,0 +1,923 @@
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::StorageEngine;
+use aeordb::server::{create_app_with_jwt_and_engine, create_engine_for_storage};
+use aeordb::storage::RedbStorage;
+
+/// Create a fresh in-memory app with engine support.
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>) {
+  let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let engine = create_engine_for_storage();
+  let app = create_app_with_jwt_and_engine(storage.clone(), jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, storage, engine)
+}
+
+/// Rebuild app from shared state (for multi-request tests).
+fn rebuild_app(
+  storage: &Arc<RedbStorage>,
+  jwt_manager: &Arc<JwtManager>,
+  engine: &Arc<StorageEngine>,
+) -> axum::Router {
+  create_app_with_jwt_and_engine(storage.clone(), jwt_manager.clone(), engine.clone())
+}
+
+/// Create an admin Bearer token value (including "Bearer " prefix).
+fn bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "test-admin".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    roles: vec!["admin".to_string()],
+    scope: None,
+    permissions: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
+/// Collect response body into bytes.
+async fn body_bytes(body: Body) -> Vec<u8> {
+  body.collect().await.unwrap().to_bytes().to_vec()
+}
+
+/// Collect response body into JSON.
+async fn body_json(body: Body) -> serde_json::Value {
+  let bytes = body_bytes(body).await;
+  serde_json::from_slice(&bytes).expect("valid JSON response body")
+}
+
+// ---------------------------------------------------------------------------
+// Engine file store
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_engine_store_file_returns_201() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/docs/readme.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("hello engine"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert!(json["path"].is_string());
+  assert_eq!(json["total_size"], 12);
+  assert_eq!(json["content_type"], "text/plain");
+}
+
+#[tokio::test]
+async fn test_engine_get_file_returns_data() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store a file
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/test/data.bin")
+    .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
+    .body(Body::from(vec![1u8, 2, 3, 4, 5]))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Read it back
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/test/data.bin")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(bytes, vec![1u8, 2, 3, 4, 5]);
+}
+
+#[tokio::test]
+async fn test_engine_get_file_returns_content_type() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/app/config.json")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"key":"val"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/app/config.json")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(
+    response.headers().get("content-type").unwrap().to_str().unwrap(),
+    "application/json"
+  );
+}
+
+#[tokio::test]
+async fn test_engine_get_file_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/nonexistent/file.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_engine_get_directory_returns_listing() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store two files in the same directory
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/mydir/file1.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("first"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/mydir/file2.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("second"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // List the directory
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/mydir")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let entries = json.as_array().expect("expected array");
+  assert_eq!(entries.len(), 2);
+
+  let names: Vec<&str> = entries
+    .iter()
+    .map(|entry| entry["name"].as_str().unwrap())
+    .collect();
+  assert!(names.contains(&"file1.txt"));
+  assert!(names.contains(&"file2.txt"));
+}
+
+#[tokio::test]
+async fn test_engine_delete_file_returns_200() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store first
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/todelete/file.txt")
+    .header("authorization", &auth)
+    .body(Body::from("delete me"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Delete
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/engine/todelete/file.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["deleted"], true);
+}
+
+#[tokio::test]
+async fn test_engine_delete_file_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/engine/nope/gone.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_engine_head_returns_metadata() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/meta/info.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("metadata test"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("HEAD")
+    .uri("/engine/meta/info.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(
+    response.headers().get("X-Entry-Type").unwrap().to_str().unwrap(),
+    "file"
+  );
+  assert_eq!(
+    response.headers().get("X-Total-Size").unwrap().to_str().unwrap(),
+    "13"
+  );
+  assert_eq!(
+    response.headers().get("content-type").unwrap().to_str().unwrap(),
+    "text/plain"
+  );
+
+  // Body should be empty for HEAD
+  let bytes = body_bytes(response.into_body()).await;
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn test_engine_store_creates_intermediate_dirs() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store file at a deeply nested path
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/a/b/c/deep.txt")
+    .header("authorization", &auth)
+    .body(Body::from("deep"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Listing "a/b/c" should show "deep.txt"
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/a/b/c")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let entries = json.as_array().expect("expected array");
+  assert_eq!(entries.len(), 1);
+  assert_eq!(entries[0]["name"], "deep.txt");
+}
+
+#[tokio::test]
+async fn test_engine_store_and_get_roundtrip() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let original_data = "The quick brown fox jumps over the lazy dog.";
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/roundtrip/fox.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from(original_data))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/roundtrip/fox.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(String::from_utf8(bytes).unwrap(), original_data);
+}
+
+#[tokio::test]
+async fn test_engine_routes_require_auth() {
+  let (app, _, _, _) = test_app();
+
+  // GET without auth should fail
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/some/path")
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot routes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_snapshot_create() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"v1","metadata":{"env":"test"}}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["name"], "v1");
+  assert!(json["root_hash"].is_string());
+  assert!(json["created_at"].is_number());
+  assert_eq!(json["metadata"]["env"], "test");
+}
+
+#[tokio::test]
+async fn test_snapshot_list() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create two snapshots
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"snap1","metadata":{}}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"snap2","metadata":{}}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // List snapshots
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/version/snapshots")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let snapshots = json.as_array().expect("expected array");
+  assert_eq!(snapshots.len(), 2);
+}
+
+#[tokio::test]
+async fn test_snapshot_restore() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a snapshot
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"restore-me","metadata":{}}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Restore it
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/restore")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"restore-me"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["restored"], true);
+  assert_eq!(json["name"], "restore-me");
+}
+
+#[tokio::test]
+async fn test_snapshot_delete() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a snapshot
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"to-delete","metadata":{}}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Delete it
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/version/snapshot/to-delete")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["deleted"], true);
+
+  // Should be gone from list
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/version/snapshots")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let json = body_json(response.into_body()).await;
+  let snapshots = json.as_array().expect("expected array");
+  assert!(snapshots.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Fork routes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_fork_create() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"my-batch"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["name"], "my-batch");
+  assert!(json["root_hash"].is_string());
+  assert!(json["created_at"].is_number());
+}
+
+#[tokio::test]
+async fn test_fork_list() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a fork
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"fork-a"}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // List forks
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/version/forks")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let forks = json.as_array().expect("expected array");
+  assert_eq!(forks.len(), 1);
+  assert_eq!(forks[0]["name"], "fork-a");
+}
+
+#[tokio::test]
+async fn test_fork_promote() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a fork
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"promote-me"}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Promote it
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork/promote-me/promote")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["promoted"], true);
+  assert_eq!(json["name"], "promote-me");
+
+  // Fork should be gone after promote
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/version/forks")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let json = body_json(response.into_body()).await;
+  let forks = json.as_array().expect("expected array");
+  assert!(forks.is_empty());
+}
+
+#[tokio::test]
+async fn test_fork_abandon() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create a fork
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"abandon-me"}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Abandon it
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/version/fork/abandon-me")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["abandoned"], true);
+
+  // Fork should be gone
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/version/forks")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let json = body_json(response.into_body()).await;
+  let forks = json.as_array().expect("expected array");
+  assert!(forks.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Large file (multi-chunk)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_engine_large_file() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create data larger than one chunk (256 KB)
+  let large_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/big/largefile.bin")
+    .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
+    .body(Body::from(large_data.clone()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["total_size"], 300_000);
+
+  // Read it back and verify roundtrip
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/big/largefile.bin")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(bytes.len(), 300_000);
+  assert_eq!(bytes, large_data);
+}
+
+// ---------------------------------------------------------------------------
+// Error / edge case tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_snapshot_create_duplicate_returns_conflict() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"dup","metadata":{}}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Duplicate
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"dup","metadata":{}}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn test_snapshot_restore_nonexistent_returns_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/restore")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"nonexistent"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_snapshot_delete_nonexistent_returns_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/version/snapshot/nope")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_fork_create_duplicate_returns_conflict() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"dup-fork"}"#))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"dup-fork"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn test_fork_promote_nonexistent_returns_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork/ghost/promote")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_fork_abandon_nonexistent_returns_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/version/fork/ghost")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_version_routes_require_auth() {
+  let (app, _, _, _) = test_app();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"name":"noauth","metadata":{}}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_engine_head_nonexistent_returns_404() {
+  let (app, jwt_manager, _, _) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("HEAD")
+    .uri("/engine/nope/nothing.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_engine_store_empty_file() {
+  let (app, jwt_manager, storage, engine) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/empty/zero.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["total_size"], 0);
+
+  // Read it back
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/empty/zero.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert!(bytes.is_empty());
+}
