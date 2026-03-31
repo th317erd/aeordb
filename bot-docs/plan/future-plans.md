@@ -49,6 +49,98 @@ trait AuthProvider: Send + Sync {
 
 ---
 
+## HTTP-to-DB User Mapping + Permission Resolution
+
+**What:** Connect HTTP authentication (JWT) to database permissions (crudlify groups) so that every request is authorized against the filesystem's permission model.
+
+### User Entity
+
+Users become first-class entities in the database:
+
+```
+User entity (stored in engine):
+  user_id:    UUID
+  username:   String
+  email:      Option<String>
+  created_at: i64
+  groups:     Vec<String>    // group names this user belongs to
+
+API Key entity:
+  key_id:     String
+  key_hash:   String
+  user_id:    UUID           // links credential to user
+  roles:      Vec<String>
+
+JWT claims (lean):
+  sub:        user_id        // just identity, nothing else
+  iss:        "aeordb"
+  iat:        i64
+  exp:        i64
+```
+
+JWT is tiny — just proof of identity. No groups, no permissions, no roles in the token.
+
+### Permission Resolution Per Request
+
+```
+1. Extract user_id from JWT
+2. Look up user's groups (cache first, DB fallback)
+3. Walk the target path hierarchy
+4. Resolve crudlify flags for user's groups at each level
+5. Allow or deny the operation
+```
+
+### Group Cache (In-Memory, LRU + TTL)
+
+```rust
+struct GroupCache {
+  cache: LruCache<UserId, (Vec<GroupName>, Instant)>,
+  ttl: Duration,  // default 60 seconds
+}
+```
+
+**Cache busting:**
+
+- **Single-node:** When a group membership changes (via admin API), immediately evict that user's cache entry. The write and the cache are on the same server. Zero staleness.
+
+- **Multi-node (Raft):** Group changes are Raft log entries. When a follower applies a group change from the replicated log, it evicts its local cache entry. Consistency follows from consensus — all nodes eventually bust their cache as the Raft entry is applied.
+
+- **Passive expiry:** TTL-based. Even without active busting, stale entries expire after 60 seconds. Configurable.
+
+### Request Flow (Complete)
+
+```
+HTTP request
+  → auth middleware: validate JWT → extract user_id
+  → group cache: user_id → groups (LRU hit or DB lookup)
+  → permission middleware: path + operation + groups → crudlify resolution
+  → allow → route handler (engine operations)
+  → deny → 403 Forbidden
+```
+
+### API Endpoints
+
+```
+POST   /admin/users                  → create user
+GET    /admin/users                  → list users
+GET    /admin/users/{user_id}        → get user
+PATCH  /admin/users/{user_id}        → update user (groups, email, etc.)
+DELETE /admin/users/{user_id}        → delete user (+ cache evict)
+POST   /admin/users/{user_id}/groups → add user to group (+ cache evict)
+DELETE /admin/users/{user_id}/groups/{group} → remove from group (+ cache evict)
+```
+
+### Open Questions
+
+- [ ] Bootstrap: first user is created alongside root API key? Or root API key IS the first user?
+- [ ] Group definitions: where are groups defined? As entities in the engine? Or implicitly by being referenced in permission links?
+- [ ] Superuser/root bypass: does root user skip all crudlify checks?
+- [ ] Token refresh: when groups change and cache busts, does the existing JWT need to be re-issued? (No — JWT is identity only, groups are server-side)
+
+**Why deferred:** Current auth works (API keys + JWT). Permission resolution requires the full crudlify system to be implemented first. User entities add a new data model concern.
+
+---
+
 ## Chunk Ownership & Garbage Collection
 
 **What:** Track how many FileRecords/versions reference each chunk. Clean up unreferenced chunks.
