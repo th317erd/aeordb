@@ -149,16 +149,118 @@ Content-Type: application/x-aeordb-chunked
 
 ---
 
-## Encryption at Rest
+## Encryption, Vaults, and Zero-Knowledge Multi-User Storage
 
-**What:** Encrypt entity values on disk.
+**What:** Full encryption system enabling secure multi-user storage where nodes can't read the data they store.
 
-**Ideas:**
-- Per-entity encryption with a database key
-- Key management (stored externally, derived from password, HSM)
-- The entry header stays unencrypted (needed for scanning), values are encrypted
+### Core Principle: Hash First, Then Encrypt
 
-**Why deferred:** Requires careful key management design. Not blocking core functionality.
+```
+Write path:
+  1. Hash the raw plaintext data → chunk hash (BLAKE3)
+  2. Check KV store for dedup (hash-based, works on plaintext hashes)
+  3. Parse and index the plaintext (parsers + indexers run on raw data)
+  4. Encrypt the plaintext → ciphertext
+  5. Store ciphertext on disk at the chunk hash address
+
+Read path:
+  1. Look up chunk hash in KV → get offset
+  2. Read ciphertext from disk
+  3. Decrypt with user's key → plaintext
+  4. Verify: BLAKE3(plaintext) == chunk hash → integrity confirmed
+```
+
+**Key insight:** The hash is on the plaintext, not the ciphertext. This preserves deduplication — two users storing the same file produce the same hash, so the chunk is stored once. The hash doesn't leak content (BLAKE3 is cryptographic, irreversible).
+
+### Processing Pipeline (Serial, Ordered)
+
+Encryption forces a specific order of operations because some steps need plaintext access:
+
+```
+1. Receive raw data (plaintext)
+2. Hash (needs plaintext) → chunk hash for addressing + dedup
+3. Parse (needs plaintext) → extract fields via parser plugins
+4. Index (needs parsed fields) → build/update indexes
+5. Encrypt (plaintext → ciphertext) → prepare for storage
+6. Store (ciphertext) → append to engine file
+```
+
+Steps 2-4 MUST happen before step 5. This means the write pipeline is serial for encrypted data — you can't parallelize parsing/indexing with storage because encryption happens in between.
+
+### Vaults (Multi-User Key Sharing)
+
+A **vault** is a group of users who share access to a set of encrypted data.
+
+```
+Vault: "engineering-team"
+  Members: [alice, bob, carol]
+  Vault key: K_vault (symmetric, e.g., AES-256-GCM)
+
+  Each member has:
+    - Their identity key pair (from ~/.config/aeordb/identity)
+    - The vault key K_vault, encrypted with their public key
+
+  Stored in the vault record:
+    encrypted_vault_key_for_alice: encrypt(K_vault, alice_public_key)
+    encrypted_vault_key_for_bob: encrypt(K_vault, bob_public_key)
+    encrypted_vault_key_for_carol: encrypt(K_vault, carol_public_key)
+```
+
+**How it works:**
+- Files in vault paths are encrypted with `K_vault`
+- Any vault member can decrypt `K_vault` using their private key
+- With `K_vault`, they can decrypt any file in the vault
+- Adding a member: encrypt `K_vault` with new member's public key, add to vault record
+- Removing a member: rotate `K_vault`, re-encrypt for remaining members, re-encrypt affected data
+
+**Vault paths:**
+```
+/vaults/engineering-team/          ← vault-encrypted with K_vault
+/vaults/engineering-team/docs/     ← inherits vault encryption
+/personal/alice/                   ← encrypted with alice's key only
+```
+
+Encryption inherits downward through the path hierarchy, just like permissions.
+
+### Zero-Knowledge Storage Nodes
+
+In a distributed (Raft) cluster:
+- Storage nodes hold encrypted ciphertext
+- They can replicate, serve, and manage chunks
+- They CANNOT read the data
+- Only users with the right vault key (or personal key) can decrypt
+- The KV store, NVT, entry headers, and directory structure remain unencrypted (needed for operation)
+- File CONTENT is encrypted; file METADATA (path, size, timestamps) may or may not be (configurable)
+
+### Integration with Existing Systems
+
+| System | Interaction with Encryption |
+|---|---|
+| **Auth (identity files)** | Identity contains the user's key pair. Vault keys encrypted per-user. |
+| **Permissions (crudlify)** | Permissions checked BEFORE decryption. No key = no decrypt, but permissions add another layer. |
+| **Parsers/Indexers** | Run on plaintext BEFORE encryption. Indexes are unencrypted (needed for queries). |
+| **Versioning (forks/snapshots)** | Versions reference encrypted chunks. Same dedup applies. |
+| **Replication (Raft)** | Nodes replicate ciphertext. Encryption is transparent to replication. |
+
+### Open Design Questions
+
+- [ ] Index encryption: should indexes themselves be encrypted? If so, queries require decryption of index data on every lookup — major performance hit. If not, index data leaks information (field values are visible even if file content is encrypted).
+- [ ] Metadata encryption: should file paths, sizes, timestamps be encrypted? Full metadata encryption = maximum privacy but makes directory listings impossible without the key.
+- [ ] Key rotation: when a vault member is removed, all data must be re-encrypted with a new vault key. For large vaults, this is expensive. Lazy re-encryption (re-encrypt on next read/write) vs eager (re-encrypt everything immediately)?
+- [ ] Key derivation: derive encryption keys from passwords (PBKDF2/Argon2) or require explicit key files?
+- [ ] Hardware security module (HSM) support for key storage?
+
+### Cron Task Dependencies
+
+Encryption adds work to the cron/background task system:
+- **Key rotation jobs** — re-encrypt data when vault membership changes
+- **Integrity verification** — decrypt + hash + compare for encrypted chunks
+- **Index rebuilding** — requires decryption of all affected data
+- **Garbage collection** — must consider vault-encrypted chunks (can't inspect content, only hashes)
+
+### Why Deferred
+
+This is the biggest single feature in the roadmap. It touches every layer: storage, indexing, auth, permissions, replication, cron. The architecture supports it (hash-first design, identity files, vault concept), but implementation requires careful design of the key management lifecycle, vault membership protocol, and the serial processing pipeline constraints.
 
 ---
 
