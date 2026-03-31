@@ -11,6 +11,8 @@ pub enum EngineError {
   UnexpectedEof,
   NotFound(String),
   AlreadyExists(String),
+  RangeQueryNotSupported(String),
+  JsonParseError(String),
 }
 
 impl fmt::Display for EngineError {
@@ -33,6 +35,10 @@ impl fmt::Display for EngineError {
       EngineError::UnexpectedEof => write!(formatter, "Unexpected end of file"),
       EngineError::NotFound(path) => write!(formatter, "Not found: {}", path),
       EngineError::AlreadyExists(path) => write!(formatter, "Already exists: {}", path),
+      EngineError::RangeQueryNotSupported(name) => {
+        write!(formatter, "Range query not supported: converter '{}' is not order-preserving", name)
+      }
+      EngineError::JsonParseError(reason) => write!(formatter, "JSON parse error: {}", reason),
     }
   }
 }

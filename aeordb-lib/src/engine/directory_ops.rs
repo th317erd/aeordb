@@ -6,6 +6,9 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::index_config::{PathIndexConfig, create_converter_from_config};
+use crate::engine::index_store::IndexManager;
+use crate::engine::json_parser::parse_json_fields;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::storage_engine::StorageEngine;
 
@@ -344,6 +347,101 @@ impl<'a> DirectoryOps<'a> {
     self.engine.update_head(&dir_key)?;
 
     Ok(())
+  }
+
+  /// Store a file with automatic index updates.
+  /// After storing the file, checks for index config at `.config/indexes.json`
+  /// under the parent path and updates relevant indexes.
+  pub fn store_file_with_indexing(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+  ) -> EngineResult<FileRecord> {
+    let file_record = self.store_file(path, data, content_type)?;
+
+    let normalized = normalize_path(path);
+    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+
+    // Check for index configuration
+    let config_path = if parent.ends_with('/') {
+      format!("{}.config/indexes.json", parent)
+    } else {
+      format!("{}/.config/indexes.json", parent)
+    };
+
+    let index_config = match self.read_file(&config_path) {
+      Ok(config_data) => PathIndexConfig::deserialize(&config_data).ok(),
+      Err(EngineError::NotFound(_)) => None,
+      Err(error) => return Err(error),
+    };
+
+    if let Some(config) = index_config {
+      let algo = self.engine.hash_algo();
+      let file_key = file_path_hash(&normalized, &algo)?;
+
+      // Parse field values from the stored data
+      let field_names: Vec<&str> = config.indexes.iter()
+        .map(|index_config| index_config.field_name.as_str())
+        .collect();
+
+      let extracted_fields = parse_json_fields(data, &field_names).unwrap_or_default();
+
+      let index_manager = IndexManager::new(self.engine);
+
+      for field_config in &config.indexes {
+        // Find the extracted value for this field
+        let field_value = extracted_fields.iter()
+          .find(|(name, _)| name == &field_config.field_name);
+
+        let field_value = match field_value {
+          Some((_, value)) => value,
+          None => continue, // field not found in data, skip
+        };
+
+        // Load or create the index
+        let mut index = match index_manager.load_index(&parent, &field_config.field_name)? {
+          Some(index) => index,
+          None => {
+            let converter = create_converter_from_config(field_config)?;
+            index_manager.create_index(&parent, &field_config.field_name, converter)?
+          }
+        };
+
+        // Remove any existing entries for this file (for overwrites)
+        index.remove(&file_key);
+
+        // Insert the new entry
+        index.insert(field_value, file_key.clone());
+
+        // Save the updated index
+        index_manager.save_index(&parent, &index)?;
+      }
+    }
+
+    Ok(file_record)
+  }
+
+  /// Delete a file and remove its entries from all indexes at that path.
+  pub fn delete_file_with_indexing(&self, path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+    let file_key = file_path_hash(&normalized, &algo)?;
+    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+
+    // Remove from indexes before deleting the file
+    let index_manager = IndexManager::new(self.engine);
+    let index_names = index_manager.list_indexes(&parent)?;
+
+    for field_name in &index_names {
+      if let Some(mut index) = index_manager.load_index(&parent, field_name)? {
+        index.remove(&file_key);
+        index_manager.save_index(&parent, &index)?;
+      }
+    }
+
+    // Now delete the file itself
+    self.delete_file(path)
   }
 
   /// Update parent directories after a child is added or modified.

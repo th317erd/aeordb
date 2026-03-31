@@ -171,3 +171,15 @@ path = "spec/engine/versioning_spec.rs"
 [[test]]
 name = "engine_http_spec"
 path = "spec/http/engine_http_spec.rs"
+
+[[test]]
+name = "index_store_spec"
+path = "spec/engine/index_store_spec.rs"
+
+[[test]]
+name = "write_pipeline_spec"
+path = "spec/engine/write_pipeline_spec.rs"
+
+[[test]]
+name = "query_engine_spec"
+path = "spec/engine/query_engine_spec.rs"

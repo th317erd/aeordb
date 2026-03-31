@@ -10,10 +10,14 @@ pub mod errors;
 pub mod file_header;
 pub mod file_record;
 pub mod hash_algorithm;
+pub mod index_config;
+pub mod index_store;
+pub mod json_parser;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod nvt;
 pub mod path_utils;
+pub mod query_engine;
 pub mod scalar_converter;
 pub mod storage_engine;
 pub mod system_tables;
@@ -43,6 +47,9 @@ pub use scalar_converter::{
   I64Converter, F64Converter, StringConverter, TimestampConverter,
   serialize_converter, deserialize_converter,
 };
+pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
+pub use index_store::{IndexEntry, FieldIndex, IndexManager};
+pub use json_parser::parse_json_fields;
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
@@ -50,4 +57,5 @@ pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::StorageEngine;
 pub use directory_ops::{DirectoryOps, EngineFileStream};
 pub use system_tables::{SystemTables, SystemTableError};
+pub use query_engine::{QueryOp, FieldQuery, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
