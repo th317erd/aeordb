@@ -4,6 +4,51 @@ Ideas discussed but deferred. Not blocking current implementation.
 
 ---
 
+## Auth Provider URI System (Implement Soon)
+
+**What:** The `--auth` CLI flag accepts a URI that determines how authentication is resolved. One flag, multiple modes, extensible via URI scheme.
+
+**Modes:**
+
+| Value | Meaning |
+|---|---|
+| `--auth=false` (or `null`, `no`, `0`) | No auth. Dev mode, zero ceremony. All requests allowed. |
+| `--auth=self` | Per-database auth. Keys stored in the `.aeordb` file itself. **(Current default)** |
+| `--auth=./` | Same as `self` (explicit "look here"). |
+| `--auth=file://~/.config/aeordb/identity` | Shared local identity file. SSH-like pattern. |
+| `--auth=file:///etc/aeordb/cluster-identity` | System-wide identity file. |
+| `--auth=https://auth.mycompany.com/aeordb` | Remote auth service (future). |
+| `--auth=ssh://admin@auth-server/identity` | SSH-tunneled identity (future). |
+
+**Architecture:**
+
+```rust
+trait AuthProvider: Send + Sync {
+  fn validate_api_key(&self, key: &str) -> Result<ApiKeyRecord>;
+  fn signing_key(&self) -> Result<JwtManager>;
+  fn store_api_key(&self, record: &ApiKeyRecord) -> Result<()>;
+  fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>>;
+  fn revoke_api_key(&self, key_id: &str) -> Result<()>;
+  // magic links, refresh tokens, etc.
+}
+```
+
+**Implementations to build now:**
+- `FileAuthProvider` — opens a `.aeordb` file, uses SystemTables. Handles `file://` and `self`.
+- `NoAuthProvider` — allows everything. Handles `false`/`null`/`no`/`0`.
+
+**Implementations for later:**
+- `HttpAuthProvider` — delegates to an HTTP auth service. Handles `https://`.
+- `SshAuthProvider` — tunnels through SSH. Handles `ssh://`.
+
+**Identity file format:** An `.aeordb` file containing only auth data (signing keys, API key hashes, user metadata). Same engine format — the identity file IS a tiny database.
+
+**Use case:** A developer running multiple local databases shares one identity at `~/.config/aeordb/identity`. No per-database bootstrap ceremony. Create a new database, it just works with the same key.
+
+**Default behavior:** `--auth=self` (current behavior). Backward compatible.
+
+---
+
 ## Chunk Ownership & Garbage Collection
 
 **What:** Track how many FileRecords/versions reference each chunk. Clean up unreferenced chunks.
