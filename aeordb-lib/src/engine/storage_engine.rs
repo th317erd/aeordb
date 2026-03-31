@@ -141,8 +141,8 @@ impl StorageEngine {
           std::io::Error::other(error.to_string()),
         ))?;
       match kv.get(hash) {
-        Some(entry) => entry.clone(),
-        None => return Ok(None),
+        Some(entry) if !entry.is_deleted() => entry.clone(),
+        _ => return Ok(None),
       }
     };
 
@@ -155,13 +155,16 @@ impl StorageEngine {
     Ok(Some((header, key, value)))
   }
 
-  /// Check if an entry exists in the KV store.
+  /// Check if a non-deleted entry exists in the KV store.
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let kv = self.kv_manager.read()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    Ok(kv.contains(hash))
+    match kv.get(hash) {
+      Some(entry) => Ok(!entry.is_deleted()),
+      None => Ok(false),
+    }
   }
 
   /// Return the database's hash algorithm.

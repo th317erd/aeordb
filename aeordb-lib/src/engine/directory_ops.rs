@@ -237,6 +237,9 @@ impl<'a> DirectoryOps<'a> {
       &deletion_value,
     )?;
 
+    // Mark the FileRecord as deleted in the KV store
+    self.engine.mark_entry_deleted(&file_key)?;
+
     // Remove child from parent directory
     self.remove_from_parent_directory(&normalized)?;
 
