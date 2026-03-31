@@ -23,6 +23,7 @@ pub mod storage_engine;
 pub mod system_tables;
 pub mod version_manager;
 pub mod void_manager;
+pub mod wasm_converter;
 
 pub use append_writer::AppendWriter;
 pub use deletion_record::DeletionRecord;
@@ -46,6 +47,7 @@ pub use scalar_converter::{
   U8Converter, U16Converter, U32Converter, U64Converter,
   I64Converter, F64Converter, StringConverter, TimestampConverter,
   serialize_converter, deserialize_converter,
+  CONVERTER_TYPE_WASM,
 };
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
@@ -59,3 +61,4 @@ pub use directory_ops::{DirectoryOps, EngineFileStream};
 pub use system_tables::{SystemTables, SystemTableError};
 pub use query_engine::{QueryOp, FieldQuery, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
+pub use wasm_converter::{WasmConverter, WasmBatchConverter};

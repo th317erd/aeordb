@@ -183,3 +183,11 @@ path = "spec/engine/write_pipeline_spec.rs"
 [[test]]
 name = "query_engine_spec"
 path = "spec/engine/query_engine_spec.rs"
+
+[[test]]
+name = "query_http_spec"
+path = "spec/http/query_http_spec.rs"
+
+[[test]]
+name = "wasm_converter_spec"
+path = "spec/engine/wasm_converter_spec.rs"

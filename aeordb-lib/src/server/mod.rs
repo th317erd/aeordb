@@ -109,6 +109,8 @@ pub fn create_app_with_all(
         .delete(engine_routes::engine_delete_file)
         .head(engine_routes::engine_head),
     )
+    // Query route
+    .route("/query", post(engine_routes::query_endpoint))
     // Version: snapshot routes
     .route("/version/snapshot", post(engine_routes::snapshot_create))
     .route("/version/snapshots", get(engine_routes::snapshot_list))

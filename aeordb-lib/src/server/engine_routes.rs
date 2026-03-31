@@ -14,6 +14,7 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::engine::{DirectoryOps, VersionManager};
 use crate::engine::errors::EngineError;
+use crate::engine::query_engine::{QueryEngine, Query, FieldQuery, QueryOp};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -445,6 +446,151 @@ pub async fn fork_abandon(
     Err(error) => {
       tracing::error!("Engine: failed to abandon fork '{}': {}", name, error);
       ErrorResponse::new(format!("Failed to abandon fork: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Query endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct QueryRequest {
+  pub path: String,
+  pub r#where: Vec<WhereClause>,
+  pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WhereClause {
+  pub field: String,
+  pub op: String,
+  pub value: serde_json::Value,
+  pub value2: Option<serde_json::Value>,
+}
+
+/// Convert a JSON value to the byte representation used by converters.
+/// Numbers -> u64 big-endian bytes.
+/// Strings -> UTF-8 bytes.
+/// Booleans -> single byte 0 or 1.
+fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+  match value {
+    serde_json::Value::Number(number) => {
+      if let Some(unsigned) = number.as_u64() {
+        Ok(unsigned.to_be_bytes().to_vec())
+      } else if let Some(signed) = number.as_i64() {
+        Ok((signed as u64).to_be_bytes().to_vec())
+      } else if let Some(float) = number.as_f64() {
+        Ok((float as u64).to_be_bytes().to_vec())
+      } else {
+        Err("Unsupported number format".to_string())
+      }
+    }
+    serde_json::Value::String(text) => Ok(text.as_bytes().to_vec()),
+    serde_json::Value::Bool(flag) => Ok(vec![if *flag { 1 } else { 0 }]),
+    other => Err(format!("Unsupported value type: {}", other)),
+  }
+}
+
+/// POST /query -- execute an index query and return matching file metadata.
+pub async fn query_endpoint(
+  State(state): State<AppState>,
+  Json(body): Json<QueryRequest>,
+) -> Response {
+  let mut field_queries = Vec::with_capacity(body.r#where.len());
+
+  for clause in &body.r#where {
+    let value_bytes = match json_value_to_bytes(&clause.value) {
+      Ok(bytes) => bytes,
+      Err(message) => {
+        return ErrorResponse::new(format!("Invalid value for field '{}': {}", clause.field, message))
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+    };
+
+    let operation = match clause.op.as_str() {
+      "eq" => QueryOp::Eq(value_bytes),
+      "gt" => QueryOp::Gt(value_bytes),
+      "lt" => QueryOp::Lt(value_bytes),
+      "between" => {
+        let value2 = match &clause.value2 {
+          Some(value2) => match json_value_to_bytes(value2) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+              return ErrorResponse::new(format!(
+                "Invalid value2 for field '{}': {}",
+                clause.field, message,
+              ))
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+            }
+          },
+          None => {
+            return ErrorResponse::new(format!(
+              "Missing value2 for 'between' operation on field '{}'",
+              clause.field,
+            ))
+              .with_status(StatusCode::BAD_REQUEST)
+              .into_response();
+          }
+        };
+        QueryOp::Between(value_bytes, value2)
+      }
+      unknown => {
+        return ErrorResponse::new(format!("Unknown operation: '{}'", unknown))
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+    };
+
+    field_queries.push(FieldQuery {
+      field_name: clause.field.clone(),
+      operation,
+    });
+  }
+
+  let query = Query {
+    path: body.path.clone(),
+    field_queries,
+    limit: body.limit,
+  };
+
+  let query_engine = QueryEngine::new(&state.engine);
+  match query_engine.execute(&query) {
+    Ok(results) => {
+      let response_items: Vec<serde_json::Value> = results
+        .iter()
+        .map(|result| {
+          serde_json::json!({
+            "path": result.file_record.path,
+            "total_size": result.file_record.total_size,
+            "content_type": result.file_record.content_type,
+            "created_at": result.file_record.created_at,
+            "updated_at": result.file_record.updated_at,
+          })
+        })
+        .collect();
+      (StatusCode::OK, Json(response_items)).into_response()
+    }
+    Err(EngineError::NotFound(message)) => {
+      ErrorResponse::new(message)
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(EngineError::RangeQueryNotSupported(converter_name)) => {
+      ErrorResponse::new(format!(
+        "Range query not supported for converter '{}'",
+        converter_name,
+      ))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Query execution failed: {}", error);
+      ErrorResponse::new(format!("Query failed: {}", error))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
