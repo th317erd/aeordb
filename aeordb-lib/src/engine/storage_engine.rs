@@ -10,7 +10,8 @@ use crate::engine::kv_resize::KVResizeManager;
 use crate::engine::kv_store::{
   KVEntry, KVStore,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
-  KV_TYPE_DELETION, KV_TYPE_VOID,
+  KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
+  KV_FLAG_DELETED,
 };
 use crate::engine::void_manager::VoidManager;
 
@@ -109,8 +110,8 @@ impl StorageEngine {
       EntryType::FileRecord => KV_TYPE_FILE_RECORD,
       EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
       EntryType::DeletionRecord => KV_TYPE_DELETION,
+      EntryType::Snapshot => KV_TYPE_SNAPSHOT,
       EntryType::Void => KV_TYPE_VOID,
-      _ => KV_TYPE_CHUNK,
     };
 
     let kv_entry = KVEntry {
@@ -192,5 +193,94 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
     Ok(writer.file_header().head_hash.clone())
+  }
+
+  /// Store an entry with an explicit KV type (for versioning entries
+  /// where the EntryType on disk doesn't map 1:1 to the KV type).
+  pub fn store_entry_typed(
+    &self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    kv_type: u8,
+  ) -> EngineResult<u64> {
+    let offset = {
+      let mut writer = self.writer.write()
+        .map_err(|error| EngineError::IoError(
+          std::io::Error::other(error.to_string()),
+        ))?;
+      writer.append_entry(entry_type, key, value, 0)?
+    };
+
+    let kv_entry = KVEntry {
+      type_flags: kv_type,
+      hash: key.to_vec(),
+      offset,
+    };
+
+    let mut kv = self.kv_manager.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    kv.insert(kv_entry);
+
+    Ok(offset)
+  }
+
+  /// Check if a KV entry is marked as deleted.
+  pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
+    let kv = self.kv_manager.read()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    match kv.get(hash) {
+      Some(entry) => Ok(entry.is_deleted()),
+      None => Ok(false),
+    }
+  }
+
+  /// Mark a KV entry as deleted by setting the deleted flag.
+  pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
+    let mut kv = self.kv_manager.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let updated = kv.primary_mut().update_flags(hash, KV_FLAG_DELETED);
+    if !updated {
+      return Err(EngineError::NotFound(
+        format!("Entry not found for hash: {}", hex::encode(hash)),
+      ));
+    }
+    Ok(())
+  }
+
+  /// Return all (key_hash, value) pairs for entries matching a KV type.
+  /// Reads each entry's value from disk. Includes deleted entries in the
+  /// result — callers should check `is_entry_deleted` if needed.
+  pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let hashes: Vec<(Vec<u8>, u64)> = {
+      let kv = self.kv_manager.read()
+        .map_err(|error| EngineError::IoError(
+          std::io::Error::other(error.to_string()),
+        ))?;
+      kv.primary()
+        .iter()
+        .filter(|entry| entry.entry_type() == target_type)
+        .map(|entry| (entry.hash.clone(), entry.offset))
+        .collect()
+    };
+
+    let mut results = Vec::with_capacity(hashes.len());
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    for (hash, offset) in hashes {
+      let (_header, _key, value) = writer.read_entry_at(offset)?;
+      results.push((hash, value));
+    }
+
+    Ok(results)
   }
 }
