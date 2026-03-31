@@ -7,15 +7,17 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::server::create_app_with_jwt;
+use aeordb::engine::StorageEngine;
+use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with a shared JwtManager for test token creation.
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>) {
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
-  (app, jwt_manager, storage)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, storage, engine, temp_dir)
 }
 
 /// Create an admin JWT token.
@@ -59,7 +61,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_unauthenticated_request_returns_401() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -72,7 +74,7 @@ async fn test_unauthenticated_request_returns_401() {
 
 #[tokio::test]
 async fn test_valid_bearer_token_passes() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = admin_token(&jwt_manager);
 
   let request = Request::builder()
@@ -89,7 +91,7 @@ async fn test_valid_bearer_token_passes() {
 
 #[tokio::test]
 async fn test_expired_bearer_token_returns_401() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
     sub: "expired-user".to_string(),
@@ -115,7 +117,7 @@ async fn test_expired_bearer_token_returns_401() {
 
 #[tokio::test]
 async fn test_malformed_bearer_token_returns_401() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -130,7 +132,7 @@ async fn test_malformed_bearer_token_returns_401() {
 
 #[tokio::test]
 async fn test_missing_authorization_header_returns_401() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -144,7 +146,7 @@ async fn test_missing_authorization_header_returns_401() {
 
 #[tokio::test]
 async fn test_health_endpoint_exempt_from_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .uri("/admin/health")
@@ -160,7 +162,7 @@ async fn test_health_endpoint_exempt_from_auth() {
 
 #[tokio::test]
 async fn test_auth_token_endpoint_exempt_from_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   // Even without a valid API key, the endpoint itself should be reachable (not 401 from middleware).
   // It will return 401 from the handler because the API key is invalid, but that's different.
@@ -181,7 +183,7 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
 
 #[tokio::test]
 async fn test_auth_token_with_valid_api_key_returns_jwt() {
-  let (app, _, storage) = test_app();
+  let (app, _, storage, _, _temp_dir) = test_app();
 
   // Create an API key in storage with the new format
   let key_id = uuid::Uuid::new_v4();
@@ -213,7 +215,7 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
 
 #[tokio::test]
 async fn test_auth_token_with_invalid_api_key_returns_401() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -228,7 +230,7 @@ async fn test_auth_token_with_invalid_api_key_returns_401() {
 
 #[tokio::test]
 async fn test_create_api_key_requires_admin_role() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = reader_token(&jwt_manager);
 
   let request = Request::builder()
@@ -245,7 +247,7 @@ async fn test_create_api_key_requires_admin_role() {
 
 #[tokio::test]
 async fn test_create_api_key_returns_new_key() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = admin_token(&jwt_manager);
 
   let request = Request::builder()
@@ -268,7 +270,7 @@ async fn test_create_api_key_returns_new_key() {
 
 #[tokio::test]
 async fn test_list_api_keys_returns_metadata() {
-  let (app, jwt_manager, storage) = test_app();
+  let (app, jwt_manager, storage, _, _temp_dir) = test_app();
 
   // Seed a key
   let key_id = uuid::Uuid::new_v4();
@@ -306,7 +308,7 @@ async fn test_list_api_keys_returns_metadata() {
 
 #[tokio::test]
 async fn test_revoke_api_key_succeeds() {
-  let (app, jwt_manager, storage) = test_app();
+  let (app, jwt_manager, storage, _, _temp_dir) = test_app();
 
   // Seed a key
   let key_id = uuid::Uuid::new_v4();
@@ -341,6 +343,7 @@ async fn test_revoke_api_key_succeeds() {
 async fn test_revoked_api_key_cannot_get_token() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
 
   // Create and store a key
   let key_id = uuid::Uuid::new_v4();
@@ -358,7 +361,7 @@ async fn test_revoked_api_key_cannot_get_token() {
   // Revoke it
   storage.revoke_api_key(key_id).unwrap();
 
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
 
   let request = Request::builder()
     .method("POST")
@@ -411,7 +414,7 @@ async fn test_bootstrap_returns_none_on_subsequent_runs() {
 
 #[tokio::test]
 async fn test_authorization_header_without_bearer_prefix_returns_401() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = admin_token(&jwt_manager);
 
   let request = Request::builder()
@@ -427,7 +430,7 @@ async fn test_authorization_header_without_bearer_prefix_returns_401() {
 
 #[tokio::test]
 async fn test_token_from_different_jwt_manager_rejected() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
   let other_manager = JwtManager::generate();
   let token = admin_token(&other_manager);
 
@@ -444,7 +447,7 @@ async fn test_token_from_different_jwt_manager_rejected() {
 
 #[tokio::test]
 async fn test_revoke_nonexistent_key_returns_404() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = admin_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
 
@@ -461,7 +464,7 @@ async fn test_revoke_nonexistent_key_returns_404() {
 
 #[tokio::test]
 async fn test_list_api_keys_requires_admin_role() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = reader_token(&jwt_manager);
 
   let request = Request::builder()
@@ -476,7 +479,7 @@ async fn test_list_api_keys_requires_admin_role() {
 
 #[tokio::test]
 async fn test_revoke_api_key_requires_admin_role() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let token = reader_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
 
@@ -499,13 +502,14 @@ async fn test_revoke_api_key_requires_admin_role() {
 async fn test_full_flow_bootstrap_to_token_to_crud() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
 
   // Step 1: Bootstrap root key
   let plaintext_key = bootstrap_root_key(&storage)
     .expect("should create root key on first run");
 
   // Step 2: Exchange API key for JWT
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
   let token_request = Request::builder()
     .method("POST")
     .uri("/auth/token")
@@ -521,7 +525,7 @@ async fn test_full_flow_bootstrap_to_token_to_crud() {
   let bearer = format!("Bearer {}", jwt_token);
 
   // Step 3: Use JWT to create a document
-  let app2 = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app2 = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
   let create_request = Request::builder()
     .method("POST")
     .uri("/mydb/e2e-test")
@@ -537,7 +541,7 @@ async fn test_full_flow_bootstrap_to_token_to_crud() {
   let document_id = create_json["document_id"].as_str().unwrap();
 
   // Step 4: Verify the document exists by fetching it
-  let app3 = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app3 = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
   let get_request = Request::builder()
     .uri(format!("/mydb/e2e-test/{}", document_id))
     .header("authorization", &bearer)

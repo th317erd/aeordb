@@ -6,20 +6,22 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::server::create_app_with_jwt;
+use aeordb::engine::StorageEngine;
+use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with a shared JwtManager.
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>) {
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
-  (app, jwt_manager, storage)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, storage, engine, temp_dir)
 }
 
 /// Helper: build app from shared storage + jwt_manager.
-fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>) -> axum::Router {
-  create_app_with_jwt(storage.clone(), jwt_manager.clone())
+fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
+  create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone())
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).
@@ -55,7 +57,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_health_check_returns_200() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
   let request = Request::builder()
     .uri("/admin/health")
     .body(Body::empty())
@@ -74,7 +76,7 @@ async fn test_health_check_returns_200() {
 
 #[tokio::test]
 async fn test_create_document_returns_201_with_id() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("POST")
@@ -96,7 +98,7 @@ async fn test_create_document_returns_201_with_id() {
 
 #[tokio::test]
 async fn test_create_document_returns_body_with_mandatory_fields() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("POST")
@@ -117,10 +119,10 @@ async fn test_create_document_returns_body_with_mandatory_fields() {
 
 #[tokio::test]
 async fn test_create_document_preserves_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -136,7 +138,7 @@ async fn test_create_document_preserves_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Now fetch it and confirm the content-type was preserved
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -157,10 +159,10 @@ async fn test_create_document_preserves_content_type() {
 
 #[tokio::test]
 async fn test_create_with_json_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let json_body = r#"{"name":"alice","age":30}"#;
   let request = Request::builder()
     .method("POST")
@@ -177,7 +179,7 @@ async fn test_create_with_json_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch back and verify raw data integrity
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -196,10 +198,10 @@ async fn test_create_with_json_content_type() {
 
 #[tokio::test]
 async fn test_create_with_binary_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let binary_data: Vec<u8> = (0u8..=255).collect();
   let request = Request::builder()
     .method("POST")
@@ -216,7 +218,7 @@ async fn test_create_with_binary_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch back and verify binary data roundtrip
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/blobs/{}", document_id))
     .header("authorization", &auth)
@@ -234,10 +236,10 @@ async fn test_create_with_binary_content_type() {
 
 #[tokio::test]
 async fn test_get_document_returns_200_with_data() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   // Create a document first
   let request = Request::builder()
     .method("POST")
@@ -252,7 +254,7 @@ async fn test_get_document_returns_200_with_data() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Get it
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -268,10 +270,10 @@ async fn test_get_document_returns_200_with_data() {
 
 #[tokio::test]
 async fn test_get_document_returns_correct_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -284,7 +286,7 @@ async fn test_get_document_returns_correct_content_type() {
   let json = body_json(response.into_body()).await;
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -310,7 +312,7 @@ async fn test_get_document_returns_correct_content_type() {
 
 #[tokio::test]
 async fn test_get_document_returns_404_for_missing() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
@@ -329,10 +331,10 @@ async fn test_get_document_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_update_document_returns_200() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   // Create
   let request = Request::builder()
     .method("POST")
@@ -347,7 +349,7 @@ async fn test_update_document_returns_200() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Update
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let update_request = Request::builder()
     .method("PATCH")
     .uri(format!("/mydb/users/{}", document_id))
@@ -364,7 +366,7 @@ async fn test_update_document_returns_200() {
   assert!(update_json["updated_at"].is_string());
 
   // Verify data was actually updated
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -378,7 +380,7 @@ async fn test_update_document_returns_200() {
 
 #[tokio::test]
 async fn test_update_document_returns_404_for_missing() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
@@ -398,10 +400,10 @@ async fn test_update_document_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_delete_document_returns_200() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   // Create
   let request = Request::builder()
     .method("POST")
@@ -416,7 +418,7 @@ async fn test_delete_document_returns_200() {
   let document_id = json["document_id"].as_str().unwrap().to_string();
 
   // Delete
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
@@ -432,7 +434,7 @@ async fn test_delete_document_returns_200() {
   assert_eq!(delete_json["document_id"].as_str().unwrap(), document_id);
 
   // Verify the document is actually gone
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -445,11 +447,11 @@ async fn test_delete_document_returns_200() {
 
 #[tokio::test]
 async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Completely missing document
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
@@ -462,7 +464,7 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
   // Create then delete, then try to delete again
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let create_request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -475,7 +477,7 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   let document_id = create_json["document_id"].as_str().unwrap().to_string();
 
   // First delete succeeds
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
@@ -487,7 +489,7 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
   assert_eq!(delete_response.status(), StatusCode::OK);
 
   // Second delete should return 404 (already deleted)
-  let app4 = rebuild_app(&storage, &jwt_manager);
+  let app4 = rebuild_app(&storage, &jwt_manager, &engine);
   let delete_request2 = Request::builder()
     .method("DELETE")
     .uri(format!("/mydb/users/{}", document_id))
@@ -509,10 +511,10 @@ async fn test_delete_document_returns_404_for_already_deleted_or_missing() {
 
 #[tokio::test]
 async fn test_list_documents_returns_200_with_array() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   // Create two documents
   let request1 = Request::builder()
     .method("POST")
@@ -523,7 +525,7 @@ async fn test_list_documents_returns_200_with_array() {
     .unwrap();
   app.oneshot(request1).await.unwrap();
 
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let request2 = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -534,7 +536,7 @@ async fn test_list_documents_returns_200_with_array() {
   app2.oneshot(request2).await.unwrap();
 
   // List
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let list_request = Request::builder()
     .uri("/mydb/users")
     .header("authorization", &auth)
@@ -558,7 +560,7 @@ async fn test_list_documents_returns_200_with_array() {
 
 #[tokio::test]
 async fn test_list_documents_empty_table_returns_empty_array() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/mydb/emptytable")
@@ -580,7 +582,7 @@ async fn test_list_documents_empty_table_returns_empty_array() {
 
 #[tokio::test]
 async fn test_nonexistent_route_returns_404() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/this/does/not/exist/at/all")
@@ -598,7 +600,7 @@ async fn test_nonexistent_route_returns_404() {
 
 #[tokio::test]
 async fn test_empty_table_name_handling() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Axum won't match "/{database}/{table}" if table is empty, so
@@ -617,7 +619,7 @@ async fn test_empty_table_name_handling() {
 
 #[tokio::test]
 async fn test_get_document_with_invalid_uuid_returns_400() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .uri("/mydb/users/not-a-uuid")
@@ -634,7 +636,7 @@ async fn test_get_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_update_document_with_invalid_uuid_returns_400() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("PATCH")
@@ -649,7 +651,7 @@ async fn test_update_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_delete_document_with_invalid_uuid_returns_400() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder()
     .method("DELETE")
@@ -664,10 +666,10 @@ async fn test_delete_document_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn test_create_document_without_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   // No content-type header
   let request = Request::builder()
     .method("POST")
@@ -683,7 +685,7 @@ async fn test_create_document_without_content_type() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch and verify no content-type is set
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -701,10 +703,10 @@ async fn test_create_document_without_content_type() {
 
 #[tokio::test]
 async fn test_create_empty_body() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/users")
@@ -719,7 +721,7 @@ async fn test_create_empty_body() {
   let document_id = json["document_id"].as_str().unwrap();
 
   // Fetch and verify empty body
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri(format!("/mydb/users/{}", document_id))
     .header("authorization", &auth)
@@ -737,7 +739,7 @@ async fn test_create_empty_body() {
 
 #[tokio::test]
 async fn test_invalid_table_name_rejected() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -760,7 +762,7 @@ async fn test_invalid_table_name_rejected() {
 
 #[tokio::test]
 async fn test_path_traversal_rejected() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -776,7 +778,7 @@ async fn test_path_traversal_rejected() {
 
 #[tokio::test]
 async fn test_system_table_prefix_rejected() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -799,7 +801,7 @@ async fn test_system_table_prefix_rejected() {
 
 #[tokio::test]
 async fn test_system_database_prefix_rejected() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -828,10 +830,11 @@ async fn test_system_database_prefix_rejected() {
 async fn test_concurrent_requests_handled() {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
   let auth = bearer_token(&jwt_manager);
 
   // Create a document first
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
   let request = Request::builder()
     .method("POST")
     .uri("/mydb/concurrent")
@@ -847,9 +850,10 @@ async fn test_concurrent_requests_handled() {
   for i in 0..5 {
     let storage_clone = storage.clone();
     let jwt_clone = jwt_manager.clone();
+    let engine_clone = engine.clone();
     let auth_clone = auth.clone();
     handles.push(tokio::spawn(async move {
-      let app = create_app_with_jwt(storage_clone, jwt_clone);
+      let app = create_app_with_jwt(storage_clone, jwt_clone, engine_clone);
       let request = Request::builder()
         .method("POST")
         .uri("/mydb/concurrent")
@@ -873,7 +877,7 @@ async fn test_concurrent_requests_handled() {
   assert_eq!(success_count, 5, "All concurrent requests should succeed");
 
   // Verify all documents exist
-  let app_final = create_app_with_jwt(storage.clone(), jwt_manager.clone());
+  let app_final = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
   let list_request = Request::builder()
     .uri("/mydb/concurrent")
     .header("authorization", &auth)

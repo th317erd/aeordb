@@ -1,3 +1,6 @@
+// LEGACY: Used only by ChunkStore -> PathResolver -> /fs/ routes.
+// Remove once /fs/ routes are migrated to the engine.
+
 use std::sync::Arc;
 
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};

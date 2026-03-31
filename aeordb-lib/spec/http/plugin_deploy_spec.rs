@@ -6,20 +6,22 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::server::create_app_with_jwt;
+use aeordb::engine::StorageEngine;
+use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with a shared JwtManager.
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>) {
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
-  (app, jwt_manager, storage)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, storage, engine, temp_dir)
 }
 
 /// Rebuild the app from shared state (needed when the same storage is reused).
-fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>) -> axum::Router {
-  create_app_with_jwt(storage.clone(), jwt_manager.clone())
+fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
+  create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone())
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).
@@ -74,7 +76,7 @@ fn minimal_wasm_bytes() -> Vec<u8> {
 
 #[tokio::test]
 async fn test_deploy_wasm_plugin_returns_200() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let wasm_bytes = minimal_wasm_bytes();
 
@@ -97,7 +99,7 @@ async fn test_deploy_wasm_plugin_returns_200() {
 
 #[tokio::test]
 async fn test_deploy_invalid_wasm_returns_400() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let garbage = vec![0x00, 0x61, 0x73, 0x6d, 0xFF, 0xFF, 0xFF, 0xFF];
@@ -117,7 +119,7 @@ async fn test_deploy_invalid_wasm_returns_400() {
 
 #[tokio::test]
 async fn test_deploy_empty_body_returns_400() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -133,12 +135,12 @@ async fn test_deploy_empty_body_returns_400() {
 
 #[tokio::test]
 async fn test_invoke_deployed_plugin_returns_result() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let wasm_bytes = minimal_wasm_bytes();
 
   // Deploy
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let deploy_request = Request::builder()
     .method("PUT")
     .uri("/testdb/public/echo/_deploy?name=echo")
@@ -149,7 +151,7 @@ async fn test_invoke_deployed_plugin_returns_result() {
   assert_eq!(deploy_response.status(), StatusCode::OK);
 
   // Invoke
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let invoke_request = Request::builder()
     .method("POST")
     .uri("/testdb/public/echo/handle/_invoke")
@@ -165,7 +167,7 @@ async fn test_invoke_deployed_plugin_returns_result() {
 
 #[tokio::test]
 async fn test_invoke_nonexistent_plugin_returns_404() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -181,12 +183,12 @@ async fn test_invoke_nonexistent_plugin_returns_404() {
 
 #[tokio::test]
 async fn test_list_deployed_plugins() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let wasm_bytes = minimal_wasm_bytes();
 
   // Deploy two plugins
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/testdb/public/func_a/_deploy?name=func_a")
@@ -195,7 +197,7 @@ async fn test_list_deployed_plugins() {
     .unwrap();
   app.oneshot(request).await.unwrap();
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/testdb/public/func_b/_deploy?name=func_b")
@@ -205,7 +207,7 @@ async fn test_list_deployed_plugins() {
   app.oneshot(request).await.unwrap();
 
   // List
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
     .uri("/testdb/_plugins")
@@ -222,12 +224,12 @@ async fn test_list_deployed_plugins() {
 
 #[tokio::test]
 async fn test_remove_deployed_plugin() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let wasm_bytes = minimal_wasm_bytes();
 
   // Deploy
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/testdb/public/removeme/_deploy?name=removeme")
@@ -237,7 +239,7 @@ async fn test_remove_deployed_plugin() {
   app.oneshot(request).await.unwrap();
 
   // Remove
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
     .uri("/testdb/public/removeme/handle/_remove")
@@ -251,7 +253,7 @@ async fn test_remove_deployed_plugin() {
   assert_eq!(json["removed"], true);
 
   // Verify it is gone
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
     .uri("/testdb/public/removeme/handle/_invoke")
@@ -264,7 +266,7 @@ async fn test_remove_deployed_plugin() {
 
 #[tokio::test]
 async fn test_deploy_requires_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let wasm_bytes = minimal_wasm_bytes();
   let request = Request::builder()
@@ -280,7 +282,7 @@ async fn test_deploy_requires_auth() {
 
 #[tokio::test]
 async fn test_list_plugins_requires_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("GET")
@@ -294,7 +296,7 @@ async fn test_list_plugins_requires_auth() {
 
 #[tokio::test]
 async fn test_invoke_requires_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -308,7 +310,7 @@ async fn test_invoke_requires_auth() {
 
 #[tokio::test]
 async fn test_remove_requires_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("DELETE")

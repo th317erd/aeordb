@@ -15,7 +15,7 @@ enum Commands {
   Start {
     #[arg(short, long, default_value = "3000")]
     port: u16,
-    #[arg(short = 'D', long, default_value = "data.aeor")]
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
     #[arg(long, default_value = "pretty")]
     log_format: String,

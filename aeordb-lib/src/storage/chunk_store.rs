@@ -1,3 +1,6 @@
+// LEGACY: Used only by PathResolver -> /fs/ routes.
+// Remove once /fs/ routes are migrated to the engine.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 

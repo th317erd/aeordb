@@ -26,10 +26,11 @@ const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
 
 /// Build the full application router with all routes and middleware.
 /// Loads or generates the signing key from the storage config table.
-pub fn create_app(storage: Arc<RedbStorage>) -> Router {
+pub fn create_app(storage: Arc<RedbStorage>, engine_path: &str) -> Router {
   let jwt_manager = load_or_create_jwt_manager(&storage);
   let prometheus_handle = initialize_metrics();
-  create_app_with_jwt_and_metrics(storage, Arc::new(jwt_manager), prometheus_handle)
+  let engine = create_engine_for_storage(engine_path);
+  create_app_with_jwt_and_metrics(storage, Arc::new(jwt_manager), prometheus_handle, engine)
 }
 
 /// Load an existing signing key from config, or generate a new one and persist it.
@@ -52,9 +53,9 @@ fn load_or_create_jwt_manager(storage: &RedbStorage) -> JwtManager {
 /// Initializes a fresh metrics recorder. If a global recorder is already
 /// installed (e.g. from another test), this falls back to a no-op recorder
 /// and the prometheus handle will render empty output.
-pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>) -> Router {
+pub fn create_app_with_jwt(storage: Arc<RedbStorage>, jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
   let prometheus_handle = try_initialize_metrics();
-  create_app_with_jwt_and_metrics(storage, jwt_manager, prometheus_handle)
+  create_app_with_jwt_and_metrics(storage, jwt_manager, prometheus_handle, engine)
 }
 
 /// Build the application router with a specific JwtManager and engine (useful
@@ -80,6 +81,7 @@ pub fn create_app_with_jwt_and_metrics(
   storage: Arc<RedbStorage>,
   jwt_manager: Arc<JwtManager>,
   prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
 ) -> Router {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
@@ -88,7 +90,6 @@ pub fn create_app_with_jwt_and_metrics(
   let chunk_store = ChunkStore::new_with_redb(database_arc.clone());
   let path_resolver = Arc::new(PathResolver::new(database_arc, chunk_store));
 
-  let engine = create_engine_for_storage();
   create_app_with_all(storage, jwt_manager, plugin_manager, rate_limiter, path_resolver, prometheus_handle, engine)
 }
 
@@ -198,19 +199,31 @@ fn try_initialize_metrics() -> PrometheusHandle {
 
 use crate::auth::middleware::auth_middleware;
 
-/// Create a new in-memory StorageEngine for use alongside redb storage.
+/// Create or open a StorageEngine at the given path.
 /// Initializes the root directory so the engine is ready for file operations.
-pub fn create_engine_for_storage() -> Arc<StorageEngine> {
-  let temp_dir = std::env::temp_dir();
-  let engine_file = temp_dir
-    .join(format!("aeordb-engine-{}.aeordb", uuid::Uuid::new_v4()));
-  let engine_path = engine_file.to_str().expect("valid temp path");
-  let engine = StorageEngine::create(engine_path)
-    .expect("failed to create storage engine");
+pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
+  let path = std::path::Path::new(engine_path);
+  let engine = if path.exists() {
+    StorageEngine::open(engine_path)
+      .expect("failed to open storage engine")
+  } else {
+    StorageEngine::create(engine_path)
+      .expect("failed to create storage engine")
+  };
   let engine = Arc::new(engine);
   let directory_ops = DirectoryOps::new(&engine);
   directory_ops
     .ensure_root_directory()
     .expect("failed to create engine root directory");
   engine
+}
+
+/// Create an engine backed by a temporary file (for tests).
+/// The caller should hold on to the returned `TempDir` to keep the file alive.
+pub fn create_temp_engine_for_tests() -> (Arc<StorageEngine>, tempfile::TempDir) {
+  let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+  let engine_file = temp_dir.path().join("test.aeordb");
+  let engine_path = engine_file.to_str().expect("valid temp path");
+  let engine = create_engine_for_storage(engine_path);
+  (engine, temp_dir)
 }

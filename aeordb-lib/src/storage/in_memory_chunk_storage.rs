@@ -1,3 +1,6 @@
+// LEGACY: In-memory backend for ChunkStore, used only by legacy /fs/ route tests.
+// Remove once /fs/ routes are migrated to the engine.
+
 use std::collections::HashMap;
 use std::sync::RwLock;
 

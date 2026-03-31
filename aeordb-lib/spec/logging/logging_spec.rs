@@ -267,8 +267,8 @@ async fn test_request_id_on_real_server_routes() {
   let storage = Arc::new(
     aeordb::storage::RedbStorage::new(database_path.to_str().unwrap()).unwrap(),
   );
-
-  let app = aeordb::server::create_app(storage);
+  let engine_path = temp_dir.path().join("test.aeordb");
+  let app = aeordb::server::create_app(storage, engine_path.to_str().unwrap());
 
   let response = app
     .oneshot(
@@ -296,8 +296,8 @@ async fn test_client_request_id_preserved_on_real_server() {
   let storage = Arc::new(
     aeordb::storage::RedbStorage::new(database_path.to_str().unwrap()).unwrap(),
   );
-
-  let app = aeordb::server::create_app(storage);
+  let engine_path = temp_dir.path().join("test.aeordb");
+  let app = aeordb::server::create_app(storage, engine_path.to_str().unwrap());
 
   let client_id = "integration-test-id-abc123";
 

@@ -7,40 +7,44 @@ use serial_test::serial;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::StorageEngine;
 use aeordb::metrics::initialize_metrics;
-use aeordb::server::create_app_with_jwt_and_metrics;
+use aeordb::server::{create_app_with_jwt_and_metrics, create_temp_engine_for_tests};
 use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with a standalone Prometheus recorder
 /// (not the global one). Useful for tests that don't need to observe
 /// metrics emitted by `metrics::counter!()` etc.
-fn test_app_standalone() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, metrics_exporter_prometheus::PrometheusHandle) {
+fn test_app_standalone() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, metrics_exporter_prometheus::PrometheusHandle, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
     .build_recorder()
     .handle();
-  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone());
-  (app, jwt_manager, storage, prometheus_handle)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone());
+  (app, jwt_manager, storage, prometheus_handle, engine, temp_dir)
 }
 
 /// Create a fresh in-memory app wired to the **global** Prometheus recorder.
 /// `metrics::counter!()` calls throughout the codebase will be captured
 /// by the returned handle.
-fn test_app_global() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, metrics_exporter_prometheus::PrometheusHandle) {
+fn test_app_global() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, metrics_exporter_prometheus::PrometheusHandle, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let prometheus_handle = initialize_metrics();
-  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone());
-  (app, jwt_manager, storage, prometheus_handle)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone());
+  (app, jwt_manager, storage, prometheus_handle, engine, temp_dir)
 }
 
 fn rebuild_app(
   storage: &Arc<RedbStorage>,
   jwt_manager: &Arc<JwtManager>,
   prometheus_handle: &metrics_exporter_prometheus::PrometheusHandle,
+  engine: &Arc<StorageEngine>,
 ) -> axum::Router {
-  create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone())
+  create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone())
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).
@@ -75,7 +79,7 @@ async fn body_string(body: Body) -> String {
 
 #[tokio::test]
 async fn test_metrics_endpoint_returns_200() {
-  let (app, jwt_manager, _, _) = test_app_standalone();
+  let (app, jwt_manager, _, _, _, _temp_dir) = test_app_standalone();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -90,7 +94,7 @@ async fn test_metrics_endpoint_returns_200() {
 
 #[tokio::test]
 async fn test_metrics_endpoint_returns_prometheus_format() {
-  let (app, jwt_manager, _, _) = test_app_standalone();
+  let (app, jwt_manager, _, _, _, _temp_dir) = test_app_standalone();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -117,7 +121,7 @@ async fn test_metrics_endpoint_returns_prometheus_format() {
 
 #[tokio::test]
 async fn test_metrics_endpoint_requires_auth() {
-  let (app, _, _, _) = test_app_standalone();
+  let (app, _, _, _, _, _temp_dir) = test_app_standalone();
 
   let request = Request::builder()
     .uri("/admin/metrics")
@@ -130,7 +134,7 @@ async fn test_metrics_endpoint_requires_auth() {
 
 #[tokio::test]
 async fn test_metrics_endpoint_rejects_invalid_token() {
-  let (app, _, _, _) = test_app_standalone();
+  let (app, _, _, _, _, _temp_dir) = test_app_standalone();
 
   let request = Request::builder()
     .uri("/admin/metrics")
@@ -144,7 +148,7 @@ async fn test_metrics_endpoint_rejects_invalid_token() {
 
 #[tokio::test]
 async fn test_metrics_endpoint_returns_empty_when_no_activity() {
-  let (app, jwt_manager, _, _) = test_app_standalone();
+  let (app, jwt_manager, _, _, _, _temp_dir) = test_app_standalone();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -171,7 +175,7 @@ async fn test_metrics_endpoint_returns_empty_when_no_activity() {
 #[tokio::test]
 #[serial]
 async fn test_chunk_write_increments_counter() {
-  let (app, jwt_manager, storage, prometheus_handle) = test_app_global();
+  let (app, jwt_manager, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -185,7 +189,7 @@ async fn test_chunk_write_increments_counter() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/admin/metrics")
     .header("authorization", &auth)
@@ -211,7 +215,7 @@ async fn test_chunk_write_increments_counter() {
 #[tokio::test]
 #[serial]
 async fn test_file_store_records_metrics() {
-  let (app, jwt_manager, storage, prometheus_handle) = test_app_global();
+  let (app, jwt_manager, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
 
   let data = "some file data for metrics test";
@@ -226,7 +230,7 @@ async fn test_file_store_records_metrics() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/admin/metrics")
     .header("authorization", &auth)
@@ -249,7 +253,7 @@ async fn test_file_store_records_metrics() {
 #[tokio::test]
 #[serial]
 async fn test_http_request_duration_recorded() {
-  let (app, _, storage, prometheus_handle) = test_app_global();
+  let (app, _, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
     .uri("/admin/health")
@@ -260,7 +264,7 @@ async fn test_http_request_duration_recorded() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone());
+  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone());
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -287,7 +291,7 @@ async fn test_http_request_duration_recorded() {
 #[tokio::test]
 #[serial]
 async fn test_auth_failure_records_metric() {
-  let (app, _, storage, prometheus_handle) = test_app_global();
+  let (app, _, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
     .uri("/admin/metrics")
@@ -299,7 +303,7 @@ async fn test_auth_failure_records_metric() {
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone());
+  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone());
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -321,7 +325,7 @@ async fn test_auth_failure_records_metric() {
 #[tokio::test]
 #[serial]
 async fn test_missing_auth_header_records_metric() {
-  let (app, _, storage, prometheus_handle) = test_app_global();
+  let (app, _, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
     .uri("/admin/metrics")
@@ -332,7 +336,7 @@ async fn test_missing_auth_header_records_metric() {
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone());
+  let app = create_app_with_jwt_and_metrics(storage.clone(), jwt_manager.clone(), prometheus_handle.clone(), engine.clone());
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -358,7 +362,7 @@ async fn test_missing_auth_header_records_metric() {
 #[tokio::test]
 #[serial]
 async fn test_file_delete_records_metric() {
-  let (app, jwt_manager, storage, prometheus_handle) = test_app_global();
+  let (app, jwt_manager, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -372,7 +376,7 @@ async fn test_file_delete_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .method("DELETE")
     .uri("/fs/metrics-test/to-delete.txt")
@@ -383,7 +387,7 @@ async fn test_file_delete_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/admin/metrics")
     .header("authorization", &auth)
@@ -407,7 +411,7 @@ async fn test_file_delete_records_metric() {
 #[tokio::test]
 #[serial]
 async fn test_file_read_records_metric() {
-  let (app, jwt_manager, storage, prometheus_handle) = test_app_global();
+  let (app, jwt_manager, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -421,7 +425,7 @@ async fn test_file_read_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/fs/metrics-test/to-read.txt")
     .header("authorization", &auth)
@@ -431,7 +435,7 @@ async fn test_file_read_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/admin/metrics")
     .header("authorization", &auth)
@@ -451,7 +455,7 @@ async fn test_file_read_records_metric() {
 #[tokio::test]
 #[serial]
 async fn test_directory_list_records_metric() {
-  let (app, jwt_manager, storage, prometheus_handle) = test_app_global();
+  let (app, jwt_manager, storage, prometheus_handle, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -465,7 +469,7 @@ async fn test_directory_list_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/fs/metrics-dir")
     .header("authorization", &auth)
@@ -475,7 +479,7 @@ async fn test_directory_list_records_metric() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
-  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle);
+  let app = rebuild_app(&storage, &jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
     .uri("/admin/metrics")
     .header("authorization", &auth)

@@ -10,7 +10,7 @@ use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::filesystem::PathResolver;
 use aeordb::plugins::PluginManager;
-use aeordb::server::{create_app_with_all, create_engine_for_storage};
+use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
 use aeordb::storage::{ChunkStore, RedbStorage};
 
 fn make_path_resolver(storage: &Arc<RedbStorage>) -> Arc<PathResolver> {
@@ -25,13 +25,13 @@ fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     .handle()
 }
 
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>) {
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimiter>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let rate_limiter = Arc::new(RateLimiter::new(5, 60));
   let path_resolver = make_path_resolver(&storage);
-  let engine = create_engine_for_storage();
+  let (engine, temp_dir) = create_temp_engine_for_tests();
   let app = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
@@ -41,18 +41,18 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<RateLimit
     make_prometheus_handle(),
     engine,
   );
-  (app, jwt_manager, storage, rate_limiter)
+  (app, jwt_manager, storage, rate_limiter, temp_dir)
 }
 
 fn rebuild_app(
   storage: &Arc<RedbStorage>,
   jwt_manager: &Arc<JwtManager>,
   rate_limiter: &Arc<RateLimiter>,
-) -> axum::Router {
+) -> (axum::Router, tempfile::TempDir) {
   let plugin_manager = Arc::new(PluginManager::new(storage.database_arc()));
   let path_resolver = make_path_resolver(storage);
-  let engine = create_engine_for_storage();
-  create_app_with_all(
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let router = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
     plugin_manager,
@@ -60,7 +60,8 @@ fn rebuild_app(
     path_resolver,
     make_prometheus_handle(),
     engine,
-  )
+  );
+  (router, temp_dir)
 }
 
 async fn body_json(body: Body) -> serde_json::Value {
@@ -105,7 +106,7 @@ fn test_hash_magic_link_code_different_inputs_different_hashes() {
 
 #[tokio::test]
 async fn test_request_magic_link_returns_200_always() {
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -126,7 +127,7 @@ async fn test_request_magic_link_returns_200_always() {
 
 #[tokio::test]
 async fn test_request_magic_link_returns_200_for_nonexistent_email() {
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -142,7 +143,7 @@ async fn test_request_magic_link_returns_200_for_nonexistent_email() {
 
 #[tokio::test]
 async fn test_magic_link_code_stored_hashed() {
-  let (app, _, storage, _) = test_app();
+  let (app, _, storage, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -178,7 +179,7 @@ async fn test_magic_link_code_stored_hashed() {
 
 #[tokio::test]
 async fn test_verify_valid_code_returns_jwt() {
-  let (_, jwt_manager, storage, rate_limiter) = test_app();
+  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
 
   // Store a magic link directly.
   let code = generate_magic_link_code();
@@ -188,7 +189,7 @@ async fn test_verify_valid_code_returns_jwt() {
     .store_magic_link(&code_hash, "valid@example.com", expires_at)
     .unwrap();
 
-  let app = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
   let request = Request::builder()
     .uri(format!("/auth/magic-link/verify?code={}", code))
     .body(Body::empty())
@@ -204,7 +205,7 @@ async fn test_verify_valid_code_returns_jwt() {
 
 #[tokio::test]
 async fn test_verify_expired_code_returns_401() {
-  let (_, jwt_manager, storage, rate_limiter) = test_app();
+  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
 
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
@@ -214,7 +215,7 @@ async fn test_verify_expired_code_returns_401() {
     .store_magic_link(&code_hash, "expired@example.com", expires_at)
     .unwrap();
 
-  let app = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
   let request = Request::builder()
     .uri(format!("/auth/magic-link/verify?code={}", code))
     .body(Body::empty())
@@ -226,7 +227,7 @@ async fn test_verify_expired_code_returns_401() {
 
 #[tokio::test]
 async fn test_verify_used_code_returns_401() {
-  let (_, jwt_manager, storage, rate_limiter) = test_app();
+  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
 
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
@@ -236,7 +237,7 @@ async fn test_verify_used_code_returns_401() {
     .unwrap();
   storage.mark_magic_link_used(&code_hash).unwrap();
 
-  let app = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
   let request = Request::builder()
     .uri(format!("/auth/magic-link/verify?code={}", code))
     .body(Body::empty())
@@ -248,7 +249,7 @@ async fn test_verify_used_code_returns_401() {
 
 #[tokio::test]
 async fn test_verify_invalid_code_returns_401() {
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .uri("/auth/magic-link/verify?code=this_is_not_a_real_code")
@@ -261,7 +262,7 @@ async fn test_verify_invalid_code_returns_401() {
 
 #[tokio::test]
 async fn test_verify_code_is_single_use() {
-  let (_, jwt_manager, storage, rate_limiter) = test_app();
+  let (_, jwt_manager, storage, rate_limiter, _temp_dir) = test_app();
 
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
@@ -271,7 +272,7 @@ async fn test_verify_code_is_single_use() {
     .unwrap();
 
   // First use should succeed.
-  let app = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
   let request = Request::builder()
     .uri(format!("/auth/magic-link/verify?code={}", code))
     .body(Body::empty())
@@ -280,7 +281,7 @@ async fn test_verify_code_is_single_use() {
   assert_eq!(response.status(), StatusCode::OK);
 
   // Second use should fail.
-  let app = rebuild_app(&storage, &jwt_manager, &rate_limiter);
+  let (app, _engine_dir) = rebuild_app(&storage, &jwt_manager, &rate_limiter);
   let request = Request::builder()
     .uri(format!("/auth/magic-link/verify?code={}", code))
     .body(Body::empty())
@@ -294,7 +295,7 @@ async fn test_magic_link_logs_the_link() {
   // We verify the endpoint works (the tracing log is a side effect we can't
   // easily assert in this test harness, but the handler succeeds which means
   // it reached the tracing::info! call).
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -317,7 +318,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
   let rate_limiter = Arc::new(RateLimiter::new(3, 60));
 
   for i in 0..3 {
-    let engine = create_engine_for_storage();
+    let (engine, _engine_dir) = create_temp_engine_for_tests();
     let app = create_app_with_all(
       storage.clone(),
       jwt_manager.clone(),
@@ -343,7 +344,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
   }
 
   // 4th request should be rate limited.
-  let engine = create_engine_for_storage();
+  let (engine, _engine_dir) = create_temp_engine_for_tests();
   let app = create_app_with_all(
     storage.clone(),
     jwt_manager.clone(),
@@ -433,7 +434,7 @@ async fn test_cleanup_expired_magic_links_returns_zero_when_none_expired() {
 
 #[tokio::test]
 async fn test_request_magic_link_missing_email_field() {
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -449,7 +450,7 @@ async fn test_request_magic_link_missing_email_field() {
 
 #[tokio::test]
 async fn test_verify_magic_link_missing_code_param() {
-  let (app, _, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .uri("/auth/magic-link/verify")

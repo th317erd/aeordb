@@ -6,20 +6,22 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::server::create_app_with_jwt;
+use aeordb::engine::StorageEngine;
+use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 use aeordb::storage::RedbStorage;
 
 /// Create a fresh in-memory app with filesystem support.
-fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>) {
+fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<RedbStorage>, Arc<StorageEngine>, tempfile::TempDir) {
   let storage = Arc::new(RedbStorage::new_in_memory().expect("in-memory storage"));
   let jwt_manager = Arc::new(JwtManager::generate());
-  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone());
-  (app, jwt_manager, storage)
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, storage, engine, temp_dir)
 }
 
 /// Rebuild app from shared state (for multi-request tests).
-fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>) -> axum::Router {
-  create_app_with_jwt(storage.clone(), jwt_manager.clone())
+fn rebuild_app(storage: &Arc<RedbStorage>, jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
+  create_app_with_jwt(storage.clone(), jwt_manager.clone(), engine.clone())
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).
@@ -55,7 +57,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_store_file_returns_201() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -72,7 +74,7 @@ async fn test_store_file_returns_201() {
 
 #[tokio::test]
 async fn test_store_file_returns_metadata_with_document_id() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -100,10 +102,10 @@ async fn test_store_file_returns_metadata_with_document_id() {
 
 #[tokio::test]
 async fn test_store_file_preserves_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/image.png")
@@ -119,7 +121,7 @@ async fn test_store_file_preserves_content_type() {
   assert_eq!(json["content_type"], "image/png");
 
   // Fetch the file and verify content-type header.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/image.png")
     .header("authorization", &auth)
@@ -143,11 +145,11 @@ async fn test_store_file_preserves_content_type() {
 
 #[tokio::test]
 async fn test_get_file_returns_data() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store a file.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/hello.txt")
@@ -158,7 +160,7 @@ async fn test_get_file_returns_data() {
   app.oneshot(request).await.unwrap();
 
   // Get it back.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/hello.txt")
     .header("authorization", &auth)
@@ -174,10 +176,10 @@ async fn test_get_file_returns_data() {
 
 #[tokio::test]
 async fn test_get_file_returns_correct_content_type() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/data.xml")
@@ -187,7 +189,7 @@ async fn test_get_file_returns_correct_content_type() {
     .unwrap();
   app.oneshot(request).await.unwrap();
 
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/data.xml")
     .header("authorization", &auth)
@@ -208,7 +210,7 @@ async fn test_get_file_returns_correct_content_type() {
 
 #[tokio::test]
 async fn test_get_file_returns_404_for_missing() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -227,11 +229,11 @@ async fn test_get_file_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_get_directory_returns_listing() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store two files in the same directory.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/file1.txt")
@@ -241,7 +243,7 @@ async fn test_get_directory_returns_listing() {
     .unwrap();
   app.oneshot(request).await.unwrap();
 
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let request2 = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/file2.txt")
@@ -252,7 +254,7 @@ async fn test_get_directory_returns_listing() {
   app2.oneshot(request2).await.unwrap();
 
   // List the directory.
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let list_request = Request::builder()
     .uri("/fs/myapp")
     .header("authorization", &auth)
@@ -276,11 +278,11 @@ async fn test_get_directory_returns_listing() {
 
 #[tokio::test]
 async fn test_get_directory_empty_returns_empty_array() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store a file in a subdirectory so "emptydir" parent gets created.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/emptydir/subdir/file.txt")
@@ -318,7 +320,7 @@ async fn test_get_directory_empty_returns_empty_array() {
   //
   // Alternative: create /fs/solo/file.txt which creates /solo with
   // file.txt in it. Then delete /fs/solo/file.txt. Now /solo is empty.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let store_request = Request::builder()
     .method("PUT")
     .uri("/fs/emptytest/temp.txt")
@@ -328,7 +330,7 @@ async fn test_get_directory_empty_returns_empty_array() {
   app2.oneshot(store_request).await.unwrap();
 
   // Delete the file.
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri("/fs/emptytest/temp.txt")
@@ -338,7 +340,7 @@ async fn test_get_directory_empty_returns_empty_array() {
   app3.oneshot(delete_request).await.unwrap();
 
   // List the now-empty directory.
-  let app4 = rebuild_app(&storage, &jwt_manager);
+  let app4 = rebuild_app(&storage, &jwt_manager, &engine);
   let list_request = Request::builder()
     .uri("/fs/emptytest")
     .header("authorization", &auth)
@@ -359,11 +361,11 @@ async fn test_get_directory_empty_returns_empty_array() {
 
 #[tokio::test]
 async fn test_delete_file_returns_200() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store a file.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/deleteme.txt")
@@ -374,7 +376,7 @@ async fn test_delete_file_returns_200() {
   app.oneshot(request).await.unwrap();
 
   // Delete it.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let delete_request = Request::builder()
     .method("DELETE")
     .uri("/fs/myapp/deleteme.txt")
@@ -393,7 +395,7 @@ async fn test_delete_file_returns_200() {
 
 #[tokio::test]
 async fn test_delete_file_returns_404_for_missing() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -413,11 +415,11 @@ async fn test_delete_file_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_store_creates_intermediate_directories() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store at a deep path.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/deep/nested/path/file.txt")
@@ -430,7 +432,7 @@ async fn test_store_creates_intermediate_directories() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Verify we can list intermediate directories.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let list_request = Request::builder()
     .uri("/fs/deep/nested")
     .header("authorization", &auth)
@@ -453,11 +455,11 @@ async fn test_store_creates_intermediate_directories() {
 
 #[tokio::test]
 async fn test_store_and_get_roundtrip() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let data = "roundtrip test data with special chars: <>&\"'";
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/roundtrip/test.txt")
@@ -469,7 +471,7 @@ async fn test_store_and_get_roundtrip() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/roundtrip/test.txt")
     .header("authorization", &auth)
@@ -489,11 +491,11 @@ async fn test_store_and_get_roundtrip() {
 
 #[tokio::test]
 async fn test_overwrite_existing_file() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store initial version.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/overwrite.txt")
@@ -504,7 +506,7 @@ async fn test_overwrite_existing_file() {
   app.oneshot(request).await.unwrap();
 
   // Overwrite with new content.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let request2 = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/overwrite.txt")
@@ -517,7 +519,7 @@ async fn test_overwrite_existing_file() {
   assert_eq!(response2.status(), StatusCode::CREATED);
 
   // Verify the overwritten content.
-  let app3 = rebuild_app(&storage, &jwt_manager);
+  let app3 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/overwrite.txt")
     .header("authorization", &auth)
@@ -535,11 +537,11 @@ async fn test_overwrite_existing_file() {
 
 #[tokio::test]
 async fn test_head_returns_metadata_headers() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Store a file.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/headtest.txt")
@@ -550,7 +552,7 @@ async fn test_head_returns_metadata_headers() {
   app.oneshot(request).await.unwrap();
 
   // HEAD request.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let head_request = Request::builder()
     .method("HEAD")
     .uri("/fs/myapp/headtest.txt")
@@ -585,7 +587,7 @@ async fn test_head_returns_metadata_headers() {
 
 #[tokio::test]
 async fn test_head_returns_404_for_missing() {
-  let (app, jwt_manager, _) = test_app();
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -605,7 +607,7 @@ async fn test_head_returns_404_for_missing() {
 
 #[tokio::test]
 async fn test_filesystem_routes_require_auth() {
-  let (app, _, _) = test_app();
+  let (app, _, _, _, _temp_dir) = test_app();
 
   // PUT without auth.
   let request = Request::builder()
@@ -624,11 +626,11 @@ async fn test_filesystem_routes_require_auth() {
 
 #[tokio::test]
 async fn test_store_file_with_binary_data() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let binary_data: Vec<u8> = (0u8..=255).collect();
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/binary.bin")
@@ -641,7 +643,7 @@ async fn test_store_file_with_binary_data() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Fetch and verify.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/binary.bin")
     .header("authorization", &auth)
@@ -661,13 +663,13 @@ async fn test_store_file_with_binary_data() {
 
 #[tokio::test]
 async fn test_store_and_get_large_file() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   // Default chunk size is 64KB. Create data larger than one chunk.
   let large_data: Vec<u8> = (0..200_000).map(|i| (i % 256) as u8).collect();
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/largefile.bin")
@@ -683,7 +685,7 @@ async fn test_store_and_get_large_file() {
   assert_eq!(json["total_size"], 200_000);
 
   // Fetch and verify all data matches.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/largefile.bin")
     .header("authorization", &auth)
@@ -704,10 +706,10 @@ async fn test_store_and_get_large_file() {
 
 #[tokio::test]
 async fn test_dot_prefix_paths_work() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
     .uri("/fs/myapp/.config")
@@ -723,7 +725,7 @@ async fn test_dot_prefix_paths_work() {
   assert_eq!(json["name"], ".config");
 
   // Fetch it back.
-  let app2 = rebuild_app(&storage, &jwt_manager);
+  let app2 = rebuild_app(&storage, &jwt_manager, &engine);
   let get_request = Request::builder()
     .uri("/fs/myapp/.config")
     .header("authorization", &auth)
@@ -743,12 +745,12 @@ async fn test_dot_prefix_paths_work() {
 
 #[tokio::test]
 async fn test_list_directory_after_multiple_stores() {
-  let (_, jwt_manager, storage) = test_app();
+  let (_, jwt_manager, storage, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let file_names = ["alpha.txt", "beta.txt", "gamma.txt", "delta.txt"];
   for file_name in &file_names {
-    let app = rebuild_app(&storage, &jwt_manager);
+    let app = rebuild_app(&storage, &jwt_manager, &engine);
     let request = Request::builder()
       .method("PUT")
       .uri(format!("/fs/listing/{}", file_name))
@@ -760,7 +762,7 @@ async fn test_list_directory_after_multiple_stores() {
   }
 
   // List the directory.
-  let app = rebuild_app(&storage, &jwt_manager);
+  let app = rebuild_app(&storage, &jwt_manager, &engine);
   let list_request = Request::builder()
     .uri("/fs/listing")
     .header("authorization", &auth)
