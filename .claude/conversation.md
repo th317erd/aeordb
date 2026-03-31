@@ -234,4 +234,147 @@ Query pipeline:
 
 ---
 
-*All indexing questions resolved. Ready for implementation.*
+## AGIS Test Protocol Results — Indexing Implementation
+
+### Existing Coverage
+
+| Module | Tests | Covers |
+|---|---|---|
+| `src/indexing/` (Sprint 1 prototype) | 59 | Old standalone scalar ratio — NOT the unified design |
+| `src/engine/nvt.rs` | 17 | NVT bucket lookups — separate from indexing module |
+
+These are separate implementations that will be merged. Most existing tests become regression tests for the converters.
+
+### Critical Test Plan (Priority Order)
+
+#### P1: Converter Correctness (Unit Tests)
+
+```
+spec/engine/converter_spec.rs
+  # HashConverter
+  - test_hash_converter_produces_uniform_distribution (histogram check)
+  - test_hash_converter_deterministic
+  - test_hash_converter_is_not_order_preserving
+
+  # Numeric converters
+  - test_u64_converter_preserves_order
+  - test_u64_converter_range_expansion (new min/max observed)
+  - test_u64_converter_min_equals_max (division by zero edge case → return 0.5)
+  - test_i64_converter_negative_values
+  - test_i64_converter_crosses_zero
+  - test_f64_converter_within_range
+  - test_f64_converter_clamps_outside_range
+  - test_f64_converter_nan_handling
+  - test_f64_converter_infinity_handling
+  - test_timestamp_converter_utc_milliseconds
+  - test_timestamp_converter_epoch_zero
+
+  # String converter
+  - test_string_converter_rough_lexicographic_order
+  - test_string_converter_empty_string
+  - test_string_converter_very_long_string (64KB+)
+  - test_string_converter_unicode
+
+  # Edge cases (all converters)
+  - test_empty_input_bytes
+  - test_wrong_size_input_bytes (3 bytes for u64)
+  - test_all_same_values_dont_panic
+  - test_range_expansion_preserves_approximate_correctness
+```
+
+#### P2: NVT + Converter Integration
+
+```
+spec/engine/unified_index_spec.rs
+  - test_nvt_with_hash_converter (regression — current KVS behavior)
+  - test_nvt_with_u64_converter
+  - test_nvt_with_string_converter
+  - test_skewed_data_with_smart_converter (verify bucket distribution is reasonable)
+  - test_range_query_on_order_preserving_converter
+  - test_range_query_on_non_order_preserving_refuses_with_error
+  - test_nvt_resize_with_converter (buckets double, lookups still work)
+  - test_converter_range_expansion_during_inserts
+  - test_stale_scalar_self_corrects_on_access
+```
+
+#### P3: Index Lifecycle
+
+```
+spec/engine/index_lifecycle_spec.rs
+  - test_create_index_at_path
+  - test_insert_values_into_index
+  - test_lookup_exact_value
+  - test_lookup_range_gt
+  - test_lookup_range_lt
+  - test_lookup_range_between
+  - test_delete_file_removes_index_entry
+  - test_delete_file_doesnt_remove_other_files_index
+  - test_rebuild_index_from_scratch
+  - test_index_persists_across_restart
+  - test_index_included_in_version_snapshot
+  - test_index_with_zero_entries
+  - test_index_with_one_entry
+  - test_index_with_duplicate_values (multiple files with age=30)
+```
+
+#### P4: Write Pipeline Integration
+
+```
+spec/engine/write_pipeline_spec.rs
+  - test_store_file_triggers_parser_and_indexer
+  - test_store_file_no_parser_no_indexing
+  - test_store_file_parser_but_no_indexes
+  - test_multiple_parsers_multiple_indexes
+  - test_crash_between_store_and_index_file_survives
+  - test_reindex_after_crash_recovers_index
+  - test_overwrite_file_updates_index
+  - test_delete_file_updates_index
+```
+
+#### P5: Query Pipeline Integration
+
+```
+spec/engine/query_pipeline_spec.rs
+  - test_query_exact_match_on_indexed_field
+  - test_query_range_on_indexed_field
+  - test_query_on_non_indexed_field_returns_error
+  - test_query_combining_multiple_fields (intersection)
+  - test_query_with_limit
+  - test_query_with_cursor_streaming
+  - test_query_empty_index_returns_empty
+  - test_query_after_delete_excludes_deleted
+  - test_query_on_forked_version
+```
+
+#### P6: Performance (Benchmarks, Not Correctness)
+
+```
+spec/engine/index_benchmark_spec.rs
+  - test_insert_1_million_entries_performance
+  - test_lookup_in_1_million_entries_performance
+  - test_range_query_in_1_million_entries_performance
+  - test_bulk_insert_then_bulk_query
+```
+
+### Critical Edge Cases to Watch
+
+| Edge Case | Risk | Mitigation |
+|---|---|---|
+| `observed_min == observed_max` | Division by zero in converter | Return 0.5 (all values map to center) |
+| Range expansion shifts scalars | Entries in "wrong" NVT bucket | Self-correcting on access (always good, not always perfect) |
+| Stale index entry (file deleted) | Query returns ghost results | Check deletion flag on lookup, skip deleted |
+| Two files share chunks, one deleted | Index removes wrong file's entry | Index entries are per-file-path, not per-chunk |
+| Parser returns garbage | Bad data in index | Validate parser output before indexing |
+| WASM converter panics | Index operation crashes | Trap the WASM error, skip indexing for that field, log warning |
+
+### What's NOT Tested Yet (Future)
+
+- Multi-dimensional queries (geospatial)
+- WASM converter batch API performance
+- Index hot-reloading (add new parser, re-index existing files)
+- Concurrent index writes from parallel workers
+- Index compaction / optimization
+
+---
+
+*Test plan complete. Ready for implementation.*
