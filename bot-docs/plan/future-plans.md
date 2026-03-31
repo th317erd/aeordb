@@ -49,6 +49,145 @@ trait AuthProvider: Send + Sync {
 
 ---
 
+## Server-Side Compilation + In-Database SDK + Schema-as-Code
+
+**What:** Functions are published as raw source code. The server compiles them to WASM. The SDK, models, and functions all live as files in the database filesystem. The database IS the development environment.
+
+### How It Works
+
+Users write Rust source files and push them to the database:
+
+```
+PUT /engine/myapp/.functions/models/user.rs     ← schema model
+PUT /engine/myapp/.functions/find_users.rs       ← query function
+```
+
+On first invocation, the server:
+1. Resolves all `mod`/`use` imports from the filesystem
+2. Pulls in the SDK (stored at `/.system/sdk/`)
+3. Compiles everything together → WASM binary
+4. Caches the binary
+5. Executes
+
+On subsequent invocations: uses the cached WASM. If source changes: recompile.
+
+### Filesystem Layout
+
+```
+/.system/sdk/                      ← SDK lives IN the database
+  prelude.rs
+  query.rs
+  types.rs
+  schema.rs
+  response.rs
+
+/myapp/.functions/                 ← user code lives IN the database
+  models/
+    user.rs                        ← schema definition + parser + index config
+    product.rs
+  find_young_bobs.rs               ← uses models/user.rs + SDK
+  generate_report.rs               ← uses multiple models + SDK
+```
+
+### Schema-as-Code via Proc Macros
+
+The `#[aeordb_schema]` proc macro on a struct generates:
+- **Parser plugin** — knows how to extract fields from raw bytes (JSON, XML, etc.)
+- **ScalarConverter registrations** — which converter for each field
+- **Index configuration** — automatically configures indexes at the path
+- **Typed query builder** — `.name()` returns a `StringFieldQuery`, `.age()` returns a `U64FieldQuery`
+
+```rust
+// /myapp/.functions/models/user.rs
+use aeordb_sdk::prelude::*;
+
+#[aeordb_schema(parser = "json")]
+pub struct User {
+  #[index(string, unique)]
+  pub email: String,
+  #[index(fuzzy)]
+  pub name: String,
+  #[index(u64)]
+  pub age: u64,
+}
+```
+
+### Query Functions
+
+Functions use the generated typed query builder. Operations accumulate (like Mythix ORM's operation stack) until a terminal method is called:
+
+```rust
+// /myapp/.functions/find_young_bobs.rs
+mod models;
+use models::user::User;
+
+#[query_function]
+fn find_young_bobs() -> QueryResult {
+  User::query()
+    .name().fuzzy("Bob")    // pushed to operation stack
+    .age().lt(30)           // pushed to operation stack
+    .all()                  // NOW execute: engage indexes, intersect, return
+}
+```
+
+Terminal methods: `.all()`, `.first()`, `.last()`, `.count()`, `.cursor()` (streaming).
+
+When a terminal method is called, the engine:
+1. Looks at configured indexes for the target path
+2. For each field operation → uses the matching index
+3. Executes index queries → gets candidate sets
+4. Intersects/unions candidates
+5. Loads matching files
+6. Returns results
+
+### Simple Queries (No Compilation)
+
+For simple queries that don't need full Rust, a JSON query API (interpreted, no compiler needed):
+
+```
+POST /query
+{
+  "path": "/myapp/users/",
+  "where": {
+    "name": { "fuzzy": "Bob" },
+    "age": { "lt": 30 }
+  }
+}
+```
+
+Both interfaces use the same underlying index engine.
+
+### Multi-File Compilation
+
+The server resolves `mod` imports by looking up files in the database filesystem. `mod models;` resolves to the `models/` directory at the same path. The SDK at `/.system/sdk/` is implicitly available. All dependencies are in the database.
+
+### Requirements
+
+- Rust compiler (`rustc`) with `wasm32-unknown-unknown` target on the server
+- Or: a lighter approach using a Rust-native scripting language (Rhai) for simple cases
+- WASM binary cache (keyed by hash of all source files involved)
+- Cache invalidation when any source file changes
+
+### What This Enables
+
+- **Schema lives in the database** — versioned, forkable, snapshotable
+- **Functions live in the database** — same benefits
+- **SDK lives in the database** — upgradeable per-database
+- **The database IS the development environment** — no local toolchain needed for simple queries
+- **Compile once, run everywhere** — WASM binary is portable across nodes in a cluster
+
+### Open Questions
+
+- [ ] Compilation latency on first invocation (cold start). Cache aggressively to minimize.
+- [ ] Rust compiler as a server dependency — heavy. Consider Rhai or Lua for lightweight alternative.
+- [ ] Incremental compilation — only recompile what changed.
+- [ ] Error reporting — compilation errors need to be surfaced clearly to the user.
+- [ ] Sandboxing the compiler itself — compiling arbitrary user code is a security surface.
+
+**Inspiration:** Mythix ORM's proxy-based chainable query engine (JavaScript). The Rust equivalent uses proc macros for compile-time code generation instead of runtime proxies.
+
+---
+
 ## HTTP-to-DB User Mapping + Permission Resolution
 
 **What:** Connect HTTP authentication (JWT) to database permissions (crudlify groups) so that every request is authorized against the filesystem's permission model.
