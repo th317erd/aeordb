@@ -176,3 +176,11 @@ path = "spec/engine/append_writer_spec.rs"
 [[test]]
 name = "records_spec"
 path = "spec/engine/records_spec.rs"
+
+[[test]]
+name = "nvt_spec"
+path = "spec/engine/nvt_spec.rs"
+
+[[test]]
+name = "kv_store_spec"
+path = "spec/engine/kv_store_spec.rs"
