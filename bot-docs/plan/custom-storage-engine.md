@@ -89,18 +89,62 @@ A chunk's raw data can never collide with a file path hash because the prefixes 
 
 ## Entry Format (On-Disk)
 
-Every entity on disk has the same header structure:
+Every entity on disk has the same header structure. The header is versioned and hash-algorithm-aware.
 
 ```
-[Entry Header — 89 bytes]
+[Entry Header — variable size, minimum 32 bytes + hash_length]
+  magic:         u32           // 0x0AE012DB — identifies the start of a valid entry (critical for recovery scanning)
+  entry_version: u8           // entity format version (starts at 1). Maps to an engine that reads this format.
   entry_type:    u8           // 0x01-0x06
   flags:         u8           // reserved
+  hash_algo:     u16          // hashing algorithm enum (see below)
   key_length:    u32          // length of key field
   value_length:  u32          // length of value field
   timestamp:     i64          // millisecond precision UTC, when written
-  hash:          [u8; 32]     // BLAKE3 of (entry_type + key + value) — integrity check
   total_length:  u32          // total bytes of this entry including header (for jump-scanning)
-  reserved:      [u8; 6]      // future use
+  hash:          [u8; N]      // integrity hash, length N determined by hash_algo (e.g., BLAKE3=32, SHA-256=32, SHA-512=64)
+```
+
+### Entry Versioning
+
+- `entry_version` (u8) identifies the format version of this entry. The engine maintains a registry of version→parser mappings, so old entries are always readable even after format upgrades.
+- When reading an entry, the engine selects the correct parser based on `entry_version`.
+- New format versions can add fields, change layouts, or use different serialization — as long as the version byte comes first, the engine knows how to proceed.
+
+### Hash Algorithm Enum
+
+`hash_algo` (u16) specifies which hashing algorithm was used for the `hash` field and for the entry's key (for chunks, the key IS a hash). The hash length is determined by the algorithm.
+
+```
+enum HashAlgorithm {
+  BLAKE3_256   = 0x0001,  // 32 bytes — current default
+  SHA256       = 0x0002,  // 32 bytes
+  SHA512       = 0x0003,  // 64 bytes
+  SHA3_256     = 0x0004,  // 32 bytes
+  SHA3_512     = 0x0005,  // 64 bytes
+  // 0x0006 - 0xFFFF reserved for future algorithms
+}
+
+fn hash_length(algo: HashAlgorithm) -> usize {
+  match algo {
+    BLAKE3_256 => 32,
+    SHA256     => 32,
+    SHA512     => 64,
+    SHA3_256   => 32,
+    SHA3_512   => 64,
+  }
+}
+```
+
+### Dynamic Hash Lengths
+
+All fields that store hashes use the length determined by `hash_algo`. This means:
+- Entry keys for chunks: `[u8; hash_length(algo)]` instead of hardcoded `[u8; 32]`
+- KV block entries: `(hash: [u8; hash_length(algo)], offset: u64)` — entry size varies by algorithm
+- NVT scalar computation: uses the first 8 bytes of the hash regardless of total length
+- FileRecord chunk lists: each hash is `hash_length(algo)` bytes
+
+The hash algorithm is set per-database (stored in the file header) and applies to all entities. Mixing algorithms within a database is not supported — migration requires rewriting all entries.
 
 [Key]
   [u8; key_length]
@@ -111,9 +155,12 @@ Every entity on disk has the same header structure:
 
 ### Key Properties
 
+- **`magic`** (0x0AE012DB) comes FIRST — 4 bytes that identify "this is the start of a valid entry." Critical for recovery scanning: scan for magic bytes to find entry boundaries even in corrupted files.
+- **`entry_version`** comes after magic — the engine reads this byte to select the correct parser for the rest of the header. Future format changes are always backward-compatible.
+- **`hash_algo`** determines the length of the `hash` field and all hash references. The engine knows the hash length before reading the hash.
 - **`total_length`** enables entity-by-entity scanning: read header → jump `total_length` bytes → next header. Not byte-by-byte.
-- **`hash`** covers `(entry_type + key + value)`. On read, re-hash and compare. Mismatch = corrupt entry.
-- **For chunks**: the key IS `BLAKE3("chunk:" + value)`, so verification is inherent. No separate CRC needed.
+- **`hash`** covers `(entry_type + key + value)`. On read, re-hash using the specified algorithm and compare. Mismatch = corrupt entry.
+- **For chunks**: the key IS `hash(prefix + value)`, so verification is inherent.
 - **`timestamp`** always UTC milliseconds. Enables version reconstruction by temporal ordering.
 - **`entry_type`** identifies what kind of entity this is, enabling recovery even without the KV store.
 
@@ -124,24 +171,38 @@ Every entity on disk has the same header structure:
 ```
 aeordb.dat:
 
-[File Header — 128 bytes]
+[File Header — 256 bytes]
   magic:            "AEOR" (4 bytes)
-  format_version:   u8
+  header_version:   u8           ← header format version (starts at 1)
+  hash_algo:        u16          ← database-wide hash algorithm (default: BLAKE3_256 = 0x0001)
   created_at:       i64 (ms, UTC)
   updated_at:       i64 (ms, UTC)
   kv_block_offset:  u64          ← current KV block location
   kv_block_length:  u64
+  kv_block_version: u8           ← KV block format version
   nvt_offset:       u64          ← current NVT location
   nvt_length:       u64
-  head_hash:        [u8; 32]     ← hash of the current directory index (HEAD)
+  nvt_version:      u8           ← NVT format version
+  head_hash:        [u8; N]      ← hash of current HEAD DirectoryIndex (length N = hash_length(hash_algo))
   entry_count:      u64          ← total entities written (for stats)
-  reserved:         [u8; remaining to 128]
+  resize_in_progress: u8         ← 0=normal, 1=resize underway (for crash recovery)
+  buffer_kvs_offset:  u64        ← offset of temporary buffer KVS during resize (0 if not resizing)
+  buffer_nvt_offset:  u64        ← offset of temporary buffer NVT during resize (0 if not resizing)
+  reserved:         [u8; remaining to 256]
 
-[NVT — Normalized Vector Table]
-  Immediately after header. Grows by relocating chunks.
+[NVT — Normalized Vector Table (versioned)]
+  nvt_version: u8                ← format version of the NVT structure
+  hash_algo:   u16               ← hash algorithm used (must match header)
+  bucket_count: u32              ← number of buckets
+  buckets:     [NVTBucket; bucket_count]
+  Immediately after header. Grows by bulk-relocating entities.
 
-[KV Block — Sorted array of (hash, offset) pairs]
-  After NVT. Grows by relocating chunks.
+[KV Block — Sorted hash→offset array (versioned)]
+  kv_version:  u8                ← format version of the KV block structure
+  hash_algo:   u16               ← hash algorithm used (must match header)
+  entry_count: u64               ← number of entries
+  entries:     [KVEntry; entry_count]  ← each entry is hash_length(algo) + 8 bytes
+  After NVT. Grows by bulk-relocating entities.
 
 [Entries...]
   Chunks, FileRecords, DeletionRecords, Snapshots, Voids...
@@ -235,15 +296,15 @@ The KV block is a flat sorted array of entries:
 
 ```
 struct KVEntry {
-  hash: [u8; 32],    // the entity's hash (its key in the KV store)
+  hash: [u8; N],     // the entity's hash — length N determined by hash_algo
   offset: u64,       // byte offset in the data file where the entity lives
 }
-// 40 bytes per entry
+// N + 8 bytes per entry (e.g., BLAKE3_256: 40 bytes, SHA-512: 72 bytes)
 ```
 
 Sorted by hash (the NVT's scalar ordering provides the sort naturally).
 
-### Size
+### Size (at BLAKE3_256, 40 bytes/entry)
 
 | Chunks | KV Block Size |
 |---|---|
