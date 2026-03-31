@@ -52,6 +52,10 @@ pub trait ScalarConverter: Send + Sync {
 | `TimestampConverter { min, max }` | Yes | UTC millisecond timestamps. |
 | `WasmConverter { plugin }` | User-defined | Custom WASM plugin does the conversion. |
 
+<!-- 
+Love it!
+ -->
+
 ---
 
 ## Concerns and Open Questions
@@ -201,17 +205,33 @@ Query pipeline:
 
 ---
 
-## Questions for Wyatt
+## Resolved Questions
 
-1. **Distribution handling** — smart converter (option d) vs adaptive structure (option c)?
-2. **Range queries on non-order-preserving indexes** — refuse with error (option b)?
-3. **Multi-dimensional** — multiple 1D indexes for now (option b)?
-4. **Memory** — KVS NVT always in memory, user index NVTs on-demand (option c)?
-5. **WASM performance** — batch API (option b)?
-6. **Lookup structure** — can the self-correcting offset table replace the NVT entirely?
-7. **Index storage** — indexes are files at `.indexes/` (option a)?
-8. **Crash between store and index** — acceptable, indexes are rebuildable?
+| # | Question | Resolution |
+|---|---|---|
+| 1 | Distribution handling | **Converter handles it.** The converter tracks its own observed min/max range and maps values to [0.0, 1.0] within that range. Uniform buckets work because the converter's job is to MAKE the distribution uniform. Type authors can bake in domain knowledge (e.g., age distribution) for even better results. This is exactly what Wyatt built and tested in 2012. |
+| 2 | Range queries on non-order-preserving indexes | **Refuse with error (option b).** `is_order_preserving()` on the trait. Engine refuses range queries on non-order-preserving indexes and tells the user why. Maximum flexibility. |
+| 3 | Multi-dimensional | **Multiple 1D indexes for now (option b).** One NVT per dimension, query engine intersects results. Full spatial index types (R-tree, quad-tree) deferred to future. |
+| 4 | Memory | **KVS NVT always in memory, user index NVTs on-demand with LRU (option c).** Different access patterns, different memory strategies. |
+| 5 | WASM performance | **Batch API (option b).** Send N values, get N scalars back. One boundary crossing instead of N. |
+| 6 | Lookup structure | **Uniform buckets work** because the converter makes the distribution uniform. No need for two structures. The self-correcting property comes from the converter expanding its range as new data is seen — existing scalars are "always good" approximations that improve on access. |
+| 7 | Index storage | **Indexes are files at `.indexes/` (option a).** Everything is a file. Index data is a FileRecord whose content is the NVT + sorted entries. Updated via append-only (new version written). Old versions preserved for snapshots. |
+| 8 | Crash between store and index | **Acceptable.** File is stored and recoverable. Index is rebuildable by re-running parsers. Index lag is acceptable; data loss is not. |
 
 ---
 
-*Waiting for Wyatt's feedback...*
+## Additional Resolved Decisions (from further discussion)
+
+| Decision | Resolution |
+|---|---|
+| Converter trait name | `ScalarConverter` with `to_scalar(&self, value: &[u8]) -> f64` and `is_order_preserving() -> bool` |
+| Converter range tracking | Converters track `observed_min` / `observed_max` internally. Range expands as new data is seen. |
+| NVT and indexing unification | One `ScalarConverter` trait shared by both engine KVS (HashConverter) and user indexes (U64Converter, StringConverter, etc.) |
+| Functions as endpoints | Published functions are callable HTTP endpoints with typed arguments. Data and code versioned together. |
+| Server-side compilation | Raw Rust source pushed to DB, compiled to WASM on first invocation, cached. SDK lives in the DB at `/.system/sdk/`. |
+| Schema-as-code | `#[aeordb_schema]` proc macro generates parser, converters, index config, and typed query builder from struct definitions. |
+| Query builder | Chainable builder (inspired by Mythix ORM). Operations accumulate until terminal method (`.all()`, `.first()`, `.cursor()`). |
+
+---
+
+*All indexing questions resolved. Ready for implementation.*
