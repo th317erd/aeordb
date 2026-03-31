@@ -204,6 +204,102 @@ One boundary crossing for 1000 values instead of 1000 crossings.
 
 ---
 
+## NVT Bitmap Compositing — The Query Execution Engine
+
+The NVT is not just a lookup table. It IS the query execution engine. Each NVT is a bitmap — buckets are pixels, populated buckets are "on." Complex queries are bitmap compositing operations.
+
+### Logical Operations on NVTs
+
+```
+NVT_age (age > 30):
+  [____████████████████]    ← buckets with entries for age > 30
+
+NVT_name (name = "Bob"):
+  [█__█____█___________]    ← buckets with entries for name = "Bob"
+
+AND (intersection):  [________█___________]  ← on in BOTH
+OR  (union):         [█__█████████████████]  ← on in EITHER
+NOT (difference):    [____████_███████████]  ← first minus second
+XOR (symmetric diff):[█__█████_███████████]  ← on in one but not both
+```
+
+The operation is **O(bucket_count)**, not O(entries). With 1024 buckets, it's 1024 comparisons regardless of whether you have 10 entries or 10 billion.
+
+The result is a NEW composited mask — the "on" buckets tell you exactly where to scan for actual entries.
+
+### Strided Access (Zero-Cost Resolution Scaling)
+
+Don't downsample. Don't copy. Just change the stride.
+
+```
+Full resolution:     bucket[0], bucket[1], bucket[2], bucket[3], ...
+Stride 2 (half):     bucket[0],            bucket[2],            ...
+Stride 4 (quarter):  bucket[0],                        bucket[4], ...
+Stride 64 (1/64th):  bucket[0], ..., bucket[64], ..., bucket[128], ...
+```
+
+Zero allocation. Zero copying. One loop with a step size.
+
+```rust
+fn composite_and(nvt_a: &NVT, nvt_b: &NVT, stride: usize) -> Vec<usize> {
+  let mut surviving = Vec::new();
+  let mut i = 0;
+  while i < nvt_a.bucket_count() {
+    if nvt_a.buckets[i].entry_count > 0 && nvt_b.buckets[i].entry_count > 0 {
+      surviving.push(i);
+    }
+    i += stride;
+  }
+  surviving
+}
+```
+
+### Progressive Refinement
+
+Like progressive JPEG — start rough, refine only where needed:
+
+```
+Pass 1 (stride 64):  16M buckets checked in 250K comparisons → 50 regions survive
+Pass 2 (stride 1):   scan those 50 regions × 64 buckets = 3,200 comparisons
+Total:               253,200 comparisons instead of 16,000,000
+
+95%+ of the index space eliminated in the first pass.
+```
+
+### Complex Query Composition
+
+```
+result = (NVT_age_gt_30 AND NVT_city_eq_NYC) OR NVT_role_eq_admin
+
+Step 1: AND(age, city) → intermediate mask
+Step 2: OR(intermediate, role) → final mask
+Step 3: Scan entries in surviving buckets only
+```
+
+Three bitmap operations. Microseconds. Then only scan the handful of surviving bucket regions.
+
+### Cross-Resolution Compositing
+
+If NVT_age has 1024 buckets and NVT_name has 4096 buckets:
+- Each bucket in NVT_age maps to 4 buckets in NVT_name
+- Composite at the lower resolution (1024), then refine at the higher resolution for surviving regions
+- OR: use stride 4 on NVT_name to match NVT_age's resolution
+
+No resampling needed — just adjust the stride.
+
+### GPU Offloading (Future)
+
+NVT compositing IS image processing. GPUs are built for exactly this:
+
+```
+CPU: 16M bucket composite = 16M sequential comparisons
+GPU: 16M bucket composite = one compute shader kernel, massively parallel, microseconds
+```
+
+Upload two NVT arrays to GPU memory. Run AND/OR/NOT shader. Download result mask. Database queries at framerate speeds — real-time analytics on billions of records.
+
+---
+
 ## Multi-Dimensional Queries (Future)
 
 For 2D+ data (geospatial): one NVT per dimension. Query engine intersects results.
