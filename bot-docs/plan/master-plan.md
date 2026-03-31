@@ -17,10 +17,10 @@ A Rust-native database engine that solves the 12 fundamental problems of existin
 
 One primitive: the chunk (header + data, linked via next/prev). Files are linked lists of chunks. Directories are per-directory B-trees of chunks. Versioning via bases (I-frames) and diffs (P-frames). Corruption is local — never cascading. Everything is chunks.
 
-### 2. [Indexing Engine](./indexing-engine.md)
-**Status:** Not Started
+### 2. [Unified Indexing](./indexing-unified.md) ([legacy prototype](./indexing-engine.md))
+**Status:** Designed, test-planned, ready for implementation
 
-Adaptive, automatic indexing that observes query patterns and builds/adjusts indexes without human intervention.
+One trait (`ScalarConverter`), one lookup structure (NVT). Converter handles distribution normalization via range tracking. Built-in converters for all numeric types, strings, timestamps. WASM batch API for custom converters. Indexes stored as files at `.indexes/`. ~60 tests planned across 6 priority levels.
 
 ### 3. [Query Engine](./query-engine.md)
 **Status:** In Design
