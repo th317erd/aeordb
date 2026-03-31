@@ -1,7 +1,7 @@
 # AeorDB Torture Test Results
 
-Date: 2026-03-31T06:32:23Z
-Database: /media/wyatt/Elements/wyatt-desktop/AEORDB-TEST/torture2.aeordb
+Date: 2026-03-31T06:41:56Z
+Database: /media/wyatt/Elements/wyatt-desktop/AEORDB-TEST/torture-final.aeordb
 
 ## Setup
 Server running, authenticated.
@@ -17,16 +17,16 @@ Engine file:
 
 ## Test 2: 200 Files, Each at a Unique Deep Path
 
-  ✅ 200 unique deep paths: 198 stored in 20957ms
+  ✅ 200 unique deep paths: 196 stored in 14545ms
 
 ## Test 3: Large Files
 
-  Uploading: f1281627912.mp4 (351 MB)...
-  ✅ Large file f1281627912.mp4 (351 MB): stored in 5402ms (65.1 MB/sec)
-  ✅ Large file f1281627912.mp4: integrity verified
-  Uploading: f1433745832.mp4 (359 MB)...
-  ✅ Large file f1433745832.mp4 (359 MB): stored in 5569ms (64.4 MB/sec)
-  ✅ Large file f1433745832.mp4: integrity verified
+  Uploading: LucyH-Sylvan_MyLovelyHousewife_1920x1080_mp4.mp4 (1018 MB)...
+  ✅ Large file LucyH-Sylvan_MyLovelyHousewife_1920x1080_mp4.mp4 (1018 MB): stored in 17635ms (57.7 MB/sec)
+  ✅ Large file LucyH-Sylvan_MyLovelyHousewife_1920x1080_mp4.mp4: integrity verified
+  Uploading: f591141728.mp4 (713 MB)...
+  ✅ Large file f591141728.mp4 (713 MB): stored in 12208ms (58.4 MB/sec)
+  ✅ Large file f591141728.mp4: integrity verified
 
 ## Test 4: Snapshots
 
@@ -35,8 +35,8 @@ Engine file:
 
 ## Test 5: Delete Files and Verify Gone
 
-  ✅ Deleted 50/50 files
-  ❌ Only 0/10 return 404
+  ✅ Deleted 48/50 files
+  ✅ All 10 checked deleted files return 404
 
 ## Test 6: Snapshot After Deletes
 
@@ -90,9 +90,9 @@ Engine file:
 | Metric | Value |
 |---|---|
 | Total tests | 39 |
-| Passed | 38 |
-| Failed | 1 |
+| Passed | 39 |
+| Failed | 0 |
 | Engine file | 0 MB |
 
-**1 TESTS FAILED** ❌
+**ALL TESTS PASSED** 🎉
 

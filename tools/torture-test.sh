@@ -66,8 +66,8 @@ log ""
 
 # 1a: Moderately long path (200 chars)
 LONG_PATH="engine/$(python3 -c "print('/'.join(['segment_' + str(i) for i in range(20)]))")/file.txt"
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$LONG_PATH" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "long path test" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$LONG_PATH" \
+  -H "$(auth)" -H "Content-Type: text/plain" -d "long path test" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "200-char path: stored" || fail "200-char path: HTTP $CODE"
 
 # 1b: Read it back
@@ -76,8 +76,8 @@ BODY=$(curl -sf "$SERVER/$LONG_PATH" -H "$(auth)" 2>/dev/null)
 
 # 1c: Very long path (1000+ chars)
 VERY_LONG="engine/$(python3 -c "print('/'.join(['very_long_segment_name_' + str(i).zfill(4) for i in range(40)]))")/deep_file.dat"
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$VERY_LONG" \
-  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "deep nesting test" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$VERY_LONG" \
+  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "deep nesting test" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "1000-char path (40 levels deep): stored" || fail "1000-char path: HTTP $CODE"
 
 BODY=$(curl -sf "$SERVER/$VERY_LONG" -H "$(auth)" 2>/dev/null)
@@ -98,8 +98,8 @@ for i in "${!IMGS[@]}"; do
   # Each file gets its own unique deep path
   UNIQUE_PATH="engine/torture/unique/category_$((i % 10))/subcategory_$((i % 5))/batch_$((i / 50))/item_${i}/$B"
   CT=$(file --mime-type -b "$F")
-  CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$UNIQUE_PATH" \
-    -H "$(auth)" -H "Content-Type: $CT" --data-binary "@$F" 2>/dev/null || echo "000")
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/$UNIQUE_PATH" \
+    -H "$(auth)" -H "Content-Type: $CT" --data-binary "@$F" 2>/dev/null)
   [ "$CODE" = "201" ] && UP=$((UP+1)) || FAIL_COUNT=$((FAIL_COUNT+1))
 done
 END=$(date +%s%N); DUR=$(( (END-START)/1000000 ))
@@ -118,9 +118,9 @@ if [ -d "$VIDEOS_DIR" ]; then
     VMB=$((VSZ/1024/1024))
     log "  Uploading: $VB ($VMB MB)..."
     START=$(date +%s%N)
-    CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 600 \
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 600 \
       -X PUT "$SERVER/engine/torture/videos/$VB" \
-      -H "$(auth)" -H "Content-Type: video/mp4" --data-binary "@$V" 2>/dev/null || echo "000")
+      -H "$(auth)" -H "Content-Type: video/mp4" --data-binary "@$V" 2>/dev/null)
     END=$(date +%s%N); VDUR=$(( (END-START)/1000000 ))
 
     if [ "$CODE" = "201" ]; then
@@ -171,7 +171,7 @@ for i in $(seq 0 49); do
   F="${IMGS[$i]}"
   B=$(basename "$F")
   UNIQUE_PATH="engine/torture/unique/category_$((i % 10))/subcategory_$((i % 5))/batch_$((i / 50))/item_${i}/$B"
-  CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X DELETE "$SERVER/$UNIQUE_PATH" -H "$(auth)" 2>/dev/null || echo "000")
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$SERVER/$UNIQUE_PATH" -H "$(auth)" 2>/dev/null)
   [ "$CODE" = "200" ] && DELETED=$((DELETED+1))
 done
 [ $DELETED -ge 45 ] && pass "Deleted $DELETED/50 files" || fail "Only deleted $DELETED/50"
@@ -182,7 +182,7 @@ for i in $(seq 0 9); do
   F="${IMGS[$i]}"
   B=$(basename "$F")
   UNIQUE_PATH="engine/torture/unique/category_$((i % 10))/subcategory_$((i % 5))/batch_$((i / 50))/item_${i}/$B"
-  CODE=$(curl -sf -o /dev/null -w "%{http_code}" "$SERVER/$UNIQUE_PATH" -H "$(auth)" 2>/dev/null || echo "000")
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SERVER/$UNIQUE_PATH" -H "$(auth)" 2>/dev/null)
   [ "$CODE" = "404" ] && GONE=$((GONE+1))
 done
 [ $GONE -eq 10 ] && pass "All 10 checked deleted files return 404" || fail "Only $GONE/10 return 404"
@@ -218,8 +218,8 @@ FORK_COUNT=$(echo "$FORK_LIST" | python3 -c "import sys,json; print(len(json.loa
 [ "$FORK_COUNT" -ge 1 ] && pass "Fork listed ($FORK_COUNT total)" || fail "Fork list failed"
 
 # Promote fork
-PROMOTE_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-  -X POST "$SERVER/version/fork/torture-branch/promote" -H "$(auth)" 2>/dev/null || echo "000")
+PROMOTE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "$SERVER/version/fork/torture-branch/promote" -H "$(auth)" 2>/dev/null)
 [ "$PROMOTE_CODE" = "200" ] && pass "Fork promoted to HEAD" || fail "Fork promotion: HTTP $PROMOTE_CODE"
 
 log ""
@@ -229,23 +229,23 @@ log "## Test 8: Special Characters in Paths"
 log ""
 
 # Spaces (URL-encoded)
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/file%20with%20spaces.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "spaces test" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/file%20with%20spaces.txt" \
+  -H "$(auth)" -H "Content-Type: text/plain" -d "spaces test" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Filename with spaces (URL-encoded)" || fail "Spaces: HTTP $CODE"
 
 # Dots in path
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/.hidden/file.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "hidden dir test" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/.hidden/file.txt" \
+  -H "$(auth)" -H "Content-Type: text/plain" -d "hidden dir test" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Dot-prefixed directory (.hidden)" || fail "Dot-prefix: HTTP $CODE"
 
 # Unicode in filename
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/caf%C3%A9.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "unicode test" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/caf%C3%A9.txt" \
+  -H "$(auth)" -H "Content-Type: text/plain" -d "unicode test" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Unicode filename (café)" || fail "Unicode: HTTP $CODE"
 
 # Hyphens and underscores
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/my-file_v2.0.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "hyphens and underscores" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/special/my-file_v2.0.txt" \
+  -H "$(auth)" -H "Content-Type: text/plain" -d "hyphens and underscores" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Hyphens and underscores in filename" || fail "Hyphens: HTTP $CODE"
 
 log ""
@@ -255,13 +255,13 @@ log "## Test 9: Edge Case File Sizes"
 log ""
 
 # Empty file (0 bytes)
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/empty.dat" \
-  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/empty.dat" \
+  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Empty file (0 bytes)" || fail "Empty file: HTTP $CODE"
 
 # 1 byte file
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/one_byte.dat" \
-  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "X" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/one_byte.dat" \
+  -H "$(auth)" -H "Content-Type: application/octet-stream" -d "X" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "1-byte file" || fail "1-byte: HTTP $CODE"
 
 BODY=$(curl -sf "$SERVER/engine/torture/edge/one_byte.dat" -H "$(auth)" 2>/dev/null)
@@ -270,8 +270,8 @@ BODY=$(curl -sf "$SERVER/engine/torture/edge/one_byte.dat" -H "$(auth)" 2>/dev/n
 # Exactly 256KB (one chunk boundary)
 dd if=/dev/urandom bs=262144 count=1 2>/dev/null > /tmp/torture-256k
 ORIG_HASH=$(sha256sum /tmp/torture-256k | awk '{print $1}')
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/exact_256k.dat" \
-  -H "$(auth)" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/torture-256k" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/exact_256k.dat" \
+  -H "$(auth)" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/torture-256k" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "Exactly 256KB file" || fail "256KB: HTTP $CODE"
 
 curl -sf -o /tmp/torture-256k-dl "$SERVER/engine/torture/edge/exact_256k.dat" -H "$(auth)" 2>/dev/null
@@ -282,8 +282,8 @@ rm -f /tmp/torture-256k /tmp/torture-256k-dl
 # 256KB + 1 byte (just over chunk boundary)
 dd if=/dev/urandom bs=262145 count=1 2>/dev/null > /tmp/torture-256k1
 ORIG_HASH=$(sha256sum /tmp/torture-256k1 | awk '{print $1}')
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/over_256k.dat" \
-  -H "$(auth)" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/torture-256k1" 2>/dev/null || echo "000")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$SERVER/engine/torture/edge/over_256k.dat" \
+  -H "$(auth)" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/torture-256k1" 2>/dev/null)
 [ "$CODE" = "201" ] && pass "256KB+1 byte file (just over boundary)" || fail "256KB+1: HTTP $CODE"
 
 curl -sf -o /tmp/torture-256k1-dl "$SERVER/engine/torture/edge/over_256k.dat" -H "$(auth)" 2>/dev/null
@@ -298,23 +298,23 @@ log "## Test 10: File Overwrite and Mutation"
 log ""
 
 # Write version 1
-echo "version 1 content" | curl -sf -o /dev/null -w "%{http_code}" \
+echo "version 1 content" | curl -s -o /dev/null -w "%{http_code}" \
   -X PUT "$SERVER/engine/torture/mutate/evolving.txt" \
   -H "$(auth)" -H "Content-Type: text/plain" -d @- 2>/dev/null
 V1=$(curl -sf "$SERVER/engine/torture/mutate/evolving.txt" -H "$(auth)" 2>/dev/null)
 [ "$V1" = "version 1 content" ] && pass "Version 1 written and read" || fail "Version 1 mismatch: '$V1'"
 
 # Overwrite with version 2
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -X PUT "$SERVER/engine/torture/mutate/evolving.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "version 2 content - now longer" 2>/dev/null || echo "000")
+  -H "$(auth)" -H "Content-Type: text/plain" -d "version 2 content - now longer" 2>/dev/null)
 V2=$(curl -sf "$SERVER/engine/torture/mutate/evolving.txt" -H "$(auth)" 2>/dev/null)
 [ "$V2" = "version 2 content - now longer" ] && pass "Version 2 overwrites version 1" || fail "Version 2 mismatch: '$V2'"
 
 # Overwrite with version 3 (shorter)
-CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -X PUT "$SERVER/engine/torture/mutate/evolving.txt" \
-  -H "$(auth)" -H "Content-Type: text/plain" -d "v3" 2>/dev/null || echo "000")
+  -H "$(auth)" -H "Content-Type: text/plain" -d "v3" 2>/dev/null)
 V3=$(curl -sf "$SERVER/engine/torture/mutate/evolving.txt" -H "$(auth)" 2>/dev/null)
 [ "$V3" = "v3" ] && pass "Version 3 (shorter) overwrites version 2" || fail "Version 3 mismatch: '$V3'"
 
