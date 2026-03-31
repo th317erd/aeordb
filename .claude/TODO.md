@@ -1,54 +1,46 @@
 # AeorDB — TODO
 
-## Current: Unified Indexing Implementation
+## Unified Indexing — COMPLETE
 
-### Task 1: ScalarConverter trait + built-in converters
-- [ ] ScalarConverter trait (to_scalar, is_order_preserving, name)
-- [ ] HashConverter, U8/U16/U32/U64Converter, I64Converter
-- [ ] F64Converter (with min/max clamping, NaN/Inf handling)
-- [ ] StringConverter (multi-stage, rough lexicographic)
-- [ ] TimestampConverter
-- [ ] Range tracking (observed_min/max, self-adapting)
-- [ ] Edge cases: div-by-zero, empty input, wrong-size input
-- [ ] Tests (~20)
+- [x] Task 1: ScalarConverter trait + 9 built-in converters (41 tests)
+- [x] Task 2: NVT refactored to use ScalarConverter (3 new tests)
+- [x] Task 3: Old indexing module removed
+- [x] Task 4: Index file storage at .indexes/ (21 tests)
+- [x] Task 5: Write pipeline — store → parse JSON → update indexes (20 tests)
+- [x] Task 6: Query engine — chainable builder, intersection, limit (17 tests)
+- [x] Task 7: HTTP POST /query endpoint (16 tests)
+- [x] Task 8: WASM converter stub + batch API interface (18 tests)
 
-### Task 2: Refactor NVT to use ScalarConverter
-- [ ] NVT takes Box<dyn ScalarConverter> instead of hardcoded hash_to_scalar
-- [ ] KVS uses NVT with HashConverter (regression — same behavior)
-- [ ] Update all NVT tests
-- [ ] Tests (~9)
+## Test Count: 621 (all passing)
 
-### Task 3: Remove old src/indexing/ module
-- [ ] Delete src/indexing/ (replaced by unified design)
-- [ ] Remove test entries from Cargo.toml
-- [ ] Fix any broken imports
+## What's Built
 
-### Task 4: Index file storage
-- [ ] Index stored as FileRecord at .indexes/{field}.idx
-- [ ] Index file contains: converter state + NVT + sorted entries
-- [ ] Serialize/deserialize index files
-- [ ] Tests (~14)
+### Custom Storage Engine (self-hosting, no redb)
+- Append-only WAL-filesystem with NVT + KV store
+- 6 entity types, domain-prefixed hashing, void management
+- Forks + snapshots versioning, HEAD management
+- ~2% storage overhead (vs redb's 124%)
 
-### Task 5: Write pipeline integration
-- [ ] store_file → parse → index
-- [ ] Parser extracts fields, indexer updates index
-- [ ] Handle: no parsers, parser but no indexes, multiple parsers
-- [ ] Tests (~8)
+### Unified Indexing
+- ScalarConverter trait: any value → [0.0, 1.0]
+- 10 converters: Hash, U8-U64, I64, F64, String, Timestamp, WASM stub
+- NVT with pluggable converters
+- Write pipeline: store → parse → index
+- Query engine with chainable builder
+- HTTP POST /query endpoint
 
-### Task 6: Query pipeline
-- [ ] Query → converter → NVT → candidates → results
-- [ ] Exact, range (gt/lt/between), limit, cursor
-- [ ] Multi-field intersection
-- [ ] Tests (~9)
+### Infrastructure
+- axum HTTP server with JWT auth (Ed25519)
+- API keys, magic links, refresh tokens, rate limiting
+- WASM plugin runtime (wasmi) + native plugin loading
+- Prometheus metrics + structured logging
+- Stress testing tool (CLI)
 
-### Task 7: Wire to HTTP query endpoints
-- [ ] POST /query endpoint
-- [ ] JSON query body → parse → execute → return results
-- [ ] Tests
-
-### Task 8: WASM converter + batch API
-- [ ] WasmConverter implementing ScalarConverter
-- [ ] Batch API: N values → N scalars in one WASM call
-- [ ] Tests
-
-## Test Count Target: 586 existing + ~60 new = ~646+
+## What's Next (see bot-docs/plan/future-plans.md)
+- Auth Provider URI system (--auth flag)
+- Server-side compilation + in-database SDK
+- Schema-as-code (proc macros)
+- Functions as endpoints with arguments
+- HTTP-to-DB user mapping + crudlify permissions
+- Encryption, vaults, zero-knowledge storage
+- Garbage collection + cron tasks
