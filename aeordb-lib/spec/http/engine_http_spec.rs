@@ -300,6 +300,342 @@ async fn test_engine_head_returns_metadata() {
   assert!(bytes.is_empty());
 }
 
+// ---------------------------------------------------------------------------
+// Additional error / edge-case coverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_engine_head_on_directory_returns_directory_type() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store a file to create the directory implicitly
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/headdir/child.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("content"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // HEAD on the parent directory
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("HEAD")
+    .uri("/engine/headdir")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(
+    response.headers().get("X-Entry-Type").unwrap().to_str().unwrap(),
+    "directory"
+  );
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert!(bytes.is_empty(), "HEAD response body should be empty");
+}
+
+#[tokio::test]
+async fn test_engine_store_without_content_type() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // PUT without content-type header -- should still succeed
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/noct/file.bin")
+    .header("authorization", &auth)
+    .body(Body::from("some data"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["total_size"], 9);
+  // content_type should be null when not provided
+  assert!(
+    json["content_type"].is_null(),
+    "content_type should be null when not provided"
+  );
+}
+
+#[tokio::test]
+async fn test_engine_get_nonexistent_directory() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/totally/does/not/exist")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_engine_delete_nonexistent_deep_path_returns_404() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/engine/deep/nested/nonexistent/path.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_engine_put_requires_auth() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/unauthed/file.txt")
+    .header("content-type", "text/plain")
+    .body(Body::from("no auth"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_engine_delete_requires_auth() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder()
+    .method("DELETE")
+    .uri("/engine/unauthed/file.txt")
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_engine_head_requires_auth() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder()
+    .method("HEAD")
+    .uri("/engine/unauthed/file.txt")
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_query_unsupported_value_type_returns_400() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // null is an unsupported value type for json_value_to_bytes
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "age", "op": "eq", "value": null }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_query_unsupported_value2_type_returns_400() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // between with an unsupported value2 type (array)
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "age", "op": "between", "value": 10, "value2": [1, 2, 3] }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_snapshot_create_with_malformed_json_returns_error() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/snapshot")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"not_valid_json"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let status = response.status();
+  assert!(
+    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+    "Expected 400 or 422, got {}",
+    status,
+  );
+}
+
+#[tokio::test]
+async fn test_fork_create_with_malformed_json_returns_error() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/fork")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"not json at all"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let status = response.status();
+  assert!(
+    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+    "Expected 400 or 422, got {}",
+    status,
+  );
+}
+
+#[tokio::test]
+async fn test_snapshot_restore_with_missing_name_returns_error() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/version/restore")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let status = response.status();
+  assert!(
+    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+    "Expected 400 or 422, got {}",
+    status,
+  );
+}
+
+#[tokio::test]
+async fn test_engine_get_file_returns_metadata_headers() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/headers/test.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("header test"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/headers/test.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  // Verify metadata headers are present on GET file response
+  assert!(response.headers().get("X-Path").is_some());
+  assert!(response.headers().get("X-Total-Size").is_some());
+  assert!(response.headers().get("X-Created-At").is_some());
+  assert!(response.headers().get("X-Updated-At").is_some());
+  assert_eq!(
+    response.headers().get("content-type").unwrap().to_str().unwrap(),
+    "text/plain"
+  );
+}
+
+#[tokio::test]
+async fn test_engine_overwrite_existing_file() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store initial file
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/overwrite/file.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("version 1"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Overwrite with new content
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/overwrite/file.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("version 2 is longer"))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Read back should return the new content
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/overwrite/file.txt")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(String::from_utf8(bytes).unwrap(), "version 2 is longer");
+}
+
 #[tokio::test]
 async fn test_engine_store_creates_intermediate_dirs() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();

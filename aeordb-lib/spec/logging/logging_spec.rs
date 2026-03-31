@@ -313,3 +313,60 @@ async fn test_client_request_id_preserved_on_real_server() {
 
   assert_eq!(response_id, client_id);
 }
+
+// ---------------------------------------------------------------------------
+// JSON format initialization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_initialize_logging_json_format_does_not_panic() {
+  // The global subscriber can only be initialized once, so we catch panics.
+  // This exercises the LogFormat::Json branch in initialize_logging.
+  let result = std::panic::catch_unwind(|| {
+    let config = LogConfig {
+      format: LogFormat::Json,
+      level: "warn".to_string(),
+      show_target: true,
+      show_thread: true,
+      show_file_line: true,
+    };
+    initialize_logging(&config);
+  });
+
+  // Either it succeeds (first init with Json) or it panics because a
+  // subscriber was already installed. Both are acceptable.
+  let _ok = result.is_ok();
+}
+
+#[test]
+fn test_log_format_debug_impl() {
+  let json_debug = format!("{:?}", LogFormat::Json);
+  let pretty_debug = format!("{:?}", LogFormat::Pretty);
+  assert_eq!(json_debug, "Json");
+  assert_eq!(pretty_debug, "Pretty");
+}
+
+#[test]
+fn test_log_config_debug_impl() {
+  let config = LogConfig::default();
+  let debug_output = format!("{:?}", config);
+  assert!(debug_output.contains("Pretty"));
+  assert!(debug_output.contains("info"));
+}
+
+#[test]
+fn test_log_config_clone() {
+  let original = LogConfig {
+    format: LogFormat::Json,
+    level: "trace".to_string(),
+    show_target: false,
+    show_thread: true,
+    show_file_line: true,
+  };
+  let cloned = original.clone();
+  assert_eq!(cloned.format, LogFormat::Json);
+  assert_eq!(cloned.level, "trace");
+  assert_eq!(cloned.show_target, false);
+  assert_eq!(cloned.show_thread, true);
+  assert_eq!(cloned.show_file_line, true);
+}

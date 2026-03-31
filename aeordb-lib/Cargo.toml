@@ -191,3 +191,11 @@ path = "spec/http/query_http_spec.rs"
 [[test]]
 name = "wasm_converter_spec"
 path = "spec/engine/wasm_converter_spec.rs"
+
+[[test]]
+name = "routes_coverage_spec"
+path = "spec/http/routes_coverage_spec.rs"
+
+[[test]]
+name = "plugin_types_spec"
+path = "spec/plugins/types_spec.rs"
