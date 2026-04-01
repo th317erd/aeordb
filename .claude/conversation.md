@@ -434,6 +434,12 @@ A field might have MULTIPLE NVTs optimized for different operation types:
 
 Different NVTs for the same data, with different bucket distributions. The query engine picks the right NVT based on the operation. The skipping/striding feature gives us resolution scaling for free — no separate resolution NVTs needed.
 
+<!-- 
+I wonder if this is really needed ... if we are mapping values, and we inherantly know if a value is greater or lesser, then do we really need different NVTs for each index? Or is a single one enough for most operations?
+
+I know that we want multiple indexes in some cases though. For example, we a string `content` column, we might want a fuzzy index, a phonetic index, etc...
+ -->
+
 ### NVT Concurrent Access: Reader Reports + Coordinator Swap
 
 ```
@@ -528,6 +534,12 @@ This only works if both fields use the SAME converter (same scalar mapping). If 
 
 <!-- WYATT: Approach C is the dream — pure NVT compositing for joins. But it requires same-converter compatibility. For different types (e.g., joining an integer color code to a string color name), you need value-level comparison. Thoughts? -->
 
+<!-- 
+My thoughts are that they likely _will_ be the same (or similar) types. Think about it: you are going to compare strings to strings, numbers to numbers, and bytes to bytes. More often than not, we will probably have the same type.
+
+Also, I've been thinking about it, and we probably don't need as many specific NVTs as we think we do... especially if we are smart about things. This reduces the likelihood that we will have NVT comparison issues.
+ -->
+
 ### Wildcard / Pattern Matching
 
 `WHERE name LIKE '%smith%'`
@@ -545,9 +557,19 @@ Split strings into 3-character grams: "smith" → ["smi", "mit", "ith"]. Index e
 **C) Inverted index / full-text (future):**
 Tokenize strings into words. Index each word. Good for `CONTAINS 'smith'` but not arbitrary `LIKE` patterns.
 
+<!-- 
+Trigrams are good for "contains" too.
+ -->
+
 **For now:** Option A (NVT pre-filter + full scan on candidates). Options B and C are future index types that plug into the same ScalarConverter + NVT architecture — just with different converters.
 
 <!-- WYATT: Trigram indexing is a great future addition. The converter would be a `TrigramConverter` that maps trigrams to scalars. Each string produces MULTIPLE index entries (one per trigram). The NVT then supports containment queries natively. -->
+
+<!-- 
+I think it would be an interesting idea to try and understand _how_ we would do this, being as we have a scalar indexing system.
+
+I wonder if we could assume a tri-gram is assign to any given chunk: for example, ann -> maps to 0.12342, zebra -> maps to 0.99956 something. Then we repeat chunks often with a weight, a "distance from start" for each matching letter. I bet we could do some interesting things with this.
+ -->
 
 ---
 
@@ -577,5 +599,162 @@ Task 10: Update index serialization (NVT included)
 5. **Ready to build?**
 
 ---
+---
 
-*Waiting for Wyatt's feedback on Round 2...*
+## Round 3: Memory-Bounded Joins + Resolved Questions
+
+### Resolved from Round 2
+
+| # | Question | Resolution |
+|---|---|---|
+| 1 | Multiple NVTs per field | **One NVT per field for most cases.** A single NVT handles eq, gt, lt, between naturally via scalar position. Multiple NVTs only for genuinely different index TYPES on the same data (e.g., string equality + fuzzy + phonetic on a `content` column). |
+| 2 | Cross-path joins | **Viable — same types are likely.** Strings compare to strings, numbers to numbers. NVT-to-NVT compositing works for most real-world joins. |
+| 3 | Wildcard handling | **NVT pre-filter + scan for now. Trigram index future.** Trigrams can be scalar-mapped (each trigram → scalar, weighted by position). Keeps the NVT paradigm intact. |
+| 4 | Coordinator swap frequency | **Threshold-based.** When the correction stack exceeds N entries (e.g., 1000), trigger a swap. Not time-based — activity-driven. |
+
+### The Memory Problem with Joins
+
+Wyatt's concern: "We can't load hundreds of megabytes of indexes into memory to compare."
+
+The key question for any join: `does value V exist in set S?` — an IN operation. For GT/LT, it's `is V on the right/left side?` For NOT, it's the inversion. All reduce to membership testing.
+
+### The Answer: Masks Are Fixed Size
+
+The NVT mask is **one bit per bucket**. The mask size is determined by bucket count, NOT by data size:
+
+```
+1,024 buckets  →   128 bytes mask
+16,384 buckets  →  2 KB mask
+1,048,576 buckets → 128 KB mask
+16,777,216 buckets → 2 MB mask
+```
+
+A 2 MB mask represents 16 million buckets. Whether each bucket contains 1 entry or 1 million entries, the mask is still 2 MB. The mask says "this region has matches" — you never load actual values until you scan the surviving buckets.
+
+### Memory-Bounded Join Flow
+
+```
+Join: Paints.where.color.IN(Palettes.where.primaryColor)
+
+Step 1: Build the subquery mask (streaming, fixed memory)
+  - Walk Palettes.primaryColor NVT bucket by bucket
+  - For each non-empty bucket: set the corresponding bit in a mask
+  - Memory: one NVTMask (2 MB max regardless of data size)
+  - Time: O(bucket_count), NOT O(entry_count)
+
+Step 2: Composite masks (nanoseconds)
+  - AND the subquery mask with the outer query's mask
+  - Pure bitwise operations on the packed u64 arrays
+  - Memory: another NVTMask (2 MB)
+
+Step 3: Scan survivors (proportional to results, not total data)
+  - Only the surviving buckets are scanned
+  - For each surviving bucket: load entries, verify actual value match
+  - Memory: proportional to result set size, bounded by limit
+```
+
+**Total memory for a multi-table join:** `N masks × 2 MB each`. For a 5-table join: 10 MB. Fixed. Regardless of whether each table has 100 rows or 100 billion.
+
+### Multi-Index Compositing (3+ Fields)
+
+```
+WHERE age > 30 AND city = 'NYC' AND NOT role = 'banned'
+
+Step 1: age_mask = mask from age NVT (everything > f(30))     — 2 MB
+Step 2: city_mask = mask from city NVT (bucket for f('NYC'))  — 2 MB
+Step 3: role_mask = mask from role NVT (bucket for f('banned')) — 2 MB
+Step 4: result = age_mask AND city_mask AND NOT(role_mask)     — bitwise, nanoseconds
+Step 5: scan surviving buckets                                 — proportional to results
+```
+
+Memory: 3 masks × 2 MB = 6 MB. Constant. The data can be petabytes.
+
+### Streaming NVT Walk for Subqueries
+
+For subqueries that produce dynamic value sets, we don't even need to walk the entire NVT. We stream:
+
+```rust
+fn build_mask_from_subquery(
+  subquery_nvt: &NVT,
+  target_nvt: &NVT,
+  converter: &dyn ScalarConverter,
+) -> NVTMask {
+  let mut mask = NVTMask::empty(target_nvt.bucket_count());
+
+  // Stream through the subquery NVT bucket by bucket
+  for bucket_index in 0..subquery_nvt.bucket_count() {
+    if subquery_nvt.buckets[bucket_index].entry_count == 0 {
+      continue; // skip empty buckets
+    }
+
+    // This bucket has entries — mark the corresponding region in the target mask
+    // (bucket indices map to scalar ranges, which map to target NVT buckets)
+    let scalar_start = bucket_index as f64 / subquery_nvt.bucket_count() as f64;
+    let scalar_end = (bucket_index + 1) as f64 / subquery_nvt.bucket_count() as f64;
+
+    let target_start = (scalar_start * target_nvt.bucket_count() as f64) as usize;
+    let target_end = (scalar_end * target_nvt.bucket_count() as f64) as usize;
+
+    for i in target_start..=target_end.min(target_nvt.bucket_count() - 1) {
+      mask.set_bit(i);
+    }
+  }
+
+  mask
+}
+```
+
+No values loaded. No entries scanned. Just NVT structure → mask. O(bucket_count).
+
+### Trigram Indexing via Scalars (Conceptual)
+
+Each trigram maps to a scalar:
+```
+"smith" → trigrams: ["smi", "mit", "ith"]
+  smi → f("smi") → 0.723
+  mit → f("mit") → 0.534
+  ith → f("ith") → 0.389
+```
+
+Each trigram becomes an index entry. A string with 10 characters produces 8 trigram entries. The NVT indexes ALL trigrams for ALL strings in the field.
+
+`WHERE name CONTAINS 'smith'`:
+1. Compute trigrams for 'smith': [smi, mit, ith]
+2. For each trigram: find the NVT bucket → mask
+3. AND all trigram masks → candidates contain ALL trigrams
+4. Post-filter candidates for actual substring match
+
+This keeps the scalar paradigm. The converter maps trigrams to scalars. The NVT handles the rest.
+
+Weight by position (Wyatt's idea): trigrams near the start of the string get scalars closer to the string's overall scalar. Trigrams later in the string are spread further. This means prefix searches are tighter (fewer buckets) and suffix searches are wider (more scanning). Natural optimization for the common case.
+
+---
+
+## Final Revised Task List
+
+```
+Task 1:  FieldIndex backed by NVT + reader-correction + coordinator swap
+Task 2:  NVTMask bitmap operations (packed u64, GPU-compatible)
+Task 3:  Direct scalar jumps for simple queries (Tier 1)
+Task 4:  Typed convenience methods (gt_u64, eq_str, etc.)
+Task 5:  QueryNode tree with boolean logic (AND, OR, NOT)
+Task 6:  Two-tier query execution engine
+Task 7:  Memory-bounded joins (streaming mask construction)
+Task 8:  HTTP query API with boolean logic + sugar
+Task 9:  Strided / progressive execution
+Task 10: Index serialization with NVT
+```
+
+Trigram indexing, full-text, and GPU offloading → future tasks.
+
+---
+
+## Questions for Wyatt
+
+1. **Coordinator swap threshold** — 1000 corrections before swap? Higher? Lower?
+2. **Trigram indexing** — capture as future task, or think deeper now?
+3. **Ready to build?**
+
+---
+
+*Waiting for Wyatt's feedback on Round 3...*
