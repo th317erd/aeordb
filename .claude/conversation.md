@@ -1,380 +1,581 @@
-# AeorDB — Indexing Unification Design
+# AeorDB — NVT Bitmap Compositing Query Engine
 
-## The Goal
-
-Unify the NVT (engine KVS lookup) and the scalar ratio indexing module (user-facing indexes) under one pluggable conversion trait. One concept, one interface, infinite index types.
+Planning the implementation of NVT bitmap compositing for query execution.
 
 ---
 
-## Round 1: The Unified Converter Trait
+## What We Have Now
 
-### What We're Unifying
+The current query engine (`query_engine.rs`) works but is naive:
+1. For each field query, loads the `FieldIndex`, runs a lookup → candidate file hashes
+2. Collects all candidate sets into `Vec<HashSet>`
+3. Intersects them (AND only) by retaining entries present in all sets
+4. Loads FileRecords for survivors
 
-| Currently | Module | Purpose |
-|---|---|---|
-| `hash_to_scalar()` in nvt.rs | engine/ | Converts BLAKE3 hashes to [0.0, 1.0] for KVS bucket lookup |
-| `ScalarMapping` trait in indexing/ | indexing/ | Converts typed values (u8, u64, string, etc.) to [0.0, 1.0] for index lookup |
+**Problems:**
+- Only supports AND (intersection). No OR, NOT, XOR.
+- Loads ALL candidates into memory as HashSets — O(entries) memory
+- No progressive refinement — scans entire indexes even if 99% will be eliminated
+- FieldIndex uses sorted Vec binary search, not NVT buckets
+- The NVT we built (unified with ScalarConverter) isn't used for field indexes at all
 
-These do the same thing: `value → scalar`. The trait should be shared.
+## What We Want
 
-### Proposed Trait
+NVT bitmap compositing:
+- Every field index is backed by an NVT (not just a sorted Vec)
+<!-- At _least one_, yes... (probably mode than one) -->
+- Queries composite NVT bitmaps — AND, OR, NOT, XOR
+- Strided access for fast rough passes
+- Progressive refinement: rough pass eliminates 95%+, precise scan on survivors
+- The query builder supports full boolean logic
+
+---
+
+## Round 1: Implementation Plan
+
+### Task 1: FieldIndex Backed by NVT
+
+Currently `FieldIndex` in `index_store.rs` stores:
+```rust
+pub entries: Vec<IndexEntry>,  // sorted by scalar
+```
+
+Change to also maintain an NVT over the entries:
 
 ```rust
-/// Converts any value to a normalized scalar in [0.0, 1.0].
-/// The conversion determines how values are distributed across the index.
-/// Order-preserving converters enable range queries.
-pub trait ScalarConverter: Send + Sync {
-  /// Convert raw bytes to a scalar in [0.0, 1.0].
-  fn to_scalar(&self, value: &[u8]) -> f64;
-
-  /// Is this converter order-preserving?
-  /// If true: to_scalar(a) < to_scalar(b) implies a < b (for the type's natural ordering).
-  /// Required for range queries (gt, lt, between).
-  fn is_order_preserving(&self) -> bool;
-
-  /// Human-readable name for this converter.
-  fn name(&self) -> &str;
+pub struct FieldIndex {
+  pub field_name: String,
+  pub converter: Box<dyn ScalarConverter>,
+  pub entries: Vec<IndexEntry>,        // sorted by scalar
+  pub nvt: NormalizedVectorTable,      // bucket index into entries
 }
 ```
 
-### Built-in Converters
+When entries are inserted/removed, the NVT is rebuilt (or updated incrementally). The NVT's buckets point into ranges of the sorted entries Vec — exactly like the KVS NVT points into the KV block.
 
-| Converter | Order-Preserving | Use Case |
-|---|---|---|
-| `HashConverter` | No | KVS hash lookups. BLAKE3 hashes → uniform scalar. |
-| `U8Converter` | Yes | u8 fields. value / 255.0 |
-| `U16Converter` | Yes | u16 fields. |
-| `U32Converter` | Yes | u32 fields. |
-| `U64Converter` | Yes | u64 fields. |
-| `I64Converter` | Yes | Signed integers. Shifted to [0.0, 1.0]. |
-| `F64Converter { min, max }` | Yes | Floats. Normalized within configurable range. |
-| `StringConverter` | Partially | Strings. Multi-stage: first byte weighted + length. Preserves rough lexicographic order but not exact. |
-| `TimestampConverter { min, max }` | Yes | UTC millisecond timestamps. |
-| `WasmConverter { plugin }` | User-defined | Custom WASM plugin does the conversion. |
+**Key question:** Should we rebuild the NVT on every insert, or batch rebuilds? For bulk indexing (store 1000 files), rebuilding per-insert is wasteful. Better: dirty flag + rebuild on query.
+
+<!-- WYATT: Thoughts on lazy NVT rebuild vs eager? -->
 
 <!-- 
-Love it!
+🤔 So, I think part of the benefit of this structure is that it can heal on read. It is the reader that holds the offset, the scan, and the correct offset. It is the reader that will know they had to scan hundreds of entries, possibly a full bucket before they found what they were looking for.
+
+We also just want to be able to scale the NVT... period. Like a raster. Just double it (or whatever), and wham... new higher resolution NVT. It still has low resolution data, like a scaled raster, but that poor resolution can heal on read.
+
+Now readers must be concurrent. So that raises the question: How do you have a good concurrent writer that can manage (and consolidate) multiple simultaneous changes? I am personally thinking that we store a "change list" on a stack with each reader... when the reader finishes its operation (reporting some desired updates to the index), then the coordinator will generate a new higher resolution NVT, and in an instant (mutex), swap it out with the old one. All readers then happily proceed with finding their data, reporting desired updates, having all those updates go onto a stack, have those updates mathematically optimized (probably just the average, or mean). Walla! You keep inserting things, including new buckets into the index, the readers/writers request changes (caused by low efficiency), and a coordinator aggregates, generates a new NVT, and swaps it out with the old one (notice how the buckets themselves never has to change).
+
+Note: Notice how I said "differences". We wouldn't want to store a full copy of the NVT (which could be hundreds of megabytes). Instead, we want to have readers report changes (i.e. request 0.45434 be updated to offset 12345623456). We then aggregate these altogether (which are likely going to all be the same number/offset), and update the underlying NVT by "swapping the buffer", as they say in Arcade Game programming.
  -->
 
----
+### Task 2: NVT Bitmap Operations
 
-## Concerns and Open Questions
-
-### Concern 1: Non-Uniform Distribution Kills Uniform Buckets
-
-**The problem:** The NVT uses uniform-width buckets. This is perfect for hashes (uniform distribution) but terrible for user data.
-
-Example: 1 million age values. Ages cluster 20-50. `U64Converter` maps linearly: age 30 → scalar 0.000000014. ALL million values end up in bucket 0. The other 1023 buckets are empty. Every lookup scans the entire dataset.
-
-**Question for Wyatt:** The original scalar ratio design had self-correcting offset tables that ADAPT to the distribution. The NVT has fixed uniform buckets. Should we:
-
-a) Use **uniform NVT buckets** for everything (simple, but bad for skewed data)?
-b) Use **adaptive offset tables** (your original design) for user indexes, NVT for hash lookups?
-c) Use **adaptive NVT** — start uniform, then rebalance buckets based on actual data distribution?
-d) Let the **converter handle it** — a smart converter maps values to uniform scalars even if the source data is skewed? (e.g., `AgeConverter` knows ages cluster 20-50 and spreads that range across [0.0, 1.0] more evenly)
-
-<!-- WYATT: This is the core architectural question. Option (d) is the most elegant — the converter IS the distribution equalizer. But it requires the converter to know the data distribution ahead of time, which isn't always possible. -->
-
-### Concern 2: Range Queries Need Order Preservation
-
-**The problem:** "Find all ages > 30" requires `to_scalar(30) < to_scalar(31)`. Hash converters don't preserve order (by design — that's what makes hashes good for uniform distribution). String converters are only approximately order-preserving.
-
-**Question for Wyatt:** Should we:
-
-a) Enforce that all user-facing index converters MUST be order-preserving? (Prevents using hash-based converters for user indexes)
-b) Allow non-order-preserving converters but disable range queries on those indexes? (More flexible, queries return an error if you try a range query on a hash-indexed field)
-c) Something else?
-
-The `is_order_preserving()` method on the trait enables option (b) — the query engine checks at runtime and refuses range queries on non-order-preserving indexes.
-
-<!-- WYATT: I'm leaning (b). Maximum flexibility. If a user wants to index a field by hash (fast exact lookup, no range queries), let them. The engine just refuses range queries on that index and tells them why. -->
-
-### Concern 3: Multi-Dimensional Data
-
-**The problem:** Geospatial data is 2D (lat/lon). The NVT is 1D. Flattening 2D to 1D (hilbert curve, z-order curve) works for proximity queries but is lossy for "find all points within a circle."
-
-**Question for Wyatt:** Is the NVT the right structure for geospatial, or do we need a separate index type (R-tree, quad-tree) for spatial data?
-
-Your original plan mentioned "multi-dimensional vectors" for complex types. The scalar approach can work for 1D queries (find by latitude OR longitude) but not for 2D queries (find by latitude AND longitude simultaneously).
-
-Options:
-a) Flatten to 1D (hilbert curve converter) — approximate, works for many cases
-b) Multiple 1D indexes (one for lat, one for lon) — exact per dimension, combine at query time
-c) Separate spatial index type — purpose-built for 2D/3D queries (future)
-
-<!-- WYATT: I suspect the answer is (b) for now, (c) eventually. Your NDNVT concept might naturally extend to this — each dimension gets its own NVT, and the query engine intersects results. -->
-
-### Concern 4: Memory Footprint at Scale
-
-**The problem:** The KVS NVT is always in memory. If every user index has its own NVT, and there are hundreds of indexes, memory adds up.
-
-**Question for Wyatt:** Should index NVTs:
-
-a) Always be in memory (fast, but scales with number of indexes)?
-b) On-demand loading with LRU eviction (like directories)?
-c) Only the KVS NVT is always in memory, user index NVTs are on-disk with caching?
-
-<!-- WYATT: I'm thinking (c). The KVS is critical-path (every operation uses it). User indexes are query-path (only used when querying that specific field). Different access patterns, different memory strategies. -->
-
-### Concern 5: WASM Converter Performance
-
-**The problem:** A WASM converter plugin called per-value during bulk indexing. Millions of host↔WASM boundary crossings.
-
-**Question for Wyatt:** Options:
-
-a) Accept the overhead — WASM is ~5x slower, but conversion is tiny (a few math ops)
-b) Batch API — pass a batch of values to the WASM plugin, get a batch of scalars back (amortize the boundary crossing cost)
-c) Only allow native (Rust) converters for built-in types, WASM for exotic types
-
-<!-- WYATT: Batch API (b) is probably the right answer. Send 1000 values, get 1000 scalars back. One boundary crossing instead of 1000. -->
-
-### Concern 6: The Lookup Structure Question
-
-**The problem:** We have two lookup structures:
-- **NVT buckets** (uniform width, static, good for uniform data)
-- **Offset tables** (variable, self-correcting, good for skewed data)
-
-Both use scalars. Both do the same job (scalar → data location). But they're optimized for different distributions.
-
-**Question for Wyatt:** Should the unified index allow BOTH lookup structures, chosen per-index based on the converter type?
+Create `aeordb-lib/src/engine/nvt_ops.rs`:
 
 ```rust
-enum IndexStructure {
-  NVTBuckets(NormalizedVectorTable),   // for uniform data (hashes)
-  OffsetTable(OffsetTable),             // for skewed data (user values, self-correcting)
+/// Result of a bitmap composite operation.
+/// Contains the surviving bucket indices.
+pub struct NVTMask {
+  bucket_count: usize,
+  // Bitset: one bit per bucket. 1 = surviving, 0 = eliminated.
+  bits: Vec<u64>,  // packed bits, 64 buckets per u64
 }
 ```
 
-Or should we make one structure that handles both cases (adaptive)?
+Operations:
+```rust
+impl NVTMask {
+  /// Create mask from an NVT: bucket is "on" if entry_count > 0
+  fn from_nvt(nvt: &NormalizedVectorTable) -> Self;
 
-<!-- WYATT: Your original "always good, not always perfect" design was the offset table with self-correction. The NVT is essentially a simpler, non-self-correcting version. Can the offset table replace the NVT entirely? It would self-correct for ANY distribution, whether uniform (hashes) or skewed (user data). The NVT becomes just an optimization hint for the initial bucket layout. -->
+  /// Create mask from NVT with a scalar range filter
+  /// Only buckets whose scalar range overlaps [min_scalar, max_scalar] are "on"
+  fn from_nvt_range(nvt: &NormalizedVectorTable, min_scalar: f64, max_scalar: f64) -> Self;
 
-### Concern 7: Index Storage in the Engine
+  /// Logical AND — surviving buckets must be on in BOTH masks
+  fn and(&self, other: &NVTMask) -> NVTMask;
 
-**The problem:** Where does index data live in the append-only engine?
+  /// Logical OR — surviving buckets on in EITHER mask
+  fn or(&self, other: &NVTMask) -> NVTMask;
 
-Options:
-a) Each index is a FileRecord at `.indexes/{field_name}` — the index data IS a file
-b) Index entries are their own entity type (add IndexEntry to the entity types)
-c) Index data is embedded in the KV block alongside hash→offset entries
+  /// Logical NOT — invert the mask
+  fn not(&self) -> NVTMask;
 
-<!-- WYATT: I think (a) aligns with "everything is a file." The index is a file whose content is the NVT + sorted entries. When the index is updated, a new version of the file is written (append-only). Old versions are preserved for old snapshots. -->
+  /// Logical XOR
+  fn xor(&self, other: &NVTMask) -> NVTMask;
 
-### Concern 8: Write Pipeline Integration
+  /// Difference: self AND NOT other
+  fn difference(&self, other: &NVTMask) -> NVTMask;
 
-**The problem:** When a file is stored, the pipeline must:
-1. Store chunks
-2. Store FileRecord
-3. Update directory tree
-4. **Parse fields** (via parser plugins)
-5. **Update indexes** (via converters + NVT/offset tables)
+  /// Count surviving (on) buckets
+  fn popcount(&self) -> usize;
 
-Steps 4-5 are NEW. They happen after the file is stored but before the operation is "complete." If the server crashes between step 3 and step 5, the file exists but isn't indexed. Is that acceptable?
+  /// Iterate surviving bucket indices
+  fn surviving_buckets(&self) -> Vec<usize>;
 
-<!-- WYATT: I think yes — the file is stored and recoverable. The index is rebuildable (re-run parsers on all files at that path). Index lag is acceptable; data loss is not. -->
+  /// Strided version: only check every Nth bucket
+  fn and_strided(&self, other: &NVTMask, stride: usize) -> NVTMask;
+
+  /// Progressive: rough pass at stride, then precise on survivors
+  fn and_progressive(&self, other: &NVTMask, initial_stride: usize) -> NVTMask;
+}
+```
+
+Using a packed bitset (Vec<u64>) means:
+- 1024 buckets = 16 u64s = 128 bytes
+- AND/OR/NOT = bitwise ops on 16 u64s = nanoseconds
+- 16M buckets = 256K u64s = 2MB — still fast for bitwise ops
+
+<!-- WYATT: Should NVTMask be its own struct, or integrated into the NVT? I'm leaning separate — the mask is a query-time artifact, the NVT is a persistent structure. -->
+
+<!-- 
+I agree... but let's make sure however we are desiging this that it is compatible with a GPU in future please.
+
+Also, keep in mind that the mapping function itself can be used on the input.
+
+f(x) -> NVT -> offset
+If you want all values that are >= 0.6, then you:
+f(0.6) -> offset into NVT
+
+So, you ALWAYS have the correct starting point. You can also plot a range with `f(max) - f(min)`.
+
+This means that any value that is part of the query has a boundary that is already known. If query you like:
+`WHERE a.name = 'derp' and a.age > 50`, then you know the age index is `f(age + 1)` and everything following, and the name index is `f(name)`, which is a single bucket. Where those two indexes overlap is where you have your data.
+ -->
+
+### Task 3: Range Masks from Converters
+
+For range queries (gt, lt, between), we need to create a mask that marks which NVT buckets fall within a scalar range:
+
+```
+Query: age > 30
+  1. converter.to_scalar(30) → 0.42
+  2. All buckets with scalar > 0.42 → mask bits set
+  3. AND with other query masks
+```
+
+For exact queries:
+```
+Query: name = "Bob"
+  1. converter.to_scalar("Bob") → 0.67
+  2. Only the bucket containing 0.67 → single bit set
+  3. AND with other masks → still just that one bucket (if it survived)
+  4. Scan entries in that bucket for exact match
+```
+
+The `from_nvt_range` constructor handles this.
+
+<!-- WYATT: For exact queries, should we mark just one bucket (tight) or the bucket ± neighbors (fuzzy, accounts for converter imprecision)? I'm leaning tight + post-filter. -->
+
+<!-- 
+Whichever way we go about this, we won't have to really worry I don't think. The "search" method will find the start of the bucket it is looking for, regardless of if it has to search backwards, or forwards.
+ -->
+
+### Task 4: Query Builder with Boolean Logic
+
+Extend `QueryBuilder` to support OR, NOT, and grouping:
+
+<!-- 
+Is there anyway to just have numbers, instead of this `&30_u64.to_be_bytes()` business?
+ -->
+ 
+```rust
+// AND (current):
+QueryBuilder::new(&engine, "/users/")
+  .field("age").gt(&30_u64.to_be_bytes())
+  .field("city").eq(b"NYC")
+  .all()
+
+// OR (new):
+QueryBuilder::new(&engine, "/users/")
+  .or(|q| {
+    q.field("age").gt(&30_u64.to_be_bytes())
+     .field("city").eq(b"NYC")
+  })
+  .or(|q| {
+    q.field("role").eq(b"admin")
+  })
+  .all()
+
+// NOT (new):
+QueryBuilder::new(&engine, "/users/")
+  .field("age").gt(&30_u64.to_be_bytes())
+  .not(|q| {
+    q.field("role").eq(b"admin")
+  })
+  .all()
+
+// Complex:
+QueryBuilder::new(&engine, "/users/")
+  .and(|q| {
+    q.field("age").gt(&30_u64.to_be_bytes())
+     .field("active").eq(&[1])
+  })
+  .not(|q| {
+    q.field("role").eq(b"banned")
+  })
+  .limit(100)
+  .all()
+```
+
+Internally, this builds a tree of operations:
+
+```rust
+enum QueryNode {
+  Field(FieldQuery),                    // leaf: single field operation
+  And(Vec<QueryNode>),                  // all children must match
+  Or(Vec<QueryNode>),                   // any child matches
+  Not(Box<QueryNode>),                  // invert child
+}
+```
+
+The query executor walks the tree bottom-up:
+1. Leaf nodes → create NVTMask from the field's NVT + the query operation
+2. AND nodes → bitwise AND all child masks
+3. OR nodes → bitwise OR all child masks
+4. NOT nodes → bitwise NOT the child mask
+5. Final mask → surviving buckets → scan entries → load FileRecords
+
+<!-- WYATT: The closure-based API is Rusty and ergonomic. But it's also compile-time — you can't build a query tree from JSON at runtime with closures. We need BOTH: closures for the Rust SDK, and a QueryNode tree for the HTTP/JSON API. -->
+
+<!-- 
+You are very correct about this!
+ -->
+
+### Task 5: HTTP Query API with Boolean Logic
+
+Update `POST /query` to support boolean logic in JSON:
+
+```json
+{
+  "path": "/users/",
+  "where": {
+    "and": [
+      { "field": "age", "op": "gt", "value": 30 },
+      { "field": "city", "op": "eq", "value": "NYC" },
+      {
+        "not": {
+          "field": "role", "op": "eq", "value": "banned"
+        }
+      }
+    ]
+  },
+  "limit": 100
+}
+```
+
+Or with OR:
+
+```json
+{
+  "path": "/users/",
+  "where": {
+    "or": [
+      {
+        "and": [
+          { "field": "age", "op": "gt", "value": 30 },
+          { "field": "city", "op": "eq", "value": "NYC" }
+        ]
+      },
+      { "field": "role", "op": "eq", "value": "admin" }
+    ]
+  }
+}
+```
+
+The JSON structure maps directly to the `QueryNode` tree.
+
+<!-- WYATT: Should we also support a flat array format for simple AND-only queries (backward compatible with current format)? i.e. the current `"where": [...]` is sugar for `"where": { "and": [...] }` -->
+
+<!-- 
+Sure! I am a fan of sugar. :)
+ -->
+
+### Task 6: Strided / Progressive Execution
+
+The query executor gets a `strategy` option:
+
+```rust
+pub enum QueryStrategy {
+  Full,                      // scan all buckets (current behavior)
+  Strided(usize),            // skip every N buckets
+  Progressive {              // rough pass, then refine
+    initial_stride: usize,
+    refinement_threshold: usize,  // max surviving buckets before refining
+  },
+  Auto,                      // engine picks based on index sizes
+}
+```
+
+For `Auto`:
+- If all indexes have < 10K entries: Full (fast enough)
+- If any index has > 100K entries: Progressive with stride 64
+- If any index has > 1M entries: Progressive with stride 256
+
+<!-- WYATT: Auto is the right default. Users shouldn't have to think about query strategy. But exposing it is good for benchmarking and tuning. -->
+
+<!-- 
+Agreed.
+ -->
+
+### Task 7: Update Index Serialization
+
+FieldIndex serialization must now include the NVT data. The index file at `.indexes/{field}.idx` contains:
+
+```
+[Converter state]
+[NVT serialization (buckets)]
+[Sorted entries (scalar + file_hash)]
+```
+
+This is already close to what we have — we just add the NVT to the serialization.
 
 ---
 
-## Proposed Unified Architecture
+## Implementation Order
 
 ```
-ScalarConverter (trait)
-  ├── HashConverter (engine internal, for KVS)
-  ├── U64Converter, I64Converter, StringConverter, etc.
-  ├── TimestampConverter
-  ├── GeoHilbertConverter (future)
-  └── WasmConverter (user plugin)
+Task 1 (FieldIndex + NVT)        ← foundation
+Task 2 (NVTMask bitmap ops)      ← core compositing
+Task 3 (Range masks)             ← query-to-mask conversion
+Task 4 (QueryBuilder boolean)    ← Rust API
+Task 5 (HTTP boolean queries)    ← JSON API
+Task 6 (Strided/Progressive)     ← optimization
+Task 7 (Serialization update)    ← persistence
+```
 
-IndexStructure
-  ├── For KVS: NVT buckets → sorted KV block (always in memory)
-  └── For user indexes: offset table/NVT → sorted index entries (on-demand, LRU cached)
+Tasks 1-3 are the foundation. Task 4+5 are the API. Task 6 is optimization. Task 7 is persistence.
 
-Write pipeline:
-  store_file → write chunks + FileRecord + directories
-            → run parsers (extract fields)
-            → for each indexed field: convert → update index structure
+---
 
-Query pipeline:
-  query request → identify target index
-               → load index NVT/offset table (cache)
-               → converter: query value → scalar
-               → lookup: scalar → candidate entries
-               → filter/verify candidates
-               → return results
+## Test Plan
+
+```
+nvt_ops_spec.rs:
+  - test_mask_from_nvt
+  - test_mask_from_nvt_range
+  - test_mask_and
+  - test_mask_or
+  - test_mask_not
+  - test_mask_xor
+  - test_mask_difference
+  - test_mask_popcount
+  - test_mask_surviving_buckets
+  - test_mask_and_strided
+  - test_mask_progressive_refinement
+  - test_mask_cross_resolution (different bucket counts)
+  - test_mask_empty
+  - test_mask_full (all buckets on)
+
+query_boolean_spec.rs:
+  - test_query_and (current behavior, regression)
+  - test_query_or
+  - test_query_not
+  - test_query_complex_nested
+  - test_query_node_tree_execution
+  - test_query_json_and_format
+  - test_query_json_or_format
+  - test_query_json_not_format
+  - test_query_json_backward_compatible (flat array = AND)
+
+query_strategy_spec.rs:
+  - test_strided_query_produces_correct_results
+  - test_progressive_query_produces_correct_results
+  - test_auto_strategy_selects_appropriately
+  - test_strided_is_faster_than_full (benchmark)
+  - test_progressive_eliminates_most_buckets
 ```
 
 ---
 
-## Resolved Questions
+## Questions for Wyatt
+
+1. **Lazy vs eager NVT rebuild** — dirty flag + rebuild on query, or rebuild on every insert?
+2. **NVTMask as separate struct** — keep it separate from NVT (query artifact vs persistent structure)?
+3. **Exact query bucket width** — tight (one bucket) or fuzzy (±neighbors)?
+4. **Backward compatible JSON** — flat array `"where": [...]` = sugar for `"where": { "and": [...] }`?
+5. **Auto strategy thresholds** — 10K/100K/1M reasonable?
+6. **Ready to build?**
+
+---
+---
+
+## Round 2: Refined Design After Discussion
+
+### Key Insight: Two Tiers of Query Execution
+
+**Tier 1 — Direct scalar lookups (simple queries, no compositing needed):**
+
+For `WHERE age > 30 AND name = 'Bob'`:
+- `converter.to_scalar(30)` → jump straight to that NVT offset. Everything after is the age range. One computation.
+- `converter.to_scalar("Bob")` → jump to that bucket. One computation.
+- The intersection is trivially computed from the two scalar positions — no bitmap needed.
+
+Most queries live here. It's O(1) per field. No bitmaps. No compositing. Just math.
+
+**Tier 2 — Bitmap compositing (complex queries):**
+
+Needed when:
+- **OR queries** — union of non-overlapping regions
+- **NOT queries** — inversion
+- **IN queries with dynamic sets** — `color IN (subquery results)`
+- **Cross-path joins** — `Paints.where.color.IN(Palettes.where.primaryColor)`
+
+This is where NVTMask compositing earns its keep.
+
+### Multiple NVTs Per Field (Not Multiple Resolutions)
+
+A field might have MULTIPLE NVTs optimized for different operation types:
+
+```
+/myapp/users/.indexes/age/
+  eq.nvt        ← optimized for equality lookups (tight buckets around common values)
+  range.nvt     ← optimized for gt/lt/between (uniform distribution across full range)
+```
+
+Different NVTs for the same data, with different bucket distributions. The query engine picks the right NVT based on the operation. The skipping/striding feature gives us resolution scaling for free — no separate resolution NVTs needed.
+
+### NVT Concurrent Access: Reader Reports + Coordinator Swap
+
+```
+Readers (concurrent):
+  1. Use the current NVT (immutable reference)
+  2. Perform their lookup
+  3. If they had to scan far from the expected offset → report correction
+     Report = (scalar: 0.4543, correct_offset: 12345623456)
+  4. Reports pushed onto a lock-free stack
+
+Coordinator (single thread, periodic):
+  1. Drain the correction stack
+  2. Aggregate corrections (average/mean for conflicting updates)
+  3. Generate a new NVT incorporating corrections
+  4. Atomic swap: replace the old NVT pointer with the new one
+  5. Old NVT is dropped when all readers release their references (Arc)
+```
+
+Double-buffering. Readers never block. The NVT heals over time through normal access patterns. The coordinator is a background task, not a per-query cost.
+
+### Typed Convenience Methods (No More Bytes)
+
+```rust
+// Before (ugly):
+.field("age").gt(&30_u64.to_be_bytes())
+
+// After (clean):
+.field("age").gt_u64(30)
+.field("name").eq_str("Bob")
+.field("score").gt_f64(95.5)
+.field("active").eq_bool(true)
+.field("created").gt_timestamp(1711234567000)
+```
+
+Conversion to bytes happens inside. The user never sees `to_be_bytes()`.
+
+### Resolved Questions from Round 1
 
 | # | Question | Resolution |
 |---|---|---|
-| 1 | Distribution handling | **Converter handles it.** The converter tracks its own observed min/max range and maps values to [0.0, 1.0] within that range. Uniform buckets work because the converter's job is to MAKE the distribution uniform. Type authors can bake in domain knowledge (e.g., age distribution) for even better results. This is exactly what Wyatt built and tested in 2012. |
-| 2 | Range queries on non-order-preserving indexes | **Refuse with error (option b).** `is_order_preserving()` on the trait. Engine refuses range queries on non-order-preserving indexes and tells the user why. Maximum flexibility. |
-| 3 | Multi-dimensional | **Multiple 1D indexes for now (option b).** One NVT per dimension, query engine intersects results. Full spatial index types (R-tree, quad-tree) deferred to future. |
-| 4 | Memory | **KVS NVT always in memory, user index NVTs on-demand with LRU (option c).** Different access patterns, different memory strategies. |
-| 5 | WASM performance | **Batch API (option b).** Send N values, get N scalars back. One boundary crossing instead of N. |
-| 6 | Lookup structure | **Uniform buckets work** because the converter makes the distribution uniform. No need for two structures. The self-correcting property comes from the converter expanding its range as new data is seen — existing scalars are "always good" approximations that improve on access. |
-| 7 | Index storage | **Indexes are files at `.indexes/` (option a).** Everything is a file. Index data is a FileRecord whose content is the NVT + sorted entries. Updated via append-only (new version written). Old versions preserved for snapshots. |
-| 8 | Crash between store and index | **Acceptable.** File is stored and recoverable. Index is rebuildable by re-running parsers. Index lag is acceptable; data loss is not. |
+| 1 | Lazy vs eager NVT rebuild | **Reader-corrected + coordinator swap.** NVT heals through normal reads. Coordinator aggregates corrections and swaps periodically. No explicit rebuild. |
+| 2 | NVTMask separate or integrated | **Separate.** Mask is a query-time artifact. NVT is persistent. Keep separate. GPU-compatible packed u64 bitset. |
+| 3 | Exact query bucket width | **Direct scalar jump.** `f(value)` → bucket. Search from there. The NVT self-corrects on access. No fuzz needed. |
+| 4 | Backward compatible JSON | **Yes.** Flat array = AND sugar. |
+| 5 | Auto strategy thresholds | **Agreed.** 10K/100K/1M. Tune via stress testing. |
+| 6 | Ready to build? | **Almost.** Need to discuss IN/join queries and wildcard first. |
 
 ---
 
-## Additional Resolved Decisions (from further discussion)
+## Round 2: IN Queries, Joins, and Wildcards
 
-| Decision | Resolution |
-|---|---|
-| Converter trait name | `ScalarConverter` with `to_scalar(&self, value: &[u8]) -> f64` and `is_order_preserving() -> bool` |
-| Converter range tracking | Converters track `observed_min` / `observed_max` internally. Range expands as new data is seen. |
-| NVT and indexing unification | One `ScalarConverter` trait shared by both engine KVS (HashConverter) and user indexes (U64Converter, StringConverter, etc.) |
-| Functions as endpoints | Published functions are callable HTTP endpoints with typed arguments. Data and code versioned together. |
-| Server-side compilation | Raw Rust source pushed to DB, compiled to WASM on first invocation, cached. SDK lives in the DB at `/.system/sdk/`. |
-| Schema-as-code | `#[aeordb_schema]` proc macro generates parser, converters, index config, and typed query builder from struct definitions. |
-| Query builder | Chainable builder (inspired by Mythix ORM). Operations accumulate until terminal method (`.all()`, `.first()`, `.cursor()`). |
+### IN Queries with Static Set
+
+```
+WHERE color IN ('red', 'blue', 'green')
+```
+
+**Small set (< 1000 values):** Compute scalar for each value. Mark those NVT buckets. Create a sparse mask. AND with other field masks if needed. Fast.
+
+**Large set (> 1000 values):** Same approach but the mask becomes denser. Still O(set_size) to build the mask, O(bucket_count) to AND. Acceptable.
+
+### IN Queries with Subquery (Cross-Path Joins)
+
+```
+Paints.where.color.IN(CustomerPalettes.where.primaryColor)
+```
+
+**The subquery produces a dynamic set of values.** Two approaches:
+
+**Approach A — Materialized set:**
+1. Execute the subquery: load all `primaryColor` values from `CustomerPalettes`
+2. For each value: compute scalar, mark NVT bucket
+3. Result: a mask of which buckets have matching colors
+4. AND with the outer query's mask
+5. Scan surviving buckets for actual matches
+
+**Approach B — Streaming mask construction:**
+1. Stream subquery results (don't load all into memory)
+2. For each streamed value: compute scalar, set bit in mask
+3. When stream is exhausted: mask is complete
+4. AND with outer query
+
+Approach B is better for large subquery results — bounded memory (just the mask, not the full value set).
+
+**Approach C — NVT-to-NVT compositing:**
+If both `Paints.color` and `Palettes.primaryColor` have NVTs:
+1. Get the `primaryColor` NVT (already exists as an index)
+2. Composite directly: AND the two NVTs
+3. No value materialization at all
+
+This only works if both fields use the SAME converter (same scalar mapping). If they do — the NVTs are directly comparable. If they don't (different types, different ranges) — fall back to Approach A or B.
+
+<!-- WYATT: Approach C is the dream — pure NVT compositing for joins. But it requires same-converter compatibility. For different types (e.g., joining an integer color code to a string color name), you need value-level comparison. Thoughts? -->
+
+### Wildcard / Pattern Matching
+
+`WHERE name LIKE '%smith%'`
+
+The NVT CAN'T help with mid-string matching. The scalar converter maps the BEGINNING of the string (first byte + length). "Smith" and "Blacksmith" map to completely different scalars. The `%` prefix kills NVT-based lookup.
+
+**Options:**
+
+**A) Full scan with NVT pre-filter:**
+If the query also has an NVT-friendly clause (`WHERE age > 30 AND name LIKE '%smith%'`), use the NVT for `age > 30` to narrow candidates, THEN full-scan those candidates for the wildcard match. The NVT reduces the scan set, even if it can't handle the wildcard directly.
+
+**B) Trigram index (future):**
+Split strings into 3-character grams: "smith" → ["smi", "mit", "ith"]. Index each trigram. `%smith%` → find entries containing all three trigrams → post-filter for exact match. This is how PostgreSQL's `pg_trgm` works.
+
+**C) Inverted index / full-text (future):**
+Tokenize strings into words. Index each word. Good for `CONTAINS 'smith'` but not arbitrary `LIKE` patterns.
+
+**For now:** Option A (NVT pre-filter + full scan on candidates). Options B and C are future index types that plug into the same ScalarConverter + NVT architecture — just with different converters.
+
+<!-- WYATT: Trigram indexing is a great future addition. The converter would be a `TrigramConverter` that maps trigrams to scalars. Each string produces MULTIPLE index entries (one per trigram). The NVT then supports containment queries natively. -->
 
 ---
 
-## AGIS Test Protocol Results — Indexing Implementation
-
-### Existing Coverage
-
-| Module | Tests | Covers |
-|---|---|---|
-| `src/indexing/` (Sprint 1 prototype) | 59 | Old standalone scalar ratio — NOT the unified design |
-| `src/engine/nvt.rs` | 17 | NVT bucket lookups — separate from indexing module |
-
-These are separate implementations that will be merged. Most existing tests become regression tests for the converters.
-
-### Critical Test Plan (Priority Order)
-
-#### P1: Converter Correctness (Unit Tests)
+## Revised Task List
 
 ```
-spec/engine/converter_spec.rs
-  # HashConverter
-  - test_hash_converter_produces_uniform_distribution (histogram check)
-  - test_hash_converter_deterministic
-  - test_hash_converter_is_not_order_preserving
-
-  # Numeric converters
-  - test_u64_converter_preserves_order
-  - test_u64_converter_range_expansion (new min/max observed)
-  - test_u64_converter_min_equals_max (division by zero edge case → return 0.5)
-  - test_i64_converter_negative_values
-  - test_i64_converter_crosses_zero
-  - test_f64_converter_within_range
-  - test_f64_converter_clamps_outside_range
-  - test_f64_converter_nan_handling
-  - test_f64_converter_infinity_handling
-  - test_timestamp_converter_utc_milliseconds
-  - test_timestamp_converter_epoch_zero
-
-  # String converter
-  - test_string_converter_rough_lexicographic_order
-  - test_string_converter_empty_string
-  - test_string_converter_very_long_string (64KB+)
-  - test_string_converter_unicode
-
-  # Edge cases (all converters)
-  - test_empty_input_bytes
-  - test_wrong_size_input_bytes (3 bytes for u64)
-  - test_all_same_values_dont_panic
-  - test_range_expansion_preserves_approximate_correctness
+Task 1: FieldIndex backed by NVT (with reader-correction + coordinator swap)
+Task 2: NVTMask bitmap operations (packed u64 bitset, GPU-compatible)
+Task 3: Range masks from converters (direct scalar jumps, not scans)
+Task 4: Typed convenience methods on QueryBuilder (gt_u64, eq_str, etc.)
+Task 5: QueryNode tree with boolean logic (AND, OR, NOT)
+Task 6: Two-tier query execution (Tier 1: direct scalars, Tier 2: bitmap compositing)
+Task 7: IN queries (static set + subquery/streaming)
+Task 8: HTTP query API with boolean logic + backward-compatible sugar
+Task 9: Strided / progressive execution
+Task 10: Update index serialization (NVT included)
 ```
-
-#### P2: NVT + Converter Integration
-
-```
-spec/engine/unified_index_spec.rs
-  - test_nvt_with_hash_converter (regression — current KVS behavior)
-  - test_nvt_with_u64_converter
-  - test_nvt_with_string_converter
-  - test_skewed_data_with_smart_converter (verify bucket distribution is reasonable)
-  - test_range_query_on_order_preserving_converter
-  - test_range_query_on_non_order_preserving_refuses_with_error
-  - test_nvt_resize_with_converter (buckets double, lookups still work)
-  - test_converter_range_expansion_during_inserts
-  - test_stale_scalar_self_corrects_on_access
-```
-
-#### P3: Index Lifecycle
-
-```
-spec/engine/index_lifecycle_spec.rs
-  - test_create_index_at_path
-  - test_insert_values_into_index
-  - test_lookup_exact_value
-  - test_lookup_range_gt
-  - test_lookup_range_lt
-  - test_lookup_range_between
-  - test_delete_file_removes_index_entry
-  - test_delete_file_doesnt_remove_other_files_index
-  - test_rebuild_index_from_scratch
-  - test_index_persists_across_restart
-  - test_index_included_in_version_snapshot
-  - test_index_with_zero_entries
-  - test_index_with_one_entry
-  - test_index_with_duplicate_values (multiple files with age=30)
-```
-
-#### P4: Write Pipeline Integration
-
-```
-spec/engine/write_pipeline_spec.rs
-  - test_store_file_triggers_parser_and_indexer
-  - test_store_file_no_parser_no_indexing
-  - test_store_file_parser_but_no_indexes
-  - test_multiple_parsers_multiple_indexes
-  - test_crash_between_store_and_index_file_survives
-  - test_reindex_after_crash_recovers_index
-  - test_overwrite_file_updates_index
-  - test_delete_file_updates_index
-```
-
-#### P5: Query Pipeline Integration
-
-```
-spec/engine/query_pipeline_spec.rs
-  - test_query_exact_match_on_indexed_field
-  - test_query_range_on_indexed_field
-  - test_query_on_non_indexed_field_returns_error
-  - test_query_combining_multiple_fields (intersection)
-  - test_query_with_limit
-  - test_query_with_cursor_streaming
-  - test_query_empty_index_returns_empty
-  - test_query_after_delete_excludes_deleted
-  - test_query_on_forked_version
-```
-
-#### P6: Performance (Benchmarks, Not Correctness)
-
-```
-spec/engine/index_benchmark_spec.rs
-  - test_insert_1_million_entries_performance
-  - test_lookup_in_1_million_entries_performance
-  - test_range_query_in_1_million_entries_performance
-  - test_bulk_insert_then_bulk_query
-```
-
-### Critical Edge Cases to Watch
-
-| Edge Case | Risk | Mitigation |
-|---|---|---|
-| `observed_min == observed_max` | Division by zero in converter | Return 0.5 (all values map to center) |
-| Range expansion shifts scalars | Entries in "wrong" NVT bucket | Self-correcting on access (always good, not always perfect) |
-| Stale index entry (file deleted) | Query returns ghost results | Check deletion flag on lookup, skip deleted |
-| Two files share chunks, one deleted | Index removes wrong file's entry | Index entries are per-file-path, not per-chunk |
-| Parser returns garbage | Bad data in index | Validate parser output before indexing |
-| WASM converter panics | Index operation crashes | Trap the WASM error, skip indexing for that field, log warning |
-
-### What's NOT Tested Yet (Future)
-
-- Multi-dimensional queries (geospatial)
-- WASM converter batch API performance
-- Index hot-reloading (add new parser, re-index existing files)
-- Concurrent index writes from parallel workers
-- Index compaction / optimization
 
 ---
 
-*Test plan complete. Ready for implementation.*
+## Questions for Wyatt
+
+1. **Multiple NVTs per field** — is eq.nvt + range.nvt the right split, or something different?
+2. **Cross-path joins with NVT compositing (Approach C)** — worth pursuing now, or defer? Requires same-converter compatibility.
+3. **Wildcard handling** — NVT pre-filter + full scan for now, trigram index as future?
+4. **Coordinator swap frequency** — every N queries? Every N seconds? On-demand when correction stack exceeds a threshold?
+5. **Ready to build?**
+
+---
+
+*Waiting for Wyatt's feedback on Round 2...*
