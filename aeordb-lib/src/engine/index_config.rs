@@ -61,14 +61,16 @@ impl PathIndexConfig {
 
     let mut indexes = Vec::with_capacity(indexes_array.len());
     for item in indexes_array {
-      let field_name = item.get("field")
+      let field_name = item.get("field_name")
+        .or_else(|| item.get("field"))
         .and_then(|value| value.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Missing 'field' in index config".to_string()))?
+        .ok_or_else(|| EngineError::JsonParseError("Missing 'field_name' in index config".to_string()))?
         .to_string();
 
-      let converter_type = item.get("converter")
+      let converter_type = item.get("converter_type")
+        .or_else(|| item.get("converter"))
         .and_then(|value| value.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Missing 'converter' in index config".to_string()))?
+        .ok_or_else(|| EngineError::JsonParseError("Missing 'converter_type' in index config".to_string()))?
         .to_string();
 
       let min = item.get("min").and_then(|value| value.as_f64());
