@@ -1,7 +1,11 @@
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::{deserialize_converter, serialize_converter, ScalarConverter};
 use crate::engine::storage_engine::StorageEngine;
+
+/// Default number of NVT buckets for a new FieldIndex.
+const DEFAULT_NVT_BUCKET_COUNT: usize = 1024;
 
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
@@ -10,24 +14,31 @@ pub struct IndexEntry {
   pub file_hash: Vec<u8>,
 }
 
-/// A field index: converter + sorted entries.
+/// A field index: converter + sorted entries + NVT bucket index.
 pub struct FieldIndex {
   pub field_name: String,
   pub converter: Box<dyn ScalarConverter>,
   pub entries: Vec<IndexEntry>,
+  pub nvt: NormalizedVectorTable,
+  dirty: bool,
 }
 
 impl FieldIndex {
   /// Create an empty index with the given converter.
   pub fn new(field_name: String, converter: Box<dyn ScalarConverter>) -> Self {
+    let nvt_converter = deserialize_converter(&converter.serialize())
+      .expect("converter roundtrip for NVT should never fail");
+    let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
     FieldIndex {
       field_name,
       converter,
       entries: Vec::new(),
+      nvt,
+      dirty: false,
     }
   }
 
-  /// Convert value to scalar and insert in sorted position.
+  /// Convert value to scalar and insert in sorted position. Marks NVT dirty.
   pub fn insert(&mut self, value: &[u8], file_hash: Vec<u8>) {
     let scalar = self.converter.to_scalar(value);
     let entry = IndexEntry {
@@ -38,70 +49,186 @@ impl FieldIndex {
       .binary_search_by(|probe| probe.scalar.partial_cmp(&scalar).unwrap_or(std::cmp::Ordering::Equal))
       .unwrap_or_else(|position| position);
     self.entries.insert(position, entry);
+    self.dirty = true;
   }
 
-  /// Remove all entries for a given file hash.
+  /// Remove all entries for a given file hash. Marks NVT dirty.
   pub fn remove(&mut self, file_hash: &[u8]) {
+    let original_length = self.entries.len();
     self.entries.retain(|entry| entry.file_hash != file_hash);
+    if self.entries.len() != original_length {
+      self.dirty = true;
+    }
+  }
+
+  /// Returns true if entries have changed since the last NVT rebuild.
+  pub fn is_dirty(&self) -> bool {
+    self.dirty
+  }
+
+  /// Ensure the NVT reflects the current entries. Called before any lookup.
+  pub fn ensure_nvt_current(&mut self) {
+    if !self.dirty {
+      return;
+    }
+    self.rebuild_nvt();
+  }
+
+  /// Rebuild the NVT from the sorted entries, assigning bucket ranges.
+  pub fn rebuild_nvt(&mut self) {
+    let bucket_count = self.nvt.bucket_count();
+
+    // Reset all buckets to empty.
+    for bucket_index in 0..bucket_count {
+      self.nvt.update_bucket(bucket_index, 0, 0);
+    }
+
+    if self.entries.is_empty() {
+      self.dirty = false;
+      return;
+    }
+
+    // Walk sorted entries and assign each to its NVT bucket.
+    // Track the start_index and count for each bucket.
+    let mut bucket_start_indices: Vec<Option<usize>> = vec![None; bucket_count];
+    let mut bucket_counts: Vec<u32> = vec![0; bucket_count];
+
+    for (entry_index, entry) in self.entries.iter().enumerate() {
+      let bucket_index = self.scalar_to_bucket(entry.scalar);
+      if bucket_start_indices[bucket_index].is_none() {
+        bucket_start_indices[bucket_index] = Some(entry_index);
+      }
+      bucket_counts[bucket_index] += 1;
+    }
+
+    for bucket_index in 0..bucket_count {
+      let start = bucket_start_indices[bucket_index].unwrap_or(0) as u64;
+      let count = bucket_counts[bucket_index];
+      self.nvt.update_bucket(bucket_index, start, count);
+    }
+
+    self.dirty = false;
   }
 
   /// Find entries matching the scalar for this value (approximate match).
-  pub fn lookup_exact(&self, value: &[u8]) -> Vec<&IndexEntry> {
+  /// Uses NVT for bucket-level lookup, then scans within the bucket range.
+  pub fn lookup_exact(&mut self, value: &[u8]) -> Vec<&IndexEntry> {
+    self.ensure_nvt_current();
+
     let target_scalar = self.converter.to_scalar(value);
-    self.entries
+    let bucket_index = self.nvt.bucket_for_value(value);
+    let bucket = self.nvt.get_bucket(bucket_index);
+
+    if bucket.entry_count == 0 {
+      return Vec::new();
+    }
+
+    let start = bucket.kv_block_offset as usize;
+    let end = (start + bucket.entry_count as usize).min(self.entries.len());
+
+    self.entries[start..end]
       .iter()
       .filter(|entry| (entry.scalar - target_scalar).abs() < f64::EPSILON)
       .collect()
   }
 
   /// Range query: find entries with scalars between min and max values.
-  /// Returns error if converter is not order-preserving.
-  pub fn lookup_range(&self, min_value: &[u8], max_value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
+  /// Uses NVT for bucket-level lookup across the range, then scans within.
+  pub fn lookup_range(&mut self, min_value: &[u8], max_value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
         self.converter.name().to_string(),
       ));
     }
+    self.ensure_nvt_current();
+
     let min_scalar = self.converter.to_scalar(min_value);
     let max_scalar = self.converter.to_scalar(max_value);
-    Ok(
-      self.entries
-        .iter()
-        .filter(|entry| entry.scalar >= min_scalar && entry.scalar <= max_scalar)
-        .collect(),
-    )
+    let start_bucket = self.scalar_to_bucket(min_scalar);
+    let end_bucket = self.scalar_to_bucket(max_scalar);
+
+    let mut results = Vec::new();
+    for bucket_index in start_bucket..=end_bucket {
+      if bucket_index >= self.nvt.bucket_count() {
+        break;
+      }
+      let bucket = self.nvt.get_bucket(bucket_index);
+      if bucket.entry_count == 0 {
+        continue;
+      }
+      let start = bucket.kv_block_offset as usize;
+      let end = (start + bucket.entry_count as usize).min(self.entries.len());
+      for entry in &self.entries[start..end] {
+        if entry.scalar >= min_scalar && entry.scalar <= max_scalar {
+          results.push(entry);
+        }
+      }
+    }
+
+    Ok(results)
   }
 
-  /// Greater than query.
-  pub fn lookup_gt(&self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
+  /// Greater than query. Uses NVT to skip buckets below the threshold.
+  pub fn lookup_gt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
         self.converter.name().to_string(),
       ));
     }
+    self.ensure_nvt_current();
+
     let target_scalar = self.converter.to_scalar(value);
-    Ok(
-      self.entries
-        .iter()
-        .filter(|entry| entry.scalar > target_scalar)
-        .collect(),
-    )
+    let start_bucket = self.scalar_to_bucket(target_scalar);
+
+    let mut results = Vec::new();
+    for bucket_index in start_bucket..self.nvt.bucket_count() {
+      let bucket = self.nvt.get_bucket(bucket_index);
+      if bucket.entry_count == 0 {
+        continue;
+      }
+      let start = bucket.kv_block_offset as usize;
+      let end = (start + bucket.entry_count as usize).min(self.entries.len());
+      for entry in &self.entries[start..end] {
+        if entry.scalar > target_scalar {
+          results.push(entry);
+        }
+      }
+    }
+
+    Ok(results)
   }
 
-  /// Less than query.
-  pub fn lookup_lt(&self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
+  /// Less than query. Uses NVT to skip buckets above the threshold.
+  pub fn lookup_lt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
         self.converter.name().to_string(),
       ));
     }
+    self.ensure_nvt_current();
+
     let target_scalar = self.converter.to_scalar(value);
-    Ok(
-      self.entries
-        .iter()
-        .filter(|entry| entry.scalar < target_scalar)
-        .collect(),
-    )
+    let end_bucket = self.scalar_to_bucket(target_scalar);
+
+    let mut results = Vec::new();
+    for bucket_index in 0..=end_bucket {
+      if bucket_index >= self.nvt.bucket_count() {
+        break;
+      }
+      let bucket = self.nvt.get_bucket(bucket_index);
+      if bucket.entry_count == 0 {
+        continue;
+      }
+      let start = bucket.kv_block_offset as usize;
+      let end = (start + bucket.entry_count as usize).min(self.entries.len());
+      for entry in &self.entries[start..end] {
+        if entry.scalar < target_scalar {
+          results.push(entry);
+        }
+      }
+    }
+
+    Ok(results)
   }
 
   /// Return the number of entries.
@@ -233,11 +360,29 @@ impl FieldIndex {
       entries.push(IndexEntry { scalar, file_hash });
     }
 
-    Ok(FieldIndex {
+    // Build NVT from the converter for the deserialized index.
+    let nvt_converter = deserialize_converter(&converter.serialize())
+      .expect("converter roundtrip for NVT should never fail");
+    let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
+
+    let mut index = FieldIndex {
       field_name,
       converter,
       entries,
-    })
+      nvt,
+      dirty: true, // mark dirty so NVT is rebuilt on first query
+    };
+    index.rebuild_nvt();
+    Ok(index)
+  }
+
+  // --- Private helpers ---
+
+  /// Map a scalar in [0.0, 1.0] to a bucket index.
+  fn scalar_to_bucket(&self, scalar: f64) -> usize {
+    let bucket_count = self.nvt.bucket_count();
+    let index = (scalar * bucket_count as f64).floor() as usize;
+    index.min(bucket_count.saturating_sub(1))
   }
 }
 

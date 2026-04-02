@@ -16,6 +16,7 @@ pub mod json_parser;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod nvt;
+pub mod nvt_ops;
 pub mod path_utils;
 pub mod query_engine;
 pub mod scalar_converter;
@@ -42,6 +43,7 @@ pub use kv_store::{
   KV_FLAG_PENDING, KV_FLAG_DELETED,
 };
 pub use nvt::{NVTBucket, NormalizedVectorTable};
+pub use nvt_ops::NVTMask;
 pub use scalar_converter::{
   ScalarConverter, HashConverter,
   U8Converter, U16Converter, U32Converter, U64Converter,

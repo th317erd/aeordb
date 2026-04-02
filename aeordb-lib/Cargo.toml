@@ -203,3 +203,7 @@ path = "spec/plugins/types_spec.rs"
 [[test]]
 name = "error_display_spec"
 path = "spec/engine/error_display_spec.rs"
+
+[[test]]
+name = "nvt_ops_spec"
+path = "spec/engine/nvt_ops_spec.rs"

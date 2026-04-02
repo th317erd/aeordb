@@ -57,7 +57,7 @@ impl<'a> QueryEngine<'a> {
 
     for field_query in &query.field_queries {
       let index = index_manager.load_index(&query.path, &field_query.field_name)?;
-      let index = match index {
+      let mut index = match index {
         Some(index) => index,
         None => {
           return Err(EngineError::NotFound(format!(

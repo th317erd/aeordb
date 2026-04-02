@@ -170,7 +170,7 @@ fn test_serialize_deserialize_roundtrip() {
 #[test]
 fn test_empty_index_lookup_returns_empty() {
   let converter = Box::new(U64Converter::with_range(0, 100));
-  let index = FieldIndex::new("age".to_string(), converter);
+  let mut index = FieldIndex::new("age".to_string(), converter);
 
   let results = index.lookup_exact(&42u64.to_be_bytes());
   assert!(results.is_empty());
@@ -347,4 +347,119 @@ fn test_overwrite_index_via_save() {
 
   let loaded = index_manager.load_index("/users", "age").unwrap().unwrap();
   assert_eq!(loaded.len(), 2);
+}
+
+// --- NVT-backed lookup tests ---
+
+#[test]
+fn test_field_index_nvt_lookup_exact() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  // Insert several values
+  index.insert(&10u64.to_be_bytes(), vec![0x10; 32]);
+  index.insert(&25u64.to_be_bytes(), vec![0x25; 32]);
+  index.insert(&50u64.to_be_bytes(), vec![0x50; 32]);
+  index.insert(&75u64.to_be_bytes(), vec![0x75; 32]);
+  index.insert(&99u64.to_be_bytes(), vec![0x99; 32]);
+
+  // Exact lookup should find the right entry via NVT bucket
+  let results = index.lookup_exact(&50u64.to_be_bytes());
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_hash, vec![0x50; 32]);
+
+  // Lookup a value that doesn't exist
+  let results = index.lookup_exact(&42u64.to_be_bytes());
+  assert_eq!(results.len(), 0);
+
+  // Lookup at boundaries
+  let results = index.lookup_exact(&10u64.to_be_bytes());
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_hash, vec![0x10; 32]);
+
+  let results = index.lookup_exact(&99u64.to_be_bytes());
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_hash, vec![0x99; 32]);
+}
+
+#[test]
+fn test_field_index_nvt_lookup_range() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  for value in (0..=100).step_by(5) {
+    let hash_byte = (value & 0xFF) as u8;
+    index.insert(&(value as u64).to_be_bytes(), vec![hash_byte; 32]);
+  }
+
+  // Range query spanning multiple NVT buckets
+  let results = index.lookup_range(
+    &20u64.to_be_bytes(),
+    &40u64.to_be_bytes(),
+  ).unwrap();
+
+  // Should include 20, 25, 30, 35, 40
+  assert_eq!(results.len(), 5);
+  for entry in &results {
+    assert!(entry.scalar >= 0.2 - f64::EPSILON);
+    assert!(entry.scalar <= 0.4 + f64::EPSILON);
+  }
+
+  // Range at the very start
+  let results = index.lookup_range(
+    &0u64.to_be_bytes(),
+    &5u64.to_be_bytes(),
+  ).unwrap();
+  assert_eq!(results.len(), 2); // 0 and 5
+}
+
+#[test]
+fn test_field_index_nvt_rebuild_on_dirty() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  // Initially not dirty (empty, nothing to rebuild)
+  assert!(!index.is_dirty());
+
+  // Insert marks dirty
+  index.insert(&50u64.to_be_bytes(), vec![0x50; 32]);
+  assert!(index.is_dirty());
+
+  // A lookup triggers rebuild, clears dirty
+  let _results = index.lookup_exact(&50u64.to_be_bytes());
+  assert!(!index.is_dirty());
+
+  // Insert again marks dirty
+  index.insert(&25u64.to_be_bytes(), vec![0x25; 32]);
+  assert!(index.is_dirty());
+
+  // Another lookup clears dirty and returns correct results
+  let result_count = index.lookup_exact(&25u64.to_be_bytes()).len();
+  assert!(!index.is_dirty());
+  assert_eq!(result_count, 1);
+}
+
+#[test]
+fn test_field_index_nvt_insert_marks_dirty() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  assert!(!index.is_dirty());
+
+  index.insert(&10u64.to_be_bytes(), vec![0x10; 32]);
+  assert!(index.is_dirty());
+
+  // Force rebuild
+  index.ensure_nvt_current();
+  assert!(!index.is_dirty());
+
+  // Remove marks dirty
+  index.remove(&vec![0x10; 32]);
+  assert!(index.is_dirty());
+
+  // Removing a non-existent hash does NOT mark dirty
+  index.ensure_nvt_current();
+  assert!(!index.is_dirty());
+  index.remove(&vec![0xFF; 32]);
+  assert!(!index.is_dirty());
 }
