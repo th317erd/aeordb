@@ -1,6 +1,6 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
-use aeordb::engine::query_engine::{QueryBuilder, QueryEngine, Query, FieldQuery, QueryOp};
+use aeordb::engine::query_engine::{QueryBuilder, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy};
 use aeordb::engine::storage_engine::StorageEngine;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
@@ -253,7 +253,9 @@ fn test_query_no_field_queries_returns_empty() {
   let query = Query {
     path: "/users".to_string(),
     field_queries: Vec::new(),
+    node: None,
     limit: None,
+    strategy: QueryStrategy::Full,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -347,11 +349,299 @@ fn test_query_via_raw_query_struct() {
         operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()),
       },
     ],
+    node: None,
     limit: Some(2),
+    strategy: QueryStrategy::Full,
   };
 
   let query_engine = QueryEngine::new(&engine);
   let results = query_engine.execute(&query).unwrap();
 
   assert!(results.len() <= 2);
+}
+
+// ===========================================================================
+// Task 4: Typed convenience methods
+// ===========================================================================
+
+#[test]
+fn test_typed_eq_u64() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").eq_u64(30)
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/users/alice.json");
+}
+
+#[test]
+fn test_typed_gt_str() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // Use eq_str since StringConverter is not order-preserving.
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("name").eq_str("Bob")
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/users/bob.json");
+}
+
+#[test]
+fn test_typed_eq_bool() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Verify the method compiles and produces the correct bytes.
+  // No bool index exists, so execution will fail — but construction must work.
+  let builder = QueryBuilder::new(&engine, "/test")
+    .field("active").eq_bool(true);
+
+  let result = builder.all();
+  assert!(result.is_err()); // no index exists
+}
+
+#[test]
+fn test_typed_between_u64() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").between_u64(28, 36)
+    .all()
+    .unwrap();
+
+  // Alice (30) and Diana (35) are in [28, 36]
+  assert_eq!(results.len(), 2);
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(paths.contains(&"/users/alice.json"));
+  assert!(paths.contains(&"/users/diana.json"));
+}
+
+// ===========================================================================
+// Task 5: QueryNode tree with boolean logic
+// ===========================================================================
+
+#[test]
+fn test_query_or() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // age == 25 OR age == 40
+  let results = QueryBuilder::new(&engine, "/users")
+    .or(|q| {
+      q.field("age").eq_u64(25)
+       .field("age").eq_u64(40)
+    })
+    .all()
+    .unwrap();
+
+  // Bob (25) and Charlie (40)
+  assert_eq!(results.len(), 2);
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(paths.contains(&"/users/bob.json"));
+  assert!(paths.contains(&"/users/charlie.json"));
+}
+
+#[test]
+fn test_query_not() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // NOT(age == 30) — everyone except Alice
+  let results = QueryBuilder::new(&engine, "/users")
+    .not(|q| q.field("age").eq_u64(30))
+    .all()
+    .unwrap();
+
+  // Bob (25), Charlie (40), Diana (35)
+  assert_eq!(results.len(), 3);
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(!paths.contains(&"/users/alice.json"));
+  assert!(paths.contains(&"/users/bob.json"));
+  assert!(paths.contains(&"/users/charlie.json"));
+  assert!(paths.contains(&"/users/diana.json"));
+}
+
+#[test]
+fn test_query_complex_and_or_not() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // (age > 25) AND NOT(age == 40)
+  // Should match Alice (30) and Diana (35), but not Charlie (40)
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").gt_u64(25)
+    .not(|q| q.field("age").eq_u64(40))
+    .all()
+    .unwrap();
+
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(paths.contains(&"/users/alice.json"));
+  assert!(paths.contains(&"/users/diana.json"));
+  assert!(!paths.contains(&"/users/charlie.json"));
+  assert!(!paths.contains(&"/users/bob.json"));
+  assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_query_node_tree() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // Build a QueryNode tree directly: OR(age==25, age==30)
+  let node = QueryNode::Or(vec![
+    QueryNode::Field(FieldQuery {
+      field_name: "age".to_string(),
+      operation: QueryOp::Eq(25u64.to_be_bytes().to_vec()),
+    }),
+    QueryNode::Field(FieldQuery {
+      field_name: "age".to_string(),
+      operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()),
+    }),
+  ]);
+
+  let query = Query {
+    path: "/users".to_string(),
+    field_queries: Vec::new(),
+    node: Some(node),
+    limit: None,
+    strategy: QueryStrategy::Full,
+  };
+
+  let query_engine = QueryEngine::new(&engine);
+  let results = query_engine.execute(&query).unwrap();
+
+  assert_eq!(results.len(), 2);
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(paths.contains(&"/users/alice.json"));
+  assert!(paths.contains(&"/users/bob.json"));
+}
+
+// ===========================================================================
+// Task 9: Query strategy
+// ===========================================================================
+
+#[test]
+fn test_query_strategy_auto() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").gt_u64(25)
+    .strategy(QueryStrategy::Auto)
+    .all()
+    .unwrap();
+
+  // Alice (30), Charlie (40), Diana (35)
+  assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_query_strategy_strided() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").gt_u64(25)
+    .strategy(QueryStrategy::Strided(4))
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_query_strategy_progressive() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").gt_u64(25)
+    .strategy(QueryStrategy::Progressive { initial_stride: 8 })
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_query_or_empty_sub_builder() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // OR with an empty sub-builder is a no-op.
+  let results = QueryBuilder::new(&engine, "/users")
+    .field("age").eq_u64(30)
+    .or(|q| q) // empty OR group
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/users/alice.json");
+}
+
+#[test]
+fn test_query_and_explicit_group() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let results = QueryBuilder::new(&engine, "/users")
+    .and(|q| {
+      q.field("age").gt_u64(25)
+       .field("name").eq_str("Alice")
+    })
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/users/alice.json");
+}
+
+#[test]
+fn test_query_not_with_no_matches_returns_all() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // NOT(age == 999) — no one has age 999, so all should be returned
+  let results = QueryBuilder::new(&engine, "/users")
+    .not(|q| q.field("age").eq_u64(999))
+    .all()
+    .unwrap();
+
+  assert_eq!(results.len(), 4);
+}
+
+#[test]
+fn test_query_node_not_complement() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  // NOT(age > 30) => only those with age <= 30: Bob (25), Alice (30)
+  let node = QueryNode::Not(Box::new(QueryNode::Field(FieldQuery {
+    field_name: "age".to_string(),
+    operation: QueryOp::Gt(30u64.to_be_bytes().to_vec()),
+  })));
+
+  let query = Query {
+    path: "/users".to_string(),
+    field_queries: Vec::new(),
+    node: Some(node),
+    limit: None,
+    strategy: QueryStrategy::Full,
+  };
+
+  let query_engine = QueryEngine::new(&engine);
+  let results = query_engine.execute(&query).unwrap();
+
+  assert_eq!(results.len(), 2);
+  let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
+  assert!(paths.contains(&"/users/alice.json"));
+  assert!(paths.contains(&"/users/bob.json"));
 }

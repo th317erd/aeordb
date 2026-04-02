@@ -463,3 +463,176 @@ fn test_field_index_nvt_insert_marks_dirty() {
   index.remove(&vec![0xFF; 32]);
   assert!(!index.is_dirty());
 }
+
+// ===========================================================================
+// Task 10: Index serialization with NVT
+// ===========================================================================
+
+#[test]
+fn test_field_index_serialization_with_nvt() {
+  let converter = Box::new(U64Converter::with_range(0, 200));
+  let mut index = FieldIndex::new("age".to_string(), converter);
+
+  let hash_a = vec![0xAA; 32];
+  let hash_b = vec![0xBB; 32];
+  let hash_c = vec![0xCC; 32];
+  index.insert(&25u64.to_be_bytes(), hash_a.clone());
+  index.insert(&50u64.to_be_bytes(), hash_b.clone());
+  index.insert(&75u64.to_be_bytes(), hash_c.clone());
+
+  // Force NVT rebuild before serialize so NVT is current.
+  index.ensure_nvt_current();
+
+  let hash_length = 32;
+  let serialized = index.serialize(hash_length);
+
+  // The new format should be larger than the old format because it includes NVT data.
+  // Minimum NVT overhead: 4 (nvt_length) + version(1) + converter_length(4) + converter_data + bucket_count(4) + buckets
+  assert!(serialized.len() > 100);
+
+  let deserialized = FieldIndex::deserialize(&serialized, hash_length).unwrap();
+  assert_eq!(deserialized.field_name, "age");
+  assert_eq!(deserialized.len(), 3);
+  assert_eq!(deserialized.entries[0].file_hash, hash_a);
+  assert_eq!(deserialized.entries[1].file_hash, hash_b);
+  assert_eq!(deserialized.entries[2].file_hash, hash_c);
+
+  // NVT should be functional after deserialization.
+  let mut deserialized = deserialized;
+  let results = deserialized.lookup_exact(&50u64.to_be_bytes());
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_hash, hash_b);
+
+  // Converter should produce the same scalars.
+  let original_scalar = index.converter.to_scalar(&75u64.to_be_bytes());
+  let deserialized_scalar = deserialized.converter.to_scalar(&75u64.to_be_bytes());
+  assert!((original_scalar - deserialized_scalar).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_field_index_serialization_with_nvt_empty() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let index = FieldIndex::new("score".to_string(), converter);
+
+  let hash_length = 32;
+  let serialized = index.serialize(hash_length);
+  let deserialized = FieldIndex::deserialize(&serialized, hash_length).unwrap();
+
+  assert_eq!(deserialized.field_name, "score");
+  assert_eq!(deserialized.len(), 0);
+  assert!(deserialized.is_empty());
+}
+
+#[test]
+fn test_field_index_serialization_roundtrip_preserves_lookups() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("age".to_string(), converter);
+
+  for value in (0..=100).step_by(10) {
+    let hash_byte = (value & 0xFF) as u8;
+    index.insert(&(value as u64).to_be_bytes(), vec![hash_byte; 32]);
+  }
+  index.ensure_nvt_current();
+
+  let hash_length = 32;
+  let serialized = index.serialize(hash_length);
+  let mut deserialized = FieldIndex::deserialize(&serialized, hash_length).unwrap();
+
+  // Verify all lookups work after roundtrip.
+  let results = deserialized.lookup_exact(&50u64.to_be_bytes());
+  assert_eq!(results.len(), 1);
+
+  let results = deserialized.lookup_range(&20u64.to_be_bytes(), &60u64.to_be_bytes()).unwrap();
+  assert_eq!(results.len(), 5); // 20, 30, 40, 50, 60
+
+  let results = deserialized.lookup_gt(&70u64.to_be_bytes()).unwrap();
+  assert_eq!(results.len(), 3); // 80, 90, 100
+
+  let results = deserialized.lookup_lt(&30u64.to_be_bytes()).unwrap();
+  assert_eq!(results.len(), 3); // 0, 10, 20
+}
+
+// ===========================================================================
+// Task 3: Direct scalar jump lookups
+// ===========================================================================
+
+#[test]
+fn test_field_index_scalar_jump_lookup() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  let hash_a = vec![0x10; 32];
+  let hash_b = vec![0x50; 32];
+  let hash_c = vec![0x99; 32];
+  index.insert(&10u64.to_be_bytes(), hash_a.clone());
+  index.insert(&50u64.to_be_bytes(), hash_b.clone());
+  index.insert(&99u64.to_be_bytes(), hash_c.clone());
+
+  // Compute the scalar for value 50, then look up by scalar directly.
+  let scalar_50 = index.converter.to_scalar(&50u64.to_be_bytes());
+  let results = index.lookup_by_scalar(scalar_50);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_hash, hash_b);
+
+  // Scalar for a value that doesn't exist should return empty.
+  let scalar_42 = index.converter.to_scalar(&42u64.to_be_bytes());
+  let results = index.lookup_by_scalar(scalar_42);
+  assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_field_index_scalar_range_lookup() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  for value in (0..=100).step_by(10) {
+    let hash_byte = (value & 0xFF) as u8;
+    index.insert(&(value as u64).to_be_bytes(), vec![hash_byte; 32]);
+  }
+
+  let min_scalar = index.converter.to_scalar(&20u64.to_be_bytes());
+  let max_scalar = index.converter.to_scalar(&50u64.to_be_bytes());
+  let results = index.lookup_by_scalar_range(min_scalar, max_scalar);
+
+  // Should include 20, 30, 40, 50
+  assert_eq!(results.len(), 4);
+  for entry in &results {
+    assert!(entry.scalar >= min_scalar - f64::EPSILON);
+    assert!(entry.scalar <= max_scalar + f64::EPSILON);
+  }
+}
+
+#[test]
+fn test_field_index_scalar_jump_empty_index() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  let results = index.lookup_by_scalar(0.5);
+  assert!(results.is_empty());
+
+  let results = index.lookup_by_scalar_range(0.0, 1.0);
+  assert!(results.is_empty());
+}
+
+#[test]
+fn test_field_index_scalar_jump_boundary_values() {
+  let converter = Box::new(U64Converter::with_range(0, 100));
+  let mut index = FieldIndex::new("score".to_string(), converter);
+
+  index.insert(&0u64.to_be_bytes(), vec![0x00; 32]);
+  index.insert(&100u64.to_be_bytes(), vec![0xFF; 32]);
+
+  // Lookup at the minimum scalar
+  let scalar_0 = index.converter.to_scalar(&0u64.to_be_bytes());
+  let results = index.lookup_by_scalar(scalar_0);
+  assert_eq!(results.len(), 1);
+
+  // Lookup at the maximum scalar
+  let scalar_100 = index.converter.to_scalar(&100u64.to_be_bytes());
+  let results = index.lookup_by_scalar(scalar_100);
+  assert_eq!(results.len(), 1);
+
+  // Full range should return both
+  let results = index.lookup_by_scalar_range(scalar_0, scalar_100);
+  assert_eq!(results.len(), 2);
+}

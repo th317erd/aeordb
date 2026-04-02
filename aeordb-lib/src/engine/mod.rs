@@ -61,6 +61,6 @@ pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::StorageEngine;
 pub use directory_ops::{DirectoryOps, EngineFileStream};
 pub use system_tables::{SystemTables, SystemTableError};
-pub use query_engine::{QueryOp, FieldQuery, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder};
+pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use wasm_converter::{WasmConverter, WasmBatchConverter};

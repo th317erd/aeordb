@@ -55,6 +55,12 @@ impl NormalizedVectorTable {
 
   pub fn bucket_for_value(&self, value: &[u8]) -> usize {
     let scalar = self.converter.inner.to_scalar(value);
+    self.bucket_for_scalar(scalar)
+  }
+
+  /// Map a scalar in [0.0, 1.0] directly to a bucket index.
+  /// O(1) bucket identification for Tier 1 direct scalar jumps.
+  pub fn bucket_for_scalar(&self, scalar: f64) -> usize {
     let index = (scalar * self.buckets.len() as f64).floor() as usize;
     // Clamp to valid range (scalar of exactly 1.0 would overflow)
     index.min(self.buckets.len().saturating_sub(1))

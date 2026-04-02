@@ -231,6 +231,55 @@ impl FieldIndex {
     Ok(results)
   }
 
+  /// Direct scalar lookup — O(1) bucket identification, scan within bucket.
+  /// Used for Tier 1 simple queries. Bypasses the NVT value conversion.
+  pub fn lookup_by_scalar(&mut self, scalar: f64) -> Vec<&IndexEntry> {
+    self.ensure_nvt_current();
+    let bucket_index = self.nvt.bucket_for_scalar(scalar);
+    let bucket = self.nvt.get_bucket(bucket_index);
+
+    if bucket.entry_count == 0 {
+      return Vec::new();
+    }
+
+    let start = bucket.kv_block_offset as usize;
+    let end = (start + bucket.entry_count as usize).min(self.entries.len());
+
+    self.entries[start..end]
+      .iter()
+      .filter(|entry| (entry.scalar - scalar).abs() < f64::EPSILON)
+      .collect()
+  }
+
+  /// Direct scalar range — mark start/end buckets, return entries in range.
+  /// Used for Tier 1 simple queries. Bypasses the NVT value conversion.
+  pub fn lookup_by_scalar_range(&mut self, min_scalar: f64, max_scalar: f64) -> Vec<&IndexEntry> {
+    self.ensure_nvt_current();
+
+    let start_bucket = self.scalar_to_bucket(min_scalar);
+    let end_bucket = self.scalar_to_bucket(max_scalar);
+
+    let mut results = Vec::new();
+    for bucket_index in start_bucket..=end_bucket {
+      if bucket_index >= self.nvt.bucket_count() {
+        break;
+      }
+      let bucket = self.nvt.get_bucket(bucket_index);
+      if bucket.entry_count == 0 {
+        continue;
+      }
+      let start = bucket.kv_block_offset as usize;
+      let end = (start + bucket.entry_count as usize).min(self.entries.len());
+      for entry in &self.entries[start..end] {
+        if entry.scalar >= min_scalar && entry.scalar <= max_scalar {
+          results.push(entry);
+        }
+      }
+    }
+
+    results
+  }
+
   /// Return the number of entries.
   pub fn len(&self) -> usize {
     self.entries.len()
@@ -241,14 +290,16 @@ impl FieldIndex {
     self.entries.is_empty()
   }
 
-  /// Serialize the index: converter state + entry count + sorted entries.
+  /// Serialize the index: converter state + NVT data + entry count + sorted entries.
   /// Each entry is: f64 scalar (8 bytes LE) + file_hash (hash_length bytes).
   pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
     let converter_data = serialize_converter(self.converter.as_ref());
+    let nvt_data = self.nvt.serialize();
     let field_name_bytes = self.field_name.as_bytes();
 
     let capacity = 2 + field_name_bytes.len()
       + 4 + converter_data.len()
+      + 4 + nvt_data.len()
       + 4
       + self.entries.len() * (8 + hash_length);
     let mut buffer = Vec::with_capacity(capacity);
@@ -260,6 +311,10 @@ impl FieldIndex {
     // Converter section
     buffer.extend_from_slice(&(converter_data.len() as u32).to_le_bytes());
     buffer.extend_from_slice(&converter_data);
+
+    // NVT section
+    buffer.extend_from_slice(&(nvt_data.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&nvt_data);
 
     // Entry count
     buffer.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
@@ -321,6 +376,35 @@ impl FieldIndex {
     let converter = deserialize_converter(&data[cursor..cursor + converter_length])?;
     cursor += converter_length;
 
+    // NVT section (optional for backward compatibility with old format)
+    let nvt = if data.len() >= cursor + 4 {
+      let nvt_length = u32::from_le_bytes([
+        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+      ]) as usize;
+
+      // Heuristic: if nvt_length is unreasonably large or would exceed remaining data
+      // minus what we need for entries, this is likely the old format where this u32
+      // is actually the entry count. In the new format, NVT data starts with a version
+      // byte (>= 1) followed by converter data, so nvt_length will be reasonable.
+      // We peek at what follows: if cursor+4+nvt_length leaves room for an entry_count u32,
+      // and the data at cursor+4 starts with a valid NVT version byte, it's NVT data.
+      let has_nvt_section = nvt_length > 0
+        && data.len() >= cursor + 4 + nvt_length + 4
+        && data[cursor + 4] >= 1 // valid NVT version byte
+        && data[cursor + 4] < 128; // not a huge version number
+
+      if has_nvt_section {
+        cursor += 4;
+        let nvt_result = NormalizedVectorTable::deserialize(&data[cursor..cursor + nvt_length]);
+        cursor += nvt_length;
+        nvt_result.ok()
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+
     // Entry count
     if data.len() < cursor + 4 {
       return Err(EngineError::CorruptEntry {
@@ -360,17 +444,24 @@ impl FieldIndex {
       entries.push(IndexEntry { scalar, file_hash });
     }
 
-    // Build NVT from the converter for the deserialized index.
-    let nvt_converter = deserialize_converter(&converter.serialize())
-      .expect("converter roundtrip for NVT should never fail");
-    let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
+    // Use deserialized NVT if available (preserves bucket count), otherwise build fresh.
+    let resolved_nvt = match nvt {
+      Some(deserialized_nvt) => deserialized_nvt,
+      None => {
+        let nvt_converter = deserialize_converter(&converter.serialize())
+          .expect("converter roundtrip for NVT should never fail");
+        NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT)
+      }
+    };
 
+    // Always rebuild NVT from entries on deserialize, since the serialized NVT
+    // may be stale (entries modified after last NVT rebuild before serialization).
     let mut index = FieldIndex {
       field_name,
       converter,
       entries,
-      nvt,
-      dirty: true, // mark dirty so NVT is rebuilt on first query
+      nvt: resolved_nvt,
+      dirty: true,
     };
     index.rebuild_nvt();
     Ok(index)

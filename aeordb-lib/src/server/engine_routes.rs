@@ -14,7 +14,7 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::engine::{DirectoryOps, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, FieldQuery, QueryOp};
+use crate::engine::query_engine::{QueryEngine, Query, FieldQuery, QueryOp, QueryStrategy};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -555,7 +555,9 @@ pub async fn query_endpoint(
   let query = Query {
     path: body.path.clone(),
     field_queries,
+    node: None,
     limit: body.limit,
+    strategy: QueryStrategy::Full,
   };
 
   let query_engine = QueryEngine::new(&state.engine);
