@@ -596,3 +596,51 @@ This is the biggest single feature in the roadmap. It touches every layer: stora
 **Why discussed:** Wanted the best possible MIME detection from content bytes.
 
 **Resolution:** Using `file-format` crate (200+ formats, zero deps) for now. Custom crate only if `file-format` proves insufficient.
+
+---
+
+## Query Engine Enhancements
+
+Gaps identified during indexing design. Not blocking current implementation.
+
+### Aggregations (SUM, AVG, MIN, MAX)
+We have `.count()` but no other aggregations. Every analytics use case needs these. The NVT + sorted entries could accelerate MIN/MAX (first/last entry in sorted order).
+
+### Sorting / ORDER BY
+Results are unordered. Order-preserving converters mean index entries ARE roughly sorted by scalar — sorted iteration could leverage this instead of post-sort.
+
+### Pagination / Cursors
+`.limit()` and `.first()` exist but no `.offset()` or cursor-based paging. For cursor-based: use the last result's scalar as the starting point for the next page.
+
+### Projections
+Return only specific fields, not full FileRecords. Reduces bandwidth for large result sets. Requires the parser to extract fields on read (currently only on write).
+
+### NULL / Missing Field Queries
+`WHERE age IS NULL` needs to find documents NOT in the age index. Requires a "complement" approach: all documents at the path MINUS documents in the index.
+
+### Query EXPLAIN
+Show the user how a query will execute: which indexes, estimated selectivity, scan strategy. Like SQL's EXPLAIN. Essential for optimization.
+
+### Index Selectivity / Statistics
+The query engine should scan the most selective index first. Needs cardinality stats per index (distinct value count, entry count, min/max). Could be maintained incrementally on insert/delete.
+
+### Type Coercion
+`age > "30"` (string instead of number). Options: error (strict), coerce (lenient), configurable. Leaning toward error with a clear message.
+
+### DISTINCT
+Deduplicate results by a field value. Requires post-processing on the result set, or a distinct-values index.
+
+### Compound Indexes
+Index on `(age, city)` together. More selective than separate single-field indexes for multi-field queries. Could be implemented as a multi-dimensional scalar (concatenate scalars from multiple converters).
+
+### Index Warm-up on Startup
+Pre-load frequently used index NVTs on startup instead of lazy-loading on first query. Could be driven by access statistics from the previous session.
+
+### Index Cache Invalidation on Version Restore
+When restoring a snapshot, in-memory NVT caches may be stale. Need to invalidate or reload affected indexes.
+
+### Trigram Indexing for Substring Search
+Map trigrams to scalars. Each string produces multiple index entries (one per trigram). `CONTAINS 'smith'` = AND all trigram masks. Position-weighted scalars give prefix searches tighter buckets.
+
+### GPU-Offloaded NVT Compositing
+NVT masks are packed u64 bitsets — directly compatible with GPU compute shaders. Upload masks, run AND/OR/NOT kernels, download result. Database queries at framerate speeds.

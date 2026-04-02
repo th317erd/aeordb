@@ -757,4 +757,26 @@ Trigram indexing, full-text, and GPU offloading → future tasks.
 
 ---
 
-*Waiting for Wyatt's feedback on Round 3...*
+## Round 3 Resolved
+
+All questions resolved. Gaps captured in `bot-docs/plan/future-plans.md`. Plan is ready to build.
+
+**Final task list (10 tasks):**
+```
+Task 1:  FieldIndex backed by NVT + reader-correction + coordinator swap
+Task 2:  NVTMask bitmap operations (packed u64, GPU-compatible)
+Task 3:  Direct scalar jumps for simple queries (Tier 1)
+Task 4:  Typed convenience methods (gt_u64, eq_str, etc.)
+Task 5:  QueryNode tree with boolean logic (AND, OR, NOT)
+Task 6:  Two-tier query execution engine
+Task 7:  Memory-bounded joins (streaming mask construction)
+Task 8:  HTTP query API with boolean logic + sugar
+Task 9:  Strided / progressive execution
+Task 10: Index serialization with NVT
+```
+
+*Ready for implementation.*
+
+<!-- 
+This seems like a good plan to me. What other things have we not thought of yet?
+ -->
