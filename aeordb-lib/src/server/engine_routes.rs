@@ -14,7 +14,7 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::engine::{DirectoryOps, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, FieldQuery, QueryOp, QueryStrategy};
+use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -456,10 +456,13 @@ pub async fn fork_abandon(
 // Query endpoint
 // ---------------------------------------------------------------------------
 
+/// Raw query request — accepts `where` as either an array (legacy) or
+/// an object (boolean logic). Deserialized as raw JSON so we can detect
+/// the format at runtime.
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
   pub path: String,
-  pub r#where: Vec<WhereClause>,
+  pub r#where: serde_json::Value,
   pub limit: Option<usize>,
 }
 
@@ -494,68 +497,133 @@ fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
   }
 }
 
+/// Parse a single field-level where clause JSON object into a QueryNode::Field.
+fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, String> {
+  let field = value.get("field")
+    .and_then(|v| v.as_str())
+    .ok_or_else(|| "Missing 'field' in where clause".to_string())?;
+  let op = value.get("op")
+    .and_then(|v| v.as_str())
+    .ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
+  let raw_value = value.get("value")
+    .ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
+
+  let operation = match op {
+    "eq" => {
+      let bytes = json_value_to_bytes(raw_value)
+        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Eq(bytes)
+    }
+    "gt" => {
+      let bytes = json_value_to_bytes(raw_value)
+        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Gt(bytes)
+    }
+    "lt" => {
+      let bytes = json_value_to_bytes(raw_value)
+        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Lt(bytes)
+    }
+    "between" => {
+      let bytes = json_value_to_bytes(raw_value)
+        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let raw_value2 = value.get("value2")
+        .ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
+      let bytes2 = json_value_to_bytes(raw_value2)
+        .map_err(|message| format!("Invalid value2 for field '{}': {}", field, message))?;
+      QueryOp::Between(bytes, bytes2)
+    }
+    "in" => {
+      let array = raw_value.as_array()
+        .ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
+      let mut byte_values = Vec::with_capacity(array.len());
+      for item in array {
+        let bytes = json_value_to_bytes(item)
+          .map_err(|message| format!("Invalid value in 'in' array for field '{}': {}", field, message))?;
+        byte_values.push(bytes);
+      }
+      QueryOp::In(byte_values)
+    }
+    unknown => {
+      return Err(format!("Unknown operation: '{}'", unknown));
+    }
+  };
+
+  Ok(QueryNode::Field(FieldQuery {
+    field_name: field.to_string(),
+    operation,
+  }))
+}
+
+/// Recursively parse a where clause JSON value into a QueryNode tree.
+/// Supports:
+///   - Array: legacy format, sugar for AND of field clauses
+///   - Object with "and": AND of child clauses
+///   - Object with "or": OR of child clauses
+///   - Object with "not": NOT of a single child clause
+///   - Object with "field": leaf field query
+fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
+  if value.is_array() {
+    let array = value.as_array().unwrap();
+    let children: Result<Vec<QueryNode>, String> = array.iter()
+      .map(parse_where_clause)
+      .collect();
+    return Ok(QueryNode::And(children?));
+  }
+
+  if let Some(and_array) = value.get("and") {
+    let array = and_array.as_array()
+      .ok_or_else(|| "'and' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter()
+      .map(parse_where_clause)
+      .collect();
+    return Ok(QueryNode::And(children?));
+  }
+
+  if let Some(or_array) = value.get("or") {
+    let array = or_array.as_array()
+      .ok_or_else(|| "'or' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter()
+      .map(parse_where_clause)
+      .collect();
+    return Ok(QueryNode::Or(children?));
+  }
+
+  if let Some(not_value) = value.get("not") {
+    let child = parse_where_clause(not_value)?;
+    return Ok(QueryNode::Not(Box::new(child)));
+  }
+
+  if value.get("field").is_some() {
+    return parse_single_field_query(value);
+  }
+
+  Err(format!("Invalid where clause structure: {}", value))
+}
+
 /// POST /query -- execute an index query and return matching file metadata.
+/// Supports both legacy array format and nested boolean object format.
 pub async fn query_endpoint(
   State(state): State<AppState>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
-  let mut field_queries = Vec::with_capacity(body.r#where.len());
+  // Parse the where clause into a QueryNode tree.
+  let query_node = match parse_where_clause(&body.r#where) {
+    Ok(node) => node,
+    Err(message) => {
+      return ErrorResponse::new(message)
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
 
-  for clause in &body.r#where {
-    let value_bytes = match json_value_to_bytes(&clause.value) {
-      Ok(bytes) => bytes,
-      Err(message) => {
-        return ErrorResponse::new(format!("Invalid value for field '{}': {}", clause.field, message))
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-    };
-
-    let operation = match clause.op.as_str() {
-      "eq" => QueryOp::Eq(value_bytes),
-      "gt" => QueryOp::Gt(value_bytes),
-      "lt" => QueryOp::Lt(value_bytes),
-      "between" => {
-        let value2 = match &clause.value2 {
-          Some(value2) => match json_value_to_bytes(value2) {
-            Ok(bytes) => bytes,
-            Err(message) => {
-              return ErrorResponse::new(format!(
-                "Invalid value2 for field '{}': {}",
-                clause.field, message,
-              ))
-                .with_status(StatusCode::BAD_REQUEST)
-                .into_response();
-            }
-          },
-          None => {
-            return ErrorResponse::new(format!(
-              "Missing value2 for 'between' operation on field '{}'",
-              clause.field,
-            ))
-              .with_status(StatusCode::BAD_REQUEST)
-              .into_response();
-          }
-        };
-        QueryOp::Between(value_bytes, value2)
-      }
-      unknown => {
-        return ErrorResponse::new(format!("Unknown operation: '{}'", unknown))
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-    };
-
-    field_queries.push(FieldQuery {
-      field_name: clause.field.clone(),
-      operation,
-    });
-  }
+  // Check for empty where clause (AND with no children).
+  let is_empty = matches!(&query_node, QueryNode::And(children) if children.is_empty());
 
   let query = Query {
     path: body.path.clone(),
-    field_queries,
-    node: None,
+    field_queries: Vec::new(),
+    node: if is_empty { None } else { Some(query_node) },
     limit: body.limit,
     strategy: QueryStrategy::Full,
   };

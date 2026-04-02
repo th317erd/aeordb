@@ -582,3 +582,335 @@ async fn test_query_empty_where_returns_empty_array() {
   let results = json.as_array().unwrap();
   assert!(results.is_empty());
 }
+
+// ===========================================================================
+// Task 8: HTTP Query API with Boolean Logic
+// ===========================================================================
+
+#[tokio::test]
+async fn test_query_json_boolean_and() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "and": [
+        { "field": "age", "op": "gt", "value": 25 },
+        { "field": "name", "op": "eq", "value": "Alice" }
+      ]
+    }
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0]["path"], "/myapp/users/alice.json");
+}
+
+#[tokio::test]
+async fn test_query_json_boolean_or() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "or": [
+        { "field": "age", "op": "eq", "value": 25 },
+        { "field": "age", "op": "eq", "value": 40 }
+      ]
+    }
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 2);
+
+  let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
+  assert!(paths.contains(&"/myapp/users/bob.json"));
+  assert!(paths.contains(&"/myapp/users/charlie.json"));
+}
+
+#[tokio::test]
+async fn test_query_json_boolean_not() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "not": { "field": "age", "op": "eq", "value": 30 }
+    }
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 3);
+
+  let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
+  assert!(!paths.contains(&"/myapp/users/alice.json"));
+  assert!(paths.contains(&"/myapp/users/bob.json"));
+  assert!(paths.contains(&"/myapp/users/charlie.json"));
+  assert!(paths.contains(&"/myapp/users/diana.json"));
+}
+
+#[tokio::test]
+async fn test_query_json_nested_boolean() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  // (age > 25) AND (name == "Alice" OR name == "Charlie") AND NOT(age == 40)
+  // Result: Alice only
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "and": [
+        { "field": "age", "op": "gt", "value": 25 },
+        { "or": [
+          { "field": "name", "op": "eq", "value": "Alice" },
+          { "field": "name", "op": "eq", "value": "Charlie" }
+        ]},
+        { "not": { "field": "age", "op": "eq", "value": 40 } }
+      ]
+    },
+    "limit": 100
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0]["path"], "/myapp/users/alice.json");
+}
+
+#[tokio::test]
+async fn test_query_json_backward_compatible_array() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  // Legacy array format still works.
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "age", "op": "gt", "value": 30 }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 2);
+
+  let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
+  assert!(paths.contains(&"/myapp/users/charlie.json"));
+  assert!(paths.contains(&"/myapp/users/diana.json"));
+}
+
+#[tokio::test]
+async fn test_query_json_in_operation() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "age", "op": "in", "value": [25, 40] }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 2);
+
+  let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
+  assert!(paths.contains(&"/myapp/users/bob.json"));
+  assert!(paths.contains(&"/myapp/users/charlie.json"));
+}
+
+#[tokio::test]
+async fn test_query_json_invalid_boolean_structure() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Invalid: where is an object with no recognized keys.
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "invalid_key": true
+    }
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_query_json_in_with_string_values() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "name", "op": "in", "value": ["Bob", "Diana"] }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json.as_array().unwrap();
+  assert_eq!(results.len(), 2);
+
+  let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
+  assert!(paths.contains(&"/myapp/users/bob.json"));
+  assert!(paths.contains(&"/myapp/users/diana.json"));
+}
+
+#[tokio::test]
+async fn test_query_json_in_non_array_returns_400() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // "in" requires array value, not a scalar.
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": [
+      { "field": "age", "op": "in", "value": 30 }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_query_json_or_missing_field_returns_error() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // OR with a clause missing "field" key.
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": {
+      "or": [
+        { "op": "eq", "value": 30 }
+      ]
+    }
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
