@@ -92,17 +92,19 @@ A chunk's raw data can never collide with a file path hash because the prefixes 
 Every entity on disk has the same header structure. The header is versioned and hash-algorithm-aware.
 
 ```
-[Entry Header — variable size, minimum 32 bytes + hash_length]
-  magic:         u32           // 0x0AE012DB — identifies the start of a valid entry (critical for recovery scanning)
-  entry_version: u8           // entity format version (starts at 1). Maps to an engine that reads this format.
-  entry_type:    u8           // 0x01-0x06
-  flags:         u8           // bit 0: compressed (zstd), bit 1: encrypted (future), bits 2-7: reserved
-  hash_algo:     u16          // hashing algorithm enum (see below)
-  key_length:    u32          // length of key field
-  value_length:  u32          // length of value field
-  timestamp:     i64          // millisecond precision UTC, when written
-  total_length:  u32          // total bytes of this entry including header (for jump-scanning)
-  hash:          [u8; N]      // integrity hash, length N determined by hash_algo (e.g., BLAKE3=32, SHA-256=32, SHA-512=64)
+[Entry Header — variable size, minimum 31 bytes + hash_length]
+  magic:              u32     // 0x0AE012DB — identifies the start of a valid entry (critical for recovery scanning)
+  entry_version:      u8      // entity format version (starts at 1). Maps to an engine that reads this format.
+  entry_type:         u8      // 0x01-0x06
+  flags:              u8      // operational flags (pending, deleted, etc.)
+  hash_algo:          u8      // 0x01=BLAKE3_256, 0x02=SHA256, 0x03=SHA512, etc.
+  compression_algo:   u8      // 0x00=none, 0x01=zstd, 0x02=lz4, etc.
+  encryption_algo:    u8      // 0x00=none, 0x01=AES-256-GCM, 0x02=ChaCha20-Poly1305, etc.
+  key_length:         u32     // length of key field
+  value_length:       u32     // length of value field
+  timestamp:          i64     // millisecond precision UTC, when written
+  total_length:       u32     // total bytes of this entry including header (for jump-scanning)
+  hash:               [u8; N] // integrity hash, length N determined by hash_algo
 ```
 
 ### Entry Versioning
@@ -113,16 +115,30 @@ Every entity on disk has the same header structure. The header is versioned and 
 
 ### Hash Algorithm Enum
 
-`hash_algo` (u16) specifies which hashing algorithm was used for the `hash` field and for the entry's key (for chunks, the key IS a hash). The hash length is determined by the algorithm.
+Three u8 enums specify the algorithms used for this entry. `0x00` means "none" for compression and encryption.
 
 ```
-enum HashAlgorithm {
-  BLAKE3_256   = 0x0001,  // 32 bytes — current default
-  SHA256       = 0x0002,  // 32 bytes
-  SHA512       = 0x0003,  // 64 bytes
-  SHA3_256     = 0x0004,  // 32 bytes
-  SHA3_512     = 0x0005,  // 64 bytes
-  // 0x0006 - 0xFFFF reserved for future algorithms
+enum HashAlgorithm (u8) {
+  BLAKE3_256 = 0x01,  // 32 bytes — current default
+  SHA256     = 0x02,  // 32 bytes
+  SHA512     = 0x03,  // 64 bytes
+  SHA3_256   = 0x04,  // 32 bytes
+  SHA3_512   = 0x05,  // 64 bytes
+  // 0x06-0xFF reserved
+}
+
+enum CompressionAlgorithm (u8) {
+  None = 0x00,  // no compression — default
+  Zstd = 0x01,  // zstd (current choice)
+  Lz4  = 0x02,  // lz4 (future)
+  // 0x03-0xFF reserved
+}
+
+enum EncryptionAlgorithm (u8) {
+  None            = 0x00,  // no encryption — default
+  Aes256Gcm       = 0x01,  // AES-256-GCM (future)
+  ChaCha20Poly    = 0x02,  // ChaCha20-Poly1305 (future)
+  // 0x03-0xFF reserved
 }
 
 fn hash_length(algo: HashAlgorithm) -> usize {
@@ -174,7 +190,7 @@ aeordb.dat:
 [File Header — 256 bytes]
   magic:            "AEOR" (4 bytes)
   header_version:   u8           ← header format version (starts at 1)
-  hash_algo:        u16          ← database-wide hash algorithm (default: BLAKE3_256 = 0x0001)
+  hash_algo:        u8          ← database-wide hash algorithm (default: BLAKE3_256 = 0x0001)
   created_at:       i64 (ms, UTC)
   updated_at:       i64 (ms, UTC)
   kv_block_offset:  u64          ← current KV block location
@@ -192,14 +208,14 @@ aeordb.dat:
 
 [NVT — Normalized Vector Table (versioned)]
   nvt_version: u8                ← format version of the NVT structure
-  hash_algo:   u16               ← hash algorithm used (must match header)
+  hash_algo:   u8               ← hash algorithm used (must match header)
   bucket_count: u32              ← number of buckets
   buckets:     [NVTBucket; bucket_count]
   Immediately after header. Grows by bulk-relocating entities.
 
 [KV Block — Sorted hash→offset array (versioned)]
   kv_version:  u8                ← format version of the KV block structure
-  hash_algo:   u16               ← hash algorithm used (must match header)
+  hash_algo:   u8               ← hash algorithm used (must match header)
   entry_count: u64               ← number of entries
   entries:     [KVEntry; entry_count]  ← each entry is hash_length(algo) + 8 bytes
   After NVT. Grows by bulk-relocating entities.
@@ -501,16 +517,13 @@ Read:  load → decompress → verify hash → return
 
 The hash is ALWAYS on the raw uncompressed data. This preserves dedup (same content = same hash regardless of compression) and integrity verification (decompress, then hash-check).
 
-### Entry Header Flags
+### Entry Header Algorithm Fields
 
-The `flags: u8` field in the entry header:
-```
-bit 0: compressed (0 = raw, 1 = zstd compressed)
-bit 1: encrypted (future)
-bits 2-7: reserved
-```
+Each entry carries its own `compression_algo: u8` and `encryption_algo: u8`:
+- `0x00` = none (no compression / no encryption)
+- Non-zero = specific algorithm enum value
 
-On read, the engine checks bit 0. If set, decompress the value after reading. Transparent to the rest of the system.
+On read, the engine checks these fields and applies the corresponding decompression/decryption. Transparent to the rest of the system. The `flags: u8` field remains for operational flags (pending, deleted, etc.).
 
 ### User Control
 
@@ -572,4 +585,6 @@ This is a future optimization. For now, user-configured or explicit.
 - **KV resize**: Temporary buffer KVS during resize operations. Discarded after merge.
 - **NVT growth**: Double buckets when scan length exceeds threshold. Exact threshold via stress testing.
 - **Minimum void**: 89 bytes (smallest possible entry header). Smaller gaps are abandoned.
-- **Compression**: zstd, opt-in per-path or per-request, post-hash transform. Bit 0 in entry flags.
+- **Compression**: zstd, opt-in per-path or per-request, post-hash transform. `compression_algo: u8` enum per entry.
+- **Encryption**: Future. `encryption_algo: u8` enum per entry. Same post-hash transform pattern.
+- **Algorithm fields**: All u8 enums (hash, compression, encryption). 255 values each. Version byte protects future expansion.
