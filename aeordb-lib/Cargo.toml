@@ -215,3 +215,7 @@ path = "spec/engine/user_spec.rs"
 [[test]]
 name = "group_spec"
 path = "spec/engine/group_spec.rs"
+
+[[test]]
+name = "permissions_spec"
+path = "spec/engine/permissions_spec.rs"

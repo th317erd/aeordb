@@ -2,6 +2,7 @@ pub mod api_key;
 pub mod jwt;
 pub mod magic_link;
 pub mod middleware;
+pub mod permission_middleware;
 pub mod rate_limiter;
 pub mod refresh;
 
@@ -9,6 +10,7 @@ pub use api_key::{ApiKeyRecord, generate_api_key, hash_api_key, parse_api_key, v
 pub use jwt::{JwtManager, TokenClaims};
 pub use magic_link::{MagicLinkRecord, generate_magic_link_code, hash_magic_link_code};
 pub use middleware::auth_middleware;
+pub use permission_middleware::permission_middleware;
 pub use rate_limiter::RateLimiter;
 pub use refresh::{RefreshTokenRecord, generate_refresh_token, hash_refresh_token};
 

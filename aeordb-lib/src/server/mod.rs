@@ -4,6 +4,7 @@ pub mod routes;
 pub mod state;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
@@ -13,7 +14,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, StorageEngine, SystemTables};
+use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, StorageEngine, SystemTables};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -21,6 +22,9 @@ use crate::plugins::PluginManager;
 use state::AppState;
 
 const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
+
+/// Default cache TTL in seconds.
+const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
 /// Build the full application router with all routes and middleware.
 /// Loads or generates the signing key from the engine's system tables.
@@ -88,12 +92,18 @@ pub fn create_app_with_all(
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
 ) -> Router {
+  let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
+  let group_cache = Arc::new(GroupCache::new(cache_ttl));
+  let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
+
   let app_state = AppState {
     jwt_manager,
     plugin_manager,
     rate_limiter,
     prometheus_handle,
     engine,
+    group_cache,
+    permissions_cache,
   };
 
   // Routes that require authentication
@@ -138,6 +148,7 @@ pub fn create_app_with_all(
       "/{database}/{schema}/{table}/{function_name}/_remove",
       delete(routes::remove_plugin),
     )
+    .route_layer(from_fn_with_state(app_state.clone(), permission_middleware))
     .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 
   // Public routes (no auth required)
@@ -164,6 +175,7 @@ fn try_initialize_metrics() -> PrometheusHandle {
 }
 
 use crate::auth::middleware::auth_middleware;
+use crate::auth::permission_middleware::permission_middleware;
 
 /// Create or open a StorageEngine at the given path.
 /// Initializes the root directory so the engine is ready for file operations.
