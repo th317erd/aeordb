@@ -36,7 +36,7 @@ const DARK_THEME = {
   yAxis:   { textColor: '#8b949e' },
 };
 
-const CHART_COLORS = ['#58a6ff', '#3fb950', '#d2a8ff', '#f0883e'];
+const CHART_COLORS = ['#f0883e', '#3fb950', '#d2a8ff', '#58a6ff'];
 
 class AeorDashboard extends HTMLElement {
   constructor() {
@@ -248,8 +248,8 @@ class AeorDashboard extends HTMLElement {
       <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
         ${yLabels}
         ${timeLabels.join('')}
-        <path d="${areaPath}" fill="rgba(88, 166, 255, 0.1)"/>
-        <polyline points="${polyline}" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <path d="${areaPath}" fill="rgba(240, 136, 62, 0.1)"/>
+        <polyline points="${polyline}" fill="none" stroke="#f0883e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       </svg>
     `;
   }
