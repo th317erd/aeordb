@@ -17,10 +17,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rand = "0.8"
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [[test]]
 name = "stress_spec"
 path = "spec/stress_spec.rs"
+
+[[test]]
+name = "emergency_reset_spec"
+path = "spec/emergency_reset_spec.rs"

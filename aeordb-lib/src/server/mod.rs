@@ -1,3 +1,4 @@
+pub mod admin_routes;
 pub mod engine_routes;
 pub mod responses;
 pub mod routes;
@@ -111,6 +112,21 @@ pub fn create_app_with_all(
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
     .route("/admin/metrics", get(routes::metrics_endpoint))
+    // Admin user/group management
+    .route("/admin/users", post(admin_routes::create_user).get(admin_routes::list_users))
+    .route(
+      "/admin/users/{user_id}",
+      get(admin_routes::get_user)
+        .patch(admin_routes::update_user)
+        .delete(admin_routes::deactivate_user),
+    )
+    .route("/admin/groups", post(admin_routes::create_group).get(admin_routes::list_groups))
+    .route(
+      "/admin/groups/{name}",
+      get(admin_routes::get_group)
+        .patch(admin_routes::update_group)
+        .delete(admin_routes::delete_group),
+    )
     // Engine routes (custom storage engine)
     .route(
       "/engine/{*path}",

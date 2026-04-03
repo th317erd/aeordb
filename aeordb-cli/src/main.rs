@@ -22,6 +22,13 @@ enum Commands {
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
+  /// Emergency reset: revoke the current root API key and generate a new one
+  EmergencyReset {
+    #[arg(short = 'D', long)]
+    database: String,
+    #[arg(long)]
+    force: bool,
+  },
 }
 
 #[tokio::main]
@@ -37,6 +44,9 @@ async fn main() {
         eprintln!("Stress test failed: {error}");
         std::process::exit(1);
       }
+    }
+    Commands::EmergencyReset { database, force } => {
+      commands::emergency_reset::run(&database, force);
     }
   }
 }

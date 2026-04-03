@@ -88,3 +88,57 @@ impl From<&crate::engine::ForkInfo> for ForkResponse {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// User / Group response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct UserResponse {
+  pub user_id: String,
+  pub username: String,
+  pub email: Option<String>,
+  pub is_active: bool,
+  pub created_at: i64,
+  pub updated_at: i64,
+}
+
+impl From<&crate::engine::User> for UserResponse {
+  fn from(user: &crate::engine::User) -> Self {
+    Self {
+      user_id: user.user_id.to_string(),
+      username: user.username.clone(),
+      email: user.email.clone(),
+      is_active: user.is_active,
+      created_at: user.created_at,
+      updated_at: user.updated_at,
+    }
+  }
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupResponse {
+  pub name: String,
+  pub default_allow: String,
+  pub default_deny: String,
+  pub query_field: String,
+  pub query_operator: String,
+  pub query_value: String,
+  pub created_at: i64,
+  pub updated_at: i64,
+}
+
+impl From<&crate::engine::Group> for GroupResponse {
+  fn from(group: &crate::engine::Group) -> Self {
+    Self {
+      name: group.name.clone(),
+      default_allow: group.default_allow.clone(),
+      default_deny: group.default_deny.clone(),
+      query_field: group.query_field.clone(),
+      query_operator: group.query_operator.clone(),
+      query_value: group.query_value.clone(),
+      created_at: group.created_at,
+      updated_at: group.updated_at,
+    }
+  }
+}
