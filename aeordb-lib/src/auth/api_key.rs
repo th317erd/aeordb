@@ -11,11 +11,13 @@ use uuid::Uuid;
 const API_KEY_PREFIX: &str = "aeor_k_";
 
 /// Metadata record for a stored API key (never contains the plaintext key).
+/// The `user_id` field links this key to its owning user. For the root
+/// bootstrap key, `user_id` is the nil UUID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
   pub key_id: Uuid,
   pub key_hash: String,
-  pub roles: Vec<String>,
+  pub user_id: Uuid,
   pub created_at: DateTime<Utc>,
   pub is_revoked: bool,
 }

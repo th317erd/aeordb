@@ -176,7 +176,7 @@ pub struct AuthTokenRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
-  pub roles: Option<Vec<String>>,
+  pub user_id: Option<String>,
 }
 
 /// POST /auth/token -- exchange an API key for a JWT.
@@ -240,11 +240,10 @@ pub async fn auth_token(
 
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: record.key_id.to_string(),
+    sub: record.user_id.to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
-    roles: record.roles.clone(),
     scope: None,
     permissions: None,
   };
@@ -267,7 +266,7 @@ pub async fn auth_token(
 
   if let Err(error) = system_tables.store_refresh_token(
     &refresh_token_hash,
-    &record.key_id.to_string(),
+    &record.user_id.to_string(),
     refresh_expires_at,
   ) {
     tracing::error!("Failed to store refresh token: {}", error);
@@ -289,17 +288,40 @@ pub async fn auth_token(
     .into_response()
 }
 
-/// POST /admin/api-keys -- create a new API key (requires admin role).
+/// POST /admin/api-keys -- create a new API key (requires root).
 pub async fn create_api_key(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateApiKeyRequest>,
 ) -> Response {
-  if !claims.roles.contains(&"admin".to_string()) {
-    return ErrorResponse::new("Admin role required".to_string())
+  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
+    return ErrorResponse::new("Root access required".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
+
+  // Determine which user this key is for.
+  let target_user_id = match payload.user_id {
+    Some(ref id_string) => match Uuid::parse_str(id_string) {
+      Ok(id) => id,
+      Err(_) => {
+        return ErrorResponse::new(format!("Invalid user_id: {}", id_string))
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+    },
+    None => {
+      // Default to the calling user's identity.
+      match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+          return ErrorResponse::new("Invalid sub claim".to_string())
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+        }
+      }
+    }
+  };
 
   let key_id = Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
@@ -313,11 +335,10 @@ pub async fn create_api_key(
     }
   };
 
-  let roles = payload.roles.unwrap_or_default();
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles,
+    user_id: target_user_id,
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
@@ -335,7 +356,7 @@ pub async fn create_api_key(
     Json(serde_json::json!({
       "key_id": record.key_id,
       "api_key": plaintext_key,
-      "roles": record.roles,
+      "user_id": record.user_id,
       "created_at": record.created_at.to_rfc3339(),
     })),
   )
@@ -347,8 +368,8 @@ pub async fn list_api_keys(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-  if !claims.roles.contains(&"admin".to_string()) {
-    return ErrorResponse::new("Admin role required".to_string())
+  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
+    return ErrorResponse::new("Root access required".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
@@ -361,7 +382,7 @@ pub async fn list_api_keys(
         .map(|record| {
           serde_json::json!({
             "key_id": record.key_id,
-            "roles": record.roles,
+            "user_id": record.user_id,
             "created_at": record.created_at.to_rfc3339(),
             "is_revoked": record.is_revoked,
           })
@@ -384,8 +405,8 @@ pub async fn revoke_api_key(
   Extension(claims): Extension<TokenClaims>,
   Path(key_id): Path<String>,
 ) -> Response {
-  if !claims.roles.contains(&"admin".to_string()) {
-    return ErrorResponse::new("Admin role required".to_string())
+  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
+    return ErrorResponse::new("Root access required".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
@@ -534,7 +555,6 @@ pub async fn verify_magic_link(
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
-    roles: vec!["user".to_string()],
     scope: None,
     permissions: None,
   };
@@ -618,7 +638,6 @@ pub async fn refresh_token(
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
-    roles: vec!["admin".to_string()],
     scope: None,
     permissions: None,
   };

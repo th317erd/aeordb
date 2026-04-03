@@ -207,3 +207,11 @@ path = "spec/engine/error_display_spec.rs"
 [[test]]
 name = "nvt_ops_spec"
 path = "spec/engine/nvt_ops_spec.rs"
+
+[[test]]
+name = "user_spec"
+path = "spec/engine/user_spec.rs"
+
+[[test]]
+name = "group_spec"
+path = "spec/engine/group_spec.rs"

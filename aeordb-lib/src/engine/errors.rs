@@ -13,6 +13,8 @@ pub enum EngineError {
   AlreadyExists(String),
   RangeQueryNotSupported(String),
   JsonParseError(String),
+  ReservedUserId,
+  UnsafeQueryField(String),
 }
 
 impl fmt::Display for EngineError {
@@ -39,6 +41,8 @@ impl fmt::Display for EngineError {
         write!(formatter, "Range query not supported: converter '{}' is not order-preserving", name)
       }
       EngineError::JsonParseError(reason) => write!(formatter, "JSON parse error: {}", reason),
+      EngineError::ReservedUserId => write!(formatter, "Cannot use the nil UUID (root user ID) for regular users or API keys"),
+      EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
     }
   }
 }

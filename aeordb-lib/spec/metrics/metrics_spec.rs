@@ -47,7 +47,7 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
-    roles: vec!["admin".to_string()],
+
     scope: None,
     permissions: None,
   };

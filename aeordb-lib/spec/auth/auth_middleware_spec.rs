@@ -18,30 +18,28 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-/// Create an admin JWT token.
+/// Create a root JWT token (nil UUID = root identity).
 fn admin_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "admin-user".to_string(),
+    sub: "00000000-0000-0000-0000-000000000000".to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
-    roles: vec!["admin".to_string()],
     scope: None,
     permissions: None,
   };
   jwt_manager.create_token(&claims).expect("create admin token")
 }
 
-/// Create a non-admin JWT token.
+/// Create a non-root JWT token (random UUID).
 fn reader_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "reader-user".to_string(),
+    sub: uuid::Uuid::new_v4().to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
-    roles: vec!["reader".to_string()],
     scope: None,
     permissions: None,
   };
@@ -96,7 +94,6 @@ async fn test_expired_bearer_token_returns_401() {
     iss: "aeordb".to_string(),
     iat: now - 7200,
     exp: now - 3600, // expired 1 hour ago
-    roles: vec!["admin".to_string()],
     scope: None,
     permissions: None,
   };
@@ -187,7 +184,7 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles: vec!["admin".to_string()],
+    user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
@@ -234,7 +231,7 @@ async fn test_create_api_key_requires_admin_role() {
     .uri("/admin/api-keys")
     .header("authorization", format!("Bearer {}", token))
     .header("content-type", "application/json")
-    .body(Body::from(r#"{"roles":["reader"]}"#))
+    .body(Body::from(r#"{}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -245,13 +242,14 @@ async fn test_create_api_key_requires_admin_role() {
 async fn test_create_api_key_returns_new_key() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let token = admin_token(&jwt_manager);
+  let target_user_id = uuid::Uuid::new_v4();
 
   let request = Request::builder()
     .method("POST")
     .uri("/admin/api-keys")
     .header("authorization", format!("Bearer {}", token))
     .header("content-type", "application/json")
-    .body(Body::from(r#"{"roles":["reader"]}"#))
+    .body(Body::from(format!(r#"{{"user_id":"{}"}}"#, target_user_id)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -261,7 +259,7 @@ async fn test_create_api_key_returns_new_key() {
   assert!(json["key_id"].is_string(), "response should contain key_id");
   let api_key = json["api_key"].as_str().expect("response should contain api_key");
   assert!(api_key.starts_with("aeor_k_"), "API key should have correct prefix");
-  assert_eq!(json["roles"], serde_json::json!(["reader"]));
+  assert_eq!(json["user_id"], target_user_id.to_string());
 }
 
 #[tokio::test]
@@ -275,7 +273,7 @@ async fn test_list_api_keys_returns_metadata() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles: vec!["admin".to_string()],
+    user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
@@ -296,7 +294,7 @@ async fn test_list_api_keys_returns_metadata() {
   let array = json.as_array().expect("response should be an array");
   assert_eq!(array.len(), 1);
   assert!(array[0]["key_id"].is_string());
-  assert!(array[0]["roles"].is_array());
+  assert!(array[0]["user_id"].is_string());
   assert!(array[0]["is_revoked"].is_boolean());
   assert!(array[0].get("key_hash").is_none(), "should not expose key_hash");
   assert!(array[0].get("api_key").is_none(), "should not expose api_key");
@@ -313,7 +311,7 @@ async fn test_revoke_api_key_succeeds() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles: vec!["reader".to_string()],
+    user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
@@ -348,7 +346,7 @@ async fn test_revoked_api_key_cannot_get_token() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles: vec!["admin".to_string()],
+    user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
@@ -385,7 +383,7 @@ async fn test_bootstrap_creates_root_key_on_first_run() {
   let system_tables = SystemTables::new(&engine);
   let keys = system_tables.list_system_api_keys().unwrap();
   assert_eq!(keys.len(), 1);
-  assert_eq!(keys[0].roles, vec!["admin".to_string()]);
+  assert_eq!(keys[0].user_id, uuid::Uuid::nil());
   assert!(!keys[0].is_revoked);
 }
 

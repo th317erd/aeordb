@@ -14,13 +14,14 @@ pub struct JwtKeyError(pub String);
 pub const DEFAULT_EXPIRY_SECONDS: i64 = 3600;
 
 /// JWT claims payload for aeordb tokens.
+/// The `sub` field contains the user_id (UUID string). For root, it is the nil UUID.
+/// Groups replace the old roles system -- permission resolution happens at request time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenClaims {
   pub sub: String,
   pub iss: String,
   pub iat: i64,
   pub exp: i64,
-  pub roles: Vec<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub scope: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]

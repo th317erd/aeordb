@@ -7,7 +7,6 @@ fn make_claims(expiry_offset: i64) -> TokenClaims {
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + expiry_offset,
-    roles: vec!["admin".to_string(), "reader".to_string()],
     scope: None,
     permissions: None,
   }
@@ -29,7 +28,6 @@ fn test_sign_and_verify_jwt() {
 
   assert_eq!(decoded.sub, claims.sub);
   assert_eq!(decoded.iss, claims.iss);
-  assert_eq!(decoded.roles, claims.roles);
 }
 
 #[test]
@@ -71,7 +69,6 @@ fn test_wrong_issuer_rejected() {
     iss: "not-aeordb".to_string(),
     iat: now,
     exp: now + 3600,
-    roles: vec![],
     scope: None,
     permissions: None,
   };
@@ -91,7 +88,6 @@ fn test_jwt_contains_correct_claims() {
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + 3600,
-    roles: vec!["reader".to_string()],
     scope: None,
     permissions: None,
   };
@@ -103,7 +99,6 @@ fn test_jwt_contains_correct_claims() {
   assert_eq!(decoded.iss, "aeordb");
   assert_eq!(decoded.iat, now);
   assert_eq!(decoded.exp, now + 3600);
-  assert_eq!(decoded.roles, vec!["reader".to_string()]);
   assert_eq!(decoded.scope, None);
   assert_eq!(decoded.permissions, None);
 }
@@ -150,7 +145,6 @@ fn test_to_bytes_and_from_bytes_roundtrip() {
 
   let decoded = restored_manager.verify_token(&token).expect("restored manager should verify token");
   assert_eq!(decoded.sub, claims.sub);
-  assert_eq!(decoded.roles, claims.roles);
 }
 
 #[test]
@@ -169,7 +163,6 @@ fn test_scope_and_permissions_serialized_when_present() {
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + 3600,
-    roles: vec!["admin".to_string()],
     scope: Some("read write".to_string()),
     permissions: Some(vec!["docs:read".to_string(), "docs:write".to_string()]),
   };

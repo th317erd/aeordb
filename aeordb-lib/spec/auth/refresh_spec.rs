@@ -63,7 +63,7 @@ fn seed_api_key(engine: &StorageEngine) -> String {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    roles: vec!["admin".to_string()],
+    user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };

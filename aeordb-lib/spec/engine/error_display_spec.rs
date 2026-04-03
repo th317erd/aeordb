@@ -161,6 +161,8 @@ fn test_error_source_non_io_variants_return_none() {
     EngineError::AlreadyExists("x".into()),
     EngineError::RangeQueryNotSupported("x".into()),
     EngineError::JsonParseError("x".into()),
+    EngineError::ReservedUserId,
+    EngineError::UnsafeQueryField("x".into()),
   ];
 
   for variant in &variants {

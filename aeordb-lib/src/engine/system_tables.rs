@@ -5,7 +5,9 @@ use crate::auth::api_key::ApiKeyRecord;
 use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::refresh::RefreshTokenRecord;
 use crate::engine::entry_type::EntryType;
+use crate::engine::group::Group;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::user::{User, validate_user_id};
 
 /// Error type for system table operations.
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +45,11 @@ const PREFIX_MAGIC_LINK: &str = "::aeordb:magiclink:";
 const PREFIX_REFRESH_TOKEN: &str = "::aeordb:refresh:";
 const PREFIX_PLUGIN: &str = "::aeordb:plugin:";
 const PREFIX_PLUGIN_REGISTRY: &str = "::aeordb:plugin:_registry";
+const PREFIX_USER: &str = "::aeordb:user:";
+const PREFIX_USER_REGISTRY: &str = "::aeordb:user:_registry";
+const PREFIX_USER_BY_USERNAME: &str = "::aeordb:user:_by_username:";
+const PREFIX_GROUP: &str = "::aeordb:group:";
+const PREFIX_GROUP_REGISTRY: &str = "::aeordb:group:_registry";
 
 impl<'a> SystemTables<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
@@ -79,7 +86,23 @@ impl<'a> SystemTables<'a> {
   // -------------------------------------------------------------------------
 
   /// Store an API key record.
+  /// SECURITY: Validates that user_id is not the nil UUID (root).
+  /// Use `store_api_key_for_bootstrap` for the root bootstrap key only.
   pub fn store_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
+    validate_user_id(&record.user_id)?;
+    self.store_api_key_unchecked(record)
+  }
+
+  /// SECURITY WARNING: This method allows storing an API key with the nil UUID
+  /// (root user_id). It exists SOLELY for the bootstrap process that creates
+  /// the initial root API key. NEVER expose this method to any external
+  /// interface (HTTP, WASM plugins, native plugins, admin paths).
+  pub fn store_api_key_for_bootstrap(&self, record: &ApiKeyRecord) -> Result<()> {
+    self.store_api_key_unchecked(record)
+  }
+
+  /// Internal: store an API key record without user_id validation.
+  fn store_api_key_unchecked(&self, record: &ApiKeyRecord) -> Result<()> {
     let key_id_string = record.key_id.to_string();
     let hash = self.hash_key(&format!("{PREFIX_API_KEY}{key_id_string}"));
     let encoded = serde_json::to_vec(record)
@@ -374,6 +397,279 @@ impl<'a> SystemTables<'a> {
 
   fn save_plugin_registry(&self, registry: &[String]) -> Result<()> {
     let hash = self.hash_key(PREFIX_PLUGIN_REGISTRY);
+    let encoded = serde_json::to_vec(registry)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+    Ok(())
+  }
+
+  // -------------------------------------------------------------------------
+  // Users
+  // -------------------------------------------------------------------------
+
+  /// Store a user. Validates user_id != nil UUID.
+  /// Automatically creates a per-user auto-group `user:{user_id}`.
+  pub fn store_user(&self, user: &User) -> Result<()> {
+    validate_user_id(&user.user_id)?;
+
+    let user_id_string = user.user_id.to_string();
+    let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+    let encoded = user.serialize();
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+
+    // Update the registry.
+    let mut registry = self.load_user_registry()?;
+    if !registry.contains(&user_id_string) {
+      registry.push(user_id_string.clone());
+      self.save_user_registry(&registry)?;
+    }
+
+    // Update username lookup.
+    let username_hash = self.hash_key(&format!("{PREFIX_USER_BY_USERNAME}{}", user.username));
+    let username_encoded = serde_json::to_vec(&user_id_string)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &username_hash, &username_encoded)?;
+
+    // Create per-user auto-group.
+    let group_name = format!("user:{}", user_id_string);
+    let auto_group = Group::new(
+      &group_name,
+      "crudlify",
+      "........",
+      "user_id",
+      "eq",
+      &user_id_string,
+    ).map_err(SystemTableError::Engine)?;
+    self.store_group(&auto_group)?;
+
+    Ok(())
+  }
+
+  /// Retrieve a user by user_id.
+  pub fn get_user(&self, user_id: &Uuid) -> Result<Option<User>> {
+    let user_id_string = user_id.to_string();
+    let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        if self.engine.is_entry_deleted(&hash)? {
+          return Ok(None);
+        }
+        let user = User::deserialize(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(Some(user))
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// Retrieve a user by username.
+  pub fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
+    let username_hash = self.hash_key(&format!("{PREFIX_USER_BY_USERNAME}{username}"));
+    match self.engine.get_entry(&username_hash)? {
+      Some((_header, _key, value)) => {
+        if self.engine.is_entry_deleted(&username_hash)? {
+          return Ok(None);
+        }
+        let user_id_string: String = serde_json::from_slice(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        let user_id = Uuid::parse_str(&user_id_string)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        self.get_user(&user_id)
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// List all users.
+  pub fn list_users(&self) -> Result<Vec<User>> {
+    let registry = self.load_user_registry()?;
+    let mut users = Vec::new();
+    for user_id_string in &registry {
+      let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+      if self.engine.is_entry_deleted(&hash)? {
+        continue;
+      }
+      if let Some((_header, _key, value)) = self.engine.get_entry(&hash)? {
+        let user = User::deserialize(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        users.push(user);
+      }
+    }
+    Ok(users)
+  }
+
+  /// Update an existing user. Validates user_id != nil UUID.
+  pub fn update_user(&self, user: &User) -> Result<()> {
+    validate_user_id(&user.user_id)?;
+
+    let user_id_string = user.user_id.to_string();
+    let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+    let encoded = user.serialize();
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+
+    // Update username lookup.
+    let username_hash = self.hash_key(&format!("{PREFIX_USER_BY_USERNAME}{}", user.username));
+    let username_encoded = serde_json::to_vec(&user_id_string)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &username_hash, &username_encoded)?;
+
+    Ok(())
+  }
+
+  /// Delete a user. Also deletes the per-user auto-group.
+  pub fn delete_user(&self, user_id: &Uuid) -> Result<()> {
+    let user_id_string = user_id.to_string();
+
+    // Remove username lookup if user exists.
+    if let Some(user) = self.get_user(user_id)? {
+      let username_hash = self.hash_key(&format!("{PREFIX_USER_BY_USERNAME}{}", user.username));
+      if self.engine.has_entry(&username_hash)? {
+        let _ = self.engine.mark_entry_deleted(&username_hash);
+      }
+    }
+
+    // Mark user entry as deleted.
+    let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+    if self.engine.has_entry(&hash)? {
+      self.engine.mark_entry_deleted(&hash)?;
+    }
+
+    // Update registry.
+    let mut registry = self.load_user_registry()?;
+    registry.retain(|id| id != &user_id_string);
+    self.save_user_registry(&registry)?;
+
+    // Delete the auto-group.
+    let group_name = format!("user:{}", user_id_string);
+    let _ = self.delete_group(&group_name);
+
+    Ok(())
+  }
+
+  /// Count all users.
+  pub fn count_users(&self) -> Result<u64> {
+    let registry = self.load_user_registry()?;
+    let mut count = 0u64;
+    for user_id_string in &registry {
+      let hash = self.hash_key(&format!("{PREFIX_USER}{user_id_string}"));
+      if !self.engine.is_entry_deleted(&hash)? {
+        count += 1;
+      }
+    }
+    Ok(count)
+  }
+
+  fn load_user_registry(&self) -> Result<Vec<String>> {
+    let hash = self.hash_key(PREFIX_USER_REGISTRY);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        let registry: Vec<String> = serde_json::from_slice(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(registry)
+      }
+      None => Ok(Vec::new()),
+    }
+  }
+
+  fn save_user_registry(&self, registry: &[String]) -> Result<()> {
+    let hash = self.hash_key(PREFIX_USER_REGISTRY);
+    let encoded = serde_json::to_vec(registry)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+    Ok(())
+  }
+
+  // -------------------------------------------------------------------------
+  // Groups
+  // -------------------------------------------------------------------------
+
+  /// Store a group.
+  pub fn store_group(&self, group: &Group) -> Result<()> {
+    let hash = self.hash_key(&format!("{PREFIX_GROUP}{}", group.name));
+    let encoded = group.serialize();
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+
+    // Update the registry.
+    let mut registry = self.load_group_registry()?;
+    if !registry.contains(&group.name) {
+      registry.push(group.name.clone());
+      self.save_group_registry(&registry)?;
+    }
+
+    Ok(())
+  }
+
+  /// Retrieve a group by name.
+  pub fn get_group(&self, name: &str) -> Result<Option<Group>> {
+    let hash = self.hash_key(&format!("{PREFIX_GROUP}{name}"));
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        if self.engine.is_entry_deleted(&hash)? {
+          return Ok(None);
+        }
+        let group = Group::deserialize(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(Some(group))
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// List all groups.
+  pub fn list_groups(&self) -> Result<Vec<Group>> {
+    let registry = self.load_group_registry()?;
+    let mut groups = Vec::new();
+    for name in &registry {
+      let hash = self.hash_key(&format!("{PREFIX_GROUP}{name}"));
+      if self.engine.is_entry_deleted(&hash)? {
+        continue;
+      }
+      if let Some((_header, _key, value)) = self.engine.get_entry(&hash)? {
+        let group = Group::deserialize(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        groups.push(group);
+      }
+    }
+    Ok(groups)
+  }
+
+  /// Update a group.
+  pub fn update_group(&self, group: &Group) -> Result<()> {
+    let hash = self.hash_key(&format!("{PREFIX_GROUP}{}", group.name));
+    let encoded = group.serialize();
+    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+    Ok(())
+  }
+
+  /// Delete a group.
+  pub fn delete_group(&self, name: &str) -> Result<()> {
+    let hash = self.hash_key(&format!("{PREFIX_GROUP}{name}"));
+    if self.engine.has_entry(&hash)? {
+      self.engine.mark_entry_deleted(&hash)?;
+    }
+
+    // Update registry.
+    let mut registry = self.load_group_registry()?;
+    registry.retain(|registered_name| registered_name != name);
+    self.save_group_registry(&registry)?;
+
+    Ok(())
+  }
+
+  fn load_group_registry(&self) -> Result<Vec<String>> {
+    let hash = self.hash_key(PREFIX_GROUP_REGISTRY);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        let registry: Vec<String> = serde_json::from_slice(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(registry)
+      }
+      None => Ok(Vec::new()),
+    }
+  }
+
+  fn save_group_registry(&self, registry: &[String]) -> Result<()> {
+    let hash = self.hash_key(PREFIX_GROUP_REGISTRY);
     let encoded = serde_json::to_vec(registry)
       .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
     self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
