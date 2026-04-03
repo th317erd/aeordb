@@ -395,6 +395,23 @@
     .toggle input:checked + .toggle-track { background: var(--accent); }
     .toggle input:checked + .toggle-track::after { transform: translateX(18px); }
 
+    /* Sidebar footer */
+    .sidebar-footer {
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .logout-button {
+      width: 100%;
+      background: none;
+      font-family: inherit;
+      border: none;
+      text-align: left;
+      color: var(--text-muted);
+    }
+
+    .logout-button:hover { color: var(--danger); }
+
     /* Utility */
     .flex-gap { display: flex; gap: 8px; }
     .text-muted { color: var(--text-muted); }
@@ -408,6 +425,9 @@
       <a class="nav-link active" data-page="dashboard" href="#dashboard">Dashboard</a>
       <a class="nav-link" data-page="users" href="#users">Users</a>
     </nav>
+    <div class="sidebar-footer">
+      <button class="nav-link logout-button" id="logout-button">Logout</button>
+    </div>
   </aside>
   <main class="main" id="main-content"></main>
 

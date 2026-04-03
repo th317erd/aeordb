@@ -150,6 +150,14 @@ document.querySelectorAll('.nav-link').forEach((element) => {
   });
 });
 
+// Logout button
+document.getElementById('logout-button').addEventListener('click', () => {
+  AUTH.clear();
+  authDisabled = false;
+  location.hash = '';
+  navigate();
+});
+
 // Listen for hash changes
 window.addEventListener('hashchange', navigate);
 
