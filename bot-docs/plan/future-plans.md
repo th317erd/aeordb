@@ -644,3 +644,48 @@ Map trigrams to scalars. Each string produces multiple index entries (one per tr
 
 ### GPU-Offloaded NVT Compositing
 NVT masks are packed u64 bitsets — directly compatible with GPU compute shaders. Upload masks, run AND/OR/NOT kernels, download result. Database queries at framerate speeds.
+
+---
+
+## Selective zstd Compression (Implement Soon)
+
+**What:** Selectively compress entries on disk using zstd. Per-entry compression flag in the entry header's `flags` byte.
+
+**Decision:** zstd crate (BSD-3-Clause, wraps Facebook's C library). Fastest compression/decompression, fully license-compatible.
+
+### Compression Test Results (Real Data)
+
+| Data Type | Original | zstd | Ratio | Verdict |
+|---|---|---|---|---|
+| Directory listing (500 entries) | 70 KB | 4.2 KB | **5.8%** (17x) | 🔥 Compress |
+| Index files (.idx) | 31 KB | 16 KB | **51%** (2x) | ✅ Compress |
+| Individual JSON files (~275 B) | 275 B | ~235 B | **85%** | ❌ Too small |
+| KV block (hashes+offsets) | 390 KB | 346 KB | **86%** | ❌ Random data |
+| Config files (~270 B) | 270 B | ~124 B | **46%** | ❌ Too small |
+
+### What to Compress
+
+- **Directory entries (FileRecords with type DirectoryIndex)** — 17x compression
+- **Index files** — 2x compression
+- **Large FileRecords with rich metadata** — good compression on text/JSON
+- **User file data (optional, content-type aware)** — compress text/JSON/XML, skip JPEG/MP4/etc.
+
+### What NOT to Compress
+
+- **KV block** — random hashes are incompressible
+- **NVT** — small, always in memory, needs random access
+- **Small entries (< 500 bytes)** — gzip/zstd header overhead eats the savings
+- **Already-compressed content** — JPEG, MP4, ZIP, etc.
+
+### Implementation
+
+- Use one bit in the entry header `flags: u8` field (bit 0 = compressed)
+- On write: check content-type and size, compress if beneficial
+- On read: check flag, decompress if set
+- Transparent to the rest of the engine — compression/decompression at the entry read/write layer
+
+### Dependency
+
+```toml
+zstd = "0.13"  # BSD-3-Clause, wraps facebook/zstd C library
+```
