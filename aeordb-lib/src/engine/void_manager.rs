@@ -6,12 +6,12 @@ use crate::engine::entry_header::EntryHeader;
 /// Minimum useful void size in bytes.
 ///
 /// A void must be large enough to hold at least the smallest possible entry:
-/// fixed_header(29) + hash(N) + key(0) + value(0).
-/// For BLAKE3_256 (32-byte hash): 29 + 32 = 61 bytes.
+/// fixed_header(31) + hash(N) + key(0) + value(0).
+/// For BLAKE3_256 (32-byte hash): 31 + 32 = 63 bytes.
 ///
-/// We use 61 as the default since BLAKE3_256 is the current default algorithm.
+/// We use 63 as the default since BLAKE3_256 is the current default algorithm.
 /// Any remainder smaller than this after splitting a void is abandoned (not tracked).
-pub const MINIMUM_VOID_SIZE: u32 = 61;
+pub const MINIMUM_VOID_SIZE: u32 = 63;
 
 /// Tracks reusable free space (voids) in the data file.
 ///

@@ -18,6 +18,7 @@ tokio = { workspace = true }
 # Storage
 blake3 = "1"
 hex = "0.4"
+zstd = "0.13"
 
 # Serialization
 serde = { workspace = true }
@@ -227,3 +228,7 @@ path = "spec/http/admin_spec.rs"
 [[test]]
 name = "permission_scenarios_spec"
 path = "spec/http/permission_scenarios_spec.rs"
+
+[[test]]
+name = "compression_spec"
+path = "spec/engine/compression_spec.rs"

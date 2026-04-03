@@ -1,5 +1,6 @@
 use std::io::Cursor;
 
+use aeordb::engine::compression::CompressionAlgorithm;
 use aeordb::engine::entry_header::{EntryHeader, ENTRY_MAGIC};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
@@ -27,6 +28,8 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
     entry_type,
     flags: 0,
     hash_algo,
+    compression_algo: CompressionAlgorithm::None,
+    encryption_algo: 0,
     key_length: key.len() as u32,
     value_length: value.len() as u32,
     timestamp: 1700000000000,
@@ -80,6 +83,8 @@ fn test_entry_header_hash_verification_passes() {
     entry_type: EntryType::FileRecord,
     flags: 0,
     hash_algo,
+    compression_algo: CompressionAlgorithm::None,
+    encryption_algo: 0,
     key_length: key.len() as u32,
     value_length: value.len() as u32,
     timestamp: 1700000000000,
@@ -108,6 +113,8 @@ fn test_entry_header_hash_verification_fails_on_tamper() {
     entry_type: EntryType::Chunk,
     flags: 0,
     hash_algo,
+    compression_algo: CompressionAlgorithm::None,
+    encryption_algo: 0,
     key_length: key.len() as u32,
     value_length: value.len() as u32,
     timestamp: 1700000000000,
@@ -233,8 +240,8 @@ fn test_entry_header_total_length_correct() {
   let value_length: u32 = 128;
 
   let total = EntryHeader::compute_total_length(hash_algo, key_length, value_length);
-  // 29 (fixed) + 32 (blake3 hash) + 16 (key) + 128 (value) = 205
-  let expected = 29 + 32 + 16 + 128;
+  // 31 (fixed) + 32 (blake3 hash) + 16 (key) + 128 (value) = 207
+  let expected = 31 + 32 + 16 + 128;
   assert_eq!(total, expected);
 }
 
@@ -254,6 +261,8 @@ fn test_void_entry_format() {
     entry_type: EntryType::Void,
     flags: 0,
     hash_algo,
+    compression_algo: CompressionAlgorithm::None,
+    encryption_algo: 0,
     key_length: 0,
     value_length: value.len() as u32,
     timestamp: 1700000000000,

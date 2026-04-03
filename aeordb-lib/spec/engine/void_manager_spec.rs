@@ -192,11 +192,11 @@ fn test_minimum_void_size_matches_entry_header() {
   let manager = VoidManager::new(HashAlgorithm::Blake3_256);
   let min = manager.minimum_void_size();
 
-  // For BLAKE3_256: fixed_header(29) + hash(32) + key(0) + value(0) = 61
-  assert_eq!(min, 61);
+  // For BLAKE3_256: fixed_header(31) + hash(32) + key(0) + value(0) = 63
+  assert_eq!(min, 63);
 
   // The constant should match for BLAKE3
-  assert_eq!(MINIMUM_VOID_SIZE, 61);
+  assert_eq!(MINIMUM_VOID_SIZE, 63);
 }
 
 #[test]

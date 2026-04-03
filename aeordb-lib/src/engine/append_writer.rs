@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
@@ -63,6 +64,23 @@ impl AppendWriter {
     value: &[u8],
     flags: u8,
   ) -> EngineResult<u64> {
+    self.append_entry_with_compression(
+      entry_type,
+      key,
+      value,
+      flags,
+      CompressionAlgorithm::None,
+    )
+  }
+
+  pub fn append_entry_with_compression(
+    &mut self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<u64> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
@@ -78,6 +96,8 @@ impl AppendWriter {
       entry_type,
       flags,
       hash_algo,
+      compression_algo,
+      encryption_algo: 0,
       key_length: key.len() as u32,
       value_length: value.len() as u32,
       timestamp: now,
@@ -116,7 +136,7 @@ impl AppendWriter {
 
   pub fn write_void(&mut self, size: u32) -> EngineResult<u64> {
     let hash_algo = self.file_header.hash_algo;
-    let header_size = 29 + hash_algo.hash_length(); // fixed header + hash
+    let header_size = 31 + hash_algo.hash_length(); // fixed header + hash
 
     if (size as usize) < header_size {
       return Err(EngineError::CorruptEntry {

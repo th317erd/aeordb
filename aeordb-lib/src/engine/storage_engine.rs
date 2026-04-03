@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::engine::append_writer::AppendWriter;
+use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -103,6 +104,55 @@ impl StorageEngine {
           std::io::Error::other(error.to_string()),
         ))?;
       writer.append_entry(entry_type, key, value, 0)?
+    };
+
+    let kv_type = match entry_type {
+      EntryType::Chunk => KV_TYPE_CHUNK,
+      EntryType::FileRecord => KV_TYPE_FILE_RECORD,
+      EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
+      EntryType::DeletionRecord => KV_TYPE_DELETION,
+      EntryType::Snapshot => KV_TYPE_SNAPSHOT,
+      EntryType::Void => KV_TYPE_VOID,
+    };
+
+    let kv_entry = KVEntry {
+      type_flags: kv_type,
+      hash: key.to_vec(),
+      offset,
+    };
+
+    let mut kv = self.kv_manager.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    kv.insert(kv_entry);
+
+    Ok(offset)
+  }
+
+  /// Store an entry with compression: append to file, register in KV store.
+  /// The hash is computed on the UNCOMPRESSED value (for dedup).
+  /// The compressed value is what gets written to disk.
+  /// Returns the file offset where the entry was written.
+  pub fn store_entry_compressed(
+    &self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<u64> {
+    let offset = {
+      let mut writer = self.writer.write()
+        .map_err(|error| EngineError::IoError(
+          std::io::Error::other(error.to_string()),
+        ))?;
+      writer.append_entry_with_compression(
+        entry_type,
+        key,
+        value,
+        0,
+        compression_algo,
+      )?
     };
 
     let kv_type = match entry_type {

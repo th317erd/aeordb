@@ -86,6 +86,24 @@ impl PathIndexConfig {
 
     Ok(PathIndexConfig { indexes })
   }
+
+  /// Deserialize JSON bytes and extract the optional "compression" field value.
+  /// Returns Ok(Some("zstd")) if compression is configured, Ok(None) otherwise.
+  pub fn deserialize_with_compression(data: &[u8]) -> EngineResult<Option<String>> {
+    let text = std::str::from_utf8(data).map_err(|error| {
+      EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
+    })?;
+
+    let parsed: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+      EngineError::JsonParseError(format!("Invalid JSON: {}", error))
+    })?;
+
+    let compression = parsed.get("compression")
+      .and_then(|value| value.as_str())
+      .map(|value| value.to_string());
+
+    Ok(compression)
+  }
 }
 
 /// Create a ScalarConverter from a config entry.

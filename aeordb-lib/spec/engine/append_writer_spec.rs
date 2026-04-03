@@ -194,7 +194,7 @@ fn test_write_void_entry() {
   let mut writer = AppendWriter::create(&file_path)
     .expect("Failed to create file");
 
-  // Minimum size = 29 (fixed header) + 32 (blake3 hash) = 61
+  // Minimum size = 31 (fixed header) + 32 (blake3 hash) = 63
   let void_size: u32 = 100;
   let offset = writer.write_void(void_size)
     .expect("Failed to write void");
@@ -203,7 +203,7 @@ fn test_write_void_entry() {
   assert_eq!(header.entry_type, EntryType::Void);
   assert_eq!(key.len(), 0);
   assert_eq!(header.total_length, void_size);
-  assert_eq!(value.len(), (void_size as usize) - 29 - 32); // total - fixed - hash
+  assert_eq!(value.len(), (void_size as usize) - 31 - 32); // total - fixed - hash
 }
 
 #[test]

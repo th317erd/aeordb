@@ -1,3 +1,4 @@
+use crate::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{
   ChildEntry, deserialize_child_entries, serialize_child_entries,
@@ -90,7 +91,17 @@ impl Iterator for EngineFileStream {
     let engine = unsafe { &*self.engine };
 
     match engine.get_entry(hash) {
-      Ok(Some((_header, _key, value))) => Some(Ok(value)),
+      Ok(Some((header, _key, value))) => {
+        // Decompress if the chunk was stored compressed
+        if header.compression_algo != CompressionAlgorithm::None {
+          match decompress(&value, header.compression_algo) {
+            Ok(decompressed) => Some(Ok(decompressed)),
+            Err(error) => Some(Err(error)),
+          }
+        } else {
+          Some(Ok(value))
+        }
+      }
       Ok(None) => Some(Err(EngineError::NotFound(
         format!("Chunk not found: {}", hex::encode(hash)),
       ))),
@@ -120,6 +131,30 @@ impl<'a> DirectoryOps<'a> {
     data: &[u8],
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
+    self.store_file_internal(path, data, content_type, CompressionAlgorithm::None)
+  }
+
+  /// Store a file with compression at the given path, splitting data into chunks.
+  /// Creates intermediate directories as needed and updates HEAD.
+  /// Chunks are compressed individually using the specified algorithm.
+  pub fn store_file_compressed(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<FileRecord> {
+    self.store_file_internal(path, data, content_type, compression_algo)
+  }
+
+  /// Internal file storage with optional compression.
+  fn store_file_internal(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -136,15 +171,26 @@ impl<'a> DirectoryOps<'a> {
         let end = (offset + chunk_size).min(data.len());
         let chunk_data = &data[offset..end];
 
+        // Hash is ALWAYS on uncompressed data (for dedup)
         let chunk_key = chunk_content_hash(chunk_data, &algo)?;
 
         // Dedup: only store if not already present
         if !self.engine.has_entry(&chunk_key)? {
-          self.engine.store_entry(
-            EntryType::Chunk,
-            &chunk_key,
-            chunk_data,
-          )?;
+          if compression_algo != CompressionAlgorithm::None {
+            let compressed_data = compress(chunk_data, compression_algo)?;
+            self.engine.store_entry_compressed(
+              EntryType::Chunk,
+              &chunk_key,
+              &compressed_data,
+              compression_algo,
+            )?;
+          } else {
+            self.engine.store_entry(
+              EntryType::Chunk,
+              &chunk_key,
+              chunk_data,
+            )?;
+          }
         }
 
         chunk_hashes.push(chunk_key);
@@ -349,16 +395,44 @@ impl<'a> DirectoryOps<'a> {
     Ok(())
   }
 
-  /// Store a file with automatic index updates.
+  /// Store a file with automatic index updates and optional compression.
   /// After storing the file, checks for index config at `.config/indexes.json`
   /// under the parent path and updates relevant indexes.
+  /// Compression is determined by config or auto-detection via `should_compress`.
   pub fn store_file_with_indexing(
     &self,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
-    let file_record = self.store_file(path, data, content_type)?;
+    let normalized_for_config = normalize_path(path);
+    let parent_for_config = parent_path(&normalized_for_config).unwrap_or_else(|| "/".to_string());
+
+    // Check for compression configuration
+    let config_path_for_compression = if parent_for_config.ends_with('/') {
+      format!("{}.config/indexes.json", parent_for_config)
+    } else {
+      format!("{}/.config/indexes.json", parent_for_config)
+    };
+
+    let compression_algo = match self.read_file(&config_path_for_compression) {
+      Ok(config_data) => {
+        match PathIndexConfig::deserialize_with_compression(&config_data) {
+          Ok(Some(algo_str)) if algo_str == "zstd" => {
+            if should_compress(content_type, data.len()) {
+              CompressionAlgorithm::Zstd
+            } else {
+              CompressionAlgorithm::None
+            }
+          }
+          _ => CompressionAlgorithm::None,
+        }
+      }
+      Err(EngineError::NotFound(_)) => CompressionAlgorithm::None,
+      Err(_) => CompressionAlgorithm::None,
+    };
+
+    let file_record = self.store_file_internal(path, data, content_type, compression_algo)?;
 
     let normalized = normalize_path(path);
     let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());

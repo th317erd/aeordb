@@ -1,4 +1,5 @@
 pub mod append_writer;
+pub mod compression;
 pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_ops;
@@ -33,6 +34,7 @@ pub mod void_manager;
 pub mod wasm_converter;
 
 pub use append_writer::AppendWriter;
+pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
 pub use deletion_record::DeletionRecord;
 pub use directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries};
 pub use entry_header::{EntryHeader, ENTRY_MAGIC};
