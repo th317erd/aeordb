@@ -1,26 +1,24 @@
 # AeorDB — TODO
 
-## Current: Users, Groups, and Permissions (crudlify)
+## Recently Completed
+- [x] Users, Groups, Permissions (crudlify) — 1,008 tests
+- [x] Selective zstd compression — 35 tests
+- [x] Auth Provider URI (--auth flag) — 41 tests
+- [x] NVT bitmap compositing query engine — 78 tests
+- [x] Custom storage engine — 273 tests
+- [x] Unified indexing (ScalarConverter + NVT) — 136 tests
 
-### Batch 1: Core Identity (Tasks 1-7)
-- [ ] Task 1: User entity (CRUD + SystemTables + registry)
-- [ ] Task 2: Group entity (query-based, CRUD + SystemTables)
-- [ ] Task 3: Update ApiKeyRecord (add user_id, drop roles)
-- [ ] Task 4: Update JWT (sub = user_id)
-- [ ] Task 5: Root as nil UUID (engine bypass + validation)
-- [ ] Task 6: Bootstrap (zero keys → root API key with nil UUID)
-- [ ] Task 7: Per-user auto-groups
+## Total: 1,084 tests, all passing
 
-### Batch 2: Permission System (Tasks 8-12)
-- [ ] Task 8: .permissions files (per-directory, deny-all default)
-- [ ] Task 9: Permission resolution (path walk + crudlify)
-- [ ] Task 10: Group cache (user_id → groups, LRU + TTL)
-- [ ] Task 11: Permissions cache (.permissions files)
-- [ ] Task 12: Permission middleware (check every HTTP request)
-
-### Batch 3: Admin + CLI (Tasks 13-14)
-- [ ] Task 13: Admin endpoints (user CRUD, group CRUD)
-- [ ] Task 14: Emergency reset CLI command
-
-### Batch 4: Tests (Task 15)
-- [ ] Task 15: 7 real-world scenarios + 20 security tests
+## Remaining Future Plans
+- [ ] Server-side compilation + in-database SDK + schema-as-code
+- [ ] Chunk ownership & garbage collection
+- [ ] Cron/background task system
+- [ ] Pre-hashed client uploads
+- [ ] Fork merging (true merge, not just fast-forward)
+- [ ] Concurrent parallel writers (coordinator pattern)
+- [ ] Large directory optimization
+- [ ] File defragmentation
+- [ ] Encryption, vaults, zero-knowledge multi-user storage
+- [ ] Multi-database sharding
+- [ ] Query engine enhancements (aggregations, sorting, pagination, etc.)
