@@ -96,7 +96,7 @@ Every entity on disk has the same header structure. The header is versioned and 
   magic:         u32           // 0x0AE012DB — identifies the start of a valid entry (critical for recovery scanning)
   entry_version: u8           // entity format version (starts at 1). Maps to an engine that reads this format.
   entry_type:    u8           // 0x01-0x06
-  flags:         u8           // reserved
+  flags:         u8           // bit 0: compressed (zstd), bit 1: encrypted (future), bits 2-7: reserved
   hash_algo:     u16          // hashing algorithm enum (see below)
   key_length:    u32          // length of key field
   value_length:  u32          // length of value field
@@ -488,6 +488,78 @@ Tasks 1-3 are the foundation. Task 6 is the integration point. Tasks 7-9 build t
 
 ---
 
+## Compression
+
+### Pipeline Order
+
+Compression is a post-hash transform, just like encryption:
+
+```
+Write: raw data → hash → parse/index → compress → store
+Read:  load → decompress → verify hash → return
+```
+
+The hash is ALWAYS on the raw uncompressed data. This preserves dedup (same content = same hash regardless of compression) and integrity verification (decompress, then hash-check).
+
+### Entry Header Flags
+
+The `flags: u8` field in the entry header:
+```
+bit 0: compressed (0 = raw, 1 = zstd compressed)
+bit 1: encrypted (future)
+bits 2-7: reserved
+```
+
+On read, the engine checks bit 0. If set, decompress the value after reading. Transparent to the rest of the system.
+
+### User Control
+
+Compression is **opt-in**, controlled per-path via `.config`:
+
+```json
+{
+  "compression": "zstd",
+  "compression_level": 1,
+  "indexes": [...]
+}
+```
+
+Or per-request via HTTP header: `X-Compression: zstd`
+
+If no compression configured: store raw (current behavior, zero overhead).
+
+### Auto-Detection (Future)
+
+The engine could auto-decide compression based on:
+- Content-type: compress text/JSON/XML, skip JPEG/MP4/ZIP (already compressed)
+- Entry size: skip entries < 500 bytes (header overhead eats savings)
+- Sampling: compress a sample, check ratio, only store compressed if ratio < 80%
+
+This is a future optimization. For now, user-configured or explicit.
+
+### Algorithm
+
+**zstd** via the `zstd` Rust crate (BSD-3-Clause):
+- 17x compression on directory listings
+- 2x on index files
+- 2ms decompression for 70 KB
+- Streaming-friendly
+
+### What to Compress
+
+| Data | Compress? | Ratio |
+|---|---|---|
+| Directory entries | Yes | 5.8% (17x) |
+| Index files | Yes | 51% (2x) |
+| Large metadata-rich FileRecords | Yes | Varies |
+| User text/JSON/XML data | Yes (if opted in) | Varies |
+| KV block | No | 86% (not worth it) |
+| NVT | No | Always in memory |
+| Small entries (< 500 B) | No | Header overhead |
+| Already-compressed content | No | Makes it bigger |
+
+---
+
 ## Resolved Decisions
 
 - **Timestamps**: Always UTC milliseconds. No timezone ambiguity.
@@ -495,8 +567,9 @@ Tasks 1-3 are the foundation. Task 6 is the integration point. Tasks 7-9 build t
 - **Path lengths**: u16 (65,535 bytes max — more than sufficient).
 - **FileRecord layout**: Metadata first, chunk hashes last (streaming-friendly).
 - **fsync**: Immediately for truth entities (chunks, file records, deletions). Deferred for derived data (KVS, NVT, snapshots).
-- **Single file**: Everything in one .aeor file. Index stored as entries in the same file.
+- **Single file**: Everything in one .aeordb file. Index stored as entries in the same file.
 - **No compaction**: File only grows. Old versions keep old chunks alive. This is intentional.
 - **KV resize**: Temporary buffer KVS during resize operations. Discarded after merge.
 - **NVT growth**: Double buckets when scan length exceeds threshold. Exact threshold via stress testing.
 - **Minimum void**: 89 bytes (smallest possible entry header). Smaller gaps are abandoned.
+- **Compression**: zstd, opt-in per-path or per-request, post-hash transform. Bit 0 in entry flags.
