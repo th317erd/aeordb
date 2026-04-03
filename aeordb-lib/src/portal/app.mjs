@@ -1,7 +1,7 @@
 'use strict';
 
-import './dashboard.mjs';
-import './users.mjs';
+import '/portal/dashboard.mjs';
+import '/portal/users.mjs';
 
 // Auth state management
 const AUTH = {
@@ -110,13 +110,16 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Track whether auth is disabled (--auth=false mode)
+let authDisabled = false;
+
 // Router
 function navigate() {
   const page = location.hash.slice(1) || 'dashboard';
   const main = document.getElementById('main-content');
   main.innerHTML = '';
 
-  if (!AUTH.token) {
+  if (!AUTH.token && !authDisabled) {
     main.appendChild(document.createElement('aeor-login'));
     updateNavLinks('');
     return;
@@ -150,5 +153,20 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 // Listen for hash changes
 window.addEventListener('hashchange', navigate);
 
-// Initial navigation
-navigate();
+// Detect no-auth mode: probe /api/stats without a token.
+// If it succeeds, auth is disabled and we skip the login screen.
+async function init() {
+  if (!AUTH.token) {
+    try {
+      const res = await fetch('/api/stats');
+      if (res.ok) {
+        authDisabled = true;
+      }
+    } catch (_) {
+      // Server unreachable or auth required — show login
+    }
+  }
+  navigate();
+}
+
+init();
