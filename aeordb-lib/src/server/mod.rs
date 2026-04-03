@@ -13,50 +13,63 @@ use axum::routing::{delete, get, post, put};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
 
-use crate::auth::JwtManager;
+use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
+use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, StorageEngine, SystemTables};
+use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, StorageEngine};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
 use crate::plugins::PluginManager;
 use state::AppState;
 
-const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
-
 /// Default cache TTL in seconds.
 const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
 /// Build the full application router with all routes and middleware.
-/// Loads or generates the signing key from the engine's system tables.
+/// Uses SelfContained auth mode (current default behavior).
 pub fn create_app(engine_path: &str) -> Router {
   let engine = create_engine_for_storage(engine_path);
-  let jwt_manager = load_or_create_jwt_manager(&engine);
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  let jwt_manager = Arc::new(JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
+    .expect("failed to reconstruct JWT manager from auth provider"));
   let prometheus_handle = initialize_metrics();
-  create_app_with_jwt_and_metrics(Arc::new(jwt_manager), prometheus_handle, engine)
+  create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
 }
 
-/// Load an existing signing key from config, or generate a new one and persist it.
-fn load_or_create_jwt_manager(engine: &StorageEngine) -> JwtManager {
-  let system_tables = SystemTables::new(engine);
-  if let Ok(Some(key_bytes)) = system_tables.get_config(SIGNING_KEY_CONFIG) {
-    if let Ok(manager) = JwtManager::from_bytes(&key_bytes) {
-      return manager;
+/// Build the full application router with a specific auth mode.
+/// Returns the router and optionally a bootstrap key (for file:// mode).
+pub fn create_app_with_auth_mode(
+  engine_path: &str,
+  auth_mode: &AuthMode,
+) -> (Router, Option<String>) {
+  let engine = create_engine_for_storage(engine_path);
+  let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
+    AuthMode::Disabled => (Arc::new(NoAuthProvider::new()), None),
+    AuthMode::SelfContained => {
+      let provider = FileAuthProvider::new(engine.clone());
+      (Arc::new(provider), None)
     }
-  }
+    AuthMode::File(path) => {
+      let (provider, key) = FileAuthProvider::from_identity_file(path)
+        .expect("failed to create auth provider from identity file");
+      (Arc::new(provider), key)
+    }
+  };
 
-  let manager = JwtManager::generate();
-  let key_bytes = manager.to_bytes();
-  system_tables
-    .store_config(SIGNING_KEY_CONFIG, &key_bytes)
-    .expect("failed to persist JWT signing key");
-  manager
+  let jwt_manager = Arc::new(JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
+    .expect("failed to reconstruct JWT manager from auth provider"));
+  let prometheus_handle = initialize_metrics();
+  let router = create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine);
+  (router, bootstrap_key)
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
+/// Creates a FileAuthProvider backed by the given engine.
 pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
   let prometheus_handle = try_initialize_metrics();
-  create_app_with_jwt_and_metrics(jwt_manager, prometheus_handle, engine)
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
 }
 
 /// Build the application router with a specific JwtManager and engine (useful
@@ -66,10 +79,11 @@ pub fn create_app_with_jwt_and_engine(
   engine: Arc<StorageEngine>,
 ) -> Router {
   let prometheus_handle = try_initialize_metrics();
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
-  create_app_with_all(jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
 }
 
 /// Build the application router with an explicit PrometheusHandle.
@@ -78,15 +92,27 @@ pub fn create_app_with_jwt_and_metrics(
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
 ) -> Router {
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
+}
+
+/// Build the application router with an auth provider and metrics.
+fn create_app_with_provider_and_metrics(
+  auth_provider: Arc<dyn AuthProvider>,
+  jwt_manager: Arc<JwtManager>,
+  prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
+) -> Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
 
-  create_app_with_all(jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
 /// that need to control the rate limiter).
 pub fn create_app_with_all(
+  auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
   plugin_manager: Arc<PluginManager>,
   rate_limiter: Arc<RateLimiter>,
@@ -99,6 +125,7 @@ pub fn create_app_with_all(
 
   let app_state = AppState {
     jwt_manager,
+    auth_provider,
     plugin_manager,
     rate_limiter,
     prometheus_handle,
@@ -184,8 +211,8 @@ pub fn create_app_with_all(
     .layer(TraceLayer::new_for_http())
 }
 
+
 /// Initialize or retrieve the global Prometheus recorder handle.
-/// Safe to call multiple times across tests and production.
 fn try_initialize_metrics() -> PrometheusHandle {
   initialize_metrics()
 }
@@ -194,7 +221,6 @@ use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
 
 /// Create or open a StorageEngine at the given path.
-/// Initializes the root directory so the engine is ready for file operations.
 pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
   let path = std::path::Path::new(engine_path);
   let engine = if path.exists() {
@@ -213,7 +239,6 @@ pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
 }
 
 /// Create an engine backed by a temporary file (for tests).
-/// The caller should hold on to the returned `TempDir` to keep the file alive.
 pub fn create_temp_engine_for_tests() -> (Arc<StorageEngine>, tempfile::TempDir) {
   let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
   let engine_file = temp_dir.path().join("test.aeordb");

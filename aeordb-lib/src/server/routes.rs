@@ -196,8 +196,7 @@ pub async fn auth_token(
     }
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  let record = match system_tables.get_system_api_key(&key_id_prefix) {
+  let record = match state.auth_provider.get_api_key_by_prefix(&key_id_prefix) {
     Ok(Some(record)) => record,
     Ok(None) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "not_found").increment(1);
@@ -264,6 +263,7 @@ pub async fn auth_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
+  let system_tables = SystemTables::new(&state.engine);
   if let Err(error) = system_tables.store_refresh_token(
     &refresh_token_hash,
     &record.user_id.to_string(),
@@ -343,8 +343,7 @@ pub async fn create_api_key(
     is_revoked: false,
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_api_key(&record) {
+  if let Err(error) = state.auth_provider.store_api_key(&record) {
     tracing::error!("Failed to store API key: {}", error);
     return ErrorResponse::new("Failed to store API key".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -374,8 +373,7 @@ pub async fn list_api_keys(
       .into_response();
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.list_system_api_keys() {
+  match state.auth_provider.list_api_keys() {
     Ok(keys) => {
       let metadata: Vec<serde_json::Value> = keys
         .iter()
@@ -420,8 +418,7 @@ pub async fn revoke_api_key(
     }
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.revoke_api_key(parsed_key_id) {
+  match state.auth_provider.revoke_api_key(parsed_key_id) {
     Ok(true) => (
       StatusCode::OK,
       Json(serde_json::json!({

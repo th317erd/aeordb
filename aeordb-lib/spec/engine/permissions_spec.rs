@@ -813,8 +813,10 @@ fn test_crudlify_op_from_http_method() {
   let group_cache = Arc::new(GroupCache::new(Duration::from_secs(60)));
   let permissions_cache = Arc::new(PermissionsCache::new(Duration::from_secs(60)));
 
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(aeordb::auth::FileAuthProvider::new(engine.clone()));
   let state = AppState {
     jwt_manager,
+    auth_provider,
     plugin_manager,
     rate_limiter,
     prometheus_handle,

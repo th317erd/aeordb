@@ -6,22 +6,36 @@ use axum::{
   Json,
 };
 
+use crate::auth::jwt::TokenClaims;
+use crate::engine::ROOT_USER_ID;
 use crate::server::responses::ErrorResponse;
 use crate::server::state::AppState;
 
 /// Axum middleware that validates JWT Bearer tokens.
 ///
-/// Route-level separation handles public vs protected endpoints.
-/// This middleware only runs on protected routes (those behind
-/// the `route_layer` in the router). It extracts the
-/// `Authorization: Bearer <token>` header, verifies the JWT,
-/// and injects `TokenClaims` into request extensions. Returns
-/// 401 for missing, invalid, or expired tokens.
+/// When the auth provider is disabled (NoAuth mode), this middleware
+/// skips JWT validation entirely and injects root claims (nil UUID)
+/// so every request is treated as root.
 pub async fn auth_middleware(
   State(state): State<AppState>,
   mut request: Request,
   next: Next,
 ) -> Response {
+  // If auth is disabled, inject root claims and skip validation.
+  if !state.auth_provider.is_enabled() {
+    let now = chrono::Utc::now().timestamp();
+    let root_claims = TokenClaims {
+      sub: ROOT_USER_ID.to_string(),
+      iss: "aeordb".to_string(),
+      iat: now,
+      exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+      scope: None,
+      permissions: None,
+    };
+    request.extensions_mut().insert(root_claims);
+    return next.run(request).await;
+  }
+
   let authorization_header = request
     .headers()
     .get("authorization")

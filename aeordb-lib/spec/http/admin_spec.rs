@@ -9,6 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::StorageEngine;
 use aeordb::plugins::PluginManager;
+use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
@@ -22,7 +23,9 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let app = create_app_with_all(
+    auth_provider,
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
@@ -38,7 +41,9 @@ fn rebuild_app(
   rate_limiter: &Arc<RateLimiter>,
 ) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
+    auth_provider,
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),

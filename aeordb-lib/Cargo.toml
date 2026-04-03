@@ -230,5 +230,9 @@ name = "permission_scenarios_spec"
 path = "spec/http/permission_scenarios_spec.rs"
 
 [[test]]
+name = "auth_provider_spec"
+path = "spec/auth/auth_provider_spec.rs"
+
+[[test]]
 name = "compression_spec"
 path = "spec/engine/compression_spec.rs"

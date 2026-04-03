@@ -9,6 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::StorageEngine;
 use aeordb::plugins::PluginManager;
+use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
 
 // ===========================================================================
@@ -46,7 +47,9 @@ impl TestHarness {
 
   fn app(&self) -> axum::Router {
     let plugin_manager = Arc::new(PluginManager::new(self.engine.clone()));
+    let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(self.engine.clone()));
     create_app_with_all(
+      auth_provider,
       self.jwt_manager.clone(),
       plugin_manager,
       self.rate_limiter.clone(),

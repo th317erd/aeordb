@@ -19,6 +19,9 @@ enum Commands {
     database: String,
     #[arg(long, default_value = "pretty")]
     log_format: String,
+    /// Auth provider URI: false/null/no/0, self, file:///path/to/identity
+    #[arg(long)]
+    auth: Option<String>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -36,8 +39,8 @@ async fn main() {
   let cli = Cli::parse();
 
   match cli.command {
-    Commands::Start { port, database, log_format } => {
-      commands::start::run(port, &database, &log_format).await;
+    Commands::Start { port, database, log_format, auth } => {
+      commands::start::run(port, &database, &log_format, auth.as_deref()).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

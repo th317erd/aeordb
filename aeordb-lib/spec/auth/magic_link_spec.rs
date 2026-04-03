@@ -10,6 +10,7 @@ use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{StorageEngine, SystemTables};
 use aeordb::plugins::PluginManager;
+use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
@@ -23,7 +24,9 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let app = create_app_with_all(
+    auth_provider,
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
@@ -39,7 +42,9 @@ fn rebuild_app(
   rate_limiter: &Arc<RateLimiter>,
 ) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
+    auth_provider,
     jwt_manager.clone(),
     plugin_manager,
     rate_limiter.clone(),
@@ -285,7 +290,9 @@ async fn test_rate_limiting_blocks_after_threshold() {
   let rate_limiter = Arc::new(RateLimiter::new(3, 60));
 
   for i in 0..3 {
+    let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
     let app = create_app_with_all(
+      auth_provider,
       jwt_manager.clone(),
       plugin_manager.clone(),
       rate_limiter.clone(),
@@ -308,7 +315,9 @@ async fn test_rate_limiting_blocks_after_threshold() {
   }
 
   // 4th request should be rate limited.
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let app = create_app_with_all(
+    auth_provider,
     jwt_manager.clone(),
     plugin_manager.clone(),
     rate_limiter.clone(),

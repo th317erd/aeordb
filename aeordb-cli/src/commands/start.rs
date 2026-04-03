@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 
+use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::{create_app, create_engine_for_storage};
+use aeordb::server::{create_app_with_auth_mode, create_engine_for_storage};
 
-pub async fn run(port: u16, database: &str, log_format: &str) {
+pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>) {
   let log_config = LogConfig {
     format: match log_format {
       "json" => LogFormat::Json,
@@ -15,24 +16,41 @@ pub async fn run(port: u16, database: &str, log_format: &str) {
 
   initialize_logging(&log_config);
 
+  let auth_mode = resolve_auth_mode(auth_flag);
+
   println!("AeorDB v{}", env!("CARGO_PKG_VERSION"));
   println!("Database: {database}");
   println!("Port: {port}");
+  match &auth_mode {
+    AuthMode::Disabled => println!("Auth: disabled (dev mode)"),
+    AuthMode::SelfContained => println!("Auth: self-contained"),
+    AuthMode::File(path) => println!("Auth: file://{path}"),
+  }
   println!();
 
-  // Bootstrap root key using the engine before building the app.
-  let engine = create_engine_for_storage(database);
-  if let Some(root_key) = bootstrap_root_key(&engine) {
+  // For SelfContained mode, bootstrap the root key using the engine before
+  // building the app (preserves existing behavior).
+  if auth_mode == AuthMode::SelfContained {
+    let engine = create_engine_for_storage(database);
+    if let Some(root_key) = bootstrap_root_key(&engine) {
+      println!("==========================================================");
+      println!("  ROOT API KEY (shown once, save it now!):");
+      println!("  {root_key}");
+      println!("==========================================================");
+      println!();
+    }
+    drop(engine);
+  }
+
+  let (application, file_bootstrap_key) = create_app_with_auth_mode(database, &auth_mode);
+
+  if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");
     println!("  ROOT API KEY (shown once, save it now!):");
     println!("  {root_key}");
     println!("==========================================================");
     println!();
   }
-  // Drop the engine Arc so create_app can open it fresh.
-  drop(engine);
-
-  let application = create_app(database);
 
   let address = SocketAddr::from(([0, 0, 0, 0], port));
   println!("Listening on http://{address}");
