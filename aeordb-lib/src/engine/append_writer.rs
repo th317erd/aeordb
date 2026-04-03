@@ -177,6 +177,10 @@ impl AppendWriter {
     &self.file_header
   }
 
+  pub fn file_size(&self) -> u64 {
+    self.current_offset
+  }
+
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
     self.file_header = header.clone();
     let header_bytes = self.file_header.serialize();

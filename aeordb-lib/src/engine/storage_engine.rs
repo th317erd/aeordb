@@ -8,11 +8,13 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::kv_resize::KVResizeManager;
+use serde::Serialize;
+
 use crate::engine::kv_store::{
   KVEntry, KVStore,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
   KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
-  KV_FLAG_DELETED,
+  KV_FLAG_DELETED, KV_TYPE_FORK,
 };
 use crate::engine::void_manager::VoidManager;
 
@@ -20,6 +22,26 @@ const DEFAULT_NVT_BUCKETS: usize = 1024;
 
 /// Result type for entry retrieval: (header, key, value).
 pub type EntryData = (EntryHeader, Vec<u8>, Vec<u8>);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseStats {
+  pub entry_count: u64,
+  pub kv_entries: usize,
+  pub kv_size_bytes: u64,
+  pub nvt_buckets: usize,
+  pub nvt_size_bytes: u64,
+  pub chunk_count: usize,
+  pub file_count: usize,
+  pub directory_count: usize,
+  pub snapshot_count: usize,
+  pub fork_count: usize,
+  pub void_count: usize,
+  pub void_space_bytes: u64,
+  pub db_file_size_bytes: u64,
+  pub created_at: i64,
+  pub updated_at: i64,
+  pub hash_algorithm: String,
+}
 
 /// Top-level storage engine combining append writer, KV index, and void manager.
 ///
@@ -335,5 +357,77 @@ impl StorageEngine {
     }
 
     Ok(results)
+  }
+
+  /// Return aggregate statistics about the database.
+  pub fn stats(&self) -> DatabaseStats {
+    // 1. Lock writer for file header info and file size
+    let (entry_count, kv_size_bytes, nvt_size_bytes, created_at, updated_at, db_file_size_bytes) = {
+      let writer = self.writer.read().expect("writer lock poisoned");
+      let fh = writer.file_header();
+      (
+        fh.entry_count,
+        fh.kv_block_length,
+        fh.nvt_length,
+        fh.created_at,
+        fh.updated_at,
+        writer.file_size(),
+      )
+    };
+
+    // 2. Lock kv_manager for entry counts
+    let (kv_entries, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count) = {
+      let kv = self.kv_manager.read().expect("kv_manager lock poisoned");
+      let store = kv.primary();
+      let kv_entries = store.len();
+      let nvt_buckets = store.nvt().bucket_count();
+
+      let mut chunk_count = 0usize;
+      let mut file_count = 0usize;
+      let mut directory_count = 0usize;
+      let mut snapshot_count = 0usize;
+      let mut fork_count = 0usize;
+
+      for entry in store.iter() {
+        if entry.is_deleted() {
+          continue;
+        }
+        match entry.entry_type() {
+          KV_TYPE_CHUNK => chunk_count += 1,
+          KV_TYPE_FILE_RECORD => file_count += 1,
+          KV_TYPE_DIRECTORY => directory_count += 1,
+          KV_TYPE_SNAPSHOT => snapshot_count += 1,
+          KV_TYPE_FORK => fork_count += 1,
+          _ => {}
+        }
+      }
+
+      (kv_entries, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count)
+    };
+
+    // 3. Lock void_manager for void stats
+    let (void_count, void_space_bytes) = {
+      let vm = self.void_manager.read().expect("void_manager lock poisoned");
+      (vm.void_count(), vm.total_void_space())
+    };
+
+    DatabaseStats {
+      entry_count,
+      kv_entries,
+      kv_size_bytes,
+      nvt_buckets,
+      nvt_size_bytes,
+      chunk_count,
+      file_count,
+      directory_count,
+      snapshot_count,
+      fork_count,
+      void_count,
+      void_space_bytes,
+      db_file_size_bytes,
+      created_at,
+      updated_at,
+      hash_algorithm: format!("{:?}", self.hash_algo),
+    }
   }
 }

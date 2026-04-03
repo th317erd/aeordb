@@ -8,7 +8,9 @@
 - [x] Custom storage engine — 273 tests
 - [x] Unified indexing (ScalarConverter + NVT) — 136 tests
 
-## Total: 1,084 tests, all passing
+- [x] HTTP Portal Dashboard (stats API + embedded UI) — 17 tests
+
+## Total: 1,101 tests, all passing
 
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code

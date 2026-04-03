@@ -1,5 +1,6 @@
 pub mod admin_routes;
 pub mod engine_routes;
+pub mod portal_routes;
 pub mod responses;
 pub mod routes;
 pub mod state;
@@ -139,6 +140,7 @@ pub fn create_app_with_all(
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
     .route("/admin/metrics", get(routes::metrics_endpoint))
+    .route("/api/stats", get(portal_routes::get_stats))
     // Admin user/group management
     .route("/admin/users", post(admin_routes::create_user).get(admin_routes::list_users))
     .route(
@@ -200,7 +202,11 @@ pub fn create_app_with_all(
     .route("/auth/token", post(routes::auth_token))
     .route("/auth/magic-link", post(routes::request_magic_link))
     .route("/auth/magic-link/verify", get(routes::verify_magic_link))
-    .route("/auth/refresh", post(routes::refresh_token));
+    .route("/auth/refresh", post(routes::refresh_token))
+    // Portal (embedded dashboard UI)
+    .route("/portal", get(portal_routes::portal_index))
+    .route("/portal/", get(portal_routes::portal_index))
+    .route("/portal/{filename}", get(portal_routes::portal_asset));
 
   public_routes
     .merge(protected_routes)
