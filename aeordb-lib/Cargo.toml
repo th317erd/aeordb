@@ -223,3 +223,7 @@ path = "spec/engine/permissions_spec.rs"
 [[test]]
 name = "admin_spec"
 path = "spec/http/admin_spec.rs"
+
+[[test]]
+name = "permission_scenarios_spec"
+path = "spec/http/permission_scenarios_spec.rs"
