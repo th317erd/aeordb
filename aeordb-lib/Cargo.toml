@@ -252,3 +252,7 @@ path = "spec/engine/trigram_spec.rs"
 [[test]]
 name = "phonetic_spec"
 path = "spec/engine/phonetic_spec.rs"
+
+[[test]]
+name = "fuzzy_scoring_spec"
+path = "spec/engine/fuzzy_scoring_spec.rs"

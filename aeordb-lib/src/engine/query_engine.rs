@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::index_store::{FieldIndex, IndexManager};
+use crate::engine::json_parser::parse_json_fields;
 use crate::engine::nvt_ops::NVTMask;
+use crate::engine::scalar_converter::{ScalarConverter, TrigramConverter};
 use crate::engine::storage_engine::StorageEngine;
 
 /// A query operation on a field.
@@ -14,6 +17,47 @@ pub enum QueryOp {
   Lt(Vec<u8>),
   Between(Vec<u8>, Vec<u8>),
   In(Vec<Vec<u8>>),
+  // Fuzzy search operations
+  /// Substring match via trigram AND + recheck
+  Contains(String),
+  /// Trigram similarity with threshold (Dice coefficient)
+  Similar(String, f64),
+  /// Phonetic code match (soundex / double metaphone)
+  Phonetic(String),
+  /// Edit distance or Jaro-Winkler fuzzy match
+  Fuzzy(String, FuzzyOptions),
+}
+
+/// Options for the Fuzzy query operation.
+#[derive(Debug, Clone)]
+pub struct FuzzyOptions {
+  pub fuzziness: Fuzziness,
+  pub algorithm: FuzzyAlgorithm,
+}
+
+/// How many edits to allow.
+#[derive(Debug, Clone)]
+pub enum Fuzziness {
+  /// Automatically determined by term length (0-2: 0, 3-5: 1, 6+: 2)
+  Auto,
+  /// Fixed edit distance
+  Fixed(usize),
+}
+
+/// Which fuzzy matching algorithm to use.
+#[derive(Debug, Clone)]
+pub enum FuzzyAlgorithm {
+  DamerauLevenshtein,
+  JaroWinkler,
+}
+
+impl Default for FuzzyOptions {
+  fn default() -> Self {
+    FuzzyOptions {
+      fuzziness: Fuzziness::Auto,
+      algorithm: FuzzyAlgorithm::DamerauLevenshtein,
+    }
+  }
 }
 
 /// A query on a single field.
@@ -124,6 +168,12 @@ fn field_query_to_mask(
       }
       Ok(mask)
     }
+    // Fuzzy ops are handled by the recheck path, not NVT masks.
+    QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) => {
+      Err(EngineError::NotFound(
+        "Fuzzy operations do not support NVT mask generation".to_string(),
+      ))
+    }
   }
 }
 
@@ -193,6 +243,8 @@ impl<'a> QueryEngine<'a> {
   /// Uses a two-tier approach:
   ///   Tier 1: flat AND of field queries → direct scalar lookups (HashSet intersection).
   ///   Tier 2: complex boolean logic (OR, NOT) → NVTMask bitmap compositing.
+  /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use a separate path
+  /// with index-based candidate generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
     // Determine which node tree to evaluate.
     let effective_node = if let Some(ref node) = query.node {
@@ -210,6 +262,11 @@ impl<'a> QueryEngine<'a> {
         QueryNode::And(leaves)
       }
     };
+
+    // Check for fuzzy operations — these need the recheck path.
+    if self.node_has_fuzzy_ops(&effective_node) {
+      return self.execute_with_recheck(query, &effective_node);
+    }
 
     let index_manager = IndexManager::new(self.engine);
 
@@ -354,6 +411,12 @@ impl<'a> QueryEngine<'a> {
         }
         result
       }
+      // Fuzzy ops are handled by execute_with_recheck, not here.
+      QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) => {
+        return Err(EngineError::NotFound(
+          "Fuzzy operations should use the recheck execution path".to_string(),
+        ));
+      }
     };
 
     Ok(matching_entries)
@@ -376,6 +439,298 @@ impl<'a> QueryEngine<'a> {
       }
     }
     Ok(all_hashes)
+  }
+
+  /// Check if a QueryNode tree contains any fuzzy operations.
+  fn node_has_fuzzy_ops(&self, node: &QueryNode) -> bool {
+    match node {
+      QueryNode::Field(fq) => matches!(
+        fq.operation,
+        QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _)
+      ),
+      QueryNode::And(children) | QueryNode::Or(children) => {
+        children.iter().any(|c| self.node_has_fuzzy_ops(c))
+      }
+      QueryNode::Not(child) => self.node_has_fuzzy_ops(child),
+    }
+  }
+
+  /// Execute a query containing fuzzy operations with a recheck phase.
+  /// Currently supports single-field fuzzy queries (the common case).
+  fn execute_with_recheck(
+    &self,
+    query: &Query,
+    effective_node: &QueryNode,
+  ) -> EngineResult<Vec<QueryResult>> {
+    let index_manager = IndexManager::new(self.engine);
+    let hash_length = self.engine.hash_algo().hash_length();
+    let ops = DirectoryOps::new(self.engine);
+
+    // Extract the single fuzzy field query
+    let field_query = match effective_node {
+      QueryNode::Field(fq) => fq,
+      _ => {
+        return Err(EngineError::NotFound(
+          "Fuzzy operations currently support single-field queries only".to_string(),
+        ));
+      }
+    };
+
+    // Get candidates from the appropriate index
+    let candidates = self.get_fuzzy_candidates(field_query, &query.path, &index_manager)?;
+
+    // Recheck phase: load each candidate, extract field value, compute score
+    let mut results = Vec::new();
+
+    for file_hash in candidates {
+      // Load the FileRecord and file data
+      let (file_record, file_data) = match self.load_file_with_data(&file_hash, hash_length, &ops)? {
+        Some(pair) => pair,
+        None => continue,
+      };
+
+      // Extract the field value from JSON
+      let field_value = match self.extract_field_value(&file_data, &field_query.field_name) {
+        Some(v) => v,
+        None => continue,
+      };
+
+      // Compute score based on operation
+      let (score, strategy) = self.compute_score(&field_query.operation, &field_value)?;
+
+      if score > 0.0 {
+        results.push(QueryResult {
+          file_hash,
+          file_record,
+          score,
+          matched_by: vec![strategy],
+        });
+      }
+    }
+
+    // Sort by score descending
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Apply limit
+    if let Some(limit) = query.limit {
+      results.truncate(limit);
+    }
+
+    Ok(results)
+  }
+
+  /// Get candidate file hashes from the appropriate index for a fuzzy query.
+  fn get_fuzzy_candidates(
+    &self,
+    field_query: &FieldQuery,
+    path: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    match &field_query.operation {
+      QueryOp::Contains(query_str) | QueryOp::Similar(query_str, _) | QueryOp::Fuzzy(query_str, _) => {
+        // Use trigram index for candidates
+        let mut index = match index_manager.load_index_by_strategy(path, &field_query.field_name, "trigram")? {
+          Some(idx) => idx,
+          None => {
+            return Err(EngineError::NotFound(format!(
+              "Trigram index not found for field '{}' at '{}'",
+              field_query.field_name, path,
+            )));
+          }
+        };
+
+        let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
+        let converter = TrigramConverter;
+
+        let mut candidates = HashSet::new();
+
+        if matches!(&field_query.operation, QueryOp::Contains(_)) {
+          // AND: intersect all trigram lookups for substring matching
+          let mut first = true;
+          for trigram in &trigrams {
+            let scalar = converter.to_scalar(trigram);
+            let entries = index.lookup_by_scalar(scalar);
+            let hashes: HashSet<Vec<u8>> = entries.iter().map(|e| e.file_hash.clone()).collect();
+            if first {
+              candidates = hashes;
+              first = false;
+            } else {
+              candidates = candidates.intersection(&hashes).cloned().collect();
+            }
+          }
+        } else {
+          // OR: union all trigram lookups (broader candidates for similarity/fuzzy)
+          for trigram in &trigrams {
+            let scalar = converter.to_scalar(trigram);
+            let entries = index.lookup_by_scalar(scalar);
+            for entry in entries {
+              candidates.insert(entry.file_hash.clone());
+            }
+          }
+        }
+
+        Ok(candidates)
+      }
+      QueryOp::Phonetic(query_str) => {
+        // Use phonetic indexes for candidates
+        let mut candidates = HashSet::new();
+        let strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
+        let mut found_any_index = false;
+
+        for strategy in &strategies {
+          if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
+            found_any_index = true;
+            // Compute the phonetic code for the query value
+            let code = match *strategy {
+              "soundex" => crate::engine::phonetic::soundex(query_str),
+              "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(query_str),
+              "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(query_str)
+                .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(query_str)),
+              _ => continue,
+            };
+
+            if code.is_empty() {
+              continue;
+            }
+
+            let scalar = index.converter.to_scalar(code.as_bytes());
+            let entries = index.lookup_by_scalar(scalar);
+            for entry in entries {
+              candidates.insert(entry.file_hash.clone());
+            }
+          }
+        }
+
+        if !found_any_index {
+          return Err(EngineError::NotFound(format!(
+            "No phonetic index found for field '{}' at '{}'",
+            field_query.field_name, path,
+          )));
+        }
+
+        Ok(candidates)
+      }
+      _ => {
+        Err(EngineError::NotFound("Not a fuzzy operation".to_string()))
+      }
+    }
+  }
+
+  /// Load a file's FileRecord and raw data from its hash.
+  fn load_file_with_data(
+    &self,
+    file_hash: &[u8],
+    hash_length: usize,
+    ops: &DirectoryOps,
+  ) -> EngineResult<Option<(FileRecord, Vec<u8>)>> {
+    match self.engine.get_entry(file_hash) {
+      Ok(Some((_header, _key, value))) => {
+        let file_record = FileRecord::deserialize(&value, hash_length)?;
+        match ops.read_file(&file_record.path) {
+          Ok(data) => Ok(Some((file_record, data))),
+          Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
+          Err(e) => Err(e),
+        }
+      }
+      Ok(None) => Ok(None),
+      Err(e) => Err(e),
+    }
+  }
+
+  /// Extract a field's string value from JSON file data.
+  fn extract_field_value(&self, file_data: &[u8], field_name: &str) -> Option<String> {
+    let fields = parse_json_fields(file_data, &[field_name]).ok()?;
+    for (name, value) in fields {
+      if name == field_name {
+        return Some(String::from_utf8_lossy(&value).to_string());
+      }
+    }
+    None
+  }
+
+  /// Compute a fuzzy score for a field value given the query operation.
+  /// Returns (score, strategy_name). Score of 0.0 means no match.
+  fn compute_score(&self, op: &QueryOp, field_value: &str) -> EngineResult<(f64, String)> {
+    match op {
+      QueryOp::Contains(query_str) => {
+        let query_lower = query_str.to_lowercase();
+        let value_lower = field_value.to_lowercase();
+        if value_lower.contains(&query_lower) {
+          Ok((1.0, "trigram".to_string()))
+        } else {
+          Ok((0.0, "trigram".to_string()))
+        }
+      }
+      QueryOp::Similar(query_str, threshold) => {
+        let score = crate::engine::fuzzy::trigram_similarity(query_str, field_value);
+        if score >= *threshold {
+          Ok((score, "trigram".to_string()))
+        } else {
+          Ok((0.0, "trigram".to_string()))
+        }
+      }
+      QueryOp::Phonetic(query_str) => {
+        let q_soundex = crate::engine::phonetic::soundex(query_str);
+        let v_soundex = crate::engine::phonetic::soundex(field_value);
+
+        let q_dm = crate::engine::phonetic::dmetaphone_primary(query_str);
+        let v_dm = crate::engine::phonetic::dmetaphone_primary(field_value);
+
+        let q_dm_alt = crate::engine::phonetic::dmetaphone_alt(query_str);
+        let v_dm_alt = crate::engine::phonetic::dmetaphone_alt(field_value);
+
+        let mut strategies = Vec::new();
+
+        if !q_soundex.is_empty() && q_soundex == v_soundex {
+          strategies.push("soundex".to_string());
+        }
+        if !q_dm.is_empty() && (q_dm == v_dm || Some(&q_dm) == v_dm_alt.as_ref()) {
+          strategies.push("dmetaphone".to_string());
+        }
+        if let Some(ref q_alt) = q_dm_alt {
+          if !q_alt.is_empty() && (q_alt == &v_dm || Some(q_alt) == v_dm_alt.as_ref()) {
+            strategies.push("dmetaphone_alt".to_string());
+          }
+        }
+
+        if !strategies.is_empty() {
+          Ok((1.0, strategies.join(",")))
+        } else {
+          Ok((0.0, String::new()))
+        }
+      }
+      QueryOp::Fuzzy(query_str, options) => {
+        match options.algorithm {
+          FuzzyAlgorithm::DamerauLevenshtein => {
+            let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
+            let max_edits = match options.fuzziness {
+              Fuzziness::Auto => crate::engine::fuzzy::auto_fuzziness(query_str.len()),
+              Fuzziness::Fixed(n) => n,
+            };
+            if distance <= max_edits {
+              let max_len = query_str.len().max(field_value.len()).max(1);
+              let score = 1.0 - (distance as f64 / max_len as f64);
+              Ok((score, "trigram".to_string()))
+            } else {
+              Ok((0.0, "trigram".to_string()))
+            }
+          }
+          FuzzyAlgorithm::JaroWinkler => {
+            let score = crate::engine::fuzzy::jaro_winkler(query_str, field_value);
+            let threshold = match options.fuzziness {
+              Fuzziness::Auto => 0.8,
+              Fuzziness::Fixed(n) => 1.0 - (n as f64 / query_str.len().max(1) as f64),
+            };
+            if score >= threshold {
+              Ok((score, "trigram".to_string()))
+            } else {
+              Ok((0.0, "trigram".to_string()))
+            }
+          }
+        }
+      }
+      _ => Ok((1.0, String::new())), // Non-fuzzy ops always score 1.0
+    }
   }
 }
 
@@ -653,5 +1008,52 @@ impl<'a> FieldQueryBuilder<'a> {
       .map(|v| v.as_bytes().to_vec())
       .collect();
     self.in_values(byte_values)
+  }
+
+  // --- Fuzzy search methods ---
+
+  /// Substring match via trigram index + recheck.
+  pub fn contains(mut self, value: &str) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Contains(value.to_string()),
+    }));
+    self.parent
+  }
+
+  /// Trigram similarity match with threshold.
+  pub fn similar(mut self, value: &str, threshold: f64) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Similar(value.to_string(), threshold),
+    }));
+    self.parent
+  }
+
+  /// Phonetic code match (soundex / double metaphone).
+  pub fn phonetic(mut self, value: &str) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Phonetic(value.to_string()),
+    }));
+    self.parent
+  }
+
+  /// Fuzzy match with edit distance (Damerau-Levenshtein, auto fuzziness).
+  pub fn fuzzy(mut self, value: &str) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Fuzzy(value.to_string(), FuzzyOptions::default()),
+    }));
+    self.parent
+  }
+
+  /// Fuzzy match with custom options.
+  pub fn fuzzy_with(mut self, value: &str, options: FuzzyOptions) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Fuzzy(value.to_string(), options),
+    }));
+    self.parent
   }
 }

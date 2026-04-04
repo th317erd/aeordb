@@ -62,7 +62,7 @@ pub use scalar_converter::{
   serialize_converter, deserialize_converter,
   CONVERTER_TYPE_WASM, CONVERTER_TYPE_TRIGRAM, CONVERTER_TYPE_PHONETIC,
 };
-pub use fuzzy::{extract_trigrams, trigram_similarity, auto_fuzziness};
+pub use fuzzy::{extract_trigrams, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
@@ -74,7 +74,7 @@ pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::StorageEngine;
 pub use directory_ops::{DirectoryOps, EngineFileStream};
 pub use system_tables::{SystemTables, SystemTableError};
-pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing};
+pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use wasm_converter::{WasmConverter, WasmBatchConverter};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};

@@ -83,3 +83,129 @@ pub fn auto_fuzziness(len: usize) -> usize {
     _ => 2,
   }
 }
+
+/// Compute the Damerau-Levenshtein distance (Optimal String Alignment variant)
+/// between two strings.
+///
+/// Supports insertions, deletions, substitutions, and transpositions of adjacent
+/// characters. Returns the minimum number of edit operations to transform `a` into `b`.
+pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
+  let a_chars: Vec<char> = a.chars().collect();
+  let b_chars: Vec<char> = b.chars().collect();
+  let m = a_chars.len();
+  let n = b_chars.len();
+
+  if m == 0 {
+    return n;
+  }
+  if n == 0 {
+    return m;
+  }
+
+  // dp[i][j] = edit distance between a[0..i] and b[0..j]
+  let mut dp = vec![vec![0usize; n + 1]; m + 1];
+
+  for i in 0..=m {
+    dp[i][0] = i;
+  }
+  for j in 0..=n {
+    dp[0][j] = j;
+  }
+
+  for i in 1..=m {
+    for j in 1..=n {
+      let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+
+      dp[i][j] = (dp[i - 1][j] + 1)           // deletion
+        .min(dp[i][j - 1] + 1)                 // insertion
+        .min(dp[i - 1][j - 1] + cost);         // substitution
+
+      // Transposition
+      if i > 1
+        && j > 1
+        && a_chars[i - 1] == b_chars[j - 2]
+        && a_chars[i - 2] == b_chars[j - 1]
+      {
+        dp[i][j] = dp[i][j].min(dp[i - 2][j - 2] + 1);
+      }
+    }
+  }
+
+  dp[m][n]
+}
+
+/// Compute Jaro-Winkler similarity between two strings.
+///
+/// Returns a value in [0.0, 1.0] where 1.0 means identical strings.
+/// Applies the Winkler prefix bonus (up to 4 characters, scaling factor 0.1).
+pub fn jaro_winkler(a: &str, b: &str) -> f64 {
+  let a_chars: Vec<char> = a.chars().collect();
+  let b_chars: Vec<char> = b.chars().collect();
+  let a_len = a_chars.len();
+  let b_len = b_chars.len();
+
+  // Both empty
+  if a_len == 0 && b_len == 0 {
+    return 1.0;
+  }
+  // One empty
+  if a_len == 0 || b_len == 0 {
+    return 0.0;
+  }
+
+  let match_window = (a_len.max(b_len) / 2).saturating_sub(1);
+
+  let mut a_matched = vec![false; a_len];
+  let mut b_matched = vec![false; b_len];
+
+  let mut matches = 0usize;
+
+  // Find matching characters within window
+  for i in 0..a_len {
+    let start = if i > match_window { i - match_window } else { 0 };
+    let end = (i + match_window + 1).min(b_len);
+
+    for j in start..end {
+      if !b_matched[j] && a_chars[i] == b_chars[j] {
+        a_matched[i] = true;
+        b_matched[j] = true;
+        matches += 1;
+        break;
+      }
+    }
+  }
+
+  if matches == 0 {
+    return 0.0;
+  }
+
+  // Count transpositions among matched characters
+  let mut transpositions = 0usize;
+  let mut k = 0usize;
+  for i in 0..a_len {
+    if !a_matched[i] {
+      continue;
+    }
+    while !b_matched[k] {
+      k += 1;
+    }
+    if a_chars[i] != b_chars[k] {
+      transpositions += 1;
+    }
+    k += 1;
+  }
+
+  let m = matches as f64;
+  let jaro = (m / a_len as f64 + m / b_len as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0;
+
+  // Winkler prefix bonus
+  let prefix_len = a_chars
+    .iter()
+    .zip(b_chars.iter())
+    .take(4)
+    .take_while(|(a, b)| a == b)
+    .count();
+
+  let p = 0.1;
+  jaro + prefix_len as f64 * p * (1.0 - jaro)
+}

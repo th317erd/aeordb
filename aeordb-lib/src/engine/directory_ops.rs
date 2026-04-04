@@ -473,12 +473,13 @@ impl<'a> DirectoryOps<'a> {
           None => continue, // field not found in data, skip
         };
 
-        // Load or create the index
-        let mut index = match index_manager.load_index(&parent, &field_config.field_name)? {
+        // Load or create the index (by strategy to support multi-index per field)
+        let converter_for_strategy = create_converter_from_config(field_config)?;
+        let strategy = converter_for_strategy.strategy().to_string();
+        let mut index = match index_manager.load_index_by_strategy(&parent, &field_config.field_name, &strategy)? {
           Some(index) => index,
           None => {
-            let converter = create_converter_from_config(field_config)?;
-            index_manager.create_index(&parent, &field_config.field_name, converter)?
+            index_manager.create_index(&parent, &field_config.field_name, converter_for_strategy)?
           }
         };
 
