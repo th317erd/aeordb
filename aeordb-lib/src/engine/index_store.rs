@@ -266,7 +266,7 @@ impl FieldIndex {
 
     self.entries[start..end]
       .iter()
-      .filter(|entry| (entry.scalar - scalar).abs() < f64::EPSILON)
+      .filter(|entry| (entry.scalar - scalar).abs() < 1e-10)
       .collect()
   }
 

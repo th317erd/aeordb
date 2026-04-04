@@ -909,26 +909,42 @@ impl ScalarConverter for PhoneticConverter {
       return vec![];
     }
 
-    match self.algorithm {
-      PhoneticAlgorithm::Soundex => {
-        let code = crate::engine::phonetic::soundex(text);
-        if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
-      }
-      PhoneticAlgorithm::DoubleMetaphonePrimary => {
-        let code = crate::engine::phonetic::dmetaphone_primary(text);
-        if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
-      }
-      PhoneticAlgorithm::DoubleMetaphoneAlt => {
-        match crate::engine::phonetic::dmetaphone_alt(text) {
-          Some(code) => vec![code.into_bytes()],
-          None => {
-            // Fallback to primary if no alternate
-            let code = crate::engine::phonetic::dmetaphone_primary(text);
-            if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
+    // Tokenize on whitespace — produce a phonetic code for EACH word.
+    // "John Smith" → ["J500", "S530"] (Soundex) or ["JN", "SM0"] (DM)
+    let words: Vec<&str> = text.split_whitespace()
+      .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+      .collect();
+
+    let mut codes = Vec::new();
+    for word in &words {
+      let word_codes = match self.algorithm {
+        PhoneticAlgorithm::Soundex => {
+          let code = crate::engine::phonetic::soundex(word);
+          if code.is_empty() { vec![] } else { vec![code] }
+        }
+        PhoneticAlgorithm::DoubleMetaphonePrimary => {
+          let code = crate::engine::phonetic::dmetaphone_primary(word);
+          if code.is_empty() { vec![] } else { vec![code] }
+        }
+        PhoneticAlgorithm::DoubleMetaphoneAlt => {
+          match crate::engine::phonetic::dmetaphone_alt(word) {
+            Some(code) => vec![code],
+            None => {
+              let code = crate::engine::phonetic::dmetaphone_primary(word);
+              if code.is_empty() { vec![] } else { vec![code] }
+            }
           }
         }
+      };
+      for code in word_codes {
+        codes.push(code.into_bytes());
       }
     }
+
+    // Deduplicate (e.g., if two words produce the same code)
+    codes.sort();
+    codes.dedup();
+    codes
   }
 
   fn recommended_bucket_count(&self) -> usize {

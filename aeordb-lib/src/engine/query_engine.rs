@@ -582,6 +582,11 @@ impl<'a> QueryEngine<'a> {
       }
       QueryOp::Phonetic(query_str) => {
         // Use phonetic indexes for candidates
+        // Tokenize query on whitespace — match any word's phonetic code
+        let query_words: Vec<&str> = query_str.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
+
         let mut candidates = HashSet::new();
         let strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         let mut found_any_index = false;
@@ -589,23 +594,25 @@ impl<'a> QueryEngine<'a> {
         for strategy in &strategies {
           if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
             found_any_index = true;
-            // Compute the phonetic code for the query value
-            let code = match *strategy {
-              "soundex" => crate::engine::phonetic::soundex(query_str),
-              "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(query_str),
-              "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(query_str)
-                .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(query_str)),
-              _ => continue,
-            };
 
-            if code.is_empty() {
-              continue;
-            }
+            for word in &query_words {
+              let code = match *strategy {
+                "soundex" => crate::engine::phonetic::soundex(word),
+                "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
+                "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(word)
+                  .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word)),
+                _ => continue,
+              };
 
-            let scalar = index.converter.to_scalar(code.as_bytes());
-            let entries = index.lookup_by_scalar(scalar);
-            for entry in entries {
-              candidates.insert(entry.file_hash.clone());
+              if code.is_empty() {
+                continue;
+              }
+
+              let scalar = index.converter.to_scalar(code.as_bytes());
+              let entries = index.lookup_by_scalar(scalar);
+              for entry in entries {
+                candidates.insert(entry.file_hash.clone());
+              }
             }
           }
         }
@@ -635,22 +642,27 @@ impl<'a> QueryEngine<'a> {
           }
         }
 
-        // Try phonetic indexes
+        // Try phonetic indexes (tokenize query on whitespace)
+        let query_words: Vec<&str> = query_str.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
         let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         for strategy in &phonetic_strategies {
           if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
-            let code = match *strategy {
-              "soundex" => crate::engine::phonetic::soundex(query_str),
-              "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(query_str),
-              "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(query_str)
-                .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(query_str)),
-              _ => continue,
-            };
-            if code.is_empty() { continue; }
-            let scalar = index.converter.to_scalar(code.as_bytes());
-            let entries = index.lookup_by_scalar(scalar);
-            for entry in entries {
-              candidates.insert(entry.file_hash.clone());
+            for word in &query_words {
+              let code = match *strategy {
+                "soundex" => crate::engine::phonetic::soundex(word),
+                "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
+                "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(word)
+                  .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word)),
+                _ => continue,
+              };
+              if code.is_empty() { continue; }
+              let scalar = index.converter.to_scalar(code.as_bytes());
+              let entries = index.lookup_by_scalar(scalar);
+              for entry in entries {
+                candidates.insert(entry.file_hash.clone());
+              }
             }
           }
         }
@@ -725,26 +737,37 @@ impl<'a> QueryEngine<'a> {
         }
       }
       QueryOp::Phonetic(query_str) => {
-        let q_soundex = crate::engine::phonetic::soundex(query_str);
-        let v_soundex = crate::engine::phonetic::soundex(field_value);
-
-        let q_dm = crate::engine::phonetic::dmetaphone_primary(query_str);
-        let v_dm = crate::engine::phonetic::dmetaphone_primary(field_value);
-
-        let q_dm_alt = crate::engine::phonetic::dmetaphone_alt(query_str);
-        let v_dm_alt = crate::engine::phonetic::dmetaphone_alt(field_value);
+        // Tokenize both query and field value — match if ANY word pair shares a code
+        let q_words: Vec<&str> = query_str.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
+        let v_words: Vec<&str> = field_value.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
 
         let mut strategies = Vec::new();
 
-        if !q_soundex.is_empty() && q_soundex == v_soundex {
-          strategies.push("soundex".to_string());
-        }
-        if !q_dm.is_empty() && (q_dm == v_dm || Some(&q_dm) == v_dm_alt.as_ref()) {
-          strategies.push("dmetaphone".to_string());
-        }
-        if let Some(ref q_alt) = q_dm_alt {
-          if !q_alt.is_empty() && (q_alt == &v_dm || Some(q_alt) == v_dm_alt.as_ref()) {
-            strategies.push("dmetaphone_alt".to_string());
+        for qw in &q_words {
+          for vw in &v_words {
+            let q_soundex = crate::engine::phonetic::soundex(qw);
+            let v_soundex = crate::engine::phonetic::soundex(vw);
+            if !q_soundex.is_empty() && q_soundex == v_soundex && !strategies.contains(&"soundex".to_string()) {
+              strategies.push("soundex".to_string());
+            }
+
+            let q_dm = crate::engine::phonetic::dmetaphone_primary(qw);
+            let v_dm = crate::engine::phonetic::dmetaphone_primary(vw);
+            let v_dm_alt = crate::engine::phonetic::dmetaphone_alt(vw);
+            if !q_dm.is_empty() && (q_dm == v_dm || Some(&q_dm) == v_dm_alt.as_ref()) && !strategies.contains(&"dmetaphone".to_string()) {
+              strategies.push("dmetaphone".to_string());
+            }
+
+            let q_dm_alt = crate::engine::phonetic::dmetaphone_alt(qw);
+            if let Some(ref q_alt) = q_dm_alt {
+              if !q_alt.is_empty() && (q_alt == &v_dm || Some(q_alt) == v_dm_alt.as_ref()) && !strategies.contains(&"dmetaphone_alt".to_string()) {
+                strategies.push("dmetaphone_alt".to_string());
+              }
+            }
           }
         }
 
@@ -801,20 +824,37 @@ impl<'a> QueryEngine<'a> {
           strategies.push("trigram".to_string());
         }
 
-        // Phonetic matching
-        let q_soundex = crate::engine::phonetic::soundex(query_str);
-        let v_soundex = crate::engine::phonetic::soundex(field_value);
-        if !q_soundex.is_empty() && q_soundex == v_soundex {
-          if 1.0 > max_score { max_score = 1.0; }
-          strategies.push("soundex".to_string());
+        // Phonetic matching (tokenize both sides)
+        let q_words: Vec<&str> = query_str.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
+        let v_words: Vec<&str> = field_value.split_whitespace()
+          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+          .collect();
+
+        'soundex_check: for qw in &q_words {
+          for vw in &v_words {
+            let qs = crate::engine::phonetic::soundex(qw);
+            let vs = crate::engine::phonetic::soundex(vw);
+            if !qs.is_empty() && qs == vs {
+              if 1.0 > max_score { max_score = 1.0; }
+              strategies.push("soundex".to_string());
+              break 'soundex_check;
+            }
+          }
         }
 
-        let q_dm = crate::engine::phonetic::dmetaphone_primary(query_str);
-        let v_dm = crate::engine::phonetic::dmetaphone_primary(field_value);
-        let v_dm_alt = crate::engine::phonetic::dmetaphone_alt(field_value);
-        if !q_dm.is_empty() && (q_dm == v_dm || Some(&q_dm) == v_dm_alt.as_ref()) {
-          if 1.0 > max_score { max_score = 1.0; }
-          strategies.push("dmetaphone".to_string());
+        'dm_check: for qw in &q_words {
+          for vw in &v_words {
+            let qd = crate::engine::phonetic::dmetaphone_primary(qw);
+            let vd = crate::engine::phonetic::dmetaphone_primary(vw);
+            let vda = crate::engine::phonetic::dmetaphone_alt(vw);
+            if !qd.is_empty() && (qd == vd || Some(&qd) == vda.as_ref()) {
+              if 1.0 > max_score { max_score = 1.0; }
+              strategies.push("dmetaphone".to_string());
+              break 'dm_check;
+            }
+          }
         }
 
         // Edit distance
