@@ -244,3 +244,11 @@ path = "spec/engine/multi_index_spec.rs"
 [[test]]
 name = "portal_spec"
 path = "spec/http/portal_spec.rs"
+
+[[test]]
+name = "trigram_spec"
+path = "spec/engine/trigram_spec.rs"
+
+[[test]]
+name = "phonetic_spec"
+path = "spec/engine/phonetic_spec.rs"

@@ -10,7 +10,9 @@ pub mod entry_type;
 pub mod errors;
 pub mod file_header;
 pub mod file_record;
+pub mod fuzzy;
 pub mod group;
+pub mod phonetic;
 pub mod group_cache;
 pub mod hash_algorithm;
 pub mod index_config;
@@ -56,9 +58,12 @@ pub use scalar_converter::{
   ScalarConverter, HashConverter,
   U8Converter, U16Converter, U32Converter, U64Converter,
   I64Converter, F64Converter, StringConverter, TimestampConverter,
+  TrigramConverter, PhoneticConverter, PhoneticAlgorithm,
   serialize_converter, deserialize_converter,
-  CONVERTER_TYPE_WASM,
+  CONVERTER_TYPE_WASM, CONVERTER_TYPE_TRIGRAM, CONVERTER_TYPE_PHONETIC,
 };
+pub use fuzzy::{extract_trigrams, trigram_similarity, auto_fuzziness};
+pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
 pub use json_parser::parse_json_fields;

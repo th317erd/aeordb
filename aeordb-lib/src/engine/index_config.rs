@@ -2,7 +2,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::scalar_converter::{
   HashConverter, U8Converter, U16Converter, U32Converter, U64Converter,
   I64Converter, F64Converter, StringConverter, TimestampConverter,
-  ScalarConverter,
+  TrigramConverter, PhoneticConverter, ScalarConverter,
 };
 
 /// Configuration for a single indexed field.
@@ -149,6 +149,10 @@ pub fn create_converter_from_config(config: &IndexFieldConfig) -> EngineResult<B
       let max = config.max.map(|v| v as i64).unwrap_or(4_102_444_800_000);
       Ok(Box::new(TimestampConverter::with_range(min, max)))
     }
+    "trigram" => Ok(Box::new(TrigramConverter)),
+    "phonetic" | "dmetaphone" => Ok(Box::new(PhoneticConverter::dmetaphone())),
+    "soundex" => Ok(Box::new(PhoneticConverter::soundex())),
+    "dmetaphone_alt" => Ok(Box::new(PhoneticConverter::dmetaphone_alt())),
     unknown => Err(EngineError::CorruptEntry {
       offset: 0,
       reason: format!("Unknown converter type: '{}'", unknown),

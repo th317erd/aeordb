@@ -12,6 +12,8 @@ pub const CONVERTER_TYPE_F64: u8 = 0x07;
 pub const CONVERTER_TYPE_STRING: u8 = 0x08;
 pub const CONVERTER_TYPE_TIMESTAMP: u8 = 0x09;
 pub const CONVERTER_TYPE_WASM: u8 = 0x0A;
+pub const CONVERTER_TYPE_TRIGRAM: u8 = 0x0B;
+pub const CONVERTER_TYPE_PHONETIC: u8 = 0x0C;
 
 /// Converts any value to a normalized scalar in [0.0, 1.0].
 pub trait ScalarConverter: Send + Sync {
@@ -157,6 +159,29 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
       let min = i64::from_le_bytes(payload[0..8].try_into().unwrap());
       let max = i64::from_le_bytes(payload[8..16].try_into().unwrap());
       Ok(Box::new(TimestampConverter::with_range(min, max)))
+    }
+    CONVERTER_TYPE_TRIGRAM => {
+      Ok(Box::new(TrigramConverter))
+    }
+    CONVERTER_TYPE_PHONETIC => {
+      if payload.is_empty() {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: "Phonetic converter missing algorithm byte".to_string(),
+        });
+      }
+      let algo = match payload[0] {
+        0 => PhoneticAlgorithm::Soundex,
+        1 => PhoneticAlgorithm::DoubleMetaphonePrimary,
+        2 => PhoneticAlgorithm::DoubleMetaphoneAlt,
+        other => {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("Unknown phonetic algorithm: {}", other),
+          })
+        }
+      };
+      Ok(Box::new(PhoneticConverter::new(algo)))
     }
     CONVERTER_TYPE_WASM => {
       // Deserialize: 1 byte order_preserving flag + 2 bytes name length + name + wasm_bytes
@@ -756,5 +781,160 @@ impl ScalarConverter for TimestampConverter {
 
   fn type_tag(&self) -> u8 {
     CONVERTER_TYPE_TIMESTAMP
+  }
+}
+
+// ============================================================================
+// TrigramConverter
+// ============================================================================
+
+/// Converts text values into multiple trigram index entries.
+/// Each trigram is hashed to a scalar for NVT lookup.
+#[derive(Debug, Clone)]
+pub struct TrigramConverter;
+
+impl ScalarConverter for TrigramConverter {
+  fn to_scalar(&self, value: &[u8]) -> f64 {
+    // value is a single trigram (from expand_value)
+    let hash = blake3::hash(value);
+    let bytes: [u8; 8] = hash.as_bytes()[..8].try_into().unwrap();
+    let n = u64::from_le_bytes(bytes);
+    n as f64 / u64::MAX as f64
+  }
+
+  fn is_order_preserving(&self) -> bool {
+    false
+  }
+
+  fn name(&self) -> &str {
+    "trigram"
+  }
+
+  fn strategy(&self) -> &str {
+    "trigram"
+  }
+
+  fn type_tag(&self) -> u8 {
+    CONVERTER_TYPE_TRIGRAM
+  }
+
+  fn serialize(&self) -> Vec<u8> {
+    vec![CONVERTER_TYPE_TRIGRAM]
+  }
+
+  fn expand_value(&self, value: &[u8]) -> Vec<Vec<u8>> {
+    let text = std::str::from_utf8(value).unwrap_or("");
+    crate::engine::fuzzy::extract_trigrams(text)
+  }
+
+  fn recommended_bucket_count(&self) -> usize {
+    4096
+  }
+}
+
+// ============================================================================
+// PhoneticConverter
+// ============================================================================
+
+/// Which phonetic algorithm to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PhoneticAlgorithm {
+  Soundex = 0,
+  DoubleMetaphonePrimary = 1,
+  DoubleMetaphoneAlt = 2,
+}
+
+/// Converts text values into phonetic codes for fuzzy name matching.
+/// Each value produces one phonetic code entry for NVT lookup.
+#[derive(Debug, Clone)]
+pub struct PhoneticConverter {
+  pub algorithm: PhoneticAlgorithm,
+}
+
+impl PhoneticConverter {
+  pub fn new(algorithm: PhoneticAlgorithm) -> Self {
+    PhoneticConverter { algorithm }
+  }
+
+  pub fn soundex() -> Self {
+    Self::new(PhoneticAlgorithm::Soundex)
+  }
+
+  pub fn dmetaphone() -> Self {
+    Self::new(PhoneticAlgorithm::DoubleMetaphonePrimary)
+  }
+
+  pub fn dmetaphone_alt() -> Self {
+    Self::new(PhoneticAlgorithm::DoubleMetaphoneAlt)
+  }
+}
+
+impl ScalarConverter for PhoneticConverter {
+  fn to_scalar(&self, value: &[u8]) -> f64 {
+    // value is a phonetic code string (from expand_value)
+    let hash = blake3::hash(value);
+    let bytes: [u8; 8] = hash.as_bytes()[..8].try_into().unwrap();
+    let n = u64::from_le_bytes(bytes);
+    n as f64 / u64::MAX as f64
+  }
+
+  fn is_order_preserving(&self) -> bool {
+    false
+  }
+
+  fn name(&self) -> &str {
+    "phonetic"
+  }
+
+  fn strategy(&self) -> &str {
+    match self.algorithm {
+      PhoneticAlgorithm::Soundex => "soundex",
+      PhoneticAlgorithm::DoubleMetaphonePrimary => "dmetaphone",
+      PhoneticAlgorithm::DoubleMetaphoneAlt => "dmetaphone_alt",
+    }
+  }
+
+  fn type_tag(&self) -> u8 {
+    CONVERTER_TYPE_PHONETIC
+  }
+
+  fn serialize(&self) -> Vec<u8> {
+    vec![CONVERTER_TYPE_PHONETIC, self.algorithm as u8]
+  }
+
+  fn expand_value(&self, value: &[u8]) -> Vec<Vec<u8>> {
+    let text = std::str::from_utf8(value).unwrap_or("");
+    if text.is_empty() {
+      return vec![];
+    }
+
+    match self.algorithm {
+      PhoneticAlgorithm::Soundex => {
+        let code = crate::engine::phonetic::soundex(text);
+        if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
+      }
+      PhoneticAlgorithm::DoubleMetaphonePrimary => {
+        let code = crate::engine::phonetic::dmetaphone_primary(text);
+        if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
+      }
+      PhoneticAlgorithm::DoubleMetaphoneAlt => {
+        match crate::engine::phonetic::dmetaphone_alt(text) {
+          Some(code) => vec![code.into_bytes()],
+          None => {
+            // Fallback to primary if no alternate
+            let code = crate::engine::phonetic::dmetaphone_primary(text);
+            if code.is_empty() { vec![] } else { vec![code.into_bytes()] }
+          }
+        }
+      }
+    }
+  }
+
+  fn recommended_bucket_count(&self) -> usize {
+    match self.algorithm {
+      PhoneticAlgorithm::Soundex => 8192,
+      _ => 16384,
+    }
   }
 }
