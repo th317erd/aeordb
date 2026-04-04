@@ -238,5 +238,9 @@ name = "compression_spec"
 path = "spec/engine/compression_spec.rs"
 
 [[test]]
+name = "multi_index_spec"
+path = "spec/engine/multi_index_spec.rs"
+
+[[test]]
 name = "portal_spec"
 path = "spec/http/portal_spec.rs"

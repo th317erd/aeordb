@@ -12,6 +12,13 @@
 
 ## Total: 1,101 tests, all passing
 
+## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
+- [ ] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes)
+- [ ] Phase 2: Trigram Indexing (fuzzy.rs, TrigramConverter, contains/similar query ops)
+- [ ] Phase 3: Phonetic Indexing (phonetic.rs, PhoneticConverter, Soundex + Double Metaphone)
+- [ ] Phase 4: Fuzzy Scoring + Recheck (DL, JW, auto fuzziness, score-based sorting)
+- [ ] Phase 5: Composite Match + Polish (match op, explicit index targeting, HTTP updates, E2E)
+
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code
 - [ ] Chunk ownership & garbage collection

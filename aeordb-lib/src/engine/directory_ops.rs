@@ -485,8 +485,8 @@ impl<'a> DirectoryOps<'a> {
         // Remove any existing entries for this file (for overwrites)
         index.remove(&file_key);
 
-        // Insert the new entry
-        index.insert(field_value, file_key.clone());
+        // Insert the new entry (with expansion for multi-strategy converters)
+        index.insert_expanded(field_value, file_key.clone());
 
         // Save the updated index
         index_manager.save_index(&parent, &index)?;

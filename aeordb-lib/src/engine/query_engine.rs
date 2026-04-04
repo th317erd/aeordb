@@ -64,6 +64,8 @@ pub struct Query {
 pub struct QueryResult {
   pub file_hash: Vec<u8>,
   pub file_record: FileRecord,
+  pub score: f64,
+  pub matched_by: Vec<String>,
 }
 
 /// Determine if a QueryNode tree requires bitmap compositing (Tier 2).
@@ -225,7 +227,7 @@ impl<'a> QueryEngine<'a> {
       match self.engine.get_entry(&file_hash) {
         Ok(Some((_header, _key, value))) => {
           let file_record = FileRecord::deserialize(&value, hash_length)?;
-          results.push(QueryResult { file_hash, file_record });
+          results.push(QueryResult { file_hash, file_record, score: 1.0, matched_by: vec![] });
         }
         Ok(None) => continue, // stale index entry, skip
         Err(error) => return Err(error),

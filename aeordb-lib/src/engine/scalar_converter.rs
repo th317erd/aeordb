@@ -30,6 +30,26 @@ pub trait ScalarConverter: Send + Sync {
 
   /// Type tag identifying this converter variant.
   fn type_tag(&self) -> u8;
+
+  /// Strategy name used in index file paths (e.g., "string", "trigram", "dmetaphone").
+  /// Each strategy produces a separate .idx file: {field_name}.{strategy}.idx
+  fn strategy(&self) -> &str {
+    self.name() // default: use name as strategy
+  }
+
+  /// Expand a single value into multiple index entries.
+  /// Default: one entry per value (existing behavior).
+  /// Trigram converters return one entry per trigram.
+  /// Phonetic converters may return multiple codes.
+  fn expand_value(&self, value: &[u8]) -> Vec<Vec<u8>> {
+    vec![value.to_vec()]
+  }
+
+  /// Recommended NVT bucket count for this converter type.
+  /// Default: 1024 (existing behavior).
+  fn recommended_bucket_count(&self) -> usize {
+    1024
+  }
 }
 
 /// Serialize any converter to bytes (type tag + state).

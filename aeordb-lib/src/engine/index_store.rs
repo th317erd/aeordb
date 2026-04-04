@@ -52,6 +52,25 @@ impl FieldIndex {
     self.dirty = true;
   }
 
+  /// Expand a value via the converter's expand_value, then insert each expanded
+  /// value as a separate index entry. For default converters this inserts one entry.
+  /// For trigram/phonetic converters this inserts multiple entries.
+  pub fn insert_expanded(&mut self, value: &[u8], file_hash: Vec<u8>) {
+    let expanded = self.converter.expand_value(value);
+    for entry_value in expanded {
+      let scalar = self.converter.to_scalar(&entry_value);
+      let entry = IndexEntry {
+        scalar,
+        file_hash: file_hash.clone(),
+      };
+      let position = self.entries
+        .binary_search_by(|probe| probe.scalar.partial_cmp(&scalar).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or_else(|position| position);
+      self.entries.insert(position, entry);
+      self.dirty = true;
+    }
+  }
+
   /// Remove all entries for a given file hash. Marks NVT dirty.
   pub fn remove(&mut self, file_hash: &[u8]) {
     let original_length = self.entries.len();
@@ -487,14 +506,24 @@ impl<'a> IndexManager<'a> {
     IndexManager { engine }
   }
 
-  /// Build the index file path for a field at a given path.
-  fn index_file_path(path: &str, field_name: &str) -> String {
+  /// Build the index file path for a field at a given path (old format, no strategy).
+  fn index_file_path_legacy(path: &str, field_name: &str) -> String {
     let base = if path.ends_with('/') {
       path.to_string()
     } else {
       format!("{}/", path)
     };
     format!("{}.indexes/{}.idx", base, field_name)
+  }
+
+  /// Build the index file path for a field at a given path with strategy.
+  fn index_file_path(path: &str, field_name: &str, strategy: &str) -> String {
+    let base = if path.ends_with('/') {
+      path.to_string()
+    } else {
+      format!("{}/", path)
+    };
+    format!("{}.indexes/{}.{}.idx", base, field_name, strategy)
   }
 
   /// Build the indexes directory path for a given path.
@@ -507,9 +536,39 @@ impl<'a> IndexManager<'a> {
     format!("{}.indexes", base)
   }
 
-  /// Load an index from `.indexes/{field_name}.idx` at the given path.
+  /// Load an index for a field at the given path.
+  /// Tries the old naming format ({field_name}.idx) first for backward compatibility,
+  /// then scans for new-format files ({field_name}.{strategy}.idx).
   pub fn load_index(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
-    let index_path = Self::index_file_path(path, field_name);
+    // Try old format first: {field_name}.idx
+    let old_path = Self::index_file_path_legacy(path, field_name);
+    let ops = DirectoryOps::new(self.engine);
+
+    match ops.read_file(&old_path) {
+      Ok(data) => {
+        let hash_length = self.engine.hash_algo().hash_length();
+        let index = FieldIndex::deserialize(&data, hash_length)?;
+        return Ok(Some(index));
+      }
+      Err(EngineError::NotFound(_)) => {} // fall through to scan
+      Err(error) => return Err(error),
+    }
+
+    // Try new format: scan for {field_name}.{strategy}.idx
+    let indexes = self.list_indexes(path)?;
+    for index_name in &indexes {
+      if index_name.starts_with(&format!("{}.", field_name)) {
+        let strategy = index_name.splitn(2, '.').nth(1).unwrap_or("string");
+        return self.load_index_by_strategy(path, field_name, strategy);
+      }
+    }
+
+    Ok(None)
+  }
+
+  /// Load an index by field name and strategy.
+  pub fn load_index_by_strategy(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<Option<FieldIndex>> {
+    let index_path = Self::index_file_path(path, field_name, strategy);
     let ops = DirectoryOps::new(self.engine);
 
     match ops.read_file(&index_path) {
@@ -523,9 +582,10 @@ impl<'a> IndexManager<'a> {
     }
   }
 
-  /// Save an index to `.indexes/{field_name}.idx` at the given path.
+  /// Save an index to `.indexes/{field_name}.{strategy}.idx` at the given path.
   pub fn save_index(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
-    let index_path = Self::index_file_path(path, &index.field_name);
+    let strategy = index.converter.strategy();
+    let index_path = Self::index_file_path(path, &index.field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
     let data = index.serialize(hash_length);
     let ops = DirectoryOps::new(self.engine);
@@ -533,7 +593,8 @@ impl<'a> IndexManager<'a> {
     Ok(())
   }
 
-  /// List field names with indexes at this path.
+  /// List index names at this path.
+  /// Returns names in the format "field.strategy" (new format) or "field" (old format).
   pub fn list_indexes(&self, path: &str) -> EngineResult<Vec<String>> {
     let indexes_dir = Self::indexes_dir_path(path);
     let ops = DirectoryOps::new(self.engine);
@@ -544,6 +605,8 @@ impl<'a> IndexManager<'a> {
           .iter()
           .filter_map(|child| {
             if child.name.ends_with(".idx") {
+              // New format: field.strategy.idx -> return "field.strategy"
+              // Old format: field.idx -> return "field"
               Some(child.name.trim_end_matches(".idx").to_string())
             } else {
               None
@@ -557,9 +620,16 @@ impl<'a> IndexManager<'a> {
     }
   }
 
-  /// Delete an index for a field at the given path.
-  pub fn delete_index(&self, path: &str, field_name: &str) -> EngineResult<()> {
-    let index_path = Self::index_file_path(path, field_name);
+  /// Delete an index for a field and strategy at the given path.
+  pub fn delete_index(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
+    let index_path = Self::index_file_path(path, field_name, strategy);
+    let ops = DirectoryOps::new(self.engine);
+    ops.delete_file(&index_path)
+  }
+
+  /// Delete an index using the legacy path format (no strategy).
+  pub fn delete_index_legacy(&self, path: &str, field_name: &str) -> EngineResult<()> {
+    let index_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
     ops.delete_file(&index_path)
   }
@@ -574,5 +644,37 @@ impl<'a> IndexManager<'a> {
     let index = FieldIndex::new(field_name.to_string(), converter);
     self.save_index(path, &index)?;
     Ok(index)
+  }
+
+  /// Load all indexes for a field across all strategies.
+  pub fn load_indexes_for_field(&self, path: &str, field_name: &str) -> EngineResult<Vec<FieldIndex>> {
+    let indexes = self.list_indexes(path)?;
+    let mut result = Vec::new();
+
+    for index_name in &indexes {
+      // index_name is either "field" (old) or "field.strategy" (new)
+      let is_match = index_name == field_name
+        || index_name.starts_with(&format!("{}.", field_name));
+
+      if is_match {
+        // Determine strategy from the name
+        let strategy = if index_name.contains('.') {
+          index_name.splitn(2, '.').nth(1).unwrap_or("string")
+        } else {
+          "string" // old format
+        };
+
+        if let Some(idx) = self.load_index_by_strategy(path, field_name, strategy)? {
+          result.push(idx);
+        } else if strategy == "string" {
+          // Try old format (no strategy in filename)
+          if let Some(idx) = self.load_index(path, field_name)? {
+            result.push(idx);
+          }
+        }
+      }
+    }
+
+    Ok(result)
   }
 }

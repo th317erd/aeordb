@@ -245,8 +245,9 @@ fn test_list_indexes() {
 
   let indexes = index_manager.list_indexes("/users").unwrap();
   assert_eq!(indexes.len(), 2);
-  assert!(indexes.contains(&"age".to_string()));
-  assert!(indexes.contains(&"name".to_string()));
+  // New format: field.strategy
+  assert!(indexes.contains(&"age.u64".to_string()));
+  assert!(indexes.contains(&"name.string".to_string()));
 }
 
 // --- Additional edge case / failure tests ---
@@ -323,7 +324,7 @@ fn test_delete_index() {
   assert!(loaded.is_some());
 
   // Delete it
-  index_manager.delete_index("/users", "age").unwrap();
+  index_manager.delete_index("/users", "age", "u64").unwrap();
 
   // Verify it's gone
   let loaded = index_manager.load_index("/users", "age").unwrap();
