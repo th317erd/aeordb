@@ -256,3 +256,7 @@ path = "spec/engine/phonetic_spec.rs"
 [[test]]
 name = "fuzzy_scoring_spec"
 path = "spec/engine/fuzzy_scoring_spec.rs"
+
+[[test]]
+name = "fuzzy_http_spec"
+path = "spec/http/fuzzy_http_spec.rs"

@@ -26,6 +26,8 @@ pub enum QueryOp {
   Phonetic(String),
   /// Edit distance or Jaro-Winkler fuzzy match
   Fuzzy(String, FuzzyOptions),
+  /// Composite: run all matching indexes, score-fuse
+  Match(String),
 }
 
 /// Options for the Fuzzy query operation.
@@ -169,7 +171,7 @@ fn field_query_to_mask(
       Ok(mask)
     }
     // Fuzzy ops are handled by the recheck path, not NVT masks.
-    QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) => {
+    QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
       Err(EngineError::NotFound(
         "Fuzzy operations do not support NVT mask generation".to_string(),
       ))
@@ -412,7 +414,7 @@ impl<'a> QueryEngine<'a> {
         result
       }
       // Fuzzy ops are handled by execute_with_recheck, not here.
-      QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) => {
+      QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
         return Err(EngineError::NotFound(
           "Fuzzy operations should use the recheck execution path".to_string(),
         ));
@@ -446,7 +448,7 @@ impl<'a> QueryEngine<'a> {
     match node {
       QueryNode::Field(fq) => matches!(
         fq.operation,
-        QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _)
+        QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
       ),
       QueryNode::And(children) | QueryNode::Or(children) => {
         children.iter().any(|c| self.node_has_fuzzy_ops(c))
@@ -503,7 +505,7 @@ impl<'a> QueryEngine<'a> {
           file_hash,
           file_record,
           score,
-          matched_by: vec![strategy],
+          matched_by: strategy.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
         });
       }
     }
@@ -539,7 +541,14 @@ impl<'a> QueryEngine<'a> {
           }
         };
 
-        let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
+        // For Contains (substring), use unpadded trigrams to avoid
+        // word-boundary padding mismatches. For similarity/fuzzy, use
+        // the standard padded trigrams.
+        let trigrams = if matches!(&field_query.operation, QueryOp::Contains(_)) {
+          crate::engine::fuzzy::extract_trigrams_no_pad(query_str)
+        } else {
+          crate::engine::fuzzy::extract_trigrams(query_str)
+        };
         let converter = TrigramConverter;
 
         let mut candidates = HashSet::new();
@@ -606,6 +615,52 @@ impl<'a> QueryEngine<'a> {
             "No phonetic index found for field '{}' at '{}'",
             field_query.field_name, path,
           )));
+        }
+
+        Ok(candidates)
+      }
+      QueryOp::Match(query_str) => {
+        let mut candidates = HashSet::new();
+
+        // Try trigram index
+        if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, "trigram")? {
+          let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
+          let converter = TrigramConverter;
+          for trigram in &trigrams {
+            let scalar = converter.to_scalar(trigram);
+            let entries = index.lookup_by_scalar(scalar);
+            for entry in entries {
+              candidates.insert(entry.file_hash.clone());
+            }
+          }
+        }
+
+        // Try phonetic indexes
+        let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
+        for strategy in &phonetic_strategies {
+          if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
+            let code = match *strategy {
+              "soundex" => crate::engine::phonetic::soundex(query_str),
+              "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(query_str),
+              "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(query_str)
+                .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(query_str)),
+              _ => continue,
+            };
+            if code.is_empty() { continue; }
+            let scalar = index.converter.to_scalar(code.as_bytes());
+            let entries = index.lookup_by_scalar(scalar);
+            for entry in entries {
+              candidates.insert(entry.file_hash.clone());
+            }
+          }
+        }
+
+        // Try exact match via string index
+        if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, "string")? {
+          let entries = index.lookup_exact(query_str.as_bytes());
+          for entry in entries {
+            candidates.insert(entry.file_hash.clone());
+          }
         }
 
         Ok(candidates)
@@ -727,6 +782,55 @@ impl<'a> QueryEngine<'a> {
               Ok((0.0, "trigram".to_string()))
             }
           }
+        }
+      }
+      QueryOp::Match(query_str) => {
+        let mut max_score = 0.0f64;
+        let mut strategies = Vec::new();
+
+        // Exact match
+        if query_str.to_lowercase() == field_value.to_lowercase() {
+          max_score = 1.0;
+          strategies.push("exact".to_string());
+        }
+
+        // Trigram similarity
+        let trig_score = crate::engine::fuzzy::trigram_similarity(query_str, field_value);
+        if trig_score > 0.3 {
+          if trig_score > max_score { max_score = trig_score; }
+          strategies.push("trigram".to_string());
+        }
+
+        // Phonetic matching
+        let q_soundex = crate::engine::phonetic::soundex(query_str);
+        let v_soundex = crate::engine::phonetic::soundex(field_value);
+        if !q_soundex.is_empty() && q_soundex == v_soundex {
+          if 1.0 > max_score { max_score = 1.0; }
+          strategies.push("soundex".to_string());
+        }
+
+        let q_dm = crate::engine::phonetic::dmetaphone_primary(query_str);
+        let v_dm = crate::engine::phonetic::dmetaphone_primary(field_value);
+        let v_dm_alt = crate::engine::phonetic::dmetaphone_alt(field_value);
+        if !q_dm.is_empty() && (q_dm == v_dm || Some(&q_dm) == v_dm_alt.as_ref()) {
+          if 1.0 > max_score { max_score = 1.0; }
+          strategies.push("dmetaphone".to_string());
+        }
+
+        // Edit distance
+        let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
+        let max_edits = crate::engine::fuzzy::auto_fuzziness(query_str.len());
+        if distance <= max_edits {
+          let max_len = query_str.len().max(field_value.len()).max(1);
+          let dl_score = 1.0 - (distance as f64 / max_len as f64);
+          if dl_score > max_score { max_score = dl_score; }
+          strategies.push("fuzzy".to_string());
+        }
+
+        if max_score > 0.0 {
+          Ok((max_score, strategies.join(",")))
+        } else {
+          Ok((0.0, String::new()))
         }
       }
       _ => Ok((1.0, String::new())), // Non-fuzzy ops always score 1.0
@@ -1053,6 +1157,15 @@ impl<'a> FieldQueryBuilder<'a> {
     self.parent.nodes.push(QueryNode::Field(FieldQuery {
       field_name: self.field_name,
       operation: QueryOp::Fuzzy(value.to_string(), options),
+    }));
+    self.parent
+  }
+
+  /// Composite match: run all matching indexes and score-fuse.
+  pub fn match_query(mut self, value: &str) -> QueryBuilder<'a> {
+    self.parent.nodes.push(QueryNode::Field(FieldQuery {
+      field_name: self.field_name,
+      operation: QueryOp::Match(value.to_string()),
     }));
     self.parent
   }

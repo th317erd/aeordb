@@ -14,7 +14,7 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::engine::{DirectoryOps, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy};
+use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -544,6 +544,47 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, Stri
       }
       QueryOp::In(byte_values)
     }
+    "contains" => {
+      let s = raw_value.as_str()
+        .ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
+      QueryOp::Contains(s.to_string())
+    }
+    "similar" => {
+      let s = raw_value.as_str()
+        .ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
+      let threshold = value.get("threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.3);
+      QueryOp::Similar(s.to_string(), threshold)
+    }
+    "phonetic" => {
+      let s = raw_value.as_str()
+        .ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
+      QueryOp::Phonetic(s.to_string())
+    }
+    "fuzzy" => {
+      let s = raw_value.as_str()
+        .ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
+
+      let fuzziness = match value.get("fuzziness") {
+        Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
+        Some(v) if v.is_u64() => Fuzziness::Fixed(v.as_u64().unwrap() as usize),
+        Some(v) if v.is_i64() => Fuzziness::Fixed(v.as_i64().unwrap().max(0) as usize),
+        _ => Fuzziness::Auto,
+      };
+
+      let algorithm = match value.get("algorithm").and_then(|v| v.as_str()) {
+        Some("jaro_winkler") => FuzzyAlgorithm::JaroWinkler,
+        _ => FuzzyAlgorithm::DamerauLevenshtein,
+      };
+
+      QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
+    }
+    "match" => {
+      let s = raw_value.as_str()
+        .ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
+      QueryOp::Match(s.to_string())
+    }
     unknown => {
       return Err(format!("Unknown operation: '{}'", unknown));
     }
@@ -640,6 +681,8 @@ pub async fn query_endpoint(
             "content_type": result.file_record.content_type,
             "created_at": result.file_record.created_at,
             "updated_at": result.file_record.updated_at,
+            "score": result.score,
+            "matched_by": result.matched_by,
           })
         })
         .collect();

@@ -16,7 +16,7 @@
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
 - [x] Phase 2: Trigram Indexing (fuzzy.rs, TrigramConverter, Dice similarity) — 43 tests
 - [x] Phase 3: Phonetic Indexing (phonetic.rs, PhoneticConverter, Soundex + Double Metaphone) — 71 tests
-- [ ] Phase 4: Fuzzy Scoring + Recheck (DL, JW, auto fuzziness, score-based sorting)
+- [x] Phase 4: Fuzzy Scoring + Recheck (DL, JW, auto fuzziness, score-based sorting) — 37 tests
 - [ ] Phase 5: Composite Match + Polish (match op, explicit index targeting, HTTP updates, E2E)
 
 ## Remaining Future Plans

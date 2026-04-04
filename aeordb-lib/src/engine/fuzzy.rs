@@ -45,6 +45,35 @@ pub fn extract_trigrams(s: &str) -> Vec<Vec<u8>> {
   result
 }
 
+/// Extract trigrams without word-boundary padding.
+///
+/// Used for substring (Contains) queries where we need raw character-level
+/// trigrams without the space-padding that would introduce false boundary
+/// constraints.
+pub fn extract_trigrams_no_pad(s: &str) -> Vec<Vec<u8>> {
+  let lower = s.to_lowercase();
+  let chars: Vec<char> = lower.chars().collect();
+
+  if chars.len() < 3 {
+    // For very short strings, return the whole string as a single "trigram"
+    if !lower.is_empty() {
+      return vec![lower.into_bytes()];
+    }
+    return Vec::new();
+  }
+
+  let mut seen = HashSet::new();
+  let mut result = Vec::new();
+  for window in chars.windows(3) {
+    let trigram: String = window.iter().collect();
+    let bytes = trigram.into_bytes();
+    if seen.insert(bytes.clone()) {
+      result.push(bytes);
+    }
+  }
+  result
+}
+
 /// Compute trigram similarity between two strings using the Dice coefficient.
 ///
 /// `2 * |A intersection B| / (|A| + |B|)`

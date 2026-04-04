@@ -62,7 +62,7 @@ pub use scalar_converter::{
   serialize_converter, deserialize_converter,
   CONVERTER_TYPE_WASM, CONVERTER_TYPE_TRIGRAM, CONVERTER_TYPE_PHONETIC,
 };
-pub use fuzzy::{extract_trigrams, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
+pub use fuzzy::{extract_trigrams, extract_trigrams_no_pad, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
