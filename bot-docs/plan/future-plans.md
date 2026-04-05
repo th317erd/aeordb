@@ -510,3 +510,209 @@ NVT masks are packed u64 bitsets — directly compatible with GPU compute shader
 
 ---
 
+## URGENT: Event System (WebSocket + In-Process Channels)
+
+**What:** Configurable event system for reacting to database mutations in real time. Two delivery mechanisms: in-process channels for Rust library consumers, WebSocket for HTTP/browser clients.
+
+**Priority:** Urgent
+
+### Architecture
+
+The append-only engine already produces events implicitly — every write IS a mutation. The event system makes these explicit and subscribable.
+
+**In-process (Rust library):**
+- `tokio::broadcast` channel on `StorageEngine` (or a wrapping `EventBus` struct)
+- `engine.subscribe() -> broadcast::Receiver<EngineEvent>`
+- Zero network overhead — direct channel send on every mutation
+- Backpressure via bounded channel (lagging receivers skip events)
+
+**Remote (HTTP clients):**
+- WebSocket endpoint at `/ws/events`
+- Server bridges the internal broadcast channel to WebSocket frames
+- Clients send subscribe/unsubscribe messages with filters (path prefix, event types)
+- JSON frames: `{"event": "file_stored", "path": "/people/smith.json", "timestamp": 1234567890}`
+- Alternative: SSE at `/events/stream` for simpler clients (one-directional, no subscription management)
+- WebSocket preferred — bidirectional enables dynamic subscription filtering
+
+**Event types:**
+- `FileStored` — path, content_type, size, hash
+- `FileDeleted` — path
+- `FileUpdated` — path, content_type, size, old_hash, new_hash
+- `IndexUpdated` — path, field_name, strategy, entry_count
+- `SnapshotCreated` — name, root_hash
+- `SnapshotRestored` — name
+- `ForkCreated` — name
+- `ForkPromoted` — name
+- `UserCreated` — user_id, username
+- `UserDeactivated` — user_id
+- `GroupChanged` — group_name
+- `PermissionChanged` — path
+- `ParserInvoked` — path, parser_name, success/failure
+- `Error` — path, error_type, message
+
+**Subscription filtering (WebSocket):**
+```json
+// Client sends:
+{"action": "subscribe", "filter": {"path_prefix": "/people/", "events": ["file_stored", "file_deleted"]}}
+{"action": "unsubscribe", "filter_id": "abc123"}
+
+// Server sends:
+{"event": "file_stored", "path": "/people/smith.json", "size": 1234, "timestamp": 1234567890}
+```
+
+**Optional per-directory event hooks:** `.config/events.json` could define WASM plugins invoked on specific events (like database triggers). Deferred to a later phase — start with passive observation, add active hooks later.
+
+**Why urgent:** Events are the foundation for:
+- Real-time dashboard updates (portal can subscribe instead of polling)
+- Backup triggers (diff export on every N events)
+- Replication (followers subscribe to leader's event stream)
+- Webhooks (future — bridge events to HTTP callbacks)
+- Client-side cache invalidation
+- Audit logging
+
+---
+
+## URGENT: Backup System (Diff-Based .aeordb Export)
+
+**What:** Incremental backup system using the append-only storage model. Full snapshots + lightweight diffs. Backup output is a valid .aeordb file.
+
+**Priority:** Urgent
+
+### Core Insight
+
+The storage engine is append-only. Every entry has a file offset. A snapshot records the state at a point in time. Therefore, a diff between two snapshots is literally the byte range of entries written between those two offsets. This is trivially extractable with zero computation.
+
+### Backup Chain Model
+
+```
+Full(A) → Diff(A→B) → Diff(B→C) → Diff(C→D) → Full(D) → Diff(D→E)
+```
+
+- **Full backup:** Complete .aeordb file (copy of the data file, or a new .aeordb with all live entries rebuilt — excluding voids/deleted)
+- **Diff backup:** A new .aeordb file containing ONLY the entries written since the last backup point
+
+### Why .aeordb as the backup format
+
+- Backups are openable with `StorageEngine::open` — you can query them, inspect them, verify them
+- Restore = merge diff .aeordb entries into target database
+- No custom format to maintain — the backup format IS the database format
+- Backup verification = open it and count entries. If it opens, it's valid.
+- Chain restore: open base.aeordb, then replay diff1.aeordb, diff2.aeordb, etc.
+
+### Diff Mechanics
+
+```
+Diff export (A → B):
+  1. Record A's entry offset (from snapshot metadata or HEAD at backup time)
+  2. Record B's current offset
+  3. Create a new .aeordb file
+  4. Copy all entries from offset_A to offset_B into the new file
+  5. Build KV block + NVT for the diff file
+  6. Write file header with metadata (parent_snapshot, created_at, etc.)
+```
+
+The diff .aeordb is a fully self-contained database — you can open it, query it, see what changed.
+
+### CLI Interface
+
+```bash
+# Full backup
+aeordb backup full --database data.aeordb --output backup-2026-04-04.aeordb
+
+# Diff backup (since last full or last diff)
+aeordb backup diff --database data.aeordb --output diff-2026-04-04-001.aeordb
+
+# Restore from chain
+aeordb restore --base backup-2026-04-01.aeordb --diffs diff-001.aeordb,diff-002.aeordb --output restored.aeordb
+
+# Verify a backup
+aeordb backup verify --file backup-2026-04-04.aeordb
+```
+
+### HTTP API
+
+```
+POST /admin/backup/full → streams the .aeordb file
+POST /admin/backup/diff?since=snap1 → streams the diff .aeordb
+POST /admin/restore → accepts .aeordb file, merges into current database
+GET /admin/backup/status → list backup history (snapshots used as backup points)
+```
+
+### Text-Based Export (Secondary)
+
+For grep-friendly exports, JSON Lines format:
+```
+{"type":"file","path":"/people/smith.json","content_type":"application/json","data":"eyJuYW1lIjoiSm9obiJ9","hash":"a1b2c3..."}
+{"type":"file","path":"/people/jones.json","content_type":"application/json","data":"eyJuYW1lIjoiSmFuZSJ9","hash":"d4e5f6..."}
+{"type":"directory","path":"/people/","children":["smith.json","jones.json"]}
+```
+
+Binary content is base64-encoded (unavoidable for text format). This format is secondary to .aeordb — useful for debugging, auditing, and piping through text tools, but not the primary backup mechanism.
+
+### Automatic Backup Schedule (Future)
+
+Ties into the cron/background task system (also a future plan):
+- Configure backup schedule: full every Sunday, diff every hour
+- Retain N full backups + diffs between them
+- Auto-prune old backup chains
+
+**Why urgent:** A database without backups is a liability. Users need to trust that their data is recoverable. The append-only architecture makes this almost free to implement — we're not doing complex journaling or WAL replay. It's just copying byte ranges.
+
+---
+
+## HIGH PRIORITY: Built-In Parser Plugins
+
+**What:** Ship a library of WASM parser plugins with AeorDB. Each parser is a separate crate compiled to `wasm32-unknown-unknown`, deployed to the database on first boot or via CLI.
+
+**Priority:** High (depends on document-parsers feature)
+
+### Parser Library
+
+| Parser | Input | Output JSON | Crate Dependencies |
+|--------|-------|------------|-------------------|
+| `plaintext-parser` | Plain text files | `{"text": "...", "line_count": N, "word_count": N, "byte_count": N}` | None |
+| `csv-parser` | CSV files | `{"headers": [...], "rows": [...], "row_count": N, "column_count": N}` | `csv` crate (pure Rust) |
+| `xml-parser` | XML files | `{"root": {...}, "namespaces": [...]}` (JSON mirror of XML tree) | `quick-xml` (pure Rust) |
+| `markdown-parser` | Markdown files | `{"text": "...", "headings": [...], "links": [...], "code_blocks": [...]}` | `pulldown-cmark` (pure Rust) |
+| `image-metadata` | JPEG/PNG/etc. | `{"metadata": {"width": N, "height": N, "format": "...", "exif": {...}}}` | `kamadak-exif` or `rexif` |
+| `audio-metadata` | MP3/FLAC/etc. | `{"metadata": {"title": "...", "artist": "...", "album": "...", "duration_ms": N}}` | `id3` or `lofty` |
+| `pdf-metadata` | PDF files | `{"metadata": {"title": "...", "author": "...", "page_count": N}, "text": "..."}` | `lopdf` or `pdf-extract` |
+| `source-code` | .rs/.js/.py/etc. | `{"language": "...", "imports": [...], "functions": [...], "line_count": N}` | `tree-sitter` (ambitious) or regex-based |
+
+### Architecture
+
+```
+aeordb-parsers/
+  plaintext/
+    Cargo.toml
+    src/lib.rs
+  csv/
+    Cargo.toml
+    src/lib.rs
+  xml/
+    Cargo.toml
+    src/lib.rs
+  ...
+```
+
+Each parser crate:
+- Targets `wasm32-unknown-unknown`
+- Exports `handle(ptr, len) -> i64` per the plugin protocol
+- Receives the parser envelope (base64 data + metadata)
+- Returns JSON
+- Has its own test suite (native tests, not WASM)
+- Built independently, versioned independently
+
+### Deployment
+
+- **Auto-deploy on first boot:** `aeordb-cli start` checks if built-in parsers are deployed at `/.parsers/`. If not, deploys them.
+- **CLI deploy:** `aeordb-cli parsers install` deploys all built-in parsers. `aeordb-cli parsers install plaintext` deploys one.
+- **Global registry auto-populated:** On deployment, updates `/.config/parsers.json` with content-type → parser mappings.
+
+### Why high priority
+
+- Dogfooding: proves the parser plugin system works end-to-end with real formats
+- User value: out-of-the-box support for common file types without custom plugins
+- Community model: parsers maintained separately, upgraded independently, contributed by community
+- Test coverage: each parser exercises the full pipeline (WASM invocation, envelope, source resolution, indexing)
+
