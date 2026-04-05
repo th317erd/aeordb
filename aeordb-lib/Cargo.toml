@@ -264,3 +264,7 @@ path = "spec/http/fuzzy_http_spec.rs"
 [[test]]
 name = "source_resolver_spec"
 path = "spec/engine/source_resolver_spec.rs"
+
+[[test]]
+name = "pipeline_spec"
+path = "spec/engine/pipeline_spec.rs"

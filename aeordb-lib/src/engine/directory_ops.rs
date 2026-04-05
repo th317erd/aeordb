@@ -7,9 +7,8 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::index_config::{PathIndexConfig, create_converter_from_config};
+use crate::engine::index_config::PathIndexConfig;
 use crate::engine::index_store::IndexManager;
-use crate::engine::json_parser::parse_json_fields;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::storage_engine::StorageEngine;
 
@@ -17,8 +16,16 @@ use crate::engine::storage_engine::StorageEngine;
 const DEFAULT_CHUNK_SIZE: usize = 262_144;
 
 /// Compute the domain-prefixed hash for a file path.
-fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   algo.compute_hash(format!("file:{}", path).as_bytes())
+}
+
+/// Check if a path targets a system directory that should not trigger indexing.
+/// Returns true for paths containing .logs/, .indexes/, or .config/ segments.
+fn is_system_path(path: &str) -> bool {
+  let normalized = normalize_path(path);
+  let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+  segments.iter().any(|s| *s == ".logs" || *s == ".indexes" || *s == ".config")
 }
 
 /// Compute the domain-prefixed hash for a directory path.
@@ -434,65 +441,14 @@ impl<'a> DirectoryOps<'a> {
 
     let file_record = self.store_file_internal(path, data, content_type, compression_algo)?;
 
-    let normalized = normalize_path(path);
-    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-
-    // Check for index configuration
-    let config_path = if parent.ends_with('/') {
-      format!("{}.config/indexes.json", parent)
-    } else {
-      format!("{}/.config/indexes.json", parent)
-    };
-
-    let index_config = match self.read_file(&config_path) {
-      Ok(config_data) => PathIndexConfig::deserialize(&config_data).ok(),
-      Err(EngineError::NotFound(_)) => None,
-      Err(error) => return Err(error),
-    };
-
-    if let Some(config) = index_config {
-      let algo = self.engine.hash_algo();
-      let file_key = file_path_hash(&normalized, &algo)?;
-
-      // Parse field values from the stored data
-      let field_names: Vec<&str> = config.indexes.iter()
-        .map(|index_config| index_config.name.as_str())
-        .collect();
-
-      let extracted_fields = parse_json_fields(data, &field_names).unwrap_or_default();
-
-      let index_manager = IndexManager::new(self.engine);
-
-      for field_config in &config.indexes {
-        // Find the extracted value for this field
-        let field_value = extracted_fields.iter()
-          .find(|(name, _)| name == &field_config.name);
-
-        let field_value = match field_value {
-          Some((_, value)) => value,
-          None => continue, // field not found in data, skip
-        };
-
-        // Load or create the index (by strategy to support multi-index per field)
-        let converter_for_strategy = create_converter_from_config(field_config)?;
-        let strategy = converter_for_strategy.strategy().to_string();
-        let mut index = match index_manager.load_index_by_strategy(&parent, &field_config.name, &strategy)? {
-          Some(index) => index,
-          None => {
-            index_manager.create_index(&parent, &field_config.name, converter_for_strategy)?
-          }
-        };
-
-        // Remove any existing entries for this file (for overwrites)
-        index.remove(&file_key);
-
-        // Insert the new entry (with expansion for multi-strategy converters)
-        index.insert_expanded(field_value, file_key.clone());
-
-        // Save the updated index
-        index_manager.save_index(&parent, &index)?;
-      }
+    // Guard: skip indexing for system directories
+    if is_system_path(path) {
+      return Ok(file_record);
     }
+
+    // Delegate to indexing pipeline
+    let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
+    let _ = pipeline.run(path, data, content_type);
 
     Ok(file_record)
   }
