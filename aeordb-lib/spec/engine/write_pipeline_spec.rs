@@ -39,10 +39,14 @@ fn test_store_file_indexes_fields() {
 
   // Set up index config at /users/
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -83,10 +87,14 @@ fn test_delete_file_removes_index_entries() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -117,10 +125,14 @@ fn test_overwrite_file_updates_index() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -149,16 +161,21 @@ fn test_multiple_indexed_fields() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "string".to_string(),
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
         min: None,
         max: None,
       },
@@ -269,16 +286,21 @@ fn test_json_parser_negative_integer() {
 #[test]
 fn test_index_config_serialize_deserialize_roundtrip() {
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "string".to_string(),
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
         min: None,
         max: None,
       },
@@ -289,12 +311,12 @@ fn test_index_config_serialize_deserialize_roundtrip() {
   let deserialized = PathIndexConfig::deserialize(&serialized).unwrap();
 
   assert_eq!(deserialized.indexes.len(), 2);
-  assert_eq!(deserialized.indexes[0].field_name, "age");
-  assert_eq!(deserialized.indexes[0].converter_type, "u64");
+  assert_eq!(deserialized.indexes[0].name, "age");
+  assert_eq!(deserialized.indexes[0].index_type, "u64");
   assert_eq!(deserialized.indexes[0].min, Some(0.0));
   assert_eq!(deserialized.indexes[0].max, Some(200.0));
-  assert_eq!(deserialized.indexes[1].field_name, "name");
-  assert_eq!(deserialized.indexes[1].converter_type, "string");
+  assert_eq!(deserialized.indexes[1].name, "name");
+  assert_eq!(deserialized.indexes[1].index_type, "string");
   assert!(deserialized.indexes[1].min.is_none());
   assert!(deserialized.indexes[1].max.is_none());
 }
@@ -318,10 +340,14 @@ fn test_store_non_json_data_with_config_does_not_crash() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -350,10 +376,14 @@ fn test_multiple_files_indexed_together() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },

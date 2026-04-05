@@ -403,8 +403,9 @@ fn test_phonetic_converter_type_tag() {
 #[test]
 fn test_create_converter_from_config_soundex() {
   let config = IndexFieldConfig {
-    field_name: "name".to_string(),
-    converter_type: "soundex".to_string(),
+    name: "name".to_string(),
+    index_type: "soundex".to_string(),
+        source: None,
     min: None,
     max: None,
   };
@@ -416,8 +417,9 @@ fn test_create_converter_from_config_soundex() {
 #[test]
 fn test_create_converter_from_config_dmetaphone() {
   let config = IndexFieldConfig {
-    field_name: "name".to_string(),
-    converter_type: "dmetaphone".to_string(),
+    name: "name".to_string(),
+    index_type: "dmetaphone".to_string(),
+        source: None,
     min: None,
     max: None,
   };
@@ -428,8 +430,9 @@ fn test_create_converter_from_config_dmetaphone() {
 #[test]
 fn test_create_converter_from_config_phonetic() {
   let config = IndexFieldConfig {
-    field_name: "name".to_string(),
-    converter_type: "phonetic".to_string(),
+    name: "name".to_string(),
+    index_type: "phonetic".to_string(),
+        source: None,
     min: None,
     max: None,
   };
@@ -440,8 +443,9 @@ fn test_create_converter_from_config_phonetic() {
 #[test]
 fn test_create_converter_from_config_dmetaphone_alt() {
   let config = IndexFieldConfig {
-    field_name: "name".to_string(),
-    converter_type: "dmetaphone_alt".to_string(),
+    name: "name".to_string(),
+    index_type: "dmetaphone_alt".to_string(),
+        source: None,
     min: None,
     max: None,
   };

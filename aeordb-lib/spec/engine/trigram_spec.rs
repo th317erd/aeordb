@@ -306,8 +306,9 @@ fn test_trigram_converter_not_order_preserving() {
 #[test]
 fn test_create_converter_from_config_trigram() {
   let config = IndexFieldConfig {
-    field_name: "name".to_string(),
-    converter_type: "trigram".to_string(),
+    name: "name".to_string(),
+    index_type: "trigram".to_string(),
+        source: None,
     min: None,
     max: None,
   };

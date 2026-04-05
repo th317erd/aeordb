@@ -431,16 +431,21 @@ fn test_expand_value_in_indexing_pipeline() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "string".to_string(),
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
         min: None,
         max: None,
       },
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -471,10 +476,14 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },
@@ -501,10 +510,14 @@ fn test_expand_value_overwrite_file_updates_index() {
   let ops = DirectoryOps::new(&engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "age".to_string(),
-        converter_type: "u64".to_string(),
+        name: "age".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
         min: Some(0.0),
         max: Some(200.0),
       },

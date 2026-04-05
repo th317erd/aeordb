@@ -64,28 +64,35 @@ fn setup_fuzzy_users(engine: &StorageEngine) {
   let ops = DirectoryOps::new(engine);
 
   let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
     indexes: vec![
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "string".to_string(),
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
         min: None,
         max: None,
       },
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "trigram".to_string(),
+        name: "name".to_string(),
+        index_type: "trigram".to_string(),
+        source: None,
         min: None,
         max: None,
       },
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "soundex".to_string(),
+        name: "name".to_string(),
+        index_type: "soundex".to_string(),
+        source: None,
         min: None,
         max: None,
       },
       IndexFieldConfig {
-        field_name: "name".to_string(),
-        converter_type: "dmetaphone".to_string(),
+        name: "name".to_string(),
+        index_type: "dmetaphone".to_string(),
+        source: None,
         min: None,
         max: None,
       },

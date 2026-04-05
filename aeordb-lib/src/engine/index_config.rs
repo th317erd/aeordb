@@ -8,8 +8,9 @@ use crate::engine::scalar_converter::{
 /// Configuration for a single indexed field.
 #[derive(Debug, Clone)]
 pub struct IndexFieldConfig {
-  pub field_name: String,
-  pub converter_type: String,
+  pub name: String,
+  pub index_type: String,
+  pub source: Option<serde_json::Value>,
   pub min: Option<f64>,
   pub max: Option<f64>,
 }
@@ -18,20 +19,36 @@ pub struct IndexFieldConfig {
 #[derive(Debug, Clone)]
 pub struct PathIndexConfig {
   pub indexes: Vec<IndexFieldConfig>,
+  pub parser: Option<String>,
+  pub parser_memory_limit: Option<String>,
+  pub logging: bool,
 }
 
 impl PathIndexConfig {
   /// Serialize to JSON bytes.
   pub fn serialize(&self) -> Vec<u8> {
-    let mut json = String::from("{\"indexes\":[");
+    let mut json = String::from("{");
+    if let Some(ref parser) = self.parser {
+      json.push_str(&format!("\"parser\":\"{}\",", parser));
+    }
+    if let Some(ref limit) = self.parser_memory_limit {
+      json.push_str(&format!("\"parser_memory_limit\":\"{}\",", limit));
+    }
+    if self.logging {
+      json.push_str("\"logging\":true,");
+    }
+    json.push_str("\"indexes\":[");
     for (position, config) in self.indexes.iter().enumerate() {
       if position > 0 {
         json.push(',');
       }
       json.push_str(&format!(
-        "{{\"field\":\"{}\",\"converter\":\"{}\"",
-        config.field_name, config.converter_type,
+        "{{\"name\":\"{}\",\"type\":\"{}\"",
+        config.name, config.index_type,
       ));
+      if let Some(ref source) = config.source {
+        json.push_str(&format!(",\"source\":{}", source));
+      }
       if let Some(min) = config.min {
         json.push_str(&format!(",\"min\":{}", min));
       }
@@ -59,32 +76,61 @@ impl PathIndexConfig {
       .and_then(|value| value.as_array())
       .ok_or_else(|| EngineError::JsonParseError("Missing 'indexes' array".to_string()))?;
 
+    let parser = parsed.get("parser")
+      .and_then(|v| v.as_str())
+      .map(|v| v.to_string());
+
+    let parser_memory_limit = parsed.get("parser_memory_limit")
+      .and_then(|v| v.as_str())
+      .map(|v| v.to_string());
+
+    let logging = parsed.get("logging")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false);
+
     let mut indexes = Vec::with_capacity(indexes_array.len());
     for item in indexes_array {
-      let field_name = item.get("field_name")
+      let name = item.get("name")
+        .or_else(|| item.get("field_name"))
         .or_else(|| item.get("field"))
         .and_then(|value| value.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Missing 'field_name' in index config".to_string()))?
+        .ok_or_else(|| EngineError::JsonParseError("Missing 'name' in index config".to_string()))?
         .to_string();
 
-      let converter_type = item.get("converter_type")
+      let type_value = item.get("type")
+        .or_else(|| item.get("converter_type"))
         .or_else(|| item.get("converter"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Missing 'converter_type' in index config".to_string()))?
-        .to_string();
+        .ok_or_else(|| EngineError::JsonParseError("Missing 'type' in index config".to_string()))?;
 
+      let source = item.get("source").cloned();
       let min = item.get("min").and_then(|value| value.as_f64());
       let max = item.get("max").and_then(|value| value.as_f64());
 
-      indexes.push(IndexFieldConfig {
-        field_name,
-        converter_type,
-        min,
-        max,
-      });
+      // "type" can be a string or an array of strings
+      let type_strings: Vec<String> = if let Some(s) = type_value.as_str() {
+        vec![s.to_string()]
+      } else if let Some(arr) = type_value.as_array() {
+        arr.iter()
+          .map(|v| v.as_str()
+            .ok_or_else(|| EngineError::JsonParseError("'type' array must contain strings".to_string()))
+            .map(|s| s.to_string()))
+          .collect::<EngineResult<Vec<String>>>()?
+      } else {
+        return Err(EngineError::JsonParseError("'type' must be a string or array of strings".to_string()));
+      };
+
+      for index_type in type_strings {
+        indexes.push(IndexFieldConfig {
+          name: name.clone(),
+          index_type,
+          source: source.clone(),
+          min,
+          max,
+        });
+      }
     }
 
-    Ok(PathIndexConfig { indexes })
+    Ok(PathIndexConfig { indexes, parser, parser_memory_limit, logging })
   }
 
   /// Deserialize JSON bytes and extract the optional "compression" field value.
@@ -108,7 +154,7 @@ impl PathIndexConfig {
 
 /// Create a ScalarConverter from a config entry.
 pub fn create_converter_from_config(config: &IndexFieldConfig) -> EngineResult<Box<dyn ScalarConverter>> {
-  match config.converter_type.as_str() {
+  match config.index_type.as_str() {
     "hash" => Ok(Box::new(HashConverter)),
     "u8" => {
       let min = config.min.map(|v| v as u8).unwrap_or(0);

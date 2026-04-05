@@ -366,7 +366,7 @@ fn test_compression_with_indexing_via_config() {
   let ops = DirectoryOps::new(&engine);
 
   // Store a config that enables zstd compression
-  let config_json = r#"{"compression":"zstd","indexes":[{"field":"name","converter":"string"}]}"#;
+  let config_json = r#"{"compression":"zstd","indexes":[{"name":"name","type":"string"}]}"#;
   ops.store_file(
     "/data/.config/indexes.json",
     config_json.as_bytes(),
@@ -477,7 +477,7 @@ fn test_no_compression_config_means_no_compression() {
   let ops = DirectoryOps::new(&engine);
 
   // Config WITHOUT compression field
-  let config_json = r#"{"indexes":[{"field":"name","converter":"string"}]}"#;
+  let config_json = r#"{"indexes":[{"name":"name","type":"string"}]}"#;
   ops.store_file(
     "/data/.config/indexes.json",
     config_json.as_bytes(),

@@ -456,7 +456,7 @@ impl<'a> DirectoryOps<'a> {
 
       // Parse field values from the stored data
       let field_names: Vec<&str> = config.indexes.iter()
-        .map(|index_config| index_config.field_name.as_str())
+        .map(|index_config| index_config.name.as_str())
         .collect();
 
       let extracted_fields = parse_json_fields(data, &field_names).unwrap_or_default();
@@ -466,7 +466,7 @@ impl<'a> DirectoryOps<'a> {
       for field_config in &config.indexes {
         // Find the extracted value for this field
         let field_value = extracted_fields.iter()
-          .find(|(name, _)| name == &field_config.field_name);
+          .find(|(name, _)| name == &field_config.name);
 
         let field_value = match field_value {
           Some((_, value)) => value,
@@ -476,10 +476,10 @@ impl<'a> DirectoryOps<'a> {
         // Load or create the index (by strategy to support multi-index per field)
         let converter_for_strategy = create_converter_from_config(field_config)?;
         let strategy = converter_for_strategy.strategy().to_string();
-        let mut index = match index_manager.load_index_by_strategy(&parent, &field_config.field_name, &strategy)? {
+        let mut index = match index_manager.load_index_by_strategy(&parent, &field_config.name, &strategy)? {
           Some(index) => index,
           None => {
-            index_manager.create_index(&parent, &field_config.field_name, converter_for_strategy)?
+            index_manager.create_index(&parent, &field_config.name, converter_for_strategy)?
           }
         };
 
