@@ -260,3 +260,7 @@ path = "spec/engine/fuzzy_scoring_spec.rs"
 [[test]]
 name = "fuzzy_http_spec"
 path = "spec/http/fuzzy_http_spec.rs"
+
+[[test]]
+name = "source_resolver_spec"
+path = "spec/engine/source_resolver_spec.rs"

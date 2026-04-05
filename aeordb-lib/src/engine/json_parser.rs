@@ -44,7 +44,7 @@ pub fn parse_json_fields(data: &[u8], field_names: &[&str]) -> EngineResult<Vec<
 /// - Strings: UTF-8 bytes
 /// - Booleans: 1 byte (0 or 1)
 /// - Null: empty vec
-fn json_value_to_bytes(value: &serde_json::Value) -> Vec<u8> {
+pub fn json_value_to_bytes(value: &serde_json::Value) -> Vec<u8> {
   match value {
     serde_json::Value::Number(number) => {
       if let Some(unsigned) = number.as_u64() {
