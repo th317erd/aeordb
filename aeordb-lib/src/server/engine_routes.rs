@@ -33,7 +33,9 @@ pub async fn engine_store_file(
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
-  let file_record = match directory_ops.store_file_with_indexing(&path, &body, content_type) {
+  let file_record = match directory_ops.store_file_with_full_pipeline(
+    &path, &body, content_type, Some(&*state.plugin_manager)
+  ) {
     Ok(record) => record,
     Err(error) => {
       tracing::error!("Engine: failed to store file at '{}': {}", path, error);

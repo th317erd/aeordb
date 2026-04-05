@@ -185,6 +185,36 @@ impl PluginManager {
 
     result
   }
+
+  /// Invoke a WASM plugin with custom memory limits (for parser plugins).
+  pub fn invoke_wasm_plugin_with_limits(
+    &self,
+    path: &str,
+    request_bytes: &[u8],
+    memory_limit_bytes: usize,
+  ) -> Result<Vec<u8>, PluginManagerError> {
+    let record = self
+      .get_plugin(path)?
+      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+
+    if record.plugin_type != PluginType::Wasm {
+      return Err(PluginManagerError::InvalidPlugin(format!(
+        "plugin at '{}' is not a WASM plugin", path
+      )));
+    }
+
+    let runtime = WasmPluginRuntime::with_limits(
+      &record.wasm_bytes,
+      memory_limit_bytes,
+      1_000_000, // default fuel limit
+    ).map_err(|error| {
+      PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
+    })?;
+
+    runtime.call_handle(request_bytes).map_err(|error| {
+      PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
+    })
+  }
 }
 
 /// Errors specific to plugin management operations.

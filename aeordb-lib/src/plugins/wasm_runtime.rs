@@ -238,17 +238,50 @@ impl WasmPluginRuntime {
       )
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
-    // TODO: log_message(level_ptr, level_len, msg_ptr, msg_len)
+    // log_message(level_ptr, level_len, msg_ptr, msg_len)
+    // Reads level and message strings from guest memory and emits a tracing event.
     linker
       .func_wrap(
         "aeordb",
         "log_message",
-        |_caller: Caller<'_, HostState>,
-         _level_ptr: i32,
-         _level_len: i32,
-         _msg_ptr: i32,
-         _msg_len: i32| {
-          tracing::warn!("TODO: log_message host function called but not yet implemented");
+        |caller: Caller<'_, HostState>,
+         level_ptr: i32,
+         level_len: i32,
+         msg_ptr: i32,
+         msg_len: i32| {
+          let memory = match caller.data().memory {
+            Some(mem) => mem,
+            None => {
+              tracing::warn!("log_message called before memory was set");
+              return;
+            }
+          };
+
+          let level_str = {
+            let mut buf = vec![0u8; level_len as usize];
+            if memory.read(&caller, level_ptr as usize, &mut buf).is_ok() {
+              String::from_utf8_lossy(&buf).to_string()
+            } else {
+              "unknown".to_string()
+            }
+          };
+
+          let msg_str = {
+            let mut buf = vec![0u8; msg_len as usize];
+            if memory.read(&caller, msg_ptr as usize, &mut buf).is_ok() {
+              String::from_utf8_lossy(&buf).to_string()
+            } else {
+              "<unreadable>".to_string()
+            }
+          };
+
+          match level_str.to_lowercase().as_str() {
+            "error" => tracing::error!(target: "wasm_plugin", "{}", msg_str),
+            "warn" | "warning" => tracing::warn!(target: "wasm_plugin", "{}", msg_str),
+            "debug" => tracing::debug!(target: "wasm_plugin", "{}", msg_str),
+            "trace" => tracing::trace!(target: "wasm_plugin", "{}", msg_str),
+            _ => tracing::info!(target: "wasm_plugin", "{}", msg_str),
+          }
         },
       )
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;

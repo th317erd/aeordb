@@ -453,6 +453,54 @@ impl<'a> DirectoryOps<'a> {
     Ok(file_record)
   }
 
+  /// Store a file with the full indexing pipeline including parser plugin support.
+  pub fn store_file_with_full_pipeline(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    plugin_manager: Option<&crate::plugins::PluginManager>,
+  ) -> EngineResult<FileRecord> {
+    // Compression detection (same as store_file_with_indexing)
+    let normalized_for_config = normalize_path(path);
+    let parent_for_config = parent_path(&normalized_for_config).unwrap_or_else(|| "/".to_string());
+    let config_path_for_compression = if parent_for_config.ends_with('/') {
+      format!("{}.config/indexes.json", parent_for_config)
+    } else {
+      format!("{}/.config/indexes.json", parent_for_config)
+    };
+    let compression_algo = match self.read_file(&config_path_for_compression) {
+      Ok(config_data) => {
+        match PathIndexConfig::deserialize_with_compression(&config_data) {
+          Ok(Some(algo_str)) if algo_str == "zstd" => {
+            if should_compress(content_type, data.len()) {
+              CompressionAlgorithm::Zstd
+            } else {
+              CompressionAlgorithm::None
+            }
+          }
+          _ => CompressionAlgorithm::None,
+        }
+      }
+      Err(_) => CompressionAlgorithm::None,
+    };
+
+    let file_record = self.store_file_internal(path, data, content_type, compression_algo)?;
+
+    if is_system_path(path) {
+      return Ok(file_record);
+    }
+
+    // Use full pipeline with plugin manager
+    let pipeline = match plugin_manager {
+      Some(pm) => crate::engine::indexing_pipeline::IndexingPipeline::with_plugin_manager(self.engine, pm),
+      None => crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine),
+    };
+    let _ = pipeline.run(path, data, content_type);
+
+    Ok(file_record)
+  }
+
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);

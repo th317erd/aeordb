@@ -5,17 +5,23 @@ use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::source_resolver::resolve_source;
 use crate::engine::storage_engine::StorageEngine;
+use crate::plugins::PluginManager;
 
 /// Manages the indexing pipeline for stored files.
-/// Handles: config loading, JSON parsing, source path resolution, index updates.
-/// Parser plugin invocation and plugin mapper will be added in later tasks.
+/// Handles: config loading, JSON parsing, parser plugin invocation,
+/// content-type registry fallback, plugin mapper sources, and index updates.
 pub struct IndexingPipeline<'a> {
   engine: &'a StorageEngine,
+  plugin_manager: Option<&'a PluginManager>,
 }
 
 impl<'a> IndexingPipeline<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
-    IndexingPipeline { engine }
+    IndexingPipeline { engine, plugin_manager: None }
+  }
+
+  pub fn with_plugin_manager(engine: &'a StorageEngine, plugin_manager: &'a PluginManager) -> Self {
+    IndexingPipeline { engine, plugin_manager: Some(plugin_manager) }
   }
 
   /// Run the indexing pipeline for a stored file.
@@ -23,7 +29,7 @@ impl<'a> IndexingPipeline<'a> {
     &self,
     path: &str,
     data: &[u8],
-    _content_type: Option<&str>,
+    content_type: Option<&str>,
   ) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
@@ -33,15 +39,33 @@ impl<'a> IndexingPipeline<'a> {
       None => return Ok(()),
     };
 
-    // Get JSON data (for now, parse raw data as JSON — parser plugins added later)
-    let json_data = match self.parse_json(data) {
-      Ok(json) => json,
-      Err(e) => {
-        if config.logging {
-          self.log_system(&parent, "parsing.log",
-            &format!("JSON parse failed for {}: {}", path, e));
+    // Determine parser name: explicit config or content-type registry fallback
+    let parser_name = config.parser.clone()
+      .or_else(|| self.lookup_parser_by_content_type(content_type));
+
+    // Get JSON data
+    let json_data = if let Some(ref parser) = parser_name {
+      match self.invoke_parser(parser, data, path, content_type, &config) {
+        Ok(json) => json,
+        Err(e) => {
+          if config.logging {
+            self.log_system(&parent, "parsing.log",
+              &format!("parser '{}' failed for {}: {}", parser, path, e));
+          }
+          return Ok(());
         }
-        return Ok(()); // Don't fail the store
+      }
+    } else {
+      // No parser — try raw data as JSON
+      match self.parse_json(data) {
+        Ok(json) => json,
+        Err(e) => {
+          if config.logging {
+            self.log_system(&parent, "parsing.log",
+              &format!("JSON parse failed for {}: {}", path, e));
+          }
+          return Ok(()); // Don't fail the store
+        }
       }
     };
 
@@ -93,15 +117,32 @@ impl<'a> IndexingPipeline<'a> {
     parent: &str,
     index_manager: &IndexManager,
   ) -> EngineResult<()> {
-    // Resolve source path
-    let source_segments = field_config.source.as_ref()
-      .and_then(|v| v.as_array())
-      .cloned()
-      .unwrap_or_else(|| vec![serde_json::Value::String(field_config.name.clone())]);
-
-    let field_value = match resolve_source(json_data, &source_segments) {
-      Some(bytes) => bytes,
-      None => return Ok(()), // source not found, skip
+    // Resolve field value based on source type
+    let field_value = if let Some(source) = &field_config.source {
+      if let Some(obj) = source.as_object() {
+        // Plugin mapper: {"plugin": "name", "args": {...}}
+        if let Some(plugin_name) = obj.get("plugin").and_then(|v| v.as_str()) {
+          let args = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
+          self.invoke_mapper(plugin_name, json_data, &args)?
+        } else {
+          return Ok(()); // invalid source object
+        }
+      } else if let Some(segments) = source.as_array() {
+        // Array path resolution
+        match resolve_source(json_data, segments) {
+          Some(bytes) => bytes,
+          None => return Ok(()),
+        }
+      } else {
+        return Ok(()); // invalid source type
+      }
+    } else {
+      // Default: use field name as key
+      let default_source = vec![serde_json::Value::String(field_config.name.clone())];
+      match resolve_source(json_data, &default_source) {
+        Some(bytes) => bytes,
+        None => return Ok(()),
+      }
     };
 
     // Load or create index
@@ -117,6 +158,121 @@ impl<'a> IndexingPipeline<'a> {
     index_manager.save_index(parent, &index)?;
 
     Ok(())
+  }
+
+  /// Invoke a parser plugin to transform file bytes into JSON.
+  fn invoke_parser(
+    &self,
+    parser_name: &str,
+    data: &[u8],
+    path: &str,
+    content_type: Option<&str>,
+    config: &PathIndexConfig,
+  ) -> EngineResult<serde_json::Value> {
+    let pm = self.plugin_manager.ok_or_else(|| {
+      EngineError::NotFound("Plugin manager required for parser invocation".to_string())
+    })?;
+
+    let memory_limit = config.parser_memory_limit.as_deref()
+      .map(|s| Self::parse_memory_limit(s))
+      .unwrap_or(256 * 1024 * 1024); // 256MB default
+
+    let envelope = Self::build_parser_envelope(data, path, content_type);
+    let envelope_bytes = serde_json::to_vec(&envelope).map_err(|e| {
+      EngineError::JsonParseError(format!("Failed to serialize parser envelope: {}", e))
+    })?;
+
+    let output = pm.invoke_wasm_plugin_with_limits(parser_name, &envelope_bytes, memory_limit)
+      .map_err(|e| EngineError::NotFound(format!("Parser '{}' failed: {}", parser_name, e)))?;
+
+    // Validate output is JSON object
+    let text = std::str::from_utf8(&output).map_err(|_| {
+      EngineError::JsonParseError("Parser returned invalid UTF-8".to_string())
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(text).map_err(|e| {
+      EngineError::JsonParseError(format!("Parser returned invalid JSON: {}", e))
+    })?;
+    if !parsed.is_object() {
+      return Err(EngineError::JsonParseError("Parser must return a JSON object".to_string()));
+    }
+    Ok(parsed)
+  }
+
+  /// Invoke a mapper plugin to extract field values from JSON data.
+  fn invoke_mapper(
+    &self,
+    plugin_name: &str,
+    json_data: &serde_json::Value,
+    args: &serde_json::Value,
+  ) -> EngineResult<Vec<u8>> {
+    let pm = self.plugin_manager.ok_or_else(|| {
+      EngineError::NotFound("Plugin manager required for mapper".to_string())
+    })?;
+
+    let mapper_input = serde_json::json!({
+      "data": json_data,
+      "args": args,
+    });
+    let input_bytes = serde_json::to_vec(&mapper_input).map_err(|e| {
+      EngineError::JsonParseError(format!("Mapper input serialization failed: {}", e))
+    })?;
+
+    pm.invoke_wasm_plugin(plugin_name, &input_bytes)
+      .map_err(|e| EngineError::NotFound(format!("Mapper '{}' failed: {}", plugin_name, e)))
+  }
+
+  /// Look up a parser name from the global registry at /.config/parsers.json
+  fn lookup_parser_by_content_type(&self, content_type: Option<&str>) -> Option<String> {
+    let ct = content_type?;
+    // Don't look up JSON — it's handled natively
+    if ct == "application/json" {
+      return None;
+    }
+
+    let ops = DirectoryOps::new(self.engine);
+    match ops.read_file("/.config/parsers.json") {
+      Ok(data) => {
+        let text = std::str::from_utf8(&data).ok()?;
+        let registry: serde_json::Value = serde_json::from_str(text).ok()?;
+        registry.get(ct)
+          .and_then(|v| v.as_str())
+          .map(String::from)
+      }
+      Err(_) => None,
+    }
+  }
+
+  /// Parse a memory limit string like "256mb", "1gb", "512kb", or raw bytes.
+  fn parse_memory_limit(limit_str: &str) -> usize {
+    let s = limit_str.trim().to_lowercase();
+    if let Some(mb) = s.strip_suffix("mb") {
+      mb.trim().parse::<usize>().unwrap_or(256) * 1024 * 1024
+    } else if let Some(gb) = s.strip_suffix("gb") {
+      gb.trim().parse::<usize>().unwrap_or(1) * 1024 * 1024 * 1024
+    } else if let Some(kb) = s.strip_suffix("kb") {
+      kb.trim().parse::<usize>().unwrap_or(256 * 1024) * 1024
+    } else {
+      s.parse::<usize>().unwrap_or(256 * 1024 * 1024)
+    }
+  }
+
+  /// Build the parser envelope: base64-encoded data + metadata.
+  fn build_parser_envelope(
+    data: &[u8],
+    path: &str,
+    content_type: Option<&str>,
+  ) -> serde_json::Value {
+    use base64::Engine as _;
+    let filename = crate::engine::path_utils::file_name(path).unwrap_or_default();
+    serde_json::json!({
+      "data": base64::engine::general_purpose::STANDARD.encode(data),
+      "meta": {
+        "filename": filename,
+        "path": path,
+        "content_type": content_type.unwrap_or("application/octet-stream"),
+        "size": data.len(),
+      }
+    })
   }
 
   /// Write a log entry to .logs/system/{log_name}

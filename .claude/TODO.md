@@ -22,9 +22,9 @@
 ## In Progress: Document Parsers
 - [x] Tasks 1-2: Config rename (field_name→name, converter_type→type) + test migration
 - [x] Task 3: Source path resolution module — 39 tests
-- [ ] Task 4: Recursive guard for system directories
-- [ ] Task 5: Extract IndexingPipeline from store_file_with_indexing
-- [ ] Tasks 6-7: .logs/ system + source resolution integration
+- [x] Task 4: Recursive guard for system directories
+- [x] Task 5: IndexingPipeline extraction — 18 tests
+- [x] Tasks 6-7: .logs/ system + source resolution integration (folded into Task 5)
 - [ ] Tasks 8-9: Parser plugin invocation + content-type registry
 - [ ] Tasks 10-11: Plugin mapper + WASM log host function
 - [ ] Tasks 12-13: Wire PluginManager + E2E test
