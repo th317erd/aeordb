@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 1,310 (all passing)
+## Test Count: 1,398 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -67,3 +67,5 @@
 - `aeordb-lib/src/portal/` — frontend assets (index.html, app.mjs, dashboard.mjs, users.mjs)
 - `aeordb-lib/src/engine/fuzzy.rs` — extract_trigrams, trigram_similarity, damerau_levenshtein, jaro_winkler
 - `aeordb-lib/src/engine/phonetic.rs` — soundex, dmetaphone_primary, dmetaphone_alt
+- `aeordb-lib/src/engine/indexing_pipeline.rs` — IndexingPipeline, parser invocation, source resolution
+- `aeordb-lib/src/engine/source_resolver.rs` — resolve_source, walk_path (array-of-segments JSON traversal)

@@ -10,7 +10,7 @@
 
 - [x] HTTP Portal Dashboard (stats API + embedded UI) — 17 tests
 
-## Total: 1,310 tests, all passing
+## Total: 1,398 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
@@ -25,10 +25,11 @@
 - [x] Task 4: Recursive guard for system directories
 - [x] Task 5: IndexingPipeline extraction — 18 tests
 - [x] Tasks 6-7: .logs/ system + source resolution integration (folded into Task 5)
-- [ ] Tasks 8-9: Parser plugin invocation + content-type registry
-- [ ] Tasks 10-11: Plugin mapper + WASM log host function
-- [ ] Tasks 12-13: Wire PluginManager + E2E test
-- [ ] Tasks 14-15: HTTP cleanup + final docs
+- [x] Tasks 8-9: Parser plugin invocation + content-type registry — 31 tests
+- [x] Tasks 10-11: Plugin mapper + WASM log host function
+- [x] Task 12: Wire PluginManager (done in Tasks 8-11)
+- [ ] Task 13: E2E test with real WASM parser (deferred — needs compiled WASM binary)
+- [x] Tasks 14-15: HTTP verified + docs updated
 
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code
