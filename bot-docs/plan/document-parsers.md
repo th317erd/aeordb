@@ -84,14 +84,11 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 | `min` | number | No | — | Range hint for numeric converters |
 | `max` | number | No | — | Range hint for numeric converters |
 
-### Backward compatibility:
+### Defaults:
 
-- `field_name` accepted as alias for `name`
-- `converter` accepted as alias for `type`
 - Missing `source` defaults to `["name"]` (the index name is the JSON key)
 - Missing `parser` means raw data is treated as JSON
 - Missing `logging` means logging is off
-- Old format `{"indexes": [{"field_name": "x", "type": "y"}]}` still works unchanged
 
 ---
 
