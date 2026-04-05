@@ -683,7 +683,9 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  /// Load a file's FileRecord and raw data from its hash.
+  /// Load a file's FileRecord and data from its hash.
+  /// Tries the `.parsed/` cached version first (for files indexed via parser plugins),
+  /// falling back to the raw file content (for native JSON files).
   fn load_file_with_data(
     &self,
     file_hash: &[u8],
@@ -693,6 +695,14 @@ impl<'a> QueryEngine<'a> {
     match self.engine.get_entry(file_hash) {
       Ok(Some((_header, _key, value))) => {
         let file_record = FileRecord::deserialize(&value, hash_length)?;
+
+        // Try .parsed/ version first (for files indexed via parser plugins)
+        let parsed_data = self.try_load_parsed(&file_record.path, ops);
+        if let Some(data) = parsed_data {
+          return Ok(Some((file_record, data)));
+        }
+
+        // Fall back to raw file content (for native JSON files)
         match ops.read_file(&file_record.path) {
           Ok(data) => Ok(Some((file_record, data))),
           Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
@@ -702,6 +712,22 @@ impl<'a> QueryEngine<'a> {
       Ok(None) => Ok(None),
       Err(e) => Err(e),
     }
+  }
+
+  /// Try to load the cached parser output for a file.
+  /// Returns None if no parsed version exists (native JSON files).
+  fn try_load_parsed(&self, file_path: &str, ops: &DirectoryOps) -> Option<Vec<u8>> {
+    let normalized = crate::engine::path_utils::normalize_path(file_path);
+    let parent = crate::engine::path_utils::parent_path(&normalized)?;
+    let filename = crate::engine::path_utils::file_name(&normalized)?;
+
+    let parsed_path = if parent.ends_with('/') {
+      format!("{}.parsed/{}.json", parent, filename)
+    } else {
+      format!("{}/.parsed/{}.json", parent, filename)
+    };
+
+    ops.read_file(&parsed_path).ok()
   }
 
   /// Extract a field's string value from JSON file data.
