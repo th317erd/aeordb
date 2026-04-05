@@ -17,7 +17,7 @@ raw bytes → Parser (format → JSON) → Source Path Resolution (JSON → fiel
 - **Source Path Resolution**: Built-in JSON traversal using array-of-segments syntax. Extracts specific values from the parser's JSON output. Configurable per index.
 - **Indexing Pipeline**: Existing system (unchanged). Takes `(name, value_bytes)` pairs, runs through converters (string, trigram, phonetic, etc.), stores in NVT indexes.
 
-For JSON files, the parser step is skipped — raw data is already JSON.
+For JSON files with no explicit parser configured, the parser step is skipped — raw data is already JSON. Users can override this by setting `"parser"` in the config (e.g., for JSONC, JSON5, or custom comment-stripped JSON).
 
 Error handling: file is ALWAYS stored regardless of parse/map/index errors. Failures are logged to `{directory}/.logs/` if logging is enabled.
 
@@ -157,7 +157,7 @@ Referenced by name in the index config's `"parser"` field.
 
 ### Parser selection at store time:
 
-1. Check `"parser"` in directory's `.config/indexes.json` — explicit config wins
+1. Check `"parser"` in directory's `.config/indexes.json` — explicit config always wins, even for JSON files
 2. If no explicit parser, check content-type against a global parser registry at `/.config/parsers.json`:
    ```json
    {
@@ -167,7 +167,8 @@ Referenced by name in the index config's `"parser"` field.
      "audio/mpeg": "audio-metadata"
    }
    ```
-3. If content-type is `application/json` or no matching parser found — skip parsing, use raw data as JSON
+3. If no matching parser and content-type is `application/json` (or unset) — skip parsing, use raw data as JSON
+4. If no matching parser and content-type is not JSON — no parsing, no indexing (file is still stored)
 
 ### Parser failure modes:
 
@@ -407,9 +408,9 @@ Stored at `/.config/parsers.json`:
 
 Lookup: `content_type → parser_name`. If no match and content-type is not `application/json`, no parsing occurs.
 
-### `application/json` special case:
+### `application/json` default behavior:
 
-JSON files are never passed through a parser — the raw data IS the JSON. This is implicit and cannot be overridden by the registry (but can be overridden by explicit `"parser"` in the directory config if someone really wants to pre-process their JSON).
+When no parser is explicitly configured and the content-type is `application/json`, the raw data is used directly as JSON — no parser invocation. This is the default, not a hard rule. Users can override by setting `"parser"` in the directory config (e.g., for JSONC, JSON5, or any custom JSON variant that needs pre-processing).
 
 ---
 
