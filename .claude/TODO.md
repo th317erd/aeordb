@@ -10,7 +10,7 @@
 
 - [x] HTTP Portal Dashboard (stats API + embedded UI) — 17 tests
 
-## Total: 1,398 tests, all passing
+## Total: 1,441 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests

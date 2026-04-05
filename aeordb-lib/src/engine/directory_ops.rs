@@ -25,7 +25,7 @@ pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>>
 fn is_system_path(path: &str) -> bool {
   let normalized = normalize_path(path);
   let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
-  segments.iter().any(|s| *s == ".logs" || *s == ".indexes" || *s == ".config" || *s == ".parsed")
+  segments.iter().any(|s| *s == ".logs" || *s == ".indexes" || *s == ".config")
 }
 
 /// Compute the domain-prefixed hash for a directory path.
@@ -518,15 +518,6 @@ impl<'a> DirectoryOps<'a> {
         index_manager.save_index(&parent, &index)?;
       }
     }
-
-    // Clean up parsed cache if it exists
-    let filename = file_name(&normalized).unwrap_or_default();
-    let parsed_path = if parent.ends_with('/') {
-      format!("{}.parsed/{}.json", parent, filename)
-    } else {
-      format!("{}/.parsed/{}.json", parent, filename)
-    };
-    let _ = self.delete_file(&parsed_path); // ignore error if doesn't exist
 
     // Now delete the file itself
     self.delete_file(path)

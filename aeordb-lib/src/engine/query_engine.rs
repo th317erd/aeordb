@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -459,6 +459,7 @@ impl<'a> QueryEngine<'a> {
 
   /// Execute a query containing fuzzy operations with a recheck phase.
   /// Currently supports single-field fuzzy queries (the common case).
+  /// Values are loaded from the index's values map instead of re-reading files.
   fn execute_with_recheck(
     &self,
     query: &Query,
@@ -478,23 +479,36 @@ impl<'a> QueryEngine<'a> {
       }
     };
 
-    // Get candidates from the appropriate index
-    let candidates = self.get_fuzzy_candidates(field_query, &query.path, &index_manager)?;
+    // Get candidates AND values from the appropriate index
+    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(
+      field_query, &query.path, &index_manager,
+    )?;
 
-    // Recheck phase: load each candidate, extract field value, compute score
+    // Recheck phase: get field value from index, compute score
     let mut results = Vec::new();
 
     for file_hash in candidates {
-      // Load the FileRecord and file data
-      let (file_record, file_data) = match self.load_file_with_data(&file_hash, hash_length, &ops)? {
-        Some(pair) => pair,
-        None => continue,
+      // Try to get value from index first (works for parser-indexed files)
+      let field_value = if let Some(value_bytes) = candidate_values.get(&file_hash) {
+        String::from_utf8_lossy(value_bytes).to_string()
+      } else {
+        // Fallback: load file and parse as JSON (for native JSON files without values in index)
+        let (_file_record, file_data) = match self.load_file_with_data(&file_hash, hash_length, &ops)? {
+          Some(pair) => pair,
+          None => continue,
+        };
+        match self.extract_field_value(&file_data, &field_query.field_name) {
+          Some(v) => v,
+          None => continue,
+        }
       };
 
-      // Extract the field value from JSON
-      let field_value = match self.extract_field_value(&file_data, &field_query.field_name) {
-        Some(v) => v,
-        None => continue,
+      // Load the FileRecord for the result
+      let file_record = match self.engine.get_entry(&file_hash) {
+        Ok(Some((_header, _key, value))) => {
+          FileRecord::deserialize(&value, hash_length)?
+        }
+        _ => continue,
       };
 
       // Compute score based on operation
@@ -521,13 +535,15 @@ impl<'a> QueryEngine<'a> {
     Ok(results)
   }
 
-  /// Get candidate file hashes from the appropriate index for a fuzzy query.
-  fn get_fuzzy_candidates(
+  /// Get candidate file hashes and their stored values from the appropriate index for a fuzzy query.
+  fn get_fuzzy_candidates_with_values(
     &self,
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  ) -> EngineResult<(HashSet<Vec<u8>>, HashMap<Vec<u8>, Vec<u8>>)> {
+    let mut all_values: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
     match &field_query.operation {
       QueryOp::Contains(query_str) | QueryOp::Similar(query_str, _) | QueryOp::Fuzzy(query_str, _) => {
         // Use trigram index for candidates
@@ -578,7 +594,10 @@ impl<'a> QueryEngine<'a> {
           }
         }
 
-        Ok(candidates)
+        // Collect values from this index
+        all_values.extend(index.values.drain());
+
+        Ok((candidates, all_values))
       }
       QueryOp::Phonetic(query_str) => {
         // Use phonetic indexes for candidates
@@ -614,6 +633,9 @@ impl<'a> QueryEngine<'a> {
                 candidates.insert(entry.file_hash.clone());
               }
             }
+
+            // Collect values from each phonetic index
+            all_values.extend(index.values.drain());
           }
         }
 
@@ -624,7 +646,7 @@ impl<'a> QueryEngine<'a> {
           )));
         }
 
-        Ok(candidates)
+        Ok((candidates, all_values))
       }
       QueryOp::Match(query_str) => {
         let mut candidates = HashSet::new();
@@ -640,6 +662,7 @@ impl<'a> QueryEngine<'a> {
               candidates.insert(entry.file_hash.clone());
             }
           }
+          all_values.extend(index.values.drain());
         }
 
         // Try phonetic indexes (tokenize query on whitespace)
@@ -664,6 +687,7 @@ impl<'a> QueryEngine<'a> {
                 candidates.insert(entry.file_hash.clone());
               }
             }
+            all_values.extend(index.values.drain());
           }
         }
 
@@ -673,9 +697,10 @@ impl<'a> QueryEngine<'a> {
           for entry in entries {
             candidates.insert(entry.file_hash.clone());
           }
+          all_values.extend(index.values.drain());
         }
 
-        Ok(candidates)
+        Ok((candidates, all_values))
       }
       _ => {
         Err(EngineError::NotFound("Not a fuzzy operation".to_string()))
@@ -683,9 +708,8 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  /// Load a file's FileRecord and data from its hash.
-  /// Tries the `.parsed/` cached version first (for files indexed via parser plugins),
-  /// falling back to the raw file content (for native JSON files).
+  /// Load a file's FileRecord and raw data from its hash.
+  /// Used as a fallback for native JSON files whose values are not in the index.
   fn load_file_with_data(
     &self,
     file_hash: &[u8],
@@ -696,13 +720,6 @@ impl<'a> QueryEngine<'a> {
       Ok(Some((_header, _key, value))) => {
         let file_record = FileRecord::deserialize(&value, hash_length)?;
 
-        // Try .parsed/ version first (for files indexed via parser plugins)
-        let parsed_data = self.try_load_parsed(&file_record.path, ops);
-        if let Some(data) = parsed_data {
-          return Ok(Some((file_record, data)));
-        }
-
-        // Fall back to raw file content (for native JSON files)
         match ops.read_file(&file_record.path) {
           Ok(data) => Ok(Some((file_record, data))),
           Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
@@ -712,22 +729,6 @@ impl<'a> QueryEngine<'a> {
       Ok(None) => Ok(None),
       Err(e) => Err(e),
     }
-  }
-
-  /// Try to load the cached parser output for a file.
-  /// Returns None if no parsed version exists (native JSON files).
-  fn try_load_parsed(&self, file_path: &str, ops: &DirectoryOps) -> Option<Vec<u8>> {
-    let normalized = crate::engine::path_utils::normalize_path(file_path);
-    let parent = crate::engine::path_utils::parent_path(&normalized)?;
-    let filename = crate::engine::path_utils::file_name(&normalized)?;
-
-    let parsed_path = if parent.ends_with('/') {
-      format!("{}.parsed/{}.json", parent, filename)
-    } else {
-      format!("{}/.parsed/{}.json", parent, filename)
-    };
-
-    ops.read_file(&parsed_path).ok()
   }
 
   /// Extract a field's string value from JSON file data.

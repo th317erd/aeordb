@@ -279,5 +279,5 @@ name = "e2e_parser_spec"
 path = "spec/engine/e2e_parser_spec.rs"
 
 [[test]]
-name = "parsed_cache_spec"
-path = "spec/engine/parsed_cache_spec.rs"
+name = "index_values_spec"
+path = "spec/engine/index_values_spec.rs"

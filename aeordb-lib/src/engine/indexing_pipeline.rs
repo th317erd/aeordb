@@ -69,19 +69,6 @@ impl<'a> IndexingPipeline<'a> {
       }
     };
 
-    // If a parser was used, cache the parsed output for query recheck
-    if parser_name.is_some() {
-      let filename = crate::engine::path_utils::file_name(&normalized).unwrap_or_default();
-      let parsed_path = if parent.ends_with('/') {
-        format!("{}.parsed/{}.json", parent, filename)
-      } else {
-        format!("{}/.parsed/{}.json", parent, filename)
-      };
-      let ops = DirectoryOps::new(self.engine);
-      let parsed_bytes = serde_json::to_vec(&json_data).unwrap_or_default();
-      let _ = ops.store_file(&parsed_path, &parsed_bytes, Some("application/json"));
-    }
-
     let algo = self.engine.hash_algo();
     let file_key = crate::engine::directory_ops::file_path_hash(&normalized, &algo)?;
     let index_manager = IndexManager::new(self.engine);

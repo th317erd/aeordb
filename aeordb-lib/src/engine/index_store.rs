@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::nvt::NormalizedVectorTable;
@@ -20,6 +22,9 @@ pub struct FieldIndex {
   pub converter: Box<dyn ScalarConverter>,
   pub entries: Vec<IndexEntry>,
   pub nvt: NormalizedVectorTable,
+  /// Raw field values keyed by file_hash. Used by fuzzy query recheck
+  /// to avoid re-loading files from storage.
+  pub values: HashMap<Vec<u8>, Vec<u8>>,
   dirty: bool,
 }
 
@@ -34,6 +39,7 @@ impl FieldIndex {
       converter,
       entries: Vec::new(),
       nvt,
+      values: HashMap::new(),
       dirty: false,
     }
   }
@@ -56,6 +62,9 @@ impl FieldIndex {
   /// value as a separate index entry. For default converters this inserts one entry.
   /// For trigram/phonetic converters this inserts multiple entries.
   pub fn insert_expanded(&mut self, value: &[u8], file_hash: Vec<u8>) {
+    // Store the raw value for recheck lookups
+    self.values.insert(file_hash.clone(), value.to_vec());
+
     let expanded = self.converter.expand_value(value);
     for entry_value in expanded {
       let scalar = self.converter.to_scalar(&entry_value);
@@ -73,11 +82,17 @@ impl FieldIndex {
 
   /// Remove all entries for a given file hash. Marks NVT dirty.
   pub fn remove(&mut self, file_hash: &[u8]) {
+    self.values.remove(file_hash);
     let original_length = self.entries.len();
     self.entries.retain(|entry| entry.file_hash != file_hash);
     if self.entries.len() != original_length {
       self.dirty = true;
     }
+  }
+
+  /// Get the raw field value for a file hash (for fuzzy query recheck).
+  pub fn get_value(&self, file_hash: &[u8]) -> Option<&[u8]> {
+    self.values.get(file_hash).map(|v| v.as_slice())
   }
 
   /// Returns true if entries have changed since the last NVT rebuild.
@@ -316,11 +331,15 @@ impl FieldIndex {
     let nvt_data = self.nvt.serialize();
     let field_name_bytes = self.field_name.as_bytes();
 
+    let values_size: usize = self.values.iter()
+      .map(|(k, v)| k.len() + 4 + v.len())
+      .sum();
     let capacity = 2 + field_name_bytes.len()
       + 4 + converter_data.len()
       + 4 + nvt_data.len()
       + 4
-      + self.entries.len() * (8 + hash_length);
+      + self.entries.len() * (8 + hash_length)
+      + 4 + values_size;
     let mut buffer = Vec::with_capacity(capacity);
 
     // Field name
@@ -342,6 +361,14 @@ impl FieldIndex {
     for entry in &self.entries {
       buffer.extend_from_slice(&entry.scalar.to_le_bytes());
       buffer.extend_from_slice(&entry.file_hash);
+    }
+
+    // Values map: count (u32) + each: file_hash (hash_length bytes) + value_length (u32) + value bytes
+    buffer.extend_from_slice(&(self.values.len() as u32).to_le_bytes());
+    for (file_hash, value) in &self.values {
+      buffer.extend_from_slice(file_hash);
+      buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+      buffer.extend_from_slice(value);
     }
 
     buffer
@@ -463,6 +490,36 @@ impl FieldIndex {
       entries.push(IndexEntry { scalar, file_hash });
     }
 
+    // Read values map (backward compatible — empty if no data remains)
+    let mut values = HashMap::new();
+    if data.len() > cursor + 4 {
+      let value_count = u32::from_le_bytes([
+        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+      ]) as usize;
+      cursor += 4;
+
+      for _ in 0..value_count {
+        if data.len() < cursor + hash_length + 4 {
+          break; // truncated data, stop reading
+        }
+        let file_hash = data[cursor..cursor + hash_length].to_vec();
+        cursor += hash_length;
+
+        let value_length = u32::from_le_bytes([
+          data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+        ]) as usize;
+        cursor += 4;
+
+        if data.len() < cursor + value_length {
+          break;
+        }
+        let value = data[cursor..cursor + value_length].to_vec();
+        cursor += value_length;
+
+        values.insert(file_hash, value);
+      }
+    }
+
     // Use deserialized NVT if available (preserves bucket count), otherwise build fresh.
     let resolved_nvt = match nvt {
       Some(deserialized_nvt) => deserialized_nvt,
@@ -480,6 +537,7 @@ impl FieldIndex {
       converter,
       entries,
       nvt: resolved_nvt,
+      values,
       dirty: true,
     };
     index.rebuild_nvt();
