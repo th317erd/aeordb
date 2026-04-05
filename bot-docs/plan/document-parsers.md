@@ -131,10 +131,43 @@ An image parser might return:
 ### WASM interface:
 
 Same as existing plugin protocol:
-- Host writes raw file bytes at offset 0 in guest linear memory
+- Host writes request bytes at offset 0 in guest linear memory
 - Host calls exported `handle(request_ptr: i32, request_len: i32) -> i64`
 - Return value: `(response_ptr << 32) | response_len` (packed i64)
 - Response bytes must be valid UTF-8 JSON
+
+### Parser input format:
+
+The parser does NOT receive raw file bytes directly. It receives a JSON envelope containing the file data (base64-encoded) and metadata:
+
+```json
+{
+  "data": "<base64-encoded raw file bytes>",
+  "meta": {
+    "filename": "report.pdf",
+    "path": "/docs/reports/report.pdf",
+    "content_type": "application/pdf",
+    "size": 1048576,
+    "hash": "a1b2c3d4...",
+    "hash_algorithm": "blake3_256",
+    "created_at": 1775277415645,
+    "updated_at": 1775277415645
+  }
+}
+```
+
+| Meta field | Type | Description |
+|-----------|------|-------------|
+| `filename` | string | File name only (e.g., `"report.pdf"`) |
+| `path` | string | Full storage path (e.g., `"/docs/reports/report.pdf"`) |
+| `content_type` | string | MIME type (from HTTP header or detection) |
+| `size` | integer | Raw file size in bytes |
+| `hash` | string | Hex-encoded content hash |
+| `hash_algorithm` | string | Hash algorithm used (e.g., `"blake3_256"`) |
+| `created_at` | integer | Creation timestamp (ms since epoch) |
+| `updated_at` | integer | Last update timestamp (ms since epoch) |
+
+This gives parsers access to file metadata without needing host function callbacks. A parser can use the filename for naming conventions, the content_type for format hints, the size for allocation decisions, etc.
 
 ### Memory limit:
 
