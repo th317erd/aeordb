@@ -1,3 +1,5 @@
+pub mod parser;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -111,4 +113,5 @@ pub trait HostFunctions {
 /// Prelude module for convenient imports.
 pub mod prelude {
   pub use super::{HostFunctions, PluginError, PluginRequest, PluginResponse};
+  pub use super::parser::{ParserInput, FileMeta};
 }

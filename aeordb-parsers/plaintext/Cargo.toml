@@ -1,0 +1,11 @@
+[package]
+name = "aeordb-parser-plaintext"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aeordb-plugin-sdk = { path = "../../aeordb-plugin-sdk" }
+serde_json = "1"

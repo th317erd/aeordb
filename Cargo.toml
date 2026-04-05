@@ -3,6 +3,7 @@ members = [
     "aeordb-lib",
     "aeordb-cli",
     "aeordb-plugin-sdk",
+    "aeordb-parsers/plaintext",
 ]
 resolver = "2"
 

@@ -273,3 +273,7 @@ path = "spec/engine/pipeline_spec.rs"
 [[test]]
 name = "parser_integration_spec"
 path = "spec/engine/parser_integration_spec.rs"
+
+[[test]]
+name = "e2e_parser_spec"
+path = "spec/engine/e2e_parser_spec.rs"
