@@ -35,10 +35,10 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
   "parser_memory_limit": "256mb",
   "logging": true,
   "indexes": [
-    { "name": "title",   "source": ["metadata", "title"],  "converter_type": ["string", "trigram"] },
-    { "name": "author",  "source": ["metadata", "author"], "converter_type": ["phonetic", "trigram"] },
-    { "name": "content", "source": ["text"],                "converter_type": "trigram" },
-    { "name": "pages",   "source": ["metadata", "pages", "length"], "converter_type": "u64" }
+    { "name": "title",   "source": ["metadata", "title"],  "type": ["string", "trigram"] },
+    { "name": "author",  "source": ["metadata", "author"], "type": ["phonetic", "trigram"] },
+    { "name": "content", "source": ["text"],                "type": "trigram" },
+    { "name": "pages",   "source": ["metadata", "pages", "length"], "type": "u64" }
   ]
 }
 ```
@@ -48,8 +48,8 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 ```json
 {
   "indexes": [
-    { "name": "name", "converter_type": ["string", "trigram", "phonetic"] },
-    { "name": "age",  "converter_type": "u64" }
+    { "name": "name", "type": ["string", "trigram", "phonetic"] },
+    { "name": "age",  "type": "u64" }
   ]
 }
 ```
@@ -60,7 +60,7 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 {
   "parser": "pdf-extractor",
   "indexes": [
-    { "name": "summary", "source": "plugin:my-mapper", "converter_type": "trigram" }
+    { "name": "summary", "source": "plugin:my-mapper", "type": "trigram" }
   ]
 }
 ```
@@ -80,18 +80,18 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 |-------|------|----------|---------|-------------|
 | `name` | string | Yes | — | Index field name (opaque string, used in `.indexes/{name}.{strategy}.idx`) |
 | `source` | array or string | No | `["name"]` | Path segments into parser output, or `"plugin:name"` for plugin mapper |
-| `converter_type` | string or array | Yes | — | One or more converter strategies |
+| `type` | string or array | Yes | — | One or more converter strategies |
 | `min` | number | No | — | Range hint for numeric converters |
 | `max` | number | No | — | Range hint for numeric converters |
 
 ### Backward compatibility:
 
 - `field_name` accepted as alias for `name`
-- `converter` accepted as alias for `converter_type`
+- `converter` accepted as alias for `type`
 - Missing `source` defaults to `["name"]` (the index name is the JSON key)
 - Missing `parser` means raw data is treated as JSON
 - Missing `logging` means logging is off
-- Old format `{"indexes": [{"field_name": "x", "converter_type": "y"}]}` still works unchanged
+- Old format `{"indexes": [{"field_name": "x", "type": "y"}]}` still works unchanged
 
 ---
 
@@ -295,12 +295,12 @@ Writes to `.logs/*`, `.indexes/*`, and `.config/*` paths do NOT trigger the inde
 
 ---
 
-## 6. `converter_type` as String or Array
+## 6. `type` as String or Array
 
 A single index definition can specify multiple converter types:
 
 ```json
-{ "name": "title", "source": ["metadata", "title"], "converter_type": ["string", "trigram"] }
+{ "name": "title", "source": ["metadata", "title"], "type": ["string", "trigram"] }
 ```
 
 This expands internally to two `IndexFieldConfig` entries during deserialization — one per converter type. Both share the same `name` and `source`, producing `title.string.idx` and `title.trigram.idx`.
@@ -308,14 +308,14 @@ This expands internally to two `IndexFieldConfig` entries during deserialization
 Single string is also accepted (existing behavior):
 
 ```json
-{ "name": "title", "converter_type": "string" }
+{ "name": "title", "type": "string" }
 ```
 
 Deserialization handles both:
 
 ```rust
-// converter_type is either a JSON string or array of strings
-match item.get("converter_type") {
+// type is either a JSON string or array of strings
+match item.get("type") {
     Some(Value::String(s)) => vec![s.clone()],
     Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
     _ => return Err(...)
@@ -352,7 +352,7 @@ match item.get("converter_type") {
    a. Resolve source path against parsed JSON (or raw data if no parser)
    b. If source is "plugin:name", invoke mapper plugin instead
    c. On resolution failure: log if enabled, skip this field
-   d. Expand converter_type array into individual converters
+   d. Expand type array into individual converters
    e. For each converter: insert_expanded into index
    f. Save index
 ```
@@ -491,7 +491,7 @@ Passed when invoking a parser plugin, used by the `log` host function implementa
 ### Phase 1 — Pipeline Decomposition + Config Extension
 
 - Extract `IndexingPipeline` from `store_file_with_indexing`
-- Extend `IndexFieldConfig` with `name` (alias for `field_name`), `source`, array `converter_type`
+- Extend `IndexFieldConfig` with `name` (alias for `field_name`), `source`, array `type`
 - Extend `PathIndexConfig` with `parser`, `parser_memory_limit`, `logging`
 - Recursive guard for `.logs/*`, `.indexes/*`, `.config/*` paths
 - Backward compatibility for old config format
