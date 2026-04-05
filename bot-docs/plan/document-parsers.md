@@ -60,7 +60,8 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 {
   "parser": "pdf-extractor",
   "indexes": [
-    { "name": "summary", "source": "plugin:my-mapper", "type": "trigram" }
+    { "name": "summary",  "source": {"plugin": "my-mapper", "args": {"mode": "summary", "max_length": 500}}, "type": "trigram" },
+    { "name": "keywords", "source": {"plugin": "my-mapper", "args": {"mode": "keywords"}}, "type": "trigram" }
   ]
 }
 ```
@@ -79,7 +80,7 @@ Lives at `{directory}/.config/indexes.json` (extended from existing format).
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | Yes | — | Index field name (opaque string, used in `.indexes/{name}.{strategy}.idx`) |
-| `source` | array or string | No | `["name"]` | Path segments into parser output, or `"plugin:name"` for plugin mapper |
+| `source` | array or object | No | `["name"]` | Array: path segments into parser output. Object: `{"plugin": "name", "args": {...}}` for plugin mapper with optional arguments |
 | `type` | string or array | Yes | — | One or more converter strategies |
 | `min` | number | No | — | Range hint for numeric converters |
 | `max` | number | No | — | Range hint for numeric converters |
@@ -227,11 +228,20 @@ When `"source"` is omitted, it defaults to `["name"]` — the index's `name` fie
 
 ### Plugin mapper source:
 
-When `"source"` is a string starting with `"plugin:"`, the named plugin is invoked instead of path resolution:
+When `"source"` is an object with a `"plugin"` key, the named plugin is invoked instead of path resolution:
 
-- Input: the full parser JSON output (as bytes)
+```json
+{ "source": {"plugin": "my-mapper", "args": {"mode": "summary", "max_length": 500}} }
+```
+
+- Input: JSON object containing the full parser output and the args:
+  ```json
+  {"data": <parser_output>, "args": {"mode": "summary", "max_length": 500}}
+  ```
 - Output: the resolved field value (as bytes)
+- `"args"` is optional — omitted means no arguments passed
 - The plugin is a regular WASM/native plugin, invoked per field per file store
+- Same plugin can serve multiple fields with different args
 
 ---
 
@@ -347,7 +357,7 @@ match item.get("type") {
    d. On failure: log if enabled, skip indexing, return
 6. For each index config:
    a. Resolve source path against parsed JSON (or raw data if no parser)
-   b. If source is "plugin:name", invoke mapper plugin instead
+   b. If source is {"plugin": "name", "args": {...}}, invoke mapper plugin with args
    c. On resolution failure: log if enabled, skip this field
    d. Expand type array into individual converters
    e. For each converter: insert_expanded into index
