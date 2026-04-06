@@ -1,4 +1,5 @@
 pub mod admin_routes;
+pub mod backup_routes;
 pub mod engine_routes;
 pub mod portal_routes;
 pub mod responses;
@@ -156,6 +157,11 @@ pub fn create_app_with_all(
         .patch(admin_routes::update_group)
         .delete(admin_routes::delete_group),
     )
+    // Backup routes (export, diff, import, promote)
+    .route("/admin/export", post(backup_routes::export_backup))
+    .route("/admin/diff", post(backup_routes::diff_backup))
+    .route("/admin/import", post(backup_routes::import_backup))
+    .route("/admin/promote", post(backup_routes::promote_head))
     // Engine routes (custom storage engine)
     .route(
       "/engine/{*path}",

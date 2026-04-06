@@ -54,6 +54,24 @@ enum Commands {
     #[arg(long)]
     to: Option<String>,
   },
+  /// Import an export or patch .aeordb file into a target database
+  Import {
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    #[arg(short, long)]
+    file: String,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    promote: bool,
+  },
+  /// Promote a version hash to HEAD
+  Promote {
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    #[arg(long)]
+    hash: String,
+  },
 }
 
 #[tokio::main]
@@ -78,6 +96,12 @@ async fn main() {
     }
     Commands::Diff { database, output, from, to } => {
       commands::diff::run(&database, &output, &from, to.as_deref());
+    }
+    Commands::Import { database, file, force, promote } => {
+      commands::import_cmd::run(&database, &file, force, promote);
+    }
+    Commands::Promote { database, hash } => {
+      commands::promote::run(&database, &hash);
     }
   }
 }

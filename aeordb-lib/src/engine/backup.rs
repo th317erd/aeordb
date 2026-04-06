@@ -1,6 +1,7 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION};
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
 use crate::engine::entry_type::EntryType;
@@ -285,6 +286,142 @@ impl std::fmt::Display for PatchResult {
             self.directories_written,
             hex::encode(&self.from_hash),
             hex::encode(&self.to_hash),
+        )
+    }
+}
+
+/// Import an export or patch .aeordb file into a target database.
+///
+/// For full exports (backup_type=1): stores all entries into target.
+/// For patches (backup_type=2): verifies base version match, applies changes.
+///
+/// Does NOT automatically promote HEAD unless `promote` is true.
+pub fn import_backup(
+    target: &StorageEngine,
+    backup_path: &str,
+    force: bool,
+    promote: bool,
+) -> EngineResult<ImportResult> {
+    // Open backup for import (allows patches)
+    let backup = StorageEngine::open_for_import(backup_path)?;
+    let (backup_type, base_hash, target_hash) = backup.backup_info();
+
+    // For patches, verify base version
+    if backup_type == 2 && !force {
+        let current_head = target.head_hash()?;
+        if current_head != base_hash {
+            return Err(EngineError::NotFound(format!(
+                "Target database HEAD ({}) does not match patch base version ({}).\n\
+                 Use --force to apply anyway.",
+                hex::encode(&current_head),
+                hex::encode(&base_hash),
+            )));
+        }
+    }
+
+    let mut entries_imported = 0u64;
+    let mut chunks_imported = 0u64;
+    let mut files_imported = 0u64;
+    let mut dirs_imported = 0u64;
+    let mut deletions_applied = 0u64;
+
+    // Import chunks
+    let chunk_entries = backup.entries_by_type(KV_TYPE_CHUNK)?;
+    for (hash, value) in &chunk_entries {
+        if !target.has_entry(hash)? {
+            target.store_entry(EntryType::Chunk, hash, value)?;
+            chunks_imported += 1;
+            entries_imported += 1;
+        }
+    }
+
+    // Import FileRecords
+    let file_entries = backup.entries_by_type(KV_TYPE_FILE_RECORD)?;
+    for (hash, value) in &file_entries {
+        target.store_entry(EntryType::FileRecord, hash, value)?;
+        files_imported += 1;
+        entries_imported += 1;
+    }
+
+    // Import DirectoryIndexes
+    let dir_entries = backup.entries_by_type(KV_TYPE_DIRECTORY)?;
+    for (hash, value) in &dir_entries {
+        target.store_entry(EntryType::DirectoryIndex, hash, value)?;
+        dirs_imported += 1;
+        entries_imported += 1;
+    }
+
+    // Apply DeletionRecords (for patches)
+    if backup_type == 2 {
+        let deletion_entries = backup.entries_by_type(KV_TYPE_DELETION)?;
+        for (hash, _value) in &deletion_entries {
+            // Mark the entry as deleted in the target
+            if target.has_entry(hash)? {
+                let _ = target.mark_entry_deleted(hash);
+                deletions_applied += 1;
+                entries_imported += 1;
+            }
+        }
+    }
+
+    // Promote HEAD if requested
+    let head_promoted = if promote {
+        target.update_head(&target_hash)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(ImportResult {
+        backup_type,
+        entries_imported,
+        chunks_imported,
+        files_imported,
+        directories_imported: dirs_imported,
+        deletions_applied,
+        version_hash: target_hash.clone(),
+        head_promoted,
+    })
+}
+
+/// Result of an import operation.
+#[derive(Debug, Clone)]
+pub struct ImportResult {
+    pub backup_type: u8,
+    pub entries_imported: u64,
+    pub chunks_imported: u64,
+    pub files_imported: u64,
+    pub directories_imported: u64,
+    pub deletions_applied: u64,
+    pub version_hash: Vec<u8>,
+    pub head_promoted: bool,
+}
+
+impl std::fmt::Display for ImportResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let type_name = match self.backup_type {
+            1 => "Full export",
+            2 => "Patch",
+            _ => "Unknown",
+        };
+        write!(
+            f,
+            "{} imported.\n  Entries: {}\n  Chunks: {}\n  Files: {}\n  Directories: {}\n  Deletions: {}\n  Version: {}\n\n  HEAD {}",
+            type_name,
+            self.entries_imported,
+            self.chunks_imported,
+            self.files_imported,
+            self.directories_imported,
+            self.deletions_applied,
+            hex::encode(&self.version_hash),
+            if self.head_promoted {
+                "has been promoted.".to_string()
+            } else {
+                format!(
+                    "has NOT been changed.\n  To promote: aeordb promote --hash {}",
+                    hex::encode(&self.version_hash)
+                )
+            },
         )
     }
 }

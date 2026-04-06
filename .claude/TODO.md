@@ -19,7 +19,7 @@
 - [ ] Phase 6: HTTP API endpoints
 - [ ] Phase 7: E2E verification
 
-## Total: 1,441 tests, all passing
+## Total: 1,550 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
