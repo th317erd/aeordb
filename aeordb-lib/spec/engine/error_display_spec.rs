@@ -131,6 +131,14 @@ fn test_display_json_parse_error() {
   assert_eq!(display_text, "JSON parse error: unexpected token at line 3");
 }
 
+#[test]
+fn test_display_patch_database() {
+  let engine_error = EngineError::PatchDatabase("cannot open patch as standalone".to_string());
+  let display_text = format!("{}", engine_error);
+
+  assert_eq!(display_text, "Patch database: cannot open patch as standalone");
+}
+
 // --- Additional coverage for std::error::Error impl ---
 
 #[test]
@@ -163,6 +171,7 @@ fn test_error_source_non_io_variants_return_none() {
     EngineError::JsonParseError("x".into()),
     EngineError::ReservedUserId,
     EngineError::UnsafeQueryField("x".into()),
+    EngineError::PatchDatabase("x".into()),
   ];
 
   for variant in &variants {

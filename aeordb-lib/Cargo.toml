@@ -281,3 +281,11 @@ path = "spec/engine/e2e_parser_spec.rs"
 [[test]]
 name = "index_values_spec"
 path = "spec/engine/index_values_spec.rs"
+
+[[test]]
+name = "backup_header_spec"
+path = "spec/engine/backup_header_spec.rs"
+
+[[test]]
+name = "tree_walker_spec"
+path = "spec/engine/tree_walker_spec.rs"

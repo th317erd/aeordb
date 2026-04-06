@@ -72,8 +72,8 @@ impl StorageEngine {
     })
   }
 
-  /// Open an existing database file, rebuilding the KV store from a file scan.
-  pub fn open(path: &str) -> EngineResult<Self> {
+  /// Internal open logic shared by `open` and `open_for_import`.
+  fn open_internal(path: &str) -> EngineResult<Self> {
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
     let mut kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
@@ -110,6 +110,34 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
+  }
+
+  /// Open an existing database file, rebuilding the KV store from a file scan.
+  /// Refuses to open patch databases (backup_type > 1).
+  pub fn open(path: &str) -> EngineResult<Self> {
+    let engine = Self::open_internal(path)?;
+
+    // Guard: refuse to open patch databases as normal databases
+    let header = engine.writer.read().expect("writer lock").file_header().clone();
+    if header.backup_type > 1 {
+      let base = hex::encode(&header.base_hash);
+      let target = hex::encode(&header.target_hash);
+      return Err(EngineError::PatchDatabase(format!(
+        "This is a patch export and cannot be used as a standalone database.\n\n\
+         Base version:   {}\n\
+         Target version: {}\n\n\
+         To apply this patch, import it into a database at the base version:\n\
+         aeordb import --database <your.aeordb> --file {}",
+        base, target, path
+      )));
+    }
+
+    Ok(engine)
+  }
+
+  /// Open a database file for import purposes, allowing patch databases.
+  pub fn open_for_import(path: &str) -> EngineResult<Self> {
+    Self::open_internal(path)
   }
 
   /// Store an entry: append to file, register in KV store.
@@ -268,6 +296,25 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
     Ok(writer.file_header().head_hash.clone())
+  }
+
+  /// Get the backup metadata from the file header.
+  pub fn backup_info(&self) -> (u8, Vec<u8>, Vec<u8>) {
+    let writer = self.writer.read().expect("writer lock");
+    let fh = writer.file_header();
+    (fh.backup_type, fh.base_hash.clone(), fh.target_hash.clone())
+  }
+
+  /// Update the backup metadata in the file header.
+  pub fn set_backup_info(&self, backup_type: u8, base_hash: &[u8], target_hash: &[u8]) -> EngineResult<()> {
+    let mut writer = self.writer.write()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    let mut header = writer.file_header().clone();
+    header.backup_type = backup_type;
+    header.base_hash = base_hash.to_vec();
+    header.target_hash = target_hash.to_vec();
+    writer.update_file_header(&header)?;
+    Ok(())
   }
 
   /// Store an entry with an explicit KV type (for versioning entries

@@ -21,6 +21,9 @@ pub struct FileHeader {
   pub resize_in_progress: bool,
   pub buffer_kvs_offset: u64,
   pub buffer_nvt_offset: u64,
+  pub backup_type: u8,        // 0=normal, 1=full export, 2=patch
+  pub base_hash: Vec<u8>,     // source version hash
+  pub target_hash: Vec<u8>,   // destination version hash
 }
 
 impl FileHeader {
@@ -48,6 +51,9 @@ impl FileHeader {
       resize_in_progress: false,
       buffer_kvs_offset: 0,
       buffer_nvt_offset: 0,
+      backup_type: 0,
+      base_hash: vec![0u8; hash_length],
+      target_hash: vec![0u8; hash_length],
     }
   }
 
@@ -119,7 +125,21 @@ impl FileHeader {
 
     // buffer_nvt_offset: 8 bytes
     buffer[offset..offset + 8].copy_from_slice(&self.buffer_nvt_offset.to_le_bytes());
-    // remaining bytes are already zeroed (reserved)
+    offset += 8;
+
+    // backup_type: 1 byte
+    buffer[offset] = self.backup_type;
+    offset += 1;
+
+    // base_hash: hash_length bytes
+    let copy_len = hash_length.min(self.base_hash.len());
+    buffer[offset..offset + copy_len].copy_from_slice(&self.base_hash[..copy_len]);
+    offset += hash_length;
+
+    // target_hash: hash_length bytes
+    let copy_len = hash_length.min(self.target_hash.len());
+    buffer[offset..offset + copy_len].copy_from_slice(&self.target_hash[..copy_len]);
+    let _ = offset + hash_length; // suppress unused warning
 
     buffer
   }
@@ -194,7 +214,19 @@ impl FileHeader {
 
     // buffer_nvt_offset: 8 bytes
     let buffer_nvt_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    let _ = offset + 8; // suppress unused warning
+    offset += 8;
+
+    // backup_type: 1 byte
+    let backup_type = bytes[offset];
+    offset += 1;
+
+    // base_hash: hash_length bytes
+    let base_hash = bytes[offset..offset + hash_length].to_vec();
+    offset += hash_length;
+
+    // target_hash: hash_length bytes
+    let target_hash = bytes[offset..offset + hash_length].to_vec();
+    let _ = offset + hash_length; // suppress unused warning
 
     Ok(FileHeader {
       header_version,
@@ -212,6 +244,9 @@ impl FileHeader {
       resize_in_progress,
       buffer_kvs_offset,
       buffer_nvt_offset,
+      backup_type,
+      base_hash,
+      target_hash,
     })
   }
 }
