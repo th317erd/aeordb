@@ -1,5 +1,5 @@
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::directory_ops::file_path_hash;
+use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
@@ -86,10 +86,19 @@ fn write_tree_to_engine(
         }
     }
 
-    // Write DirectoryIndexes
-    for (_path, (dir_hash, _data)) in &tree.directories {
+    // Write DirectoryIndexes at both content-hash and path-hash keys.
+    // The tree walker stores content hashes as dir_hash, but list_directory
+    // looks up by path hash, so both must be present in the exported database.
+    let algo = output.hash_algo();
+    for (path, (dir_hash, _data)) in &tree.directories {
         if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
+            // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            // Also write at path-hash key (for list_directory lookups)
+            let path_key = directory_path_hash(path, &algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
+            }
             dirs_written += 1;
         }
     }
@@ -191,10 +200,15 @@ pub fn create_patch(
         files_deleted += 1;
     }
 
-    // Write changed DirectoryIndexes
-    for (_path, (dir_hash, _data)) in &diff.changed_directories {
+    // Write changed DirectoryIndexes at both content-hash and path-hash keys
+    let algo = output.hash_algo();
+    for (path, (dir_hash, _data)) in &diff.changed_directories {
         if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
             output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            let path_key = directory_path_hash(path, &algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
+            }
             dirs_written += 1;
         }
     }

@@ -297,3 +297,7 @@ path = "spec/engine/backup_export_spec.rs"
 [[test]]
 name = "backup_diff_spec"
 path = "spec/engine/backup_diff_spec.rs"
+
+[[test]]
+name = "content_hash_spec"
+path = "spec/engine/content_hash_spec.rs"

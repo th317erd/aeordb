@@ -29,8 +29,18 @@ fn is_system_path(path: &str) -> bool {
 }
 
 /// Compute the domain-prefixed hash for a directory path.
-fn directory_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+pub fn directory_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   algo.compute_hash(format!("dir:{}", path).as_bytes())
+}
+
+/// Compute a content-addressed hash for directory data.
+/// Uses the "dirc:" domain prefix + the actual serialized content,
+/// distinct from the path-based "dir:" prefix to avoid collisions.
+pub fn directory_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+  let mut input = Vec::with_capacity(5 + data.len());
+  input.extend_from_slice(b"dirc:");
+  input.extend_from_slice(data);
+  algo.compute_hash(&input)
 }
 
 /// Compute the domain-prefixed hash for a chunk.
@@ -327,10 +337,18 @@ impl<'a> DirectoryOps<'a> {
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
 
-    // Store empty directory index
+    // Store empty directory index at path-based key
     self.engine.store_entry(
       EntryType::DirectoryIndex,
       &dir_key,
+      &[],
+    )?;
+
+    // Also store at content-addressed key for immutable versioning
+    let content_key = directory_content_hash(&[], &algo)?;
+    self.engine.store_entry(
+      EntryType::DirectoryIndex,
+      &content_key,
       &[],
     )?;
 
@@ -338,7 +356,7 @@ impl<'a> DirectoryOps<'a> {
     if normalized != "/" {
       let child = ChildEntry {
         entry_type: EntryType::DirectoryIndex.to_u8(),
-        hash: dir_key,
+        hash: content_key,  // content hash for tree walker
         total_size: 0,
         created_at: chrono::Utc::now().timestamp_millis(),
         updated_at: chrono::Utc::now().timestamp_millis(),
@@ -396,8 +414,16 @@ impl<'a> DirectoryOps<'a> {
       &[],
     )?;
 
-    // Update HEAD to point to root directory hash
-    self.engine.update_head(&dir_key)?;
+    // Also store at content-addressed key for immutable versioning
+    let content_key = directory_content_hash(&[], &algo)?;
+    self.engine.store_entry(
+      EntryType::DirectoryIndex,
+      &content_key,
+      &[],
+    )?;
+
+    // Update HEAD to point to content hash (immutable) instead of path hash
+    self.engine.update_head(&content_key)?;
 
     Ok(())
   }
@@ -560,7 +586,7 @@ impl<'a> DirectoryOps<'a> {
       children.push(child_entry);
     }
 
-    // Serialize and store the updated directory
+    // Serialize and store the updated directory at path-based key
     let dir_value = serialize_child_entries(&children, hash_length);
     self.engine.store_entry(
       EntryType::DirectoryIndex,
@@ -568,16 +594,24 @@ impl<'a> DirectoryOps<'a> {
       &dir_value,
     )?;
 
-    // If this is root "/", update HEAD
+    // Also store at content-addressed key for immutable versioning
+    let content_key = directory_content_hash(&dir_value, &algo)?;
+    self.engine.store_entry(
+      EntryType::DirectoryIndex,
+      &content_key,
+      &dir_value,
+    )?;
+
+    // If this is root "/", update HEAD to content hash
     if parent == "/" {
-      self.engine.update_head(&dir_key)?;
+      self.engine.update_head(&content_key)?;
       return Ok(());
     }
 
-    // Recurse: update grandparent with this directory as child
+    // Recurse: update grandparent with this directory as child (using content hash)
     let parent_child = ChildEntry {
       entry_type: EntryType::DirectoryIndex.to_u8(),
-      hash: dir_key,
+      hash: content_key,  // content hash for tree walker
       total_size: dir_value.len() as u64,
       created_at: chrono::Utc::now().timestamp_millis(),
       updated_at: chrono::Utc::now().timestamp_millis(),
@@ -615,7 +649,7 @@ impl<'a> DirectoryOps<'a> {
     // Remove the child
     children.retain(|c| c.name != child_name);
 
-    // Re-store directory
+    // Re-store directory at path-based key
     let dir_value = serialize_child_entries(&children, hash_length);
     self.engine.store_entry(
       EntryType::DirectoryIndex,
@@ -623,15 +657,23 @@ impl<'a> DirectoryOps<'a> {
       &dir_value,
     )?;
 
+    // Also store at content-addressed key for immutable versioning
+    let content_key = directory_content_hash(&dir_value, &algo)?;
+    self.engine.store_entry(
+      EntryType::DirectoryIndex,
+      &content_key,
+      &dir_value,
+    )?;
+
     // Propagate up
     if parent == "/" {
-      self.engine.update_head(&dir_key)?;
+      self.engine.update_head(&content_key)?;
       return Ok(());
     }
 
     let parent_child = ChildEntry {
       entry_type: EntryType::DirectoryIndex.to_u8(),
-      hash: dir_key,
+      hash: content_key,  // content hash for tree walker
       total_size: dir_value.len() as u64,
       created_at: chrono::Utc::now().timestamp_millis(),
       updated_at: chrono::Utc::now().timestamp_millis(),

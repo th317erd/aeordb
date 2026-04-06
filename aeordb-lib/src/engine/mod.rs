@@ -77,7 +77,7 @@ pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
 pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::StorageEngine;
-pub use directory_ops::{DirectoryOps, EngineFileStream};
+pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash};
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
 pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
