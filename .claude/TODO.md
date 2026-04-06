@@ -15,11 +15,12 @@
 - [x] Phase 2: Tree walker utility — 21 tests
 - [x] Phase 3: Export operation + CLI — 17 tests
 - [x] Phase 4: Diff/Patch operation + CLI — 20 tests
-- [ ] Phase 5: Import operation + CLI + promote
-- [ ] Phase 6: HTTP API endpoints
-- [ ] Phase 7: E2E verification
+- [x] Phase 5: Import operation + CLI + promote — 18 tests
+- [x] Phase 6: HTTP API endpoints — 13 tests
+- [x] Fix: dual-key directory storage for immutable snapshots — 25 tests
+- [ ] Phase 7: E2E verification (manual testing)
 
-## Total: 1,550 tests, all passing
+## Total: 1,581 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests

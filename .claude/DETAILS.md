@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 1,441 (all passing)
+## Test Count: 1,581 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -69,3 +69,6 @@
 - `aeordb-lib/src/engine/phonetic.rs` — soundex, dmetaphone_primary, dmetaphone_alt
 - `aeordb-lib/src/engine/indexing_pipeline.rs` — IndexingPipeline, parser invocation, source resolution
 - `aeordb-lib/src/engine/source_resolver.rs` — resolve_source, walk_path (array-of-segments JSON traversal)
+- `aeordb-lib/src/engine/backup.rs` — export_version, create_patch, import_backup
+- `aeordb-lib/src/engine/tree_walker.rs` — walk_version_tree, diff_trees, VersionTree, TreeDiff
+- `aeordb-lib/src/server/backup_routes.rs` — HTTP export/diff/import/promote endpoints
