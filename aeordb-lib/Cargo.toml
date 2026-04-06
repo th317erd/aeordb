@@ -289,3 +289,11 @@ path = "spec/engine/backup_header_spec.rs"
 [[test]]
 name = "tree_walker_spec"
 path = "spec/engine/tree_walker_spec.rs"
+
+[[test]]
+name = "backup_export_spec"
+path = "spec/engine/backup_export_spec.rs"
+
+[[test]]
+name = "backup_diff_spec"
+path = "spec/engine/backup_diff_spec.rs"

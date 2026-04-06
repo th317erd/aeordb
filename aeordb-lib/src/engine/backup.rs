@@ -1,0 +1,276 @@
+use crate::engine::deletion_record::DeletionRecord;
+use crate::engine::directory_ops::file_path_hash;
+use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::storage_engine::StorageEngine;
+use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
+use crate::engine::entry_type::EntryType;
+use crate::engine::version_manager::VersionManager;
+
+/// Export a complete version as a clean, self-contained .aeordb file.
+///
+/// The output database contains only live entries at the given version:
+/// no voids, no deletion records, no stale overwrites, no history.
+/// backup_type = 1 (full export), base_hash = target_hash = version_hash.
+pub fn export_version(
+    source: &StorageEngine,
+    version_hash: &[u8],
+    output_path: &str,
+) -> EngineResult<ExportResult> {
+    // Walk the source tree to collect all live entries
+    let tree = walk_version_tree(source, version_hash)?;
+
+    // Create output database
+    let output = StorageEngine::create(output_path)?;
+
+    // Set backup metadata: type=1 (full export), base=target=version_hash
+    output.set_backup_info(1, version_hash, version_hash)?;
+
+    let stats = write_tree_to_engine(&tree, source, &output)?;
+
+    // Set HEAD to the version hash
+    output.update_head(version_hash)?;
+
+    Ok(ExportResult {
+        chunks_written: stats.0,
+        files_written: stats.1,
+        directories_written: stats.2,
+        version_hash: version_hash.to_vec(),
+    })
+}
+
+/// Export HEAD or a named snapshot.
+pub fn export_snapshot(
+    source: &StorageEngine,
+    snapshot_name: Option<&str>,
+    output_path: &str,
+) -> EngineResult<ExportResult> {
+    let version_hash = match snapshot_name {
+        Some(name) => {
+            let vm = VersionManager::new(source);
+            let snapshots = vm.list_snapshots()?;
+            let snap = snapshots.iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| EngineError::NotFound(format!("Snapshot '{}' not found", name)))?;
+            snap.root_hash.clone()
+        }
+        None => source.head_hash()?,
+    };
+
+    export_version(source, &version_hash, output_path)
+}
+
+/// Write all entries from a VersionTree into an output engine.
+/// Returns (chunks_written, files_written, directories_written).
+fn write_tree_to_engine(
+    tree: &VersionTree,
+    source: &StorageEngine,
+    output: &StorageEngine,
+) -> EngineResult<(u64, u64, u64)> {
+    let mut chunks_written = 0u64;
+    let mut files_written = 0u64;
+    let mut dirs_written = 0u64;
+
+    // Write chunks first (referenced by FileRecords)
+    for chunk_hash in &tree.chunks {
+        if let Some((_header, key, value)) = source.get_entry(chunk_hash)? {
+            output.store_entry(EntryType::Chunk, &key, &value)?;
+            chunks_written += 1;
+        }
+    }
+
+    // Write FileRecords
+    for (_path, (file_hash, _record)) in &tree.files {
+        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+            output.store_entry(EntryType::FileRecord, &key, &value)?;
+            files_written += 1;
+        }
+    }
+
+    // Write DirectoryIndexes
+    for (_path, (dir_hash, _data)) in &tree.directories {
+        if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
+            output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            dirs_written += 1;
+        }
+    }
+
+    Ok((chunks_written, files_written, dirs_written))
+}
+
+/// Result of an export operation.
+#[derive(Debug, Clone)]
+pub struct ExportResult {
+    pub chunks_written: u64,
+    pub files_written: u64,
+    pub directories_written: u64,
+    pub version_hash: Vec<u8>,
+}
+
+impl std::fmt::Display for ExportResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Export complete.\n  Files: {}\n  Chunks: {}\n  Directories: {}\n  Version: {}",
+            self.files_written,
+            self.chunks_written,
+            self.directories_written,
+            hex::encode(&self.version_hash),
+        )
+    }
+}
+
+/// Create a patch .aeordb containing only the changeset between two versions.
+///
+/// The output contains: new/changed chunks, updated FileRecords, updated
+/// DirectoryIndexes, and DeletionRecords for removed files.
+/// backup_type = 2 (patch), base_hash = from_hash, target_hash = to_hash.
+///
+/// Only chunks that don't exist in the base version are included.
+pub fn create_patch(
+    source: &StorageEngine,
+    from_hash: &[u8],
+    to_hash: &[u8],
+    output_path: &str,
+) -> EngineResult<PatchResult> {
+    // Walk both trees
+    let base_tree = walk_version_tree(source, from_hash)?;
+    let target_tree = walk_version_tree(source, to_hash)?;
+
+    // Compute diff
+    let diff = diff_trees(&base_tree, &target_tree);
+
+    if diff.is_empty() {
+        return Err(EngineError::NotFound(
+            "No changes between the two versions".to_string(),
+        ));
+    }
+
+    // Create output database
+    let output = StorageEngine::create(output_path)?;
+
+    // Set backup metadata
+    output.set_backup_info(2, from_hash, to_hash)?;
+
+    let mut chunks_written = 0u64;
+    let mut files_added = 0u64;
+    let mut files_modified = 0u64;
+    let mut files_deleted = 0u64;
+    let mut dirs_written = 0u64;
+
+    // Write only NEW chunks (chunks in target but not in base)
+    for chunk_hash in &diff.new_chunks {
+        if let Some((_header, key, value)) = source.get_entry(chunk_hash)? {
+            output.store_entry(EntryType::Chunk, &key, &value)?;
+            chunks_written += 1;
+        }
+    }
+
+    // Write added FileRecords
+    for (_path, (file_hash, _record)) in &diff.added {
+        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+            output.store_entry(EntryType::FileRecord, &key, &value)?;
+            files_added += 1;
+        }
+    }
+
+    // Write modified FileRecords
+    for (_path, (file_hash, _record)) in &diff.modified {
+        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+            output.store_entry(EntryType::FileRecord, &key, &value)?;
+            files_modified += 1;
+        }
+    }
+
+    // Write DeletionRecords for deleted files
+    for path in &diff.deleted {
+        let algo = source.hash_algo();
+        let deletion_record = DeletionRecord::new(path.clone(), Some("patch-deletion".to_string()));
+        let deletion_data = deletion_record.serialize();
+        let deletion_key = file_path_hash(path, &algo)?;
+        output.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_data)?;
+        files_deleted += 1;
+    }
+
+    // Write changed DirectoryIndexes
+    for (_path, (dir_hash, _data)) in &diff.changed_directories {
+        if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
+            output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            dirs_written += 1;
+        }
+    }
+
+    // Set HEAD to the target hash
+    output.update_head(to_hash)?;
+
+    Ok(PatchResult {
+        chunks_written,
+        files_added,
+        files_modified,
+        files_deleted,
+        directories_written: dirs_written,
+        from_hash: from_hash.to_vec(),
+        to_hash: to_hash.to_vec(),
+    })
+}
+
+/// Create a patch from a named snapshot (or HEAD) to another.
+pub fn create_patch_from_snapshots(
+    source: &StorageEngine,
+    from_snapshot: &str,
+    to_snapshot: Option<&str>,
+    output_path: &str,
+) -> EngineResult<PatchResult> {
+    let vm = VersionManager::new(source);
+    let snapshots = vm.list_snapshots()?;
+
+    let from_hash = snapshots
+        .iter()
+        .find(|s| s.name == from_snapshot)
+        .map(|s| s.root_hash.clone())
+        .ok_or_else(|| {
+            EngineError::NotFound(format!("Snapshot '{}' not found", from_snapshot))
+        })?;
+
+    let to_hash = match to_snapshot {
+        Some(name) => {
+            snapshots
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.root_hash.clone())
+                .ok_or_else(|| {
+                    EngineError::NotFound(format!("Snapshot '{}' not found", name))
+                })?
+        }
+        None => source.head_hash()?,
+    };
+
+    create_patch(source, &from_hash, &to_hash, output_path)
+}
+
+/// Result of a patch/diff operation.
+#[derive(Debug, Clone)]
+pub struct PatchResult {
+    pub chunks_written: u64,
+    pub files_added: u64,
+    pub files_modified: u64,
+    pub files_deleted: u64,
+    pub directories_written: u64,
+    pub from_hash: Vec<u8>,
+    pub to_hash: Vec<u8>,
+}
+
+impl std::fmt::Display for PatchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Patch created.\n  Files added: {}\n  Files modified: {}\n  Files deleted: {}\n  Chunks: {}\n  Directories: {}\n  From: {}\n  To:   {}",
+            self.files_added,
+            self.files_modified,
+            self.files_deleted,
+            self.chunks_written,
+            self.directories_written,
+            hex::encode(&self.from_hash),
+            hex::encode(&self.to_hash),
+        )
+    }
+}

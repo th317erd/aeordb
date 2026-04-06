@@ -10,6 +10,15 @@
 
 - [x] HTTP Portal Dashboard (stats API + embedded UI) — 17 tests
 
+## In Progress: Version Export, Patch & Import
+- [x] Phase 1: File header extension — 21 tests
+- [x] Phase 2: Tree walker utility — 21 tests
+- [ ] Phase 3: Export operation + CLI
+- [ ] Phase 4: Diff/Patch operation + CLI
+- [ ] Phase 5: Import operation + CLI + promote
+- [ ] Phase 6: HTTP API endpoints
+- [ ] Phase 7: E2E verification
+
 ## Total: 1,441 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching

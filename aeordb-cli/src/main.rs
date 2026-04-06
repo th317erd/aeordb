@@ -32,6 +32,28 @@ enum Commands {
     #[arg(long)]
     force: bool,
   },
+  /// Export a version as a self-contained .aeordb file
+  Export {
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    #[arg(short, long)]
+    output: String,
+    #[arg(short, long)]
+    snapshot: Option<String>,
+    #[arg(long)]
+    hash: Option<String>,
+  },
+  /// Create a patch .aeordb containing only the changeset between two versions
+  Diff {
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    #[arg(short, long)]
+    output: String,
+    #[arg(long)]
+    from: String,
+    #[arg(long)]
+    to: Option<String>,
+  },
 }
 
 #[tokio::main]
@@ -50,6 +72,12 @@ async fn main() {
     }
     Commands::EmergencyReset { database, force } => {
       commands::emergency_reset::run(&database, force);
+    }
+    Commands::Export { database, output, snapshot, hash } => {
+      commands::export::run(&database, &output, snapshot.as_deref(), hash.as_deref());
+    }
+    Commands::Diff { database, output, from, to } => {
+      commands::diff::run(&database, &output, &from, to.as_deref());
     }
   }
 }
