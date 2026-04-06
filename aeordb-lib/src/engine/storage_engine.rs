@@ -91,7 +91,7 @@ impl StorageEngine {
           void_manager.register_void(scanned.header.total_length, scanned.offset);
           KV_TYPE_VOID
         }
-        _ => continue,
+        EntryType::Snapshot => KV_TYPE_SNAPSHOT,
       };
 
       let entry = KVEntry {
