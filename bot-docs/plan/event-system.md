@@ -530,37 +530,80 @@ Each layer emits events relevant to its domain:
 | Error handlers | Errors | "system" |
 | Heartbeat task | Heartbeat | "system" |
 
-### Threading user_id
+### Threading user_id via RequestContext
 
-The HTTP handlers extract `user_id` from JWT claims (already available via `Extension<TokenClaims>`). This is passed through to DirectoryOps/VersionManager/SystemTables calls. For `--auth=false` mode, the user_id is the root nil UUID.
+HTTP handlers create `RequestContext::from_claims(&claims.sub, event_bus)` and pass it to every engine call. For `--auth=false` mode, the user_id is the root nil UUID. For engine-internal operations (indexing, heartbeat, startup), `RequestContext::system()` is used.
 
-For engine-internal operations (indexing, heartbeat, startup), `user_id` is `"system"`.
+The `ctx` parameter is the first parameter after `&self` in all engine methods. This is a codebase-wide change but done once — every future feature that needs request context just reads from `ctx`.
 
 ---
 
-## 8. EventBus Integration
+## 8. RequestContext — Threading Context Through the Engine
+
+### The Problem
+
+Events need `user_id`. Tracing needs `trace_id`. Metrics need request labels. All of these require context to flow from the HTTP handler (or CLI command) down through every engine operation. Rather than add these one at a time, we build a single `RequestContext` that carries everything.
+
+### RequestContext
+
+```rust
+pub struct RequestContext {
+    pub user_id: String,                        // UUID or "system"
+    pub event_bus: Option<Arc<EventBus>>,        // None = no events (tests, CLI)
+    pub event_scope: RefCell<EventScope>,         // collects events for batching
+    // Future: trace_id, request_id, metric tags
+}
+
+impl RequestContext {
+    /// Default context for engine-internal operations and tests.
+    pub fn system() -> Self;
+
+    /// Context with event bus but system user (CLI tools, background tasks).
+    pub fn with_bus(bus: Arc<EventBus>) -> Self;
+
+    /// Full context from HTTP request claims.
+    pub fn from_claims(user_id: &str, bus: Arc<EventBus>) -> Self;
+
+    /// Emit a collected event (goes through scope for batching).
+    pub fn emit(&self, event_type: &str, payload: EventPayload);
+
+    /// Flush the scope — emits all collected events as batched events.
+    pub fn flush(&self);
+}
+```
+
+### Explicit parameter passing
+
+Every engine method that might emit events takes `ctx: &RequestContext`:
+
+```rust
+// DirectoryOps
+pub fn store_file(&self, ctx: &RequestContext, path: &str, data: &[u8], ...) -> EngineResult<FileRecord>;
+pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()>;
+
+// VersionManager
+pub fn create_snapshot(&self, ctx: &RequestContext, name: &str, ...) -> EngineResult<SnapshotInfo>;
+
+// IndexingPipeline
+pub fn run(&self, ctx: &RequestContext, path: &str, data: &[u8], ...) -> EngineResult<()>;
+```
+
+### Migration strategy
+
+1. Add `ctx: &RequestContext` parameter to all engine methods that emit events
+2. Tests pass `RequestContext::system()` — no events, no bus, no overhead
+3. HTTP handlers create context from JWT claims: `RequestContext::from_claims(&claims.sub, event_bus.clone())`
+4. CLI commands create context with bus: `RequestContext::with_bus(bus)` or `RequestContext::system()`
+5. `RequestContext::flush()` called at the end of each HTTP request (or on Drop)
 
 ### AppState
 
-Add `event_bus: Arc<EventBus>` to `AppState`. Created once during server startup, shared across all route handlers.
-
-### Engine operations
-
-`DirectoryOps`, `VersionManager`, `IndexingPipeline` currently don't have access to the EventBus. Two options:
-
-**A)** Pass `&EventBus` as a parameter to methods that emit events.
-
-**B)** Add `event_bus: Option<Arc<EventBus>>` to `StorageEngine` itself.
-
-Option **B** is cleaner — the event bus is an engine-level concern. `StorageEngine::new` / `StorageEngine::open` accept an optional EventBus. When present, all operations emit events. When None (tests, CLI tools that don't need events), no events are emitted. Zero overhead when disabled.
+Add `event_bus: Arc<EventBus>` to `AppState`. HTTP handlers create `RequestContext` from the bus + JWT claims, pass it to engine operations.
 
 ```rust
-pub struct StorageEngine {
-    writer: RwLock<AppendWriter>,
-    kv_manager: RwLock<KVResizeManager>,
-    void_manager: RwLock<VoidManager>,
-    hash_algo: HashAlgorithm,
-    event_bus: Option<Arc<EventBus>>,  // NEW
+pub struct AppState {
+    // ... existing fields ...
+    pub event_bus: Arc<EventBus>,  // NEW
 }
 ```
 
@@ -635,17 +678,25 @@ The heartbeat task holds an `Arc<StorageEngine>` reference. If the engine is bei
 
 ## 12. Implementation Phases
 
-### Phase 1 — EventBus + EngineEvent
+### Phase 1 — RequestContext + EventBus + EngineEvent
+- `RequestContext` struct with `user_id`, `event_bus`, `event_scope`
+- `RequestContext::system()`, `::with_bus()`, `::from_claims()`
 - `EngineEvent` enum with all 19 event types
-- `EventBus` with `emit`, `subscribe`, `begin_scope`/`EventScope`
+- `EventBus` with `emit`, `subscribe`
+- `EventScope` for batching
 - `EntryEventData` and other payload structs
-- Wire `event_bus: Option<Arc<EventBus>>` into `StorageEngine`
-- Tests: emit/receive, batching, lagging subscriber, event serialization
+- Tests: emit/receive, batching, lagging subscriber, event serialization, RequestContext construction
 
-### Phase 2 — Emission Points
-- DirectoryOps: emit EntriesCreated/Updated/Deleted
-- VersionManager: emit VersionsCreated/Deleted/Promoted/Restored
-- Thread user_id from HTTP handlers through to emission points
+### Phase 2 — Context Threading + Emission Points
+- Add `ctx: &RequestContext` parameter to all engine methods:
+  DirectoryOps (store_file, delete_file, store_file_with_indexing, store_file_with_full_pipeline)
+  VersionManager (create_snapshot, delete_snapshot, create_fork, abandon_fork, restore_snapshot, promote)
+  IndexingPipeline (run)
+  SystemTables (create_user, deactivate_user, activate_user)
+- Update ALL callers (HTTP handlers, CLI commands, tests)
+- Tests pass `RequestContext::system()` — no behavior change, just signature
+- HTTP handlers create context from JWT claims
+- Emit entry/version events from engine methods
 - Tests: store file → receive event, delete → receive event, snapshot → receive event
 
 ### Phase 3 — Heartbeat
