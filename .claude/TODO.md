@@ -21,9 +21,8 @@
 - [ ] Phase 7: E2E verification (manual testing)
 
 ## In Progress: Event System
-- [ ] Phase 1: EventBus + EngineEvent + RequestContext types
-- [ ] Phase 2a: Thread ctx through all engine methods + callers
-- [ ] Phase 2b: Update all tests to pass RequestContext::system()
+- [x] Phase 1: EventBus + EngineEvent + RequestContext types — 32 tests
+- [x] Phase 2: Thread ctx through all engine methods + callers + tests (45 files)
 - [ ] Phase 3: Emit events from engine methods
 - [ ] Phase 4: Heartbeat task
 - [ ] Phase 5: SSE endpoint
