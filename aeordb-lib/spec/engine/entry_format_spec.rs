@@ -143,6 +143,7 @@ fn test_entry_type_roundtrip() {
     (0x04, EntryType::DeletionRecord),
     (0x05, EntryType::Snapshot),
     (0x06, EntryType::Void),
+    (0x07, EntryType::Fork),
   ];
 
   for (byte_value, expected_type) in types {
@@ -155,7 +156,7 @@ fn test_entry_type_roundtrip() {
 #[test]
 fn test_entry_type_invalid_value() {
   assert!(EntryType::from_u8(0x00).is_err());
-  assert!(EntryType::from_u8(0x07).is_err());
+  assert!(EntryType::from_u8(0x08).is_err());
   assert!(EntryType::from_u8(0xFF).is_err());
 }
 

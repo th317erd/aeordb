@@ -9,6 +9,7 @@ pub enum EntryType {
   DeletionRecord = 0x04,
   Snapshot       = 0x05,
   Void           = 0x06,
+  Fork           = 0x07,
 }
 
 impl EntryType {
@@ -20,6 +21,7 @@ impl EntryType {
       0x04 => Ok(EntryType::DeletionRecord),
       0x05 => Ok(EntryType::Snapshot),
       0x06 => Ok(EntryType::Void),
+      0x07 => Ok(EntryType::Fork),
       _    => Err(EngineError::InvalidEntryType(value)),
     }
   }

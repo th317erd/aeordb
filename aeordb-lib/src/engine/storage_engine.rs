@@ -79,6 +79,10 @@ impl StorageEngine {
     let mut kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
     let mut void_manager = VoidManager::new(hash_algo);
 
+    // First pass: rebuild KV store from entry headers, collecting deletion records.
+    // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
+    // files that were recreated after the deletion.
+    let mut deletion_records: Vec<(String, u64)> = Vec::new();
     let scanner = writer.scan_entries()?;
     for scanned_result in scanner {
       let scanned = scanned_result?;
@@ -86,12 +90,19 @@ impl StorageEngine {
         EntryType::Chunk => KV_TYPE_CHUNK,
         EntryType::FileRecord => KV_TYPE_FILE_RECORD,
         EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-        EntryType::DeletionRecord => KV_TYPE_DELETION,
+        EntryType::DeletionRecord => {
+          // Collect deletion record paths for the post-scan pass.
+          if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
+            deletion_records.push((record.path, scanned.offset));
+          }
+          KV_TYPE_DELETION
+        }
         EntryType::Void => {
           void_manager.register_void(scanned.header.total_length, scanned.offset);
           KV_TYPE_VOID
         }
         EntryType::Snapshot => KV_TYPE_SNAPSHOT,
+        EntryType::Fork => KV_TYPE_FORK,
       };
 
       let entry = KVEntry {
@@ -100,6 +111,33 @@ impl StorageEngine {
         offset: scanned.offset,
       };
       kv_store.insert(entry);
+    }
+
+    // Second pass: replay deletions — re-mark entries as deleted.
+    // Only applies if the file/entry wasn't recreated after the deletion
+    // (i.e., the KV entry's offset is before the deletion record's offset).
+    for (path, deletion_offset) in &deletion_records {
+      let normalized = crate::engine::path_utils::normalize_path(path);
+
+      // Try file path hash (standard file deletions use "file:" prefix)
+      if let Ok(file_key) = hash_algo.compute_hash(format!("file:{}", normalized).as_bytes()) {
+        if let Some(entry) = kv_store.get(&file_key) {
+          if entry.offset < *deletion_offset {
+            kv_store.update_flags(&file_key, KV_FLAG_DELETED);
+          }
+        }
+      }
+
+      // Try raw hash (for snapshot/fork deletions that store the domain-prefixed
+      // key directly, e.g. "snap:name" or "::aeordb:fork:name").
+      // Use the raw path string without normalization since these aren't file paths.
+      if let Ok(raw_key) = hash_algo.compute_hash(path.as_bytes()) {
+        if let Some(entry) = kv_store.get(&raw_key) {
+          if entry.offset < *deletion_offset {
+            kv_store.update_flags(&raw_key, KV_FLAG_DELETED);
+          }
+        }
+      }
     }
 
     let kv_manager = KVResizeManager::new(kv_store);
@@ -163,6 +201,7 @@ impl StorageEngine {
       EntryType::DeletionRecord => KV_TYPE_DELETION,
       EntryType::Snapshot => KV_TYPE_SNAPSHOT,
       EntryType::Void => KV_TYPE_VOID,
+      EntryType::Fork => KV_TYPE_FORK,
     };
 
     let kv_entry = KVEntry {
@@ -212,6 +251,7 @@ impl StorageEngine {
       EntryType::DeletionRecord => KV_TYPE_DELETION,
       EntryType::Snapshot => KV_TYPE_SNAPSHOT,
       EntryType::Void => KV_TYPE_VOID,
+      EntryType::Fork => KV_TYPE_FORK,
     };
 
     let kv_entry = KVEntry {

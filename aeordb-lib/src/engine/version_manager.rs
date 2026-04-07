@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
@@ -222,6 +223,23 @@ impl<'a> VersionManager<'a> {
     self.engine.compute_hash(format!("::aeordb:fork:{}", name).as_bytes())
   }
 
+  /// Persist a deletion to disk by writing a DeletionRecord.
+  /// The `key_string` is the domain-prefixed key (before hashing) so
+  /// that `open_internal` can recompute the hash and replay the deletion.
+  fn persist_deletion(engine: &StorageEngine, key_string: &str) -> EngineResult<()> {
+    let deletion = DeletionRecord::new(key_string.to_string(), None);
+    let deletion_key = engine.compute_hash(
+      format!("del:{}:{}", key_string, deletion.deleted_at).as_bytes(),
+    )?;
+    let deletion_value = deletion.serialize();
+    engine.store_entry(
+      EntryType::DeletionRecord,
+      &deletion_key,
+      &deletion_value,
+    )?;
+    Ok(())
+  }
+
   /// Get the current HEAD hash from the file header.
   pub fn get_head_hash(&self) -> EngineResult<Vec<u8>> {
     self.engine.head_hash()
@@ -348,7 +366,8 @@ impl<'a> VersionManager<'a> {
     Ok(snapshots)
   }
 
-  /// Delete a named snapshot by marking its KV entry as deleted.
+  /// Delete a named snapshot by marking its KV entry as deleted and
+  /// writing a DeletionRecord so the deletion survives restart.
   pub fn delete_snapshot(&self, name: &str) -> EngineResult<()> {
     let key = self.snapshot_key(name)?;
 
@@ -358,7 +377,11 @@ impl<'a> VersionManager<'a> {
       ));
     }
 
-    self.engine.mark_entry_deleted(&key)
+    self.engine.mark_entry_deleted(&key)?;
+
+    // Persist the deletion to disk so it survives restart.
+    let key_string = format!("snap:{}", name);
+    Self::persist_deletion(self.engine, &key_string)
   }
 
   /// Create a named fork.
@@ -396,7 +419,7 @@ impl<'a> VersionManager<'a> {
     let value = fork_info.serialize(hash_length);
 
     self.engine.store_entry_typed(
-      EntryType::Snapshot,
+      EntryType::Fork,
       &key,
       &value,
       KV_TYPE_FORK,
@@ -416,7 +439,8 @@ impl<'a> VersionManager<'a> {
     self.abandon_fork(name)
   }
 
-  /// Abandon a fork by marking its KV entry as deleted.
+  /// Abandon a fork by marking its KV entry as deleted and
+  /// writing a DeletionRecord so the deletion survives restart.
   pub fn abandon_fork(&self, name: &str) -> EngineResult<()> {
     let key = self.fork_key(name)?;
 
@@ -426,7 +450,11 @@ impl<'a> VersionManager<'a> {
       ));
     }
 
-    self.engine.mark_entry_deleted(&key)
+    self.engine.mark_entry_deleted(&key)?;
+
+    // Persist the deletion to disk so it survives restart.
+    let key_string = format!("::aeordb:fork:{}", name);
+    Self::persist_deletion(self.engine, &key_string)
   }
 
   /// List all active forks.
@@ -479,7 +507,7 @@ impl<'a> VersionManager<'a> {
     let value = updated.serialize(hash_length);
 
     self.engine.store_entry_typed(
-      EntryType::Snapshot,
+      EntryType::Fork,
       &key,
       &value,
       KV_TYPE_FORK,

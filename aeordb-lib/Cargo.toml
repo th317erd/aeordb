@@ -309,3 +309,7 @@ path = "spec/engine/backup_import_spec.rs"
 [[test]]
 name = "backup_http_spec"
 path = "spec/http/backup_http_spec.rs"
+
+[[test]]
+name = "cross_restart_spec"
+path = "spec/engine/cross_restart_spec.rs"
