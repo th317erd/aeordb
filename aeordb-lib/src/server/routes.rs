@@ -264,7 +264,7 @@ pub async fn auth_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::with_bus(state.event_bus.clone());
   let system_tables = SystemTables::new(&state.engine);
   if let Err(error) = system_tables.store_refresh_token(
     &ctx,
@@ -481,7 +481,7 @@ pub async fn request_magic_link(
       crate::auth::magic_link::DEFAULT_MAGIC_LINK_EXPIRY_SECONDS,
     );
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::with_bus(state.event_bus.clone());
   let system_tables = SystemTables::new(&state.engine);
   if let Err(error) = system_tables.store_magic_link(&ctx, &code_hash, &payload.email, expires_at) {
     tracing::error!("Failed to store magic link: {}", error);
@@ -542,7 +542,7 @@ pub async fn verify_magic_link(
   }
 
   // Mark as used.
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::with_bus(state.event_bus.clone());
   if let Err(error) = system_tables.mark_magic_link_used(&ctx, &code_hash) {
     tracing::error!("Failed to mark magic link as used: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
@@ -626,7 +626,7 @@ pub async fn refresh_token(
   }
 
   // Revoke the old refresh token (rotation).
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::with_bus(state.event_bus.clone());
   if let Err(error) = system_tables.revoke_refresh_token(&ctx, &old_token_hash) {
     tracing::error!("Failed to revoke old refresh token: {}", error);
     return ErrorResponse::new("Internal server error".to_string())

@@ -58,7 +58,7 @@ pub async fn create_user(
     return *response;
   }
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let user = User::new(&payload.username, payload.email.as_deref());
   let system_tables = SystemTables::new(&state.engine);
 
@@ -168,7 +168,7 @@ pub async fn update_user(
     }
   };
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Some(ref username) = payload.username {
     user.username = username.clone();
   }
@@ -225,7 +225,7 @@ pub async fn deactivate_user(
     }
   };
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   user.is_active = false;
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
@@ -295,7 +295,7 @@ pub async fn create_group(
     }
   };
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let system_tables = SystemTables::new(&state.engine);
   if let Err(error) = system_tables.store_group(&ctx, &group) {
     tracing::error!("Failed to create group: {}", error);
@@ -412,7 +412,7 @@ pub async fn update_group(
   }
   group.updated_at = chrono::Utc::now().timestamp_millis();
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Err(error) = system_tables.update_group(&ctx, &group) {
     tracing::error!("Failed to update group: {}", error);
     return ErrorResponse::new(format!("Failed to update group: {}", error))
@@ -451,7 +451,7 @@ pub async fn delete_group(
     }
   }
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Err(error) = system_tables.delete_group(&ctx, &name) {
     tracing::error!("Failed to delete group: {}", error);
     return ErrorResponse::new(format!("Failed to delete group: {}", error))

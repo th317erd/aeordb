@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
+    Extension,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -10,6 +11,8 @@ use serde::Deserialize;
 
 use super::responses::ErrorResponse;
 use super::state::AppState;
+use crate::auth::TokenClaims;
+use crate::engine::RequestContext;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -30,6 +33,7 @@ fn unique_temp_path(prefix: &str) -> String {
 /// Query params: snapshot=name, hash=hex (default: HEAD)
 pub async fn export_backup(
     State(state): State<AppState>,
+    Extension(_claims): Extension<TokenClaims>,
     params: axum::extract::Query<ExportParams>,
 ) -> Response {
     let output_path = unique_temp_path("aeordb-export");
@@ -98,6 +102,7 @@ pub async fn export_backup(
 /// POST /admin/diff -- create a patch between two versions
 pub async fn diff_backup(
     State(state): State<AppState>,
+    Extension(_claims): Extension<TokenClaims>,
     params: axum::extract::Query<DiffParams>,
 ) -> Response {
     let output_path = unique_temp_path("aeordb-patch");
@@ -171,6 +176,7 @@ pub async fn diff_backup(
 /// POST /admin/import -- import a backup file
 pub async fn import_backup(
     State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<ImportParams>,
     body: axum::body::Bytes,
 ) -> Response {
@@ -183,7 +189,7 @@ pub async fn import_backup(
             .into_response();
     }
 
-    let ctx = crate::engine::RequestContext::system(); // TODO: from claims when events are wired
+    let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
     let result = crate::engine::backup::import_backup(
         &ctx,
         &state.engine,
@@ -219,6 +225,7 @@ pub async fn import_backup(
 /// POST /admin/promote -- promote a version hash to HEAD
 pub async fn promote_head(
     State(state): State<AppState>,
+    Extension(_claims): Extension<TokenClaims>,
     params: axum::extract::Query<PromoteParams>,
 ) -> Response {
     let hash_bytes = match hex::decode(&params.hash) {

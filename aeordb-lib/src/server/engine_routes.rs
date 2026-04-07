@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use axum::{
+  Extension,
   body::Body,
   extract::{Path, State},
   http::{HeaderMap, StatusCode},
@@ -12,6 +13,7 @@ use serde::Deserialize;
 
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
 use super::state::AppState;
+use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, VersionManager};
 use crate::engine::errors::EngineError;
 use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
@@ -23,6 +25,7 @@ use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, Que
 /// PUT /engine/*path -- store a file via the custom storage engine.
 pub async fn engine_store_file(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
   headers: HeaderMap,
   body: axum::body::Bytes,
@@ -31,7 +34,7 @@ pub async fn engine_store_file(
     .get("content-type")
     .and_then(|value| value.to_str().ok());
 
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let directory_ops = DirectoryOps::new(&state.engine);
 
   let file_record = match directory_ops.store_file_with_full_pipeline(
@@ -54,6 +57,7 @@ pub async fn engine_store_file(
 /// GET /engine/*path -- read a file (streaming) or list a directory.
 pub async fn engine_get(
   State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(&state.engine);
@@ -143,9 +147,10 @@ pub async fn engine_get(
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
 pub async fn engine_delete_file(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let directory_ops = DirectoryOps::new(&state.engine);
 
   match directory_ops.delete_file_with_indexing(&ctx, &path) {
@@ -173,6 +178,7 @@ pub async fn engine_delete_file(
 /// HEAD /engine/*path -- return metadata as headers.
 pub async fn engine_head(
   State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(&state.engine);
@@ -235,9 +241,10 @@ pub struct RestoreSnapshotRequest {
 /// POST /version/snapshot -- create a named snapshot of the current HEAD.
 pub async fn snapshot_create(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateSnapshotRequest>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.create_snapshot(&ctx, &payload.name, payload.metadata) {
@@ -262,6 +269,7 @@ pub async fn snapshot_create(
 /// GET /version/snapshots -- list all snapshots.
 pub async fn snapshot_list(
   State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
 ) -> Response {
   let version_manager = VersionManager::new(&state.engine);
 
@@ -285,9 +293,10 @@ pub async fn snapshot_list(
 /// POST /version/restore -- restore a named snapshot.
 pub async fn snapshot_restore(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<RestoreSnapshotRequest>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.restore_snapshot(&ctx, &payload.name) {
@@ -315,9 +324,10 @@ pub async fn snapshot_restore(
 /// DELETE /version/snapshot/:name -- delete a named snapshot.
 pub async fn snapshot_delete(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.delete_snapshot(&ctx, &name) {
@@ -355,9 +365,10 @@ pub struct CreateForkRequest {
 /// POST /version/fork -- create a named fork.
 pub async fn fork_create(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateForkRequest>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.create_fork(&ctx, &payload.name, payload.base.as_deref()) {
@@ -382,6 +393,7 @@ pub async fn fork_create(
 /// GET /version/forks -- list all active forks.
 pub async fn fork_list(
   State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
 ) -> Response {
   let version_manager = VersionManager::new(&state.engine);
 
@@ -405,9 +417,10 @@ pub async fn fork_list(
 /// POST /version/fork/:name/promote -- promote a fork to HEAD.
 pub async fn fork_promote(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.promote_fork(&ctx, &name) {
@@ -435,9 +448,10 @@ pub async fn fork_promote(
 /// DELETE /version/fork/:name -- abandon a fork.
 pub async fn fork_abandon(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
-  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
   match version_manager.abandon_fork(&ctx, &name) {
@@ -656,6 +670,7 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
 /// Supports both legacy array format and nested boolean object format.
 pub async fn query_endpoint(
   State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
   // Parse the where clause into a QueryNode tree.
