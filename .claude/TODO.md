@@ -28,12 +28,11 @@
 - [x] Phase 5: SSE endpoint — 27 tests
 - [x] Phase 6: Webhooks — 44 tests
 
-## In Progress: Sorting + Pagination
-- [ ] Tasks 1-3: Types + execute_paginated + sorting
-- [ ] Task 4: Cursor-based pagination
-- [ ] Tasks 5-7: HTTP API + backward compat + QueryBuilder
+## Completed: Sorting + Pagination
+- [x] Tasks 1-3: Types + execute_paginated + sorting — 31 tests
+- [x] Tasks 4-5+7: Cursors + HTTP envelope + QueryBuilder — 25 tests
 
-## Total: 1,811 tests, all passing
+## Total: 1,865 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
