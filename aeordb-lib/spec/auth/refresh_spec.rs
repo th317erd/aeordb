@@ -9,7 +9,7 @@ use aeordb::auth::jwt::{JwtManager, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::refresh::{generate_refresh_token, hash_refresh_token, DEFAULT_REFRESH_EXPIRY_SECONDS};
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::engine::{EventBus, StorageEngine, SystemTables};
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
@@ -34,6 +34,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
     rate_limiter.clone(),
     make_prometheus_handle(),
     engine.clone(),
+    Arc::new(EventBus::new()),
   );
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
@@ -52,6 +53,7 @@ fn rebuild_app(
     rate_limiter.clone(),
     make_prometheus_handle(),
     engine.clone(),
+    Arc::new(EventBus::new()),
   )
 }
 

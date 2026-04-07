@@ -825,6 +825,7 @@ fn test_crudlify_op_from_http_method() {
     rate_limiter,
     prometheus_handle,
     engine,
+    event_bus: Arc::new(aeordb::engine::EventBus::new()),
     group_cache,
     permissions_cache,
   };

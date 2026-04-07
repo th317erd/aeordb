@@ -18,7 +18,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, RequestContext, StorageEngine};
+use crate::engine::{DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -44,8 +44,9 @@ pub fn create_app(engine_path: &str) -> Router {
 pub fn create_app_with_auth_mode(
   engine_path: &str,
   auth_mode: &AuthMode,
-) -> (Router, Option<String>) {
+) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>) {
   let engine = create_engine_for_storage(engine_path);
+  let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
     AuthMode::Disabled => (Arc::new(NoAuthProvider::new()), None),
     AuthMode::SelfContained => {
@@ -62,8 +63,10 @@ pub fn create_app_with_auth_mode(
   let jwt_manager = Arc::new(JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
     .expect("failed to reconstruct JWT manager from auth provider"));
   let prometheus_handle = initialize_metrics();
-  let router = create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine);
-  (router, bootstrap_key)
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone());
+  (router, bootstrap_key, engine, event_bus)
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
@@ -84,8 +87,9 @@ pub fn create_app_with_jwt_and_engine(
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
+  let event_bus = Arc::new(EventBus::new());
 
-  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus)
 }
 
 /// Build the application router with an explicit PrometheusHandle.
@@ -107,8 +111,9 @@ fn create_app_with_provider_and_metrics(
 ) -> Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
+  let event_bus = Arc::new(EventBus::new());
 
-  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
@@ -120,6 +125,7 @@ pub fn create_app_with_all(
   rate_limiter: Arc<RateLimiter>,
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
+  event_bus: Arc<EventBus>,
 ) -> Router {
   let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
   let group_cache = Arc::new(GroupCache::new(cache_ttl));
@@ -132,6 +138,7 @@ pub fn create_app_with_all(
     rate_limiter,
     prometheus_handle,
     engine,
+    event_bus,
     group_cache,
     permissions_cache,
   };

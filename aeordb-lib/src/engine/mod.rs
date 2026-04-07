@@ -11,6 +11,7 @@ pub mod entry_scanner;
 pub mod entry_type;
 pub mod errors;
 pub mod event_bus;
+pub mod heartbeat;
 pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
@@ -106,4 +107,5 @@ pub use engine_event::{
     EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
 };
 pub use event_bus::EventBus;
+pub use heartbeat::spawn_heartbeat;
 pub use request_context::RequestContext;

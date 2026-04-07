@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{EventBus, StorageEngine};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
@@ -55,6 +55,7 @@ impl TestHarness {
       self.rate_limiter.clone(),
       make_prometheus_handle(),
       self.engine.clone(),
+      Arc::new(EventBus::new()),
     )
   }
 

@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
+use aeordb::engine::spawn_heartbeat;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_for_storage};
 
@@ -42,7 +43,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     drop(engine);
   }
 
-  let (application, file_bootstrap_key) = create_app_with_auth_mode(database, &auth_mode);
+  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode);
 
   if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");
@@ -51,6 +52,9 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     println!("==========================================================");
     println!();
   }
+
+  // Start the heartbeat task (emits DatabaseStats every 15 seconds).
+  let heartbeat_handle = spawn_heartbeat(event_bus, engine);
 
   let address = SocketAddr::from(([0, 0, 0, 0], port));
   println!("Listening on http://{address}");
@@ -68,9 +72,11 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     .await
   {
     eprintln!("Server error: {error}");
+    heartbeat_handle.abort();
     std::process::exit(1);
   }
 
+  heartbeat_handle.abort();
   println!("Server shut down gracefully.");
 }
 

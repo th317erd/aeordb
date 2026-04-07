@@ -425,6 +425,7 @@ async fn test_no_auth_mode_allows_engine_writes_without_token() {
     rate_limiter,
     make_prometheus_handle(),
     engine,
+    Arc::new(aeordb::engine::EventBus::new()),
   );
 
   // No Authorization header at all -- should still work.
@@ -454,6 +455,7 @@ async fn test_no_auth_mode_allows_admin_without_token() {
     rate_limiter,
     make_prometheus_handle(),
     engine,
+    Arc::new(aeordb::engine::EventBus::new()),
   );
 
   // GET /admin/api-keys without auth should work (root claims injected).
@@ -483,6 +485,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
     rate_limiter.clone(),
     make_prometheus_handle(),
     engine.clone(),
+    Arc::new(aeordb::engine::EventBus::new()),
   );
 
   let write_req = Request::builder()
@@ -503,6 +506,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
     rate_limiter,
     make_prometheus_handle(),
     engine,
+    Arc::new(aeordb::engine::EventBus::new()),
   );
 
   let read_req = Request::builder()
@@ -539,6 +543,7 @@ async fn test_file_auth_provider_token_exchange_works() {
     rate_limiter,
     make_prometheus_handle(),
     engine,
+    Arc::new(aeordb::engine::EventBus::new()),
   );
 
   // Exchange the root key for a JWT.

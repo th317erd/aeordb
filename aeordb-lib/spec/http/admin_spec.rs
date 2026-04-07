@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{EventBus, StorageEngine};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
@@ -31,6 +31,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
     rate_limiter.clone(),
     make_prometheus_handle(),
     engine.clone(),
+    Arc::new(EventBus::new()),
   );
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
@@ -49,6 +50,7 @@ fn rebuild_app(
     rate_limiter.clone(),
     make_prometheus_handle(),
     engine.clone(),
+    Arc::new(EventBus::new()),
   )
 }
 
