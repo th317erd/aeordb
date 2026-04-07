@@ -5,10 +5,12 @@ pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_ops;
 pub mod engine_chunk_storage;
+pub mod engine_event;
 pub mod entry_header;
 pub mod entry_scanner;
 pub mod entry_type;
 pub mod errors;
+pub mod event_bus;
 pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
@@ -29,6 +31,7 @@ pub mod permission_resolver;
 pub mod permissions;
 pub mod permissions_cache;
 pub mod query_engine;
+pub mod request_context;
 pub mod scalar_converter;
 pub mod source_resolver;
 pub mod storage_engine;
@@ -91,3 +94,16 @@ pub use group_cache::GroupCache;
 pub use permission_resolver::{CrudlifyOp, PermissionResolver, path_levels};
 pub use permissions::{PathPermissions, PermissionLink, parse_crudlify_flags, merge_flags};
 pub use permissions_cache::PermissionsCache;
+pub use engine_event::{
+    EngineEvent, EntryEventData, VersionEventData, UserEventData,
+    PermissionChangeData, ImportEventData, IndexEventData, ErrorEventData,
+    TokenEventData, ApiKeyEventData, PluginEventData, HeartbeatData,
+    EVENT_ENTRIES_CREATED, EVENT_ENTRIES_UPDATED, EVENT_ENTRIES_DELETED,
+    EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED,
+    EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED,
+    EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
+    EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
+    EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
+};
+pub use event_bus::EventBus;
+pub use request_context::RequestContext;

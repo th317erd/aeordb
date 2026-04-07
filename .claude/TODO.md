@@ -20,7 +20,16 @@
 - [x] Fix: dual-key directory storage for immutable snapshots — 25 tests
 - [ ] Phase 7: E2E verification (manual testing)
 
-## Total: 1,581 tests, all passing
+## In Progress: Event System
+- [ ] Phase 1: EventBus + EngineEvent + RequestContext types
+- [ ] Phase 2a: Thread ctx through all engine methods + callers
+- [ ] Phase 2b: Update all tests to pass RequestContext::system()
+- [ ] Phase 3: Emit events from engine methods
+- [ ] Phase 4: Heartbeat task
+- [ ] Phase 5: SSE endpoint
+- [ ] Phase 6: Webhooks
+
+## Total: 1,606 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
