@@ -358,10 +358,10 @@ async fn test_engine_store_without_content_type() {
 
   let json = body_json(response.into_body()).await;
   assert_eq!(json["total_size"], 9);
-  // content_type should be null when not provided
-  assert!(
-    json["content_type"].is_null(),
-    "content_type should be null when not provided"
+  // content_type should be auto-detected as text/plain (magic byte sniffing for "some data")
+  assert_eq!(
+    json["content_type"].as_str(), Some("text/plain"),
+    "content_type should be auto-detected when not provided"
   );
 }
 

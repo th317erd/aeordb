@@ -319,10 +319,10 @@ fn test_store_preserves_content_type() {
   let metadata = ops.get_metadata("/image.png").unwrap().unwrap();
   assert_eq!(metadata.content_type.as_deref(), Some("image/png"));
 
-  // No content type
+  // No content type -- detection kicks in; "raw" is valid UTF-8 text
   ops.store_file(&ctx, "/raw.bin", b"raw", None).unwrap();
   let metadata = ops.get_metadata("/raw.bin").unwrap().unwrap();
-  assert!(metadata.content_type.is_none());
+  assert_eq!(metadata.content_type.as_deref(), Some("text/plain"));
 }
 
 #[test]

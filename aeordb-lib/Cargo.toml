@@ -52,6 +52,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Replication / Consensus
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 
+# Content-type detection
+file-format = "0.29"
+
 # Common
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -342,3 +345,7 @@ path = "spec/http/sse_spec.rs"
 [[test]]
 name = "timestamp_spec"
 path = "spec/engine/timestamp_spec.rs"
+
+[[test]]
+name = "content_type_spec"
+path = "spec/engine/content_type_spec.rs"

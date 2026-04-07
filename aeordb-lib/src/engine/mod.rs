@@ -1,6 +1,7 @@
 pub mod append_writer;
 pub mod backup;
 pub mod compression;
+pub mod content_type;
 pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_ops;
@@ -46,6 +47,7 @@ pub mod webhook;
 
 pub use append_writer::AppendWriter;
 pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
+pub use content_type::detect_content_type;
 pub use deletion_record::DeletionRecord;
 pub use directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries};
 pub use entry_header::{EntryHeader, ENTRY_MAGIC};

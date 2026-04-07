@@ -179,6 +179,9 @@ impl<'a> DirectoryOps<'a> {
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
+
+    // Detect content type from magic bytes when not explicitly provided
+    let detected_content_type = crate::engine::content_type::detect_content_type(data, content_type);
     let hash_length = algo.hash_length();
 
     // Split data into chunks and store each one
@@ -230,10 +233,10 @@ impl<'a> DirectoryOps<'a> {
       None => None,
     };
 
-    // Create the FileRecord
+    // Create the FileRecord with detected content type
     let mut file_record = FileRecord::new(
       normalized.clone(),
-      content_type.map(|s| s.to_string()),
+      Some(detected_content_type.clone()),
       data.len() as u64,
       chunk_hashes,
     );
@@ -254,7 +257,7 @@ impl<'a> DirectoryOps<'a> {
       created_at: file_record.created_at,
       updated_at: file_record.updated_at,
       name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: content_type.map(|s| s.to_string()),
+      content_type: Some(detected_content_type.clone()),
     };
 
     self.update_parent_directories(&normalized, child)?;
@@ -531,9 +534,10 @@ impl<'a> DirectoryOps<'a> {
       return Ok(file_record);
     }
 
-    // Delegate to indexing pipeline
+    // Delegate to indexing pipeline using the detected content type from the file record
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
-    let _ = pipeline.run(ctx, path, data, content_type);
+    let detected_ct = file_record.content_type.as_deref();
+    let _ = pipeline.run(ctx, path, data, detected_ct);
 
     Ok(file_record)
   }
@@ -577,12 +581,13 @@ impl<'a> DirectoryOps<'a> {
       return Ok(file_record);
     }
 
-    // Use full pipeline with plugin manager
+    // Use full pipeline with plugin manager, passing detected content type
     let pipeline = match plugin_manager {
       Some(pm) => crate::engine::indexing_pipeline::IndexingPipeline::with_plugin_manager(self.engine, pm),
       None => crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine),
     };
-    let _ = pipeline.run(ctx, path, data, content_type);
+    let detected_ct = file_record.content_type.as_deref();
+    let _ = pipeline.run(ctx, path, data, detected_ct);
 
     Ok(file_record)
   }
