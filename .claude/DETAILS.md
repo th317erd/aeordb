@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 1,581 (all passing)
+## Test Count: 1,750 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -72,3 +72,9 @@
 - `aeordb-lib/src/engine/backup.rs` — export_version, create_patch, import_backup
 - `aeordb-lib/src/engine/tree_walker.rs` — walk_version_tree, diff_trees, VersionTree, TreeDiff
 - `aeordb-lib/src/server/backup_routes.rs` — HTTP export/diff/import/promote endpoints
+- `aeordb-lib/src/engine/event_bus.rs` — EventBus (tokio::broadcast), fire-and-forget
+- `aeordb-lib/src/engine/engine_event.rs` — EngineEvent, 19 event types, payload structs
+- `aeordb-lib/src/engine/request_context.rs` — RequestContext threaded through all engine methods
+- `aeordb-lib/src/engine/heartbeat.rs` — 15-second clock-aligned heartbeat with DatabaseStats
+- `aeordb-lib/src/server/sse_routes.rs` — GET /events/stream SSE endpoint
+- `aeordb-lib/src/engine/webhook.rs` — webhook dispatcher with HMAC-SHA256 signatures

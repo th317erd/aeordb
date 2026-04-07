@@ -25,10 +25,10 @@
 - [x] Phase 2: Thread ctx through all engine methods + callers + tests (45 files)
 - [x] Phase 3: Emit events from engine methods — 34 tests
 - [x] Phase 4: Heartbeat task — 7 tests
-- [ ] Phase 5: SSE endpoint
-- [ ] Phase 6: Webhooks
+- [x] Phase 5: SSE endpoint — 27 tests
+- [x] Phase 6: Webhooks — 44 tests
 
-## Total: 1,606 tests, all passing
+## Total: 1,750 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
