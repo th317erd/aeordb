@@ -317,3 +317,7 @@ path = "spec/engine/cross_restart_spec.rs"
 [[test]]
 name = "event_bus_spec"
 path = "spec/engine/event_bus_spec.rs"
+
+[[test]]
+name = "event_emission_spec"
+path = "spec/engine/event_emission_spec.rs"

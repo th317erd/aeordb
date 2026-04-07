@@ -18,7 +18,8 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool) {
         }
     };
 
-    match aeordb::engine::backup::import_backup(&target, file, force, promote) {
+    let ctx = aeordb::engine::RequestContext::system();
+    match aeordb::engine::backup::import_backup(&ctx, &target, file, force, promote) {
         Ok(result) => println!("\n{}", result),
         Err(e) => {
             eprintln!("Import failed: {}", e);

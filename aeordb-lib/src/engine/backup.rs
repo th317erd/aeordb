@@ -1,7 +1,9 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
+use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION};
+use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
 use crate::engine::entry_type::EntryType;
@@ -297,6 +299,7 @@ impl std::fmt::Display for PatchResult {
 ///
 /// Does NOT automatically promote HEAD unless `promote` is true.
 pub fn import_backup(
+    ctx: &RequestContext,
     target: &StorageEngine,
     backup_path: &str,
     force: bool,
@@ -371,6 +374,14 @@ pub fn import_backup(
     } else {
         false
     };
+
+    // Emit import completed event
+    ctx.emit(EVENT_IMPORTS_COMPLETED, serde_json::json!({"imports": [ImportEventData {
+        backup_type: match backup_type { 1 => "export".to_string(), 2 => "patch".to_string(), _ => "unknown".to_string() },
+        version_hash: hex::encode(&target_hash),
+        entries_imported,
+        head_promoted,
+    }]}));
 
     Ok(ImportResult {
         backup_type,

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::engine::deletion_record::DeletionRecord;
+use crate::engine::engine_event::{VersionEventData, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
@@ -307,7 +308,7 @@ impl<'a> VersionManager<'a> {
   /// Create a named snapshot of the current HEAD state.
   pub fn create_snapshot(
     &self,
-    _ctx: &RequestContext,
+    ctx: &RequestContext,
     name: &str,
     metadata: HashMap<String, String>,
   ) -> EngineResult<SnapshotInfo> {
@@ -340,13 +341,32 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_SNAPSHOT,
     )?;
 
+    // Emit version created event
+    let version_data = VersionEventData {
+      name: name.to_string(),
+      version_type: Some("snapshot".to_string()),
+      root_hash: hex::encode(&snapshot_info.root_hash),
+      created_at: Some(snapshot_info.created_at),
+    };
+    ctx.emit(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
+
     Ok(snapshot_info)
   }
 
   /// Restore a named snapshot by setting HEAD to its root hash.
-  pub fn restore_snapshot(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
+  pub fn restore_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let root_hash = self.get_snapshot_hash(name)?;
-    self.engine.update_head(&root_hash)
+    self.engine.update_head(&root_hash)?;
+
+    // Emit version restored event
+    ctx.emit(EVENT_VERSIONS_RESTORED, serde_json::json!({"versions": [VersionEventData {
+      name: name.to_string(),
+      version_type: Some("snapshot".to_string()),
+      root_hash: hex::encode(&root_hash),
+      created_at: None,
+    }]}));
+
+    Ok(())
   }
 
   /// List all snapshots, sorted by created_at ascending.
@@ -370,7 +390,7 @@ impl<'a> VersionManager<'a> {
 
   /// Delete a named snapshot by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
-  pub fn delete_snapshot(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
+  pub fn delete_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let key = self.snapshot_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
@@ -383,7 +403,17 @@ impl<'a> VersionManager<'a> {
 
     // Persist the deletion to disk so it survives restart.
     let key_string = format!("snap:{}", name);
-    Self::persist_deletion(self.engine, &key_string)
+    Self::persist_deletion(self.engine, &key_string)?;
+
+    // Emit version deleted event
+    ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {
+      name: name.to_string(),
+      version_type: Some("snapshot".to_string()),
+      root_hash: hex::encode(&key),
+      created_at: None,
+    }]}));
+
+    Ok(())
   }
 
   /// Create a named fork.
@@ -392,7 +422,7 @@ impl<'a> VersionManager<'a> {
   /// - If `base` is a snapshot name, forks from that snapshot's root hash.
   pub fn create_fork(
     &self,
-    _ctx: &RequestContext,
+    ctx: &RequestContext,
     name: &str,
     base: Option<&str>,
   ) -> EngineResult<ForkInfo> {
@@ -428,6 +458,15 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_FORK,
     )?;
 
+    // Emit version created event
+    let version_data = VersionEventData {
+      name: name.to_string(),
+      version_type: Some("fork".to_string()),
+      root_hash: hex::encode(&fork_info.root_hash),
+      created_at: Some(fork_info.created_at),
+    };
+    ctx.emit(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
+
     Ok(fork_info)
   }
 
@@ -439,12 +478,21 @@ impl<'a> VersionManager<'a> {
       ))?;
 
     self.engine.update_head(&fork_hash)?;
+
+    // Emit promote event before abandon (abandon emits its own delete event)
+    ctx.emit(EVENT_VERSIONS_PROMOTED, serde_json::json!({"versions": [VersionEventData {
+      name: name.to_string(),
+      version_type: Some("fork".to_string()),
+      root_hash: hex::encode(&fork_hash),
+      created_at: None,
+    }]}));
+
     self.abandon_fork(ctx, name)
   }
 
   /// Abandon a fork by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
-  pub fn abandon_fork(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
+  pub fn abandon_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let key = self.fork_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
@@ -457,7 +505,17 @@ impl<'a> VersionManager<'a> {
 
     // Persist the deletion to disk so it survives restart.
     let key_string = format!("::aeordb:fork:{}", name);
-    Self::persist_deletion(self.engine, &key_string)
+    Self::persist_deletion(self.engine, &key_string)?;
+
+    // Emit version deleted event
+    ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {
+      name: name.to_string(),
+      version_type: Some("fork".to_string()),
+      root_hash: hex::encode(&key),
+      created_at: None,
+    }]}));
+
+    Ok(())
   }
 
   /// List all active forks.

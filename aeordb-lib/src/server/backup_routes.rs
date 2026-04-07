@@ -183,7 +183,9 @@ pub async fn import_backup(
             .into_response();
     }
 
+    let ctx = crate::engine::RequestContext::system(); // TODO: from claims when events are wired
     let result = crate::engine::backup::import_backup(
+        &ctx,
         &state.engine,
         &temp_path,
         params.force.unwrap_or(false),

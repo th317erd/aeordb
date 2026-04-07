@@ -9,6 +9,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::index_store::IndexManager;
+use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -170,7 +171,7 @@ impl<'a> DirectoryOps<'a> {
   /// Internal file storage with optional compression.
   fn store_file_internal(
     &self,
-    _ctx: &RequestContext,
+    ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
@@ -258,6 +259,24 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
+    // Emit entry event after successful store
+    let event_type = if existing_created_at.is_some() {
+      EVENT_ENTRIES_CREATED // overwrite — still entries_created for now
+    } else {
+      EVENT_ENTRIES_CREATED
+    };
+    let entry_data = EntryEventData {
+      path: normalized,
+      entry_type: "file".to_string(),
+      content_type: file_record.content_type.clone(),
+      size: file_record.total_size,
+      hash: hex::encode(file_record.chunk_hashes.first().unwrap_or(&vec![])),
+      created_at: file_record.created_at,
+      updated_at: file_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(event_type, serde_json::json!({"entries": [entry_data]}));
+
     Ok(file_record)
   }
 
@@ -283,15 +302,21 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.
-  pub fn delete_file(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
+  pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
 
-    // Verify the file exists
+    // Verify the file exists and capture metadata for event
     let file_key = file_path_hash(&normalized, &algo)?;
-    if !self.engine.has_entry(&file_key)? {
-      return Err(EngineError::NotFound(normalized));
-    }
+    let file_record_opt = match self.engine.get_entry(&file_key)? {
+      Some((_header, _key, value)) => {
+        Some(FileRecord::deserialize(&value, hash_length)?)
+      }
+      None => {
+        return Err(EngineError::NotFound(normalized));
+      }
+    };
 
     // Store a DeletionRecord
     let deletion = DeletionRecord::new(normalized.clone(), None);
@@ -312,6 +337,21 @@ impl<'a> DirectoryOps<'a> {
 
     // Remove child from parent directory
     self.remove_from_parent_directory(&normalized)?;
+
+    // Emit deletion event with captured metadata
+    if let Some(record) = file_record_opt {
+      let entry_data = EntryEventData {
+        path: normalized,
+        entry_type: "file".to_string(),
+        content_type: record.content_type,
+        size: record.total_size,
+        hash: hex::encode(record.chunk_hashes.first().unwrap_or(&vec![])),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        previous_hash: None,
+      };
+      ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
+    }
 
     Ok(())
   }
@@ -335,7 +375,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Create an empty directory at the given path.
-  pub fn create_directory(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
+  pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
 
@@ -357,18 +397,32 @@ impl<'a> DirectoryOps<'a> {
     )?;
 
     // Update parent directory if this isn't root
+    let now = chrono::Utc::now().timestamp_millis();
     if normalized != "/" {
       let child = ChildEntry {
         entry_type: EntryType::DirectoryIndex.to_u8(),
         hash: content_key,  // content hash for tree walker
         total_size: 0,
-        created_at: chrono::Utc::now().timestamp_millis(),
-        updated_at: chrono::Utc::now().timestamp_millis(),
+        created_at: now,
+        updated_at: now,
         name: file_name(&normalized).unwrap_or("").to_string(),
         content_type: None,
       };
       self.update_parent_directories(&normalized, child)?;
     }
+
+    // Emit directory creation event
+    let entry_data = EntryEventData {
+      path: normalized,
+      entry_type: "directory".to_string(),
+      content_type: None,
+      size: 0,
+      hash: String::new(),
+      created_at: now,
+      updated_at: now,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
     Ok(())
   }
