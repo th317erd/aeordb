@@ -48,7 +48,9 @@ ORDER BY age ASC, name DESC — load the primary sort value for each result, the
 - `order_by` is an array (ordered by priority)
 - `direction`: `"asc"` (default) or `"desc"`
 - If `order_by` is omitted, results are unordered (existing behavior)
-- Fuzzy queries: if `order_by` is omitted, sort by score descending (existing behavior). If `order_by` is provided, it overrides score sorting.
+- Fuzzy queries: if `order_by` is omitted, sort by `@score` descending (existing behavior). If `order_by` is provided, it takes priority.
+- Virtual fields (prefixed with `@`) are valid sort fields: `@score`, `@path`, `@size`, `@created_at`, `@updated_at`. These are computed/metadata values, not indexed fields.
+- `@score` is always available for fuzzy queries. For exact queries, `@score` is 1.0 for all results (sorting by it is a no-op).
 
 ### Error cases
 
@@ -78,21 +80,25 @@ Page 1: offset=0, limit=20. Page 2: offset=20. Page 3: offset=40.
 
 ### Cursor-based
 
-More efficient for large datasets. The cursor encodes the last result's sort key, so the next page starts right after it without scanning skipped entries.
+More efficient for large datasets. The cursor encodes the last result's sort key AND the version hash, so the next page operates on the same snapshot of data — no skips or duplicates from concurrent mutations.
 
 ```json
 {
   "where": {"field": "age", "op": "gt", "value": 18},
   "order_by": [{"field": "age", "direction": "asc"}],
   "limit": 20,
-  "after": "eyJhZ2UiOjM1LCJfaGFzaCI6ImFiYzEyMyJ9"
+  "after": "eyJhZ2UiOjM1LCJfaGFzaCI6ImFiYzEyMyIsIl92ZXJzaW9uIjoiZGVhZGJlZWYifQ"
 }
 ```
 
-The `after` token is an opaque base64-encoded JSON containing the sort key + file_hash (for tie-breaking):
+The `after` token is an opaque base64-encoded JSON containing:
 ```json
-{"age": 35, "_hash": "abc123..."}
+{"age": 35, "_hash": "abc123...", "_version": "deadbeef..."}
 ```
+
+- Sort key for seeking
+- File hash for tie-breaking
+- Version hash: locks the query to the same tree state as page 1. Subsequent pages use this version, not HEAD. This guarantees cursor stability — data mutations between pages don't affect the result set.
 
 The engine uses the cursor to seek directly into the sorted index, skipping everything before it. O(limit) per page regardless of position.
 
@@ -198,7 +204,28 @@ When no pagination fields → flat array (backward compatible).
 
 ---
 
-## 5. Edge cases
+## 5. Default limit
+
+ALL queries that return multiple items have a default limit of 20. This prevents accidental full-table dumps of entire documents. The response indicates when the default was applied:
+
+```json
+{
+  "results": [...],
+  "default_limit_hit": true,
+  "default_limit": 20,
+  "has_more": true
+}
+```
+
+Users can override with an explicit `"limit": N`. The engine may impose a hard cap in the future (forcing cursor-based pagination for large result sets).
+
+When `limit` is explicitly provided, `default_limit_hit` is omitted.
+
+This applies globally — not just to sorted/paginated queries. Every query path (exact, fuzzy, aggregation groups) respects the default limit.
+
+---
+
+## 6. Edge cases
 
 - Empty result set: `has_more: false`, `next_cursor: null`
 - Single result: works normally

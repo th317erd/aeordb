@@ -31,7 +31,7 @@ The projection filter runs in the HTTP layer, after serialization. It's `jq`-lik
 {
   "path": "/people/",
   "where": {"field": "age", "op": "gt", "value": 30},
-  "select": ["path", "score", "content_type"]
+  "select": ["@path", "@score", "content_type"]
 }
 ```
 
@@ -48,6 +48,19 @@ The projection filter runs in the HTTP layer, after serialization. It's `jq`-lik
   {"path": "/people/alice.json", "score": 1.0, "content_type": "application/json"}
 ]
 ```
+
+### Virtual fields convention
+
+Fields prefixed with `@` are virtual (computed/metadata, not stored in the document):
+- `@path` — file path
+- `@score` — relevance score
+- `@matched_by` — matching strategies
+- `@size` — file size
+- `@content_type` — MIME type
+- `@created_at` — creation timestamp
+- `@updated_at` — update timestamp
+
+The `@` prefix is reserved forever. User document fields cannot start with `@`.
 
 ### Works on any response shape
 

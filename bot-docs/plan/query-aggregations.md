@@ -123,7 +123,58 @@ Groups are by the combination of all group_by fields:
 
 ---
 
-## 4. Error cases
+## 4. Default group limit
+
+GROUP BY results are capped by the default limit (20 groups). Users can override with `"group_limit": N`. This prevents cardinality explosions from GROUP BY on high-cardinality fields (email, UUID).
+
+```json
+{
+  "aggregate": {
+    "count": true,
+    "group_by": ["department"],
+    "group_limit": 50
+  }
+}
+```
+
+If the default limit is hit:
+```json
+{
+  "groups": [...],
+  "default_limit_hit": true,
+  "total_groups": 150
+}
+```
+
+---
+
+## 5. NULL handling
+
+Documents without the aggregated field are not in that field's index. They are simply not counted/summed/averaged. This is correct — you can't aggregate what doesn't exist.
+
+- `COUNT` with a `where` clause = count of matching documents (from the filter result set size)
+- `SUM("salary")` = sum of salary values for documents that HAVE a salary index entry
+- Documents without salary are invisible to the salary aggregation
+
+This is not a problem to solve — it's the correct semantic.
+
+---
+
+## 6. Value deserialization
+
+The `index.values` map stores raw bytes from `json_value_to_bytes`. To interpret them for aggregation, use the converter's `type_tag()`:
+
+- `CONVERTER_TYPE_U8..U64` → parse as unsigned integer (big-endian)
+- `CONVERTER_TYPE_I64` → parse as signed integer (big-endian)
+- `CONVERTER_TYPE_F64` → parse as f64 (big-endian)
+- `CONVERTER_TYPE_STRING` → UTF-8 string (for GROUP BY keys, MIN/MAX lexicographic)
+- `CONVERTER_TYPE_TIMESTAMP` → parse as i64 millis (for MIN/MAX)
+
+The converter type is always available on the `FieldIndex.converter` — no ambiguity.
+
+---
+
+## 7. Error cases
 
 - Aggregate field not indexed → error: "No index found for aggregate field 'salary'"
 - SUM/AVG on non-numeric field → error: "Cannot compute SUM on field 'name' (index type: string)"
