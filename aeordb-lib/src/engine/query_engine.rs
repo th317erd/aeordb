@@ -62,6 +62,34 @@ impl Default for FuzzyOptions {
   }
 }
 
+/// Sort direction for ORDER BY.
+#[derive(Debug, Clone)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+/// A single sort field in an ORDER BY clause.
+#[derive(Debug, Clone)]
+pub struct SortField {
+    pub field: String,
+    pub direction: SortDirection,
+}
+
+/// Default limit applied when no explicit limit is provided.
+pub const DEFAULT_QUERY_LIMIT: usize = 20;
+
+/// Paginated query response wrapping results with metadata.
+#[derive(Debug)]
+pub struct PaginatedResult {
+    pub results: Vec<QueryResult>,
+    pub total_count: Option<u64>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
+    pub default_limit_hit: bool,
+}
+
 /// A query on a single field.
 #[derive(Debug, Clone)]
 pub struct FieldQuery {
@@ -102,6 +130,11 @@ pub struct Query {
   pub field_queries: Vec<FieldQuery>,
   pub node: Option<QueryNode>,
   pub limit: Option<usize>,
+  pub offset: Option<usize>,
+  pub order_by: Vec<SortField>,
+  pub after: Option<String>,
+  pub before: Option<String>,
+  pub include_total: bool,
   pub strategy: QueryStrategy,
 }
 
@@ -248,6 +281,67 @@ impl<'a> QueryEngine<'a> {
   /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use a separate path
   /// with index-based candidate generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
+    let mut results = self.execute_internal(query)?;
+
+    // Apply limit (use DEFAULT_QUERY_LIMIT when no explicit limit).
+    let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+    results.truncate(effective_limit);
+
+    Ok(results)
+  }
+
+  /// Execute a query with pagination support.
+  /// Applies default limit, sorting, offset, and builds pagination metadata.
+  pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
+    let explicit_limit = query.limit.is_some();
+    let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+
+    // Get all results (without limit)
+    let mut all_results = self.execute_internal(query)?;
+
+    // Sort if order_by specified
+    if !query.order_by.is_empty() {
+      self.sort_results(&mut all_results, &query.order_by, &query.path)?;
+    }
+
+    // Count total before pagination
+    let total_count = if query.include_total {
+      Some(all_results.len() as u64)
+    } else {
+      None
+    };
+
+    // Apply offset
+    let offset = query.offset.unwrap_or(0);
+    if offset > 0 {
+      if offset < all_results.len() {
+        all_results = all_results.into_iter().skip(offset).collect();
+      } else {
+        all_results.clear();
+      }
+    }
+
+    // Determine has_more
+    let has_more = all_results.len() > effective_limit;
+
+    // Apply limit
+    all_results.truncate(effective_limit);
+
+    let default_limit_hit = !explicit_limit && has_more;
+
+    Ok(PaginatedResult {
+      results: all_results,
+      total_count,
+      has_more,
+      next_cursor: None,  // Task 4
+      prev_cursor: None,  // Task 4
+      default_limit_hit,
+    })
+  }
+
+  /// Internal query execution that returns all matching results without applying limit.
+  /// Both `execute()` and `execute_paginated()` delegate to this.
+  fn execute_internal(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
     // Determine which node tree to evaluate.
     let effective_node = if let Some(ref node) = query.node {
       node.clone()
@@ -267,7 +361,7 @@ impl<'a> QueryEngine<'a> {
 
     // Check for fuzzy operations — these need the recheck path.
     if self.node_has_fuzzy_ops(&effective_node) {
-      return self.execute_with_recheck(query, &effective_node);
+      return self.execute_with_recheck_internal(query, &effective_node);
     }
 
     let index_manager = IndexManager::new(self.engine);
@@ -293,12 +387,93 @@ impl<'a> QueryEngine<'a> {
       }
     }
 
-    // Apply limit.
-    if let Some(limit) = query.limit {
-      results.truncate(limit);
+    Ok(results)
+  }
+
+  /// Sort results by the specified order_by fields.
+  /// Supports virtual @fields (score, path, size, created_at, updated_at) and
+  /// indexed fields with order-preserving converters.
+  fn sort_results(
+    &self,
+    results: &mut Vec<QueryResult>,
+    order_by: &[SortField],
+    path: &str,
+  ) -> EngineResult<()> {
+    if order_by.is_empty() || results.is_empty() {
+      return Ok(());
     }
 
-    Ok(results)
+    let index_manager = IndexManager::new(self.engine);
+
+    // For each sort field, prepare the sort data
+    struct SortData {
+      values: HashMap<Vec<u8>, Vec<u8>>,
+      is_virtual: bool,
+      field: String,
+      direction: SortDirection,
+    }
+
+    let mut sort_fields: Vec<SortData> = Vec::new();
+
+    for sf in order_by {
+      if sf.field.starts_with('@') {
+        sort_fields.push(SortData {
+          values: HashMap::new(),
+          is_virtual: true,
+          field: sf.field.clone(),
+          direction: sf.direction.clone(),
+        });
+      } else {
+        let indexes = index_manager.load_indexes_for_field(path, &sf.field)?;
+        let index = indexes.into_iter()
+          .find(|idx| idx.converter.is_order_preserving())
+          .ok_or_else(|| {
+            EngineError::NotFound(format!(
+              "Cannot sort by field '{}' — no order-preserving index found. \
+               Use a string, numeric, or timestamp index type.",
+              sf.field
+            ))
+          })?;
+
+        sort_fields.push(SortData {
+          values: index.values,
+          is_virtual: false,
+          field: sf.field.clone(),
+          direction: sf.direction.clone(),
+        });
+      }
+    }
+
+    results.sort_by(|a, b| {
+      for sd in &sort_fields {
+        let cmp = if sd.is_virtual {
+          match sd.field.as_str() {
+            "@score" => a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal),
+            "@path" => a.file_record.path.cmp(&b.file_record.path),
+            "@size" => a.file_record.total_size.cmp(&b.file_record.total_size),
+            "@created_at" => a.file_record.created_at.cmp(&b.file_record.created_at),
+            "@updated_at" => a.file_record.updated_at.cmp(&b.file_record.updated_at),
+            _ => std::cmp::Ordering::Equal,
+          }
+        } else {
+          let va = sd.values.get(&a.file_hash).cloned().unwrap_or_default();
+          let vb = sd.values.get(&b.file_hash).cloned().unwrap_or_default();
+          va.cmp(&vb)
+        };
+
+        let cmp = match sd.direction {
+          SortDirection::Asc => cmp,
+          SortDirection::Desc => cmp.reverse(),
+        };
+
+        if cmp != std::cmp::Ordering::Equal {
+          return cmp;
+        }
+      }
+      std::cmp::Ordering::Equal
+    });
+
+    Ok(())
   }
 
   /// Tier 2: NVTMask bitmap compositing for complex queries with OR/NOT.
@@ -460,7 +635,7 @@ impl<'a> QueryEngine<'a> {
   /// Execute a query containing fuzzy operations with a recheck phase.
   /// Currently supports single-field fuzzy queries (the common case).
   /// Values are loaded from the index's values map instead of re-reading files.
-  fn execute_with_recheck(
+  fn execute_with_recheck_internal(
     &self,
     query: &Query,
     effective_node: &QueryNode,
@@ -526,11 +701,6 @@ impl<'a> QueryEngine<'a> {
 
     // Sort by score descending
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Apply limit
-    if let Some(limit) = query.limit {
-      results.truncate(limit);
-    }
 
     Ok(results)
   }
@@ -1007,6 +1177,11 @@ impl<'a> QueryBuilder<'a> {
       field_queries: Vec::new(),
       node: self.build_node(),
       limit: self.limit_value,
+      offset: None,
+      order_by: Vec::new(),
+      after: None,
+      before: None,
+      include_total: false,
       strategy: self.strategy_value.clone(),
     }
   }

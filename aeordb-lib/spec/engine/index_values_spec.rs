@@ -295,6 +295,11 @@ fn test_fuzzy_contains_with_parser() {
             operation: QueryOp::Contains("Hello".to_string()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 
@@ -342,6 +347,11 @@ fn test_fuzzy_similar_with_parser() {
             ),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 
@@ -428,6 +438,11 @@ fn test_json_file_fuzzy_still_works() {
             operation: QueryOp::Contains("Alexander".to_string()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 
@@ -535,6 +550,11 @@ fn test_contains_query_no_match_returns_empty() {
             operation: QueryOp::Contains("Nonexistent Phrase XYZ".to_string()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 

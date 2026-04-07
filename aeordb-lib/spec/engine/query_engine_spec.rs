@@ -264,6 +264,11 @@ fn test_query_no_field_queries_returns_empty() {
     field_queries: Vec::new(),
     node: None,
     limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 
@@ -362,6 +367,11 @@ fn test_query_via_raw_query_struct() {
     ],
     node: None,
     limit: Some(2),
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 
@@ -523,6 +533,11 @@ fn test_query_node_tree() {
     field_queries: Vec::new(),
     node: Some(node),
     limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 
@@ -645,6 +660,11 @@ fn test_query_node_not_complement() {
     field_queries: Vec::new(),
     node: Some(node),
     limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 
@@ -875,6 +895,11 @@ fn test_in_query_via_query_node() {
     field_queries: Vec::new(),
     node: Some(node),
     limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 

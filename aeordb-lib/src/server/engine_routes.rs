@@ -691,6 +691,11 @@ pub async fn query_endpoint(
     field_queries: Vec::new(),
     node: if is_empty { None } else { Some(query_node) },
     limit: body.limit,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
     strategy: QueryStrategy::Full,
   };
 

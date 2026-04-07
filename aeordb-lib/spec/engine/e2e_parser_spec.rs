@@ -170,6 +170,11 @@ fn test_e2e_parser_query_u64_after_store() {
             operation: QueryOp::Eq(3u64.to_be_bytes().to_vec()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 
@@ -194,6 +199,11 @@ fn test_e2e_parser_query_u64_after_store() {
             operation: QueryOp::Eq(6u64.to_be_bytes().to_vec()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
 
@@ -380,6 +390,11 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
             operation: QueryOp::Eq(9u64.to_be_bytes().to_vec()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
     let results = qe.execute(&query).expect("query word_count=9");
@@ -398,6 +413,11 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
             operation: QueryOp::Eq(6u64.to_be_bytes().to_vec()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
@@ -416,6 +436,11 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
             operation: QueryOp::Between(7u64.to_be_bytes().to_vec(), 10u64.to_be_bytes().to_vec()),
         })),
         limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
         strategy: QueryStrategy::Full,
     };
     let results_range = qe.execute(&query_range).expect("query word_count 7-10");

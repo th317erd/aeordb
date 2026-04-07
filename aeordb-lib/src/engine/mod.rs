@@ -87,7 +87,7 @@ pub use storage_engine::StorageEngine;
 pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash};
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
-pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
+pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, DEFAULT_QUERY_LIMIT};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
