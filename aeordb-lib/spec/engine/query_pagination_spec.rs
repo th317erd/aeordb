@@ -1,11 +1,12 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{
-    QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy,
+    QueryEngine, QueryBuilder, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy,
     SortField, SortDirection, DEFAULT_QUERY_LIMIT,
 };
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
+use std::collections::HashSet;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
     let ctx = RequestContext::system();
@@ -632,8 +633,8 @@ fn test_zero_limit() {
 }
 
 #[test]
-fn test_paginated_cursors_are_none() {
-    // Cursors are not implemented yet (Task 4), so verify they are None
+fn test_paginated_cursors_present_when_has_more() {
+    // When there are more results than the limit, next_cursor should be Some
     let dir = tempfile::tempdir().unwrap();
     let engine = setup_30_people(&dir);
     let qe = QueryEngine::new(&engine);
@@ -641,7 +642,10 @@ fn test_paginated_cursors_are_none() {
     let query = make_query_all_people();
     let paginated = qe.execute_paginated(&query).unwrap();
 
-    assert!(paginated.next_cursor.is_none());
+    // Default limit 20 with 30 results => has_more = true, next_cursor = Some
+    assert!(paginated.has_more);
+    assert!(paginated.next_cursor.is_some());
+    // No after cursor was used and offset is 0, so prev_cursor should be None
     assert!(paginated.prev_cursor.is_none());
 }
 
@@ -708,3 +712,400 @@ fn test_execute_paginated_with_no_node() {
     assert!(!paginated.has_more);
     assert!(!paginated.default_limit_hit);
 }
+
+// ============================================================================
+// Cursor-based pagination tests (Task 4)
+// ============================================================================
+
+#[test]
+fn test_cursor_pagination_next_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    // Page 1: limit=5, sorted by @path asc
+    let mut query1 = make_query_all_people();
+    query1.limit = Some(5);
+    query1.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    let page1 = qe.execute_paginated(&query1).unwrap();
+
+    assert_eq!(page1.results.len(), 5);
+    assert!(page1.has_more);
+    assert!(page1.next_cursor.is_some());
+
+    // Page 2: use after cursor from page 1
+    let mut query2 = make_query_all_people();
+    query2.limit = Some(5);
+    query2.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query2.after = page1.next_cursor.clone();
+    let page2 = qe.execute_paginated(&query2).unwrap();
+
+    assert_eq!(page2.results.len(), 5);
+
+    // Ensure no overlap
+    let paths1: Vec<&str> = page1.results.iter().map(|r| r.file_record.path.as_str()).collect();
+    let paths2: Vec<&str> = page2.results.iter().map(|r| r.file_record.path.as_str()).collect();
+    for p in &paths1 {
+        assert!(!paths2.contains(p), "Overlap: {}", p);
+    }
+
+    // Verify page2 continues from where page1 left off
+    assert!(paths1.last().unwrap() < paths2.first().unwrap(),
+        "Page 2 should start after page 1 ended: {:?} vs {:?}", paths1.last(), paths2.first());
+
+    // Page 2 should have prev_cursor since we used after
+    assert!(page2.prev_cursor.is_some());
+}
+
+#[test]
+fn test_cursor_contains_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    let mut query = make_query_all_people();
+    query.limit = Some(5);
+    query.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    let paginated = qe.execute_paginated(&query).unwrap();
+
+    let cursor_str = paginated.next_cursor.unwrap();
+    // Decode cursor
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&cursor_str).unwrap();
+    let cursor_json: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+
+    assert!(cursor_json.get("_version").is_some(), "Cursor should contain _version");
+    assert!(cursor_json.get("_hash").is_some(), "Cursor should contain _hash");
+    assert!(cursor_json["_version"].as_str().unwrap().len() > 0, "Version should be non-empty hex");
+    assert!(cursor_json["_hash"].as_str().unwrap().len() > 0, "Hash should be non-empty hex");
+}
+
+#[test]
+fn test_invalid_cursor_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    // Bad base64
+    let mut query = make_query_all_people();
+    query.limit = Some(5);
+    query.after = Some("not-valid-base64!!!".to_string());
+    let result = qe.execute_paginated(&query);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Invalid cursor"), "Error should mention invalid cursor: {}", err);
+
+    // Valid base64 but missing _hash
+    let bad_json = serde_json::json!({"foo": "bar"});
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&bad_json).unwrap());
+    let mut query2 = make_query_all_people();
+    query2.limit = Some(5);
+    query2.after = Some(encoded);
+    let result2 = qe.execute_paginated(&query2);
+    assert!(result2.is_err());
+    let err2 = format!("{}", result2.unwrap_err());
+    assert!(err2.contains("_hash"), "Error should mention missing _hash: {}", err2);
+
+    // Valid base64 but not valid JSON
+    let bad_b64 = base64::engine::general_purpose::STANDARD.encode(b"not json");
+    let mut query3 = make_query_all_people();
+    query3.limit = Some(5);
+    query3.after = Some(bad_b64);
+    let result3 = qe.execute_paginated(&query3);
+    assert!(result3.is_err());
+}
+
+#[test]
+fn test_no_more_results_no_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    let mut query = make_query_all_people();
+    query.limit = Some(100); // All results fit
+    let paginated = qe.execute_paginated(&query).unwrap();
+
+    assert_eq!(paginated.results.len(), 30);
+    assert!(!paginated.has_more);
+    assert!(paginated.next_cursor.is_none(), "next_cursor should be None when all results fit");
+}
+
+#[test]
+fn test_cursor_three_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    let mut all_paths: Vec<String> = Vec::new();
+
+    // Page 1
+    let mut query = make_query_all_people();
+    query.limit = Some(10);
+    query.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    let page1 = qe.execute_paginated(&query).unwrap();
+    assert_eq!(page1.results.len(), 10);
+    assert!(page1.has_more);
+    assert!(page1.next_cursor.is_some());
+    for r in &page1.results {
+        all_paths.push(r.file_record.path.clone());
+    }
+
+    // Page 2
+    let mut query2 = make_query_all_people();
+    query2.limit = Some(10);
+    query2.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query2.after = page1.next_cursor.clone();
+    let page2 = qe.execute_paginated(&query2).unwrap();
+    assert_eq!(page2.results.len(), 10);
+    assert!(page2.has_more);
+    assert!(page2.next_cursor.is_some());
+    for r in &page2.results {
+        all_paths.push(r.file_record.path.clone());
+    }
+
+    // Page 3
+    let mut query3 = make_query_all_people();
+    query3.limit = Some(10);
+    query3.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query3.after = page2.next_cursor.clone();
+    let page3 = qe.execute_paginated(&query3).unwrap();
+    assert_eq!(page3.results.len(), 10);
+    assert!(!page3.has_more);
+    assert!(page3.next_cursor.is_none());
+    for r in &page3.results {
+        all_paths.push(r.file_record.path.clone());
+    }
+
+    // Verify complete: 30 unique paths, no duplicates, no gaps
+    assert_eq!(all_paths.len(), 30);
+    let unique: HashSet<&String> = all_paths.iter().collect();
+    assert_eq!(unique.len(), 30, "Expected 30 unique paths, got {}", unique.len());
+
+    // Verify sorted
+    for i in 1..all_paths.len() {
+        assert!(all_paths[i - 1] < all_paths[i],
+            "Not sorted at index {}: {} >= {}", i, all_paths[i - 1], all_paths[i]);
+    }
+}
+
+#[test]
+fn test_before_cursor_pagination() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    // Get page 1 to obtain a cursor
+    let mut query1 = make_query_all_people();
+    query1.limit = Some(10);
+    query1.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    let page1 = qe.execute_paginated(&query1).unwrap();
+
+    // Page 2 to get its first element's cursor (prev_cursor)
+    let mut query2 = make_query_all_people();
+    query2.limit = Some(10);
+    query2.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query2.after = page1.next_cursor.clone();
+    let page2 = qe.execute_paginated(&query2).unwrap();
+    assert!(page2.prev_cursor.is_some());
+
+    // Use before cursor with the first result of page 2 to get results before it
+    let mut query_before = make_query_all_people();
+    query_before.limit = Some(100);
+    query_before.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query_before.before = page2.prev_cursor.clone();
+    let before_page = qe.execute_paginated(&query_before).unwrap();
+
+    // The "before" results should not include any of page2's results
+    let page2_paths: Vec<&str> = page2.results.iter().map(|r| r.file_record.path.as_str()).collect();
+    for r in &before_page.results {
+        assert!(!page2_paths.contains(&r.file_record.path.as_str()),
+            "before results should not overlap with page2");
+    }
+}
+
+#[test]
+fn test_cursor_with_nonexistent_hash_skips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    // Build a cursor with a hash that doesn't exist in results
+    let fake_cursor = serde_json::json!({
+        "_hash": "deadbeef00000000000000000000000000000000000000000000000000000000",
+        "_version": "0000000000000000000000000000000000000000000000000000000000000000"
+    });
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&fake_cursor).unwrap());
+
+    let mut query = make_query_all_people();
+    query.limit = Some(100);
+    query.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+    query.after = Some(encoded);
+    let paginated = qe.execute_paginated(&query).unwrap();
+
+    // Hash not found => no skip, all 30 results returned
+    assert_eq!(paginated.results.len(), 30);
+}
+
+#[test]
+fn test_cursor_invalid_hex_hash_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+    let qe = QueryEngine::new(&engine);
+
+    let bad_cursor = serde_json::json!({
+        "_hash": "not-valid-hex",
+        "_version": "0000"
+    });
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&bad_cursor).unwrap());
+
+    let mut query = make_query_all_people();
+    query.limit = Some(5);
+    query.after = Some(encoded);
+    let result = qe.execute_paginated(&query);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Invalid cursor hash"), "Error: {}", err);
+}
+
+// ============================================================================
+// QueryBuilder tests (Task 7)
+// ============================================================================
+
+#[test]
+fn test_query_builder_order_by() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+
+    let paginated = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(5)
+        .execute_paginated()
+        .unwrap();
+
+    assert_eq!(paginated.results.len(), 5);
+    assert!(paginated.has_more);
+    let paths: Vec<String> = paginated.results.iter().map(|r| r.file_record.path.clone()).collect();
+    for i in 1..paths.len() {
+        assert!(paths[i - 1] <= paths[i], "Not sorted: {} > {}", paths[i - 1], paths[i]);
+    }
+}
+
+#[test]
+fn test_query_builder_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+
+    let page1 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(5)
+        .execute_paginated()
+        .unwrap();
+
+    let page2 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(5)
+        .offset(5)
+        .execute_paginated()
+        .unwrap();
+
+    // No overlap
+    let paths1: Vec<&str> = page1.results.iter().map(|r| r.file_record.path.as_str()).collect();
+    let paths2: Vec<&str> = page2.results.iter().map(|r| r.file_record.path.as_str()).collect();
+    for p in &paths1 {
+        assert!(!paths2.contains(p));
+    }
+}
+
+#[test]
+fn test_query_builder_include_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+
+    let paginated = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .include_total()
+        .limit(5)
+        .execute_paginated()
+        .unwrap();
+
+    assert_eq!(paginated.total_count, Some(30));
+    assert_eq!(paginated.results.len(), 5);
+}
+
+#[test]
+fn test_query_builder_cursor_pagination() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+
+    let page1 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(10)
+        .execute_paginated()
+        .unwrap();
+
+    assert!(page1.next_cursor.is_some());
+
+    let page2 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(10)
+        .after(page1.next_cursor.as_ref().unwrap())
+        .execute_paginated()
+        .unwrap();
+
+    assert_eq!(page2.results.len(), 10);
+
+    // Verify no overlap
+    let paths1: HashSet<String> = page1.results.iter().map(|r| r.file_record.path.clone()).collect();
+    let paths2: HashSet<String> = page2.results.iter().map(|r| r.file_record.path.clone()).collect();
+    assert!(paths1.is_disjoint(&paths2), "Pages should not overlap");
+}
+
+#[test]
+fn test_query_builder_before_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = setup_30_people(&dir);
+
+    // Get page 1 cursor
+    let page1 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(10)
+        .execute_paginated()
+        .unwrap();
+
+    // Get page 2 and its prev cursor
+    let page2 = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(10)
+        .after(page1.next_cursor.as_ref().unwrap())
+        .execute_paginated()
+        .unwrap();
+
+    assert!(page2.prev_cursor.is_some());
+
+    // Use before cursor
+    let before_results = QueryBuilder::new(&engine, "/people")
+        .field("age").gt_u64(0)
+        .order_by("@path", SortDirection::Asc)
+        .limit(100)
+        .before(page2.prev_cursor.as_ref().unwrap())
+        .execute_paginated()
+        .unwrap();
+
+    // Should not contain any of page2's items
+    let page2_paths: HashSet<String> = page2.results.iter().map(|r| r.file_record.path.clone()).collect();
+    for r in &before_results.results {
+        assert!(!page2_paths.contains(&r.file_record.path));
+    }
+}
+
+use base64::Engine as _;

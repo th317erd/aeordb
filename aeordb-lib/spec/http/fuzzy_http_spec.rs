@@ -153,7 +153,7 @@ async fn test_contains_query_http() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   // "Smith" and "Schmidt" both contain "smi" (case-insensitive)
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -189,7 +189,7 @@ async fn test_similar_query_http() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(!results.is_empty(), "similar query should return results");
 
   // Each result should have a score
@@ -227,7 +227,7 @@ async fn test_phonetic_query_http() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   // Smith and Smythe should have similar phonetic codes
@@ -264,7 +264,7 @@ async fn test_fuzzy_query_http_dl() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/people/restaurant.json"), "should match restaurant, got: {:?}", paths);
@@ -300,7 +300,7 @@ async fn test_fuzzy_query_http_jw() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/people/martha.json"), "should match Martha via JW, got: {:?}", paths);
@@ -335,7 +335,7 @@ async fn test_match_query_http() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(!results.is_empty(), "match query should return results");
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -379,7 +379,7 @@ async fn test_response_includes_score() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(!results.is_empty(), "should have at least one result");
 
   for result in results {
@@ -418,7 +418,7 @@ async fn test_response_includes_matched_by() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(!results.is_empty(), "should have at least one result");
 
   for result in results {
@@ -461,7 +461,7 @@ async fn test_results_sorted_by_score() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   if results.len() >= 2 {
     let scores: Vec<f64> = results.iter()
@@ -537,7 +537,7 @@ async fn test_contains_no_match() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(results.is_empty(), "no results expected for nonsense substring");
 }
 
@@ -710,7 +710,7 @@ async fn test_fuzzy_with_fixed_fuzziness() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/people/smith.json"), "should match Smith with fuzziness 1, got: {:?}", paths);
@@ -745,7 +745,7 @@ async fn test_similar_default_threshold() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(!results.is_empty(), "similar with default threshold should find results");
 }
 
@@ -777,7 +777,7 @@ async fn test_match_no_match_returns_empty() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert!(results.is_empty(), "nonsense match query should return empty results");
 }
 
@@ -810,7 +810,7 @@ async fn test_score_and_matched_by_on_non_fuzzy_query() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["score"].as_f64().unwrap(), 1.0);
   assert!(results[0]["matched_by"].as_array().unwrap().is_empty());
@@ -875,7 +875,7 @@ async fn test_match_composite_returns_multiple_strategies() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json.as_array().unwrap();
+  let results = json["results"].as_array().unwrap();
 
   let smith_result = results.iter()
     .find(|r| r["path"].as_str().unwrap() == "/people/smith.json")

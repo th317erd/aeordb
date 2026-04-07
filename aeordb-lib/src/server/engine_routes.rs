@@ -16,7 +16,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
+use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -488,6 +488,17 @@ pub struct QueryRequest {
   pub path: String,
   pub r#where: serde_json::Value,
   pub limit: Option<usize>,
+  pub offset: Option<usize>,
+  pub order_by: Option<Vec<SortFieldRequest>>,
+  pub after: Option<String>,
+  pub before: Option<String>,
+  pub include_total: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SortFieldRequest {
+  pub field: String,
+  pub direction: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,6 +679,7 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
 
 /// POST /query -- execute an index query and return matching file metadata.
 /// Supports both legacy array format and nested boolean object format.
+/// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total_count? }
 pub async fn query_endpoint(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
@@ -686,23 +698,34 @@ pub async fn query_endpoint(
   // Check for empty where clause (AND with no children).
   let is_empty = matches!(&query_node, QueryNode::And(children) if children.is_empty());
 
+  // Parse order_by
+  let order_by: Vec<SortField> = body.order_by.as_ref()
+    .map(|fields| fields.iter().map(|f| SortField {
+      field: f.field.clone(),
+      direction: match f.direction.as_deref() {
+        Some("desc") => SortDirection::Desc,
+        _ => SortDirection::Asc,
+      },
+    }).collect())
+    .unwrap_or_default();
+
   let query = Query {
     path: body.path.clone(),
     field_queries: Vec::new(),
     node: if is_empty { None } else { Some(query_node) },
     limit: body.limit,
-    offset: None,
-    order_by: Vec::new(),
-    after: None,
-    before: None,
-    include_total: false,
+    offset: body.offset,
+    order_by,
+    after: body.after.clone(),
+    before: body.before.clone(),
+    include_total: body.include_total.unwrap_or(false),
     strategy: QueryStrategy::Full,
   };
 
   let query_engine = QueryEngine::new(&state.engine);
-  match query_engine.execute(&query) {
-    Ok(results) => {
-      let response_items: Vec<serde_json::Value> = results
+  match query_engine.execute_paginated(&query) {
+    Ok(paginated) => {
+      let response_items: Vec<serde_json::Value> = paginated.results
         .iter()
         .map(|result| {
           serde_json::json!({
@@ -716,11 +739,36 @@ pub async fn query_endpoint(
           })
         })
         .collect();
-      (StatusCode::OK, Json(response_items)).into_response()
+
+      let mut response = serde_json::json!({
+        "results": response_items,
+        "has_more": paginated.has_more,
+      });
+
+      if let Some(total) = paginated.total_count {
+        response["total_count"] = serde_json::json!(total);
+      }
+      if let Some(ref cursor) = paginated.next_cursor {
+        response["next_cursor"] = serde_json::json!(cursor);
+      }
+      if let Some(ref cursor) = paginated.prev_cursor {
+        response["prev_cursor"] = serde_json::json!(cursor);
+      }
+      if paginated.default_limit_hit {
+        response["default_limit_hit"] = serde_json::json!(true);
+        response["default_limit"] = serde_json::json!(DEFAULT_QUERY_LIMIT);
+      }
+
+      (StatusCode::OK, Json(response)).into_response()
     }
     Err(EngineError::NotFound(message)) => {
       ErrorResponse::new(message)
         .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(EngineError::JsonParseError(message)) => {
+      ErrorResponse::new(message)
+        .with_status(StatusCode::BAD_REQUEST)
         .into_response()
     }
     Err(EngineError::RangeQueryNotSupported(converter_name)) => {

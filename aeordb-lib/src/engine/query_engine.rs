@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use base64::Engine as _;
+
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
@@ -264,6 +266,45 @@ fn evaluate_node_as_mask(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cursor encoding/decoding for cursor-based pagination
+// ---------------------------------------------------------------------------
+
+fn encode_cursor(
+    result: &QueryResult,
+    order_by: &[SortField],
+    version_hash: &[u8],
+) -> String {
+    let mut cursor = serde_json::Map::new();
+
+    for sf in order_by {
+        if sf.field.starts_with('@') {
+            let value = match sf.field.as_str() {
+                "@score" => serde_json::json!(result.score),
+                "@path" => serde_json::json!(result.file_record.path),
+                "@size" => serde_json::json!(result.file_record.total_size),
+                "@created_at" => serde_json::json!(result.file_record.created_at),
+                "@updated_at" => serde_json::json!(result.file_record.updated_at),
+                _ => serde_json::Value::Null,
+            };
+            cursor.insert(sf.field.clone(), value);
+        }
+    }
+
+    cursor.insert("_hash".to_string(), serde_json::json!(hex::encode(&result.file_hash)));
+    cursor.insert("_version".to_string(), serde_json::json!(hex::encode(version_hash)));
+
+    let json = serde_json::Value::Object(cursor);
+    base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json).unwrap_or_default())
+}
+
+fn decode_cursor(cursor: &str) -> EngineResult<serde_json::Value> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(cursor)
+        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor: {}", e)))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor JSON: {}", e)))
+}
+
 /// Executes queries against the index system.
 pub struct QueryEngine<'a> {
   engine: &'a StorageEngine,
@@ -291,7 +332,7 @@ impl<'a> QueryEngine<'a> {
   }
 
   /// Execute a query with pagination support.
-  /// Applies default limit, sorting, offset, and builds pagination metadata.
+  /// Applies default limit, sorting, cursor-based pagination, offset, and builds pagination metadata.
   pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
     let explicit_limit = query.limit.is_some();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
@@ -311,6 +352,33 @@ impl<'a> QueryEngine<'a> {
       None
     };
 
+    // Apply cursor-based pagination (after sorting, before offset)
+    if let Some(ref cursor_str) = query.after {
+      let cursor_data = decode_cursor(cursor_str)?;
+      let cursor_hash = cursor_data.get("_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
+      let cursor_hash_bytes = hex::decode(cursor_hash)
+        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
+
+      if let Some(pos) = all_results.iter().position(|r| r.file_hash == cursor_hash_bytes) {
+        all_results = all_results.into_iter().skip(pos + 1).collect();
+      }
+    }
+
+    if let Some(ref cursor_str) = query.before {
+      let cursor_data = decode_cursor(cursor_str)?;
+      let cursor_hash = cursor_data.get("_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
+      let cursor_hash_bytes = hex::decode(cursor_hash)
+        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
+
+      if let Some(pos) = all_results.iter().position(|r| r.file_hash == cursor_hash_bytes) {
+        all_results.truncate(pos);
+      }
+    }
+
     // Apply offset
     let offset = query.offset.unwrap_or(0);
     if offset > 0 {
@@ -329,12 +397,31 @@ impl<'a> QueryEngine<'a> {
 
     let default_limit_hit = !explicit_limit && has_more;
 
+    // Build cursors
+    let version_hash = self.engine.head_hash().unwrap_or_default();
+
+    let next_cursor = if has_more {
+      all_results.last().map(|last| {
+        encode_cursor(last, &query.order_by, &version_hash)
+      })
+    } else {
+      None
+    };
+
+    let prev_cursor = if offset > 0 || query.after.is_some() {
+      all_results.first().map(|first| {
+        encode_cursor(first, &query.order_by, &version_hash)
+      })
+    } else {
+      None
+    };
+
     Ok(PaginatedResult {
       results: all_results,
       total_count,
       has_more,
-      next_cursor: None,  // Task 4
-      prev_cursor: None,  // Task 4
+      next_cursor,
+      prev_cursor,
       default_limit_hit,
     })
   }
@@ -1081,6 +1168,11 @@ pub struct QueryBuilder<'a> {
   path: String,
   nodes: Vec<QueryNode>,
   limit_value: Option<usize>,
+  offset_value: Option<usize>,
+  order_by_fields: Vec<SortField>,
+  after_value: Option<String>,
+  before_value: Option<String>,
+  include_total_value: bool,
   strategy_value: QueryStrategy,
 }
 
@@ -1091,6 +1183,11 @@ impl<'a> QueryBuilder<'a> {
       path: path.to_string(),
       nodes: Vec::new(),
       limit_value: None,
+      offset_value: None,
+      order_by_fields: Vec::new(),
+      after_value: None,
+      before_value: None,
+      include_total_value: false,
       strategy_value: QueryStrategy::Full,
     }
   }
@@ -1112,6 +1209,39 @@ impl<'a> QueryBuilder<'a> {
   /// Set the query execution strategy.
   pub fn strategy(mut self, strategy: QueryStrategy) -> Self {
     self.strategy_value = strategy;
+    self
+  }
+
+  /// Add a sort field.
+  pub fn order_by(mut self, field: &str, direction: SortDirection) -> Self {
+    self.order_by_fields.push(SortField {
+      field: field.to_string(),
+      direction,
+    });
+    self
+  }
+
+  /// Set an offset (skip N results).
+  pub fn offset(mut self, offset: usize) -> Self {
+    self.offset_value = Some(offset);
+    self
+  }
+
+  /// Set an "after" cursor for cursor-based pagination.
+  pub fn after(mut self, cursor: &str) -> Self {
+    self.after_value = Some(cursor.to_string());
+    self
+  }
+
+  /// Set a "before" cursor for cursor-based pagination.
+  pub fn before(mut self, cursor: &str) -> Self {
+    self.before_value = Some(cursor.to_string());
+    self
+  }
+
+  /// Include total count in paginated results.
+  pub fn include_total(mut self) -> Self {
+    self.include_total_value = true;
     self
   }
 
@@ -1177,11 +1307,11 @@ impl<'a> QueryBuilder<'a> {
       field_queries: Vec::new(),
       node: self.build_node(),
       limit: self.limit_value,
-      offset: None,
-      order_by: Vec::new(),
-      after: None,
-      before: None,
-      include_total: false,
+      offset: self.offset_value,
+      order_by: self.order_by_fields.clone(),
+      after: self.after_value.clone(),
+      before: self.before_value.clone(),
+      include_total: self.include_total_value,
       strategy: self.strategy_value.clone(),
     }
   }
@@ -1208,6 +1338,13 @@ impl<'a> QueryBuilder<'a> {
     let query_engine = QueryEngine::new(self.engine);
     let results = query_engine.execute(&query)?;
     Ok(results.len())
+  }
+
+  /// Execute with pagination support and return a PaginatedResult.
+  pub fn execute_paginated(&self) -> EngineResult<PaginatedResult> {
+    let query = self.build_query();
+    let query_engine = QueryEngine::new(self.engine);
+    query_engine.execute_paginated(&query)
   }
 }
 
