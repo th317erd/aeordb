@@ -338,3 +338,7 @@ path = "spec/engine/webhook_spec.rs"
 [[test]]
 name = "sse_spec"
 path = "spec/http/sse_spec.rs"
+
+[[test]]
+name = "timestamp_spec"
+path = "spec/engine/timestamp_spec.rs"

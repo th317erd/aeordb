@@ -749,16 +749,64 @@ impl TimestampConverter {
   }
 }
 
+impl TimestampConverter {
+  /// Parse a timestamp from bytes. Handles:
+  /// - 8 bytes: i64 big-endian milliseconds
+  /// - UTF-8 string: ISO 8601 date/datetime, converted to UTC millis
+  pub fn parse_timestamp(&self, value: &[u8]) -> i64 {
+    // If exactly 8 bytes, treat as i64 big-endian millis
+    if value.len() == 8 {
+      return i64::from_be_bytes(value.try_into().unwrap());
+    }
+
+    // Try as UTF-8 string
+    if let Ok(text) = std::str::from_utf8(value) {
+      let trimmed = text.trim();
+
+      if trimmed.is_empty() {
+        return 0;
+      }
+
+      // Try ISO 8601 with timezone: "2026-04-07T15:30:00Z" or "2026-04-07T10:30:00-05:00"
+      if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return dt.with_timezone(&chrono::Utc).timestamp_millis();
+      }
+
+      // Try ISO 8601 without timezone: "2026-04-07T15:30:00" → assume UTC
+      if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return naive.and_utc().timestamp_millis();
+      }
+
+      // Try with fractional seconds: "2026-04-07T15:30:00.123"
+      if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f") {
+        return naive.and_utc().timestamp_millis();
+      }
+
+      // Try date only: "2026-04-07" → midnight UTC
+      if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        if let Some(datetime) = date.and_hms_opt(0, 0, 0) {
+          return datetime.and_utc().timestamp_millis();
+        }
+      }
+
+      // Try as numeric string (milliseconds)
+      if let Ok(millis) = trimmed.parse::<i64>() {
+        return millis;
+      }
+    }
+
+    // Fallback: return 0 (epoch)
+    0
+  }
+}
+
 impl ScalarConverter for TimestampConverter {
   fn to_scalar(&self, value: &[u8]) -> f64 {
-    if value.len() < 8 {
-      return 0.0;
-    }
+    let millis = self.parse_timestamp(value);
     if self.min == self.max {
       return 0.5;
     }
-    let numeric = i64::from_be_bytes(value[..8].try_into().unwrap());
-    let shifted_value = (numeric as i128 - self.min as i128) as f64;
+    let shifted_value = (millis as i128 - self.min as i128) as f64;
     let shifted_range = (self.max as i128 - self.min as i128) as f64;
     (shifted_value / shifted_range).clamp(0.0, 1.0)
   }

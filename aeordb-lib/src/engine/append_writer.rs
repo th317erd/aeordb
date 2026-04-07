@@ -86,10 +86,7 @@ impl AppendWriter {
     let total_length =
       EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
 
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .expect("System clock before Unix epoch")
-      .as_millis() as i64;
+    let now = chrono::Utc::now().timestamp_millis();
 
     let header = EntryHeader {
       entry_version: 1,

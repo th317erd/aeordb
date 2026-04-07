@@ -28,10 +28,7 @@ pub struct FileHeader {
 
 impl FileHeader {
   pub fn new(hash_algo: HashAlgorithm) -> Self {
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .expect("System clock before Unix epoch")
-      .as_millis() as i64;
+    let now = chrono::Utc::now().timestamp_millis();
 
     let hash_length = hash_algo.hash_length();
 
