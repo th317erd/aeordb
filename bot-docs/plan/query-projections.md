@@ -2,152 +2,99 @@
 
 **Date:** 2026-04-07
 **Status:** Draft
-**Priority:** Medium — bandwidth optimization, developer ergonomics
-**Depends on:** Nothing (but benefits from sorting/pagination for full utility)
+**Priority:** Low — cosmetic convenience, not a query engine change
+**Depends on:** Nothing
 
 ---
 
 ## 1. Overview
 
-Return specific field values instead of full FileRecord metadata. Currently every query result includes path, total_size, content_type, created_at, updated_at, score, matched_by — but not the actual document field values (the data the user queried for). Projections fix this.
+Projections are a response filter. The query engine runs normally, produces its standard JSON response, and then a post-processing step strips fields the user didn't ask for. No index awareness, no value loading, no new query execution paths.
+
+This only applies to JSON responses. Non-JSON document queries (images, PDFs, etc.) are unaffected — if users need custom filtering for those, they write a query plugin.
 
 ---
 
-## 2. The problem
+## 2. How it works
 
-Today: you query for people with age > 30, you get back a list of file paths. To see the actual name and age, you need a second request per file to `GET /engine/{path}`. That's N+1 queries — the exact pattern databases exist to prevent.
-
-With projections: you query and get the field values inline:
-
-```json
-[
-  {"_path": "/people/alice.json", "name": "Alice", "age": 35},
-  {"_path": "/people/bob.json", "name": "Bob", "age": 42}
-]
+```
+Query Engine → Full JSON response → Projection filter → Trimmed JSON → Client
 ```
 
----
-
-## 3. How it works
-
-Field values are stored in `FieldIndex.values` — the `HashMap<file_hash, Vec<u8>>` we added for fuzzy recheck. For any indexed field, we can retrieve the raw value without loading the file.
-
-For projected fields that are NOT indexed, we'd need to load the file content and parse it. This is expensive and should be:
-1. Attempted from the `.parsed/` cache or file content
-2. Flagged in EXPLAIN as a "full scan projection"
-
-For v1: only indexed fields are projectable. Non-indexed field → error.
+The projection filter runs in the HTTP layer, after serialization. It's `jq`-like field selection on the outgoing JSON.
 
 ---
 
-## 4. API
-
-### Request
+## 3. API
 
 ```json
 {
   "path": "/people/",
   "where": {"field": "age", "op": "gt", "value": 30},
-  "select": ["name", "age", "email"]
+  "select": ["path", "score", "content_type"]
 }
 ```
 
-`select` is an array of field names to include in results.
+### Before filter:
+```json
+[
+  {"path": "/people/alice.json", "total_size": 1234, "content_type": "application/json", "created_at": 123, "updated_at": 456, "score": 1.0, "matched_by": []}
+]
+```
 
-### Response
+### After filter:
+```json
+[
+  {"path": "/people/alice.json", "score": 1.0, "content_type": "application/json"}
+]
+```
 
-When `select` is present, the response shape changes from FileRecord-based to field-value-based:
+### Works on any response shape
 
+Pagination envelope:
 ```json
 {
   "results": [
-    {
-      "_path": "/people/alice.json",
-      "_score": 1.0,
-      "_matched_by": [],
-      "name": "Alice",
-      "age": 35,
-      "email": "alice@example.com"
-    }
-  ]
+    {"path": "/people/alice.json", "score": 1.0}
+  ],
+  "has_more": true,
+  "next_cursor": "..."
 }
 ```
 
-System fields (prefixed with `_`) are always included:
-- `_path` — file path
-- `_score` — relevance score
-- `_matched_by` — matching strategies (for fuzzy queries)
-- `_size` — file size (optional, included if no select or if explicitly selected)
-- `_content_type` — MIME type (optional)
-- `_created_at` — creation timestamp (optional)
-- `_updated_at` — update timestamp (optional)
-
-### No select = existing behavior
-
-When `select` is absent, results use the current FileRecord format (backward compatible).
-
-### Select system fields explicitly
-
+Aggregation response:
 ```json
-{"select": ["name", "_created_at", "_size"]}
+{
+  "count": 150,
+  "avg": {"age": 34.5}
+}
 ```
 
-This includes only `name` plus the specified system fields. `_path` and `_score` are always included.
+The filter applies recursively to result objects. Envelope fields (`has_more`, `next_cursor`, `total_count`) are never stripped — they're pagination metadata, not result data.
+
+### No select = no filtering
+
+Omitting `select` returns the full response (backward compatible).
 
 ---
 
-## 5. Value deserialization
+## 4. Implementation
 
-The `index.values` map stores raw bytes (from `json_value_to_bytes`):
-- Strings → UTF-8 bytes → return as JSON string
-- u64 → 8 bytes big-endian → return as JSON number
-- i64 → 8 bytes big-endian → return as JSON number
-- f64 → 8 bytes big-endian → return as JSON number
-- bool → 1 byte → return as JSON boolean
-
-Need a `bytes_to_json_value(bytes, index_type) -> serde_json::Value` helper that reverses `json_value_to_bytes`.
-
----
-
-## 6. Error cases
-
-- Projected field not indexed → error: "Cannot project field 'phone' — no index found. Only indexed fields can be projected."
-- Field indexed but no values stored → return null for that field
-- Empty select array → error
-
----
-
-## 7. Implementation approach
-
-### Query struct changes
+A single function in the HTTP response path:
 
 ```rust
-pub struct Query {
-    // ... existing fields ...
-    pub select: Option<Vec<String>>,  // NEW: projected field names
-}
+fn apply_projection(response: serde_json::Value, select: &[String]) -> serde_json::Value
 ```
 
-### Execution changes
+If the response is an array: filter each object. If the response is an object with a `results` array: filter each result, preserve envelope fields. Otherwise: return as-is.
 
-After filtering and sorting (if applicable):
-1. If `select` is present: for each result, for each selected field:
-   a. Find the field's index
-   b. Look up file_hash in `index.values`
-   c. Deserialize bytes to JSON value using `bytes_to_json_value`
-   d. Build a JSON object with the projected fields + system fields
-2. Return the projected results
-
-### Response type
-
-When projections are active, `QueryResult` becomes a JSON object instead of a fixed struct. The HTTP response serialization handles this differently.
+Per-object filtering: keep only keys that are in the `select` list.
 
 ---
 
-## 8. Phases
+## 5. Phases
 
-1. `select` parameter parsing in Query and HTTP API
-2. `bytes_to_json_value` helper (reverse of `json_value_to_bytes`)
-3. Projection execution: load values from index, build JSON response
-4. System field handling (`_path`, `_score`, etc.)
-5. Combine with sorting/pagination
+1. Parse `select` from query JSON
+2. `apply_projection` helper function
+3. Wire into HTTP query response path
+4. Tests: array filtering, envelope filtering, no-select passthrough, empty select
