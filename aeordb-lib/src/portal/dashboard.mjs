@@ -42,6 +42,7 @@ class AeorDashboard extends HTMLElement {
   constructor() {
     super();
     this._interval = null;
+    this._eventSource = null;
     this._activityHistory = [];
     this._storageChart = null;
     this._activityChart = null;
@@ -50,14 +51,64 @@ class AeorDashboard extends HTMLElement {
 
   connectedCallback() {
     this.render();
-    this.fetchStats();
-    this._interval = setInterval(() => this.fetchStats(), 5000);
+    this.fetchStats(); // initial load
+    this.connectSSE();
   }
 
   disconnectedCallback() {
+    if (this._eventSource) {
+      this._eventSource.close();
+      this._eventSource = null;
+    }
     if (this._interval) {
       clearInterval(this._interval);
       this._interval = null;
+    }
+  }
+
+  connectSSE() {
+    // Build SSE URL with auth token if available
+    let url = '/events/stream?events=heartbeat';
+
+    // EventSource doesn't support Authorization headers natively.
+    // For --auth=false mode, no token is needed. For auth mode,
+    // we'd need a polyfill or query-param token. For now, direct connect.
+    try {
+      this._eventSource = new EventSource(url);
+
+      this._eventSource.addEventListener('heartbeat', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const stats = data.payload?.stats;
+          if (stats) {
+            this._stats = stats;
+            this.updateStatCards(stats);
+            this.updateStorageChart(stats);
+            this.recordActivityPoint(stats);
+            this.updateActivityChart();
+
+            const errorContainer = this.querySelector('#dashboard-error');
+            if (errorContainer)
+              errorContainer.innerHTML = '';
+          }
+        } catch (_) {
+          // malformed event, skip
+        }
+      });
+
+      this._eventSource.onerror = () => {
+        // SSE failed — fall back to polling
+        if (this._eventSource) {
+          this._eventSource.close();
+          this._eventSource = null;
+        }
+        if (!this._interval) {
+          this._interval = setInterval(() => this.fetchStats(), 15000);
+        }
+      };
+    } catch (_) {
+      // EventSource not supported — fall back to polling
+      this._interval = setInterval(() => this.fetchStats(), 15000);
     }
   }
 
@@ -173,7 +224,7 @@ class AeorDashboard extends HTMLElement {
       kvEntries: stats.kv_entries || stats.entry_count || 0,
     });
 
-    // Keep rolling window of 60 data points (5 minutes at 5s intervals)
+    // Keep rolling window of 60 data points (15 minutes at 15s heartbeat intervals)
     if (this._activityHistory.length > 60)
       this._activityHistory.shift();
   }
