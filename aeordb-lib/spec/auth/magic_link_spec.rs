@@ -9,6 +9,7 @@ use aeordb::auth::jwt::JwtManager;
 use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
@@ -129,6 +130,7 @@ async fn test_request_magic_link_returns_200_for_nonexistent_email() {
 
 #[tokio::test]
 async fn test_magic_link_code_stored_hashed() {
+  let ctx = RequestContext::system();
   let (_, _, engine, _, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -136,7 +138,7 @@ async fn test_magic_link_code_stored_hashed() {
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
   system_tables
-    .store_magic_link(&code_hash, "stored@example.com", expires_at)
+    .store_magic_link(&ctx, &code_hash, "stored@example.com", expires_at)
     .unwrap();
 
   let record = system_tables.get_magic_link(&code_hash).unwrap();
@@ -153,6 +155,7 @@ async fn test_magic_link_code_stored_hashed() {
 
 #[tokio::test]
 async fn test_verify_valid_code_returns_jwt() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   // Store a magic link directly.
@@ -161,7 +164,7 @@ async fn test_verify_valid_code_returns_jwt() {
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
   system_tables
-    .store_magic_link(&code_hash, "valid@example.com", expires_at)
+    .store_magic_link(&ctx, &code_hash, "valid@example.com", expires_at)
     .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -180,6 +183,7 @@ async fn test_verify_valid_code_returns_jwt() {
 
 #[tokio::test]
 async fn test_verify_expired_code_returns_401() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -187,7 +191,7 @@ async fn test_verify_expired_code_returns_401() {
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
   system_tables
-    .store_magic_link(&code_hash, "expired@example.com", expires_at)
+    .store_magic_link(&ctx, &code_hash, "expired@example.com", expires_at)
     .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -202,6 +206,7 @@ async fn test_verify_expired_code_returns_401() {
 
 #[tokio::test]
 async fn test_verify_used_code_returns_401() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -209,9 +214,9 @@ async fn test_verify_used_code_returns_401() {
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
   system_tables
-    .store_magic_link(&code_hash, "used@example.com", expires_at)
+    .store_magic_link(&ctx, &code_hash, "used@example.com", expires_at)
     .unwrap();
-  system_tables.mark_magic_link_used(&code_hash).unwrap();
+  system_tables.mark_magic_link_used(&ctx, &code_hash).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
@@ -238,6 +243,7 @@ async fn test_verify_invalid_code_returns_401() {
 
 #[tokio::test]
 async fn test_verify_code_is_single_use() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -245,7 +251,7 @@ async fn test_verify_code_is_single_use() {
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
   system_tables
-    .store_magic_link(&code_hash, "single-use@example.com", expires_at)
+    .store_magic_link(&ctx, &code_hash, "single-use@example.com", expires_at)
     .unwrap();
 
   // First use should succeed.

@@ -18,7 +18,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, StorageEngine};
+use crate::engine::{DirectoryOps, GroupCache, PermissionsCache, RequestContext, StorageEngine};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -243,9 +243,10 @@ pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
       .expect("failed to create storage engine")
   };
   let engine = Arc::new(engine);
+  let ctx = RequestContext::system();
   let directory_ops = DirectoryOps::new(&engine);
   directory_ops
-    .ensure_root_directory()
+    .ensure_root_directory(&ctx)
     .expect("failed to create engine root directory");
   engine
 }

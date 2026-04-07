@@ -1,6 +1,7 @@
 use aeordb::plugins::plugin_manager::{PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
+use aeordb::engine::RequestContext;
 
 /// Compile a minimal valid WASM module for testing.
 fn minimal_wasm_bytes() -> Vec<u8> {
@@ -88,6 +89,7 @@ fn test_list_deployed_plugins() {
 
 #[test]
 fn test_remove_deployed_plugin() {
+  let ctx = RequestContext::system();
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
@@ -142,6 +144,7 @@ fn test_get_nonexistent_plugin_returns_none() {
 
 #[test]
 fn test_remove_nonexistent_plugin_returns_false() {
+  let ctx = RequestContext::system();
   let (manager, _temp_dir) = test_manager();
 
   let removed = manager

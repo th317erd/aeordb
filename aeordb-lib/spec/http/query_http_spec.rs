@@ -9,6 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh app with engine support.
@@ -57,6 +58,7 @@ fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -64,11 +66,12 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 /// Set up the engine with indexed user data.
 fn setup_users(engine: &StorageEngine) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
 
   let config = PathIndexConfig {
@@ -94,25 +97,25 @@ fn setup_users(engine: &StorageEngine) {
   };
   store_index_config(engine, "/myapp/users", &config);
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/myapp/users/alice.json",
     &make_user_json("Alice", 30, "alice@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/myapp/users/bob.json",
     &make_user_json("Bob", 25, "bob@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/myapp/users/charlie.json",
     &make_user_json("Charlie", 40, "charlie@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/myapp/users/diana.json",
     &make_user_json("Diana", 35, "diana@test.com"),
     Some("application/json"),

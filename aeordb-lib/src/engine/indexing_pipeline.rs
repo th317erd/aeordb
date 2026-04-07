@@ -3,6 +3,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_config::{PathIndexConfig, IndexFieldConfig, create_converter_from_config};
 use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{normalize_path, parent_path};
+use crate::engine::request_context::RequestContext;
 use crate::engine::source_resolver::resolve_source;
 use crate::engine::storage_engine::StorageEngine;
 use crate::plugins::PluginManager;
@@ -27,6 +28,7 @@ impl<'a> IndexingPipeline<'a> {
   /// Run the indexing pipeline for a stored file.
   pub fn run(
     &self,
+    _ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
@@ -291,6 +293,7 @@ impl<'a> IndexingPipeline<'a> {
     let mut combined = existing;
     combined.extend_from_slice(entry.as_bytes());
 
-    let _ = ops.store_file(&log_path, &combined, Some("text/plain"));
+    let ctx = RequestContext::system();
+    let _ = ops.store_file(&ctx, &log_path, &combined, Some("text/plain"));
   }
 }

@@ -1,4 +1,5 @@
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
+use aeordb::engine::RequestContext;
 use aeordb::engine::{SystemTables, ROOT_USER_ID};
 use aeordb::server::create_engine_for_storage;
 
@@ -17,7 +18,7 @@ fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
     is_revoked: false,
   };
   system_tables
-    .store_api_key_for_bootstrap(&record)
+    .store_api_key_for_bootstrap(&RequestContext::system(), &record)
     .expect("failed to store root key");
   plaintext_key
 }

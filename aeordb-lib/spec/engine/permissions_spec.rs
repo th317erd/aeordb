@@ -10,6 +10,7 @@ use aeordb::engine::{
 };
 use aeordb::engine::group::Group;
 use aeordb::engine::user::{ROOT_USER_ID, User};
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 
 // ---------------------------------------------------------------------------
@@ -23,10 +24,11 @@ fn test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
 
 /// Create a test user in the system and return its user_id.
 fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
+  let ctx = RequestContext::system();
   let user = User::new(username, None);
   let user_id = user.user_id;
   let system_tables = SystemTables::new(engine);
-  system_tables.store_user(&user).unwrap();
+  system_tables.store_user(&ctx, &user).unwrap();
   user_id
 }
 
@@ -38,13 +40,15 @@ fn create_test_group(
   query_operator: &str,
   query_value: &str,
 ) {
+  let ctx = RequestContext::system();
   let group = Group::new(name, "........", "........", query_field, query_operator, query_value).unwrap();
   let system_tables = SystemTables::new(engine);
-  system_tables.store_group(&group).unwrap();
+  system_tables.store_group(&ctx, &group).unwrap();
 }
 
 /// Write a .permissions file at a given directory path.
 fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathPermissions) {
+  let ctx = RequestContext::system();
   let directory_ops = DirectoryOps::new(engine);
   let perm_path = if dir_path == "/" || dir_path.ends_with('/') {
     format!("{}.permissions", dir_path)
@@ -52,7 +56,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     format!("{}/.permissions", dir_path)
   };
   let data = permissions.serialize();
-  directory_ops.store_file(&perm_path, &data, Some("application/json")).unwrap();
+  directory_ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
 }
 
 /// Create a PermissionLink with member-only flags.

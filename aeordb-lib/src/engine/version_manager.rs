@@ -4,6 +4,7 @@ use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
+use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Information about a named snapshot (a saved point-in-time reference).
@@ -306,6 +307,7 @@ impl<'a> VersionManager<'a> {
   /// Create a named snapshot of the current HEAD state.
   pub fn create_snapshot(
     &self,
+    _ctx: &RequestContext,
     name: &str,
     metadata: HashMap<String, String>,
   ) -> EngineResult<SnapshotInfo> {
@@ -342,7 +344,7 @@ impl<'a> VersionManager<'a> {
   }
 
   /// Restore a named snapshot by setting HEAD to its root hash.
-  pub fn restore_snapshot(&self, name: &str) -> EngineResult<()> {
+  pub fn restore_snapshot(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let root_hash = self.get_snapshot_hash(name)?;
     self.engine.update_head(&root_hash)
   }
@@ -368,7 +370,7 @@ impl<'a> VersionManager<'a> {
 
   /// Delete a named snapshot by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
-  pub fn delete_snapshot(&self, name: &str) -> EngineResult<()> {
+  pub fn delete_snapshot(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let key = self.snapshot_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
@@ -390,6 +392,7 @@ impl<'a> VersionManager<'a> {
   /// - If `base` is a snapshot name, forks from that snapshot's root hash.
   pub fn create_fork(
     &self,
+    _ctx: &RequestContext,
     name: &str,
     base: Option<&str>,
   ) -> EngineResult<ForkInfo> {
@@ -429,19 +432,19 @@ impl<'a> VersionManager<'a> {
   }
 
   /// Promote a fork: set HEAD to the fork's root hash, then delete the fork.
-  pub fn promote_fork(&self, name: &str) -> EngineResult<()> {
+  pub fn promote_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let fork_hash = self.get_fork_hash(name)?
       .ok_or_else(|| EngineError::NotFound(
         format!("Fork not found: {}", name),
       ))?;
 
     self.engine.update_head(&fork_hash)?;
-    self.abandon_fork(name)
+    self.abandon_fork(ctx, name)
   }
 
   /// Abandon a fork by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
-  pub fn abandon_fork(&self, name: &str) -> EngineResult<()> {
+  pub fn abandon_fork(&self, _ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let key = self.fork_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {

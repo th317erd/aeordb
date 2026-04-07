@@ -10,6 +10,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
+use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Default chunk size for splitting file data (256 KB).
@@ -144,11 +145,12 @@ impl<'a> DirectoryOps<'a> {
   /// Creates intermediate directories as needed and updates HEAD.
   pub fn store_file(
     &self,
+    ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
-    self.store_file_internal(path, data, content_type, CompressionAlgorithm::None)
+    self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
   }
 
   /// Store a file with compression at the given path, splitting data into chunks.
@@ -156,17 +158,19 @@ impl<'a> DirectoryOps<'a> {
   /// Chunks are compressed individually using the specified algorithm.
   pub fn store_file_compressed(
     &self,
+    ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
-    self.store_file_internal(path, data, content_type, compression_algo)
+    self.store_file_internal(ctx, path, data, content_type, compression_algo)
   }
 
   /// Internal file storage with optional compression.
   fn store_file_internal(
     &self,
+    _ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
@@ -279,7 +283,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.
-  pub fn delete_file(&self, path: &str) -> EngineResult<()> {
+  pub fn delete_file(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
 
@@ -331,7 +335,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Create an empty directory at the given path.
-  pub fn create_directory(&self, path: &str) -> EngineResult<()> {
+  pub fn create_directory(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
 
@@ -400,7 +404,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Ensure the root directory exists. Called during database creation.
-  pub fn ensure_root_directory(&self) -> EngineResult<()> {
+  pub fn ensure_root_directory(&self, _ctx: &RequestContext) -> EngineResult<()> {
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash("/", &algo)?;
 
@@ -434,6 +438,7 @@ impl<'a> DirectoryOps<'a> {
   /// Compression is determined by config or auto-detection via `should_compress`.
   pub fn store_file_with_indexing(
     &self,
+    ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
@@ -465,7 +470,7 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => CompressionAlgorithm::None,
     };
 
-    let file_record = self.store_file_internal(path, data, content_type, compression_algo)?;
+    let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
 
     // Guard: skip indexing for system directories
     if is_system_path(path) {
@@ -474,7 +479,7 @@ impl<'a> DirectoryOps<'a> {
 
     // Delegate to indexing pipeline
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
-    let _ = pipeline.run(path, data, content_type);
+    let _ = pipeline.run(ctx, path, data, content_type);
 
     Ok(file_record)
   }
@@ -482,6 +487,7 @@ impl<'a> DirectoryOps<'a> {
   /// Store a file with the full indexing pipeline including parser plugin support.
   pub fn store_file_with_full_pipeline(
     &self,
+    ctx: &RequestContext,
     path: &str,
     data: &[u8],
     content_type: Option<&str>,
@@ -511,7 +517,7 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => CompressionAlgorithm::None,
     };
 
-    let file_record = self.store_file_internal(path, data, content_type, compression_algo)?;
+    let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
 
     if is_system_path(path) {
       return Ok(file_record);
@@ -522,13 +528,13 @@ impl<'a> DirectoryOps<'a> {
       Some(pm) => crate::engine::indexing_pipeline::IndexingPipeline::with_plugin_manager(self.engine, pm),
       None => crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine),
     };
-    let _ = pipeline.run(path, data, content_type);
+    let _ = pipeline.run(ctx, path, data, content_type);
 
     Ok(file_record)
   }
 
   /// Delete a file and remove its entries from all indexes at that path.
-  pub fn delete_file_with_indexing(&self, path: &str) -> EngineResult<()> {
+  pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let file_key = file_path_hash(&normalized, &algo)?;
@@ -546,7 +552,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     // Now delete the file itself
-    self.delete_file(path)
+    self.delete_file(ctx, path)
   }
 
   /// Update parent directories after a child is added or modified.

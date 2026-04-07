@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
 use super::state::AppState;
-use crate::engine::{DirectoryOps, VersionManager};
+use crate::engine::{DirectoryOps, RequestContext, VersionManager};
 use crate::engine::errors::EngineError;
 use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm};
 
@@ -31,10 +31,11 @@ pub async fn engine_store_file(
     .get("content-type")
     .and_then(|value| value.to_str().ok());
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let directory_ops = DirectoryOps::new(&state.engine);
 
   let file_record = match directory_ops.store_file_with_full_pipeline(
-    &path, &body, content_type, Some(&*state.plugin_manager)
+    &ctx, &path, &body, content_type, Some(&*state.plugin_manager)
   ) {
     Ok(record) => record,
     Err(error) => {
@@ -144,9 +145,10 @@ pub async fn engine_delete_file(
   State(state): State<AppState>,
   Path(path): Path<String>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let directory_ops = DirectoryOps::new(&state.engine);
 
-  match directory_ops.delete_file_with_indexing(&path) {
+  match directory_ops.delete_file_with_indexing(&ctx, &path) {
     Ok(()) => {
       (
         StatusCode::OK,
@@ -235,9 +237,10 @@ pub async fn snapshot_create(
   State(state): State<AppState>,
   Json(payload): Json<CreateSnapshotRequest>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.create_snapshot(&payload.name, payload.metadata) {
+  match version_manager.create_snapshot(&ctx, &payload.name, payload.metadata) {
     Ok(snapshot_info) => {
       let response_body = SnapshotResponse::from(&snapshot_info);
       (StatusCode::CREATED, Json(response_body)).into_response()
@@ -284,9 +287,10 @@ pub async fn snapshot_restore(
   State(state): State<AppState>,
   Json(payload): Json<RestoreSnapshotRequest>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.restore_snapshot(&payload.name) {
+  match version_manager.restore_snapshot(&ctx, &payload.name) {
     Ok(()) => {
       (
         StatusCode::OK,
@@ -313,9 +317,10 @@ pub async fn snapshot_delete(
   State(state): State<AppState>,
   Path(name): Path<String>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.delete_snapshot(&name) {
+  match version_manager.delete_snapshot(&ctx, &name) {
     Ok(()) => {
       (
         StatusCode::OK,
@@ -352,9 +357,10 @@ pub async fn fork_create(
   State(state): State<AppState>,
   Json(payload): Json<CreateForkRequest>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.create_fork(&payload.name, payload.base.as_deref()) {
+  match version_manager.create_fork(&ctx, &payload.name, payload.base.as_deref()) {
     Ok(fork_info) => {
       let response_body = ForkResponse::from(&fork_info);
       (StatusCode::CREATED, Json(response_body)).into_response()
@@ -401,9 +407,10 @@ pub async fn fork_promote(
   State(state): State<AppState>,
   Path(name): Path<String>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.promote_fork(&name) {
+  match version_manager.promote_fork(&ctx, &name) {
     Ok(()) => {
       (
         StatusCode::OK,
@@ -430,9 +437,10 @@ pub async fn fork_abandon(
   State(state): State<AppState>,
   Path(name): Path<String>,
 ) -> Response {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.abandon_fork(&name) {
+  match version_manager.abandon_fork(&ctx, &name) {
     Ok(()) => {
       (
         StatusCode::OK,

@@ -3,17 +3,20 @@ use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::json_parser::parse_json_fields;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
 /// Store an index config at the given parent path.
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -21,7 +24,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
@@ -33,6 +36,7 @@ fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
 
 #[test]
 fn test_store_file_indexes_fields() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -56,7 +60,7 @@ fn test_store_file_indexes_fields() {
 
   // Store a user file with indexing
   let data = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   // Verify the index was created and has an entry
   let index_manager = IndexManager::new(&engine);
@@ -66,13 +70,14 @@ fn test_store_file_indexes_fields() {
 
 #[test]
 fn test_store_file_no_config_no_indexing() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Store a file without any config — should work fine, no indexing
   let data = make_user_json("Bob", 25, "bob@test.com");
-  ops.store_file_with_indexing("/data/bob.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/bob.json", &data, Some("application/json")).unwrap();
 
   // No indexes should exist
   let index_manager = IndexManager::new(&engine);
@@ -82,6 +87,7 @@ fn test_store_file_no_config_no_indexing() {
 
 #[test]
 fn test_delete_file_removes_index_entries() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -103,7 +109,7 @@ fn test_delete_file_removes_index_entries() {
   store_index_config(&engine, "/users", &config);
 
   let data = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   // Verify entry exists
   let index_manager = IndexManager::new(&engine);
@@ -111,7 +117,7 @@ fn test_delete_file_removes_index_entries() {
   assert_eq!(index.len(), 1);
 
   // Delete with indexing
-  ops.delete_file_with_indexing("/users/alice.json").unwrap();
+  ops.delete_file_with_indexing(&ctx, "/users/alice.json").unwrap();
 
   // Verify entry is gone
   let index = index_manager.load_index("/users", "age").unwrap().unwrap();
@@ -120,6 +126,7 @@ fn test_delete_file_removes_index_entries() {
 
 #[test]
 fn test_overwrite_file_updates_index() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -142,11 +149,11 @@ fn test_overwrite_file_updates_index() {
 
   // Store initial version
   let data = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   // Overwrite with new age
   let data = make_user_json("Alice", 35, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   // Should still have exactly 1 entry (not 2)
   let index_manager = IndexManager::new(&engine);
@@ -156,6 +163,7 @@ fn test_overwrite_file_updates_index() {
 
 #[test]
 fn test_multiple_indexed_fields() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -184,7 +192,7 @@ fn test_multiple_indexed_fields() {
   store_index_config(&engine, "/users", &config);
 
   let data = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
 
@@ -335,6 +343,7 @@ fn test_index_config_deserialize_missing_indexes_key() {
 
 #[test]
 fn test_store_non_json_data_with_config_does_not_crash() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -357,7 +366,7 @@ fn test_store_non_json_data_with_config_does_not_crash() {
 
   // Store binary (non-JSON) data — indexing should be silently skipped
   let data = vec![0xFF, 0xFE, 0xFD, 0x00];
-  ops.store_file_with_indexing("/data/binary.dat", &data, Some("application/octet-stream")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/binary.dat", &data, Some("application/octet-stream")).unwrap();
 
   // No index entries should exist
   let index_manager = IndexManager::new(&engine);
@@ -371,6 +380,7 @@ fn test_store_non_json_data_with_config_does_not_crash() {
 
 #[test]
 fn test_multiple_files_indexed_together() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -391,19 +401,19 @@ fn test_multiple_files_indexed_together() {
   };
   store_index_config(&engine, "/users", &config);
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/alice.json",
     &make_user_json("Alice", 30, "alice@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/bob.json",
     &make_user_json("Bob", 25, "bob@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/charlie.json",
     &make_user_json("Charlie", 40, "charlie@test.com"),
     Some("application/json"),

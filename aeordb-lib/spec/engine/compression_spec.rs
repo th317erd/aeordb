@@ -3,12 +3,14 @@ use aeordb::engine::compression::{
 };
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
@@ -195,6 +197,7 @@ fn test_should_compress_boundary_500_bytes() {
 
 #[test]
 fn test_store_file_with_compression() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -202,7 +205,7 @@ fn test_store_file_with_compression() {
   let data = "Hello, this is test data for compression!".repeat(50);
   let data_bytes = data.as_bytes();
 
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/compressed.txt",
     data_bytes,
     Some("text/plain"),
@@ -215,6 +218,7 @@ fn test_store_file_with_compression() {
 
 #[test]
 fn test_hash_is_on_uncompressed_data() {
+  let ctx = RequestContext::system();
   // Store the same data both compressed and uncompressed.
   // The chunk hashes should be identical (hash is on raw data).
   let dir = tempfile::tempdir().unwrap();
@@ -225,11 +229,11 @@ fn test_hash_is_on_uncompressed_data() {
   let data_bytes = data.as_bytes();
 
   // Store uncompressed first
-  ops.store_file("/uncompressed.txt", data_bytes, Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/uncompressed.txt", data_bytes, Some("text/plain")).unwrap();
   let meta_uncompressed = ops.get_metadata("/uncompressed.txt").unwrap().unwrap();
 
   // Store compressed version at a different path
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/compressed.txt",
     data_bytes,
     Some("text/plain"),
@@ -243,6 +247,7 @@ fn test_hash_is_on_uncompressed_data() {
 
 #[test]
 fn test_read_compressed_file_streaming() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -250,7 +255,7 @@ fn test_read_compressed_file_streaming() {
   let data = "Streaming test data. ".repeat(200);
   let data_bytes = data.as_bytes();
 
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/streamed.txt",
     data_bytes,
     Some("text/plain"),
@@ -265,18 +270,19 @@ fn test_read_compressed_file_streaming() {
 
 #[test]
 fn test_mixed_compressed_and_uncompressed() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Store uncompressed
   let data_a = b"File A: uncompressed content that is reasonably sized.";
-  ops.store_file("/file_a.txt", data_a, Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/file_a.txt", data_a, Some("text/plain")).unwrap();
 
   // Store compressed
   let data_b = "File B: compressed content. ".repeat(100);
   let data_b_bytes = data_b.as_bytes();
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/file_b.txt",
     data_b_bytes,
     Some("text/plain"),
@@ -285,7 +291,7 @@ fn test_mixed_compressed_and_uncompressed() {
 
   // Store another uncompressed
   let data_c = b"File C: also uncompressed.";
-  ops.store_file("/file_c.txt", data_c, None).unwrap();
+  ops.store_file(&ctx, "/file_c.txt", data_c, None).unwrap();
 
   // Read all back
   assert_eq!(ops.read_file("/file_a.txt").unwrap(), data_a);
@@ -295,11 +301,12 @@ fn test_mixed_compressed_and_uncompressed() {
 
 #[test]
 fn test_store_empty_file_with_compression() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/empty.txt",
     &[],
     Some("text/plain"),
@@ -312,6 +319,7 @@ fn test_store_empty_file_with_compression() {
 
 #[test]
 fn test_store_large_file_with_compression_multiple_chunks() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -319,7 +327,7 @@ fn test_store_large_file_with_compression_multiple_chunks() {
   // 512 KB of data = 2 chunks at 256 KB each
   let data: Vec<u8> = (0..524_288).map(|i| (i % 256) as u8).collect();
 
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/large.bin",
     &data,
     Some("application/octet-stream"),
@@ -335,12 +343,13 @@ fn test_store_large_file_with_compression_multiple_chunks() {
 
 #[test]
 fn test_overwrite_compressed_file() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   let data_v1 = "Version 1 content. ".repeat(50);
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/versioned.txt",
     data_v1.as_bytes(),
     Some("text/plain"),
@@ -348,7 +357,7 @@ fn test_overwrite_compressed_file() {
   ).unwrap();
 
   let data_v2 = "Version 2 content that is different. ".repeat(50);
-  ops.store_file_compressed(
+  ops.store_file_compressed(&ctx,
     "/versioned.txt",
     data_v2.as_bytes(),
     Some("text/plain"),
@@ -361,13 +370,14 @@ fn test_overwrite_compressed_file() {
 
 #[test]
 fn test_compression_with_indexing_via_config() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Store a config that enables zstd compression
   let config_json = r#"{"compression":"zstd","indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file(
+  ops.store_file(&ctx,
     "/data/.config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -375,7 +385,7 @@ fn test_compression_with_indexing_via_config() {
 
   // Store a file that should be auto-compressed (> 500 bytes, text/json)
   let data = format!(r#"{{"name":"test","payload":"{}"}}"#, "x".repeat(1000));
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/data/record.json",
     data.as_bytes(),
     Some("application/json"),
@@ -388,13 +398,14 @@ fn test_compression_with_indexing_via_config() {
 
 #[test]
 fn test_compression_config_skips_small_data() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file(
+  ops.store_file(&ctx,
     "/data/.config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -402,7 +413,7 @@ fn test_compression_config_skips_small_data() {
 
   // Store a small file (< 500 bytes) - should NOT be compressed per should_compress
   let small_data = r#"{"name":"tiny"}"#;
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/data/small.json",
     small_data.as_bytes(),
     Some("application/json"),
@@ -414,13 +425,14 @@ fn test_compression_config_skips_small_data() {
 
 #[test]
 fn test_compression_config_skips_images() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file(
+  ops.store_file(&ctx,
     "/images/.config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -428,7 +440,7 @@ fn test_compression_config_skips_images() {
 
   // Store a "JPEG" (fake data, but content-type signals image/jpeg)
   let jpeg_data = vec![0xFF; 10_000];
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/images/photo.jpg",
     &jpeg_data,
     Some("image/jpeg"),
@@ -440,6 +452,7 @@ fn test_compression_config_skips_images() {
 
 #[test]
 fn test_reopen_engine_reads_compressed_entries() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("test.aeor");
   let path_str = path.to_str().unwrap();
@@ -448,10 +461,10 @@ fn test_reopen_engine_reads_compressed_entries() {
   {
     let engine = StorageEngine::create(path_str).unwrap();
     let ops = DirectoryOps::new(&engine);
-    ops.ensure_root_directory().unwrap();
+    ops.ensure_root_directory(&ctx).unwrap();
 
     let data = "Persistent compressed data. ".repeat(100);
-    ops.store_file_compressed(
+    ops.store_file_compressed(&ctx,
       "/persistent.txt",
       data.as_bytes(),
       Some("text/plain"),
@@ -472,20 +485,21 @@ fn test_reopen_engine_reads_compressed_entries() {
 
 #[test]
 fn test_no_compression_config_means_no_compression() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Config WITHOUT compression field
   let config_json = r#"{"indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file(
+  ops.store_file(&ctx,
     "/data/.config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
   ).unwrap();
 
   let data = format!(r#"{{"name":"test","payload":"{}"}}"#, "x".repeat(1000));
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/data/record.json",
     data.as_bytes(),
     Some("application/json"),

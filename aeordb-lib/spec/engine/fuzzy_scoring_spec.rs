@@ -5,20 +5,23 @@ use aeordb::engine::query_engine::{
   FuzzyAlgorithm, FuzzyOptions, Fuzziness, QueryBuilder,
 };
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 // =============================================================================
 // Helpers
 // =============================================================================
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -27,7 +30,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   };
   let config_data = config.serialize();
   ops
-    .store_file(&config_path, &config_data, Some("application/json"))
+    .store_file(&ctx, &config_path, &config_data, Some("application/json"))
     .unwrap();
 }
 
@@ -37,6 +40,7 @@ fn make_name_json(name: &str) -> Vec<u8> {
 
 /// Set up an engine with trigram + soundex + dmetaphone indexes on "name" field.
 fn setup_fuzzy_engine(dir: &tempfile::TempDir, names: &[(&str, &str)]) -> StorageEngine {
+  let ctx = RequestContext::system();
   let engine = create_engine(dir);
   let ops = DirectoryOps::new(&engine);
 
@@ -72,7 +76,7 @@ fn setup_fuzzy_engine(dir: &tempfile::TempDir, names: &[(&str, &str)]) -> Storag
 
   for (filename, name) in names {
     ops
-      .store_file_with_indexing(
+      .store_file_with_indexing(&ctx,
         &format!("/data/{}", filename),
         &make_name_json(name),
         Some("application/json"),
@@ -457,6 +461,7 @@ fn test_fuzzy_query_with_limit() {
 
 #[test]
 fn test_fuzzy_query_missing_trigram_index() {
+  let ctx = RequestContext::system();
   // Engine with no trigram index should return an error for Contains
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -477,7 +482,7 @@ fn test_fuzzy_query_missing_trigram_index() {
   };
   store_index_config(&engine, "/data", &config);
   ops
-    .store_file_with_indexing(
+    .store_file_with_indexing(&ctx,
       "/data/test.json",
       &make_name_json("hello"),
       Some("application/json"),
@@ -494,6 +499,7 @@ fn test_fuzzy_query_missing_trigram_index() {
 
 #[test]
 fn test_phonetic_query_missing_index() {
+  let ctx = RequestContext::system();
   // Engine with no phonetic index should return an error for Phonetic
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -513,7 +519,7 @@ fn test_phonetic_query_missing_index() {
   };
   store_index_config(&engine, "/data", &config);
   ops
-    .store_file_with_indexing(
+    .store_file_with_indexing(&ctx,
       "/data/test.json",
       &make_name_json("hello"),
       Some("application/json"),

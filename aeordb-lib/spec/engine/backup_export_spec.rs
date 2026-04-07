@@ -5,17 +5,19 @@ use aeordb::engine::backup::{export_version, export_snapshot, ExportResult};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::{DirectoryOps, StorageEngine};
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 fn setup_engine_with_files() -> (Arc<StorageEngine>, tempfile::TempDir) {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
-    ops.store_file("/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
-    ops.store_file("/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
+    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
 
     (engine, temp)
 }
@@ -50,13 +52,14 @@ fn test_export_head() {
 
 #[test]
 fn test_export_snapshot() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = setup_engine_with_files();
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
 
     // Create a snapshot
     let vm = VersionManager::new(&source);
-    vm.create_snapshot("v1.0", HashMap::new()).unwrap();
+    vm.create_snapshot(&ctx, "v1.0", HashMap::new()).unwrap();
 
     // Export the snapshot by name
     let result = export_snapshot(&source, Some("v1.0"), &out).unwrap();
@@ -147,12 +150,13 @@ fn test_export_has_correct_hashes() {
 
 #[test]
 fn test_export_no_voids() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = setup_engine_with_files();
 
     // Create some churn in the source to generate voids
     let ops = DirectoryOps::new(&source);
-    ops.store_file("/temp/file1.txt", b"temporary", Some("text/plain")).unwrap();
-    ops.delete_file("/temp/file1.txt").unwrap();
+    ops.store_file(&ctx, "/temp/file1.txt", b"temporary", Some("text/plain")).unwrap();
+    ops.delete_file(&ctx, "/temp/file1.txt").unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -170,12 +174,13 @@ fn test_export_no_voids() {
 
 #[test]
 fn test_export_no_deletion_records() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = setup_engine_with_files();
 
     // Create and delete a file to produce deletion records
     let ops = DirectoryOps::new(&source);
-    ops.store_file("/temp/doomed.txt", b"going away", Some("text/plain")).unwrap();
-    ops.delete_file("/temp/doomed.txt").unwrap();
+    ops.store_file(&ctx, "/temp/doomed.txt", b"going away", Some("text/plain")).unwrap();
+    ops.delete_file(&ctx, "/temp/doomed.txt").unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -266,13 +271,14 @@ fn test_export_empty_database() {
 
 #[test]
 fn test_export_nested_directories() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&source);
 
     // Create deeply nested files
-    ops.store_file("/a/b/c/d/deep.txt", b"deep content", Some("text/plain")).unwrap();
-    ops.store_file("/a/b/shallow.txt", b"shallow content", Some("text/plain")).unwrap();
-    ops.store_file("/a/b/c/mid.txt", b"mid content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/a/b/c/d/deep.txt", b"deep content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/a/b/shallow.txt", b"shallow content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/a/b/c/mid.txt", b"mid content", Some("text/plain")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -355,12 +361,13 @@ fn test_export_output_already_exists() {
 
 #[test]
 fn test_export_large_file_multiple_chunks() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&source);
 
     // Create a file larger than the default chunk size (256KB)
     let large_data = vec![0x42u8; 300_000];
-    ops.store_file("/big/large.bin", &large_data, Some("application/octet-stream")).unwrap();
+    ops.store_file(&ctx, "/big/large.bin", &large_data, Some("application/octet-stream")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -384,12 +391,13 @@ fn test_export_large_file_multiple_chunks() {
 
 #[test]
 fn test_export_overwritten_file_only_latest() {
+  let ctx = RequestContext::system();
     let (source, _source_temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&source);
 
     // Write, then overwrite the same file
-    ops.store_file("/docs/file.txt", b"version 1", Some("text/plain")).unwrap();
-    ops.store_file("/docs/file.txt", b"version 2", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/docs/file.txt", b"version 1", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/docs/file.txt", b"version 2", Some("text/plain")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);

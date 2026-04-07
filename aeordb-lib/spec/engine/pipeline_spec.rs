@@ -3,17 +3,20 @@ use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::IndexingPipeline;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
 /// Store an index config at the given parent path.
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -21,7 +24,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_simple_config(field_name: &str, index_type: &str) -> PathIndexConfig {
@@ -64,6 +67,7 @@ fn make_config_with_logging(field_name: &str, index_type: &str, logging: bool) -
 
 #[test]
 fn test_system_path_logs() {
+  let ctx = RequestContext::system();
   // .logs paths should be recognized as system paths
   // We test via store_file_with_indexing behavior since is_system_path is private
   let dir = tempfile::tempdir().unwrap();
@@ -76,7 +80,7 @@ fn test_system_path_logs() {
 
   // Store a JSON file at .logs path — should not create indexes
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing("/data/.logs/entry.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.logs/entry.json", &data[..], Some("application/json")).unwrap();
 
   // Verify no indexes at /data/.logs
   let index_manager = IndexManager::new(&engine);
@@ -86,6 +90,7 @@ fn test_system_path_logs() {
 
 #[test]
 fn test_system_path_indexes() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -96,7 +101,7 @@ fn test_system_path_indexes() {
 
   // Store a file at .indexes path — should not trigger indexing
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing("/data/.indexes/something.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.indexes/something.json", &data[..], Some("application/json")).unwrap();
 
   // Verify no indexes at /data/.indexes
   let index_manager = IndexManager::new(&engine);
@@ -106,13 +111,14 @@ fn test_system_path_indexes() {
 
 #[test]
 fn test_system_path_config() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Store a JSON file at .config path — should not trigger indexing pipeline
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing("/data/.config/settings.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.config/settings.json", &data[..], Some("application/json")).unwrap();
 
   // File should still be stored
   let stored = ops.read_file("/data/.config/settings.json").unwrap();
@@ -121,6 +127,7 @@ fn test_system_path_config() {
 
 #[test]
 fn test_normal_path_not_system() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -131,7 +138,7 @@ fn test_normal_path_not_system() {
 
   // Store a regular file — should trigger indexing
   let data = br#"{"name":"Alice"}"#;
-  ops.store_file_with_indexing("/users/alice.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data[..], Some("application/json")).unwrap();
 
   // Verify index was created
   let index_manager = IndexManager::new(&engine);
@@ -142,6 +149,7 @@ fn test_normal_path_not_system() {
 
 #[test]
 fn test_store_to_logs_does_not_index() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -153,8 +161,8 @@ fn test_store_to_logs_does_not_index() {
   // Store multiple JSON files under .logs
   let log1 = br#"{"level":"INFO","message":"started"}"#;
   let log2 = br#"{"level":"ERROR","message":"failed"}"#;
-  ops.store_file_with_indexing("/app/.logs/log1.json", &log1[..], Some("application/json")).unwrap();
-  ops.store_file_with_indexing("/app/.logs/log2.json", &log2[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/app/.logs/log1.json", &log1[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/app/.logs/log2.json", &log2[..], Some("application/json")).unwrap();
 
   // Files should be stored
   let stored1 = ops.read_file("/app/.logs/log1.json").unwrap();
@@ -170,13 +178,14 @@ fn test_store_to_logs_does_not_index() {
 
 #[test]
 fn test_store_to_config_does_not_index() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Store a file under .config (not indexes.json, a different file)
   let data = br#"{"setting":"value"}"#;
-  ops.store_file_with_indexing("/myapp/.config/other.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/myapp/.config/other.json", &data[..], Some("application/json")).unwrap();
 
   // File should exist
   let stored = ops.read_file("/myapp/.config/other.json").unwrap();
@@ -217,7 +226,8 @@ fn test_pipeline_indexes_json_file() {
   // Run the pipeline directly
   let data = br#"{"age":42,"name":"Bob"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/people/bob.json", &data[..], Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/people/bob.json", &data[..], Some("application/json")).unwrap();
 
   // Verify index was created with entry
   let index_manager = IndexManager::new(&engine);
@@ -250,7 +260,8 @@ fn test_pipeline_source_path_resolution() {
 
   let data = br#"{"metadata":{"title":"Hello World","author":"Alice"},"body":"content"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/docs/doc1.json", &data[..], Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/docs/doc1.json", &data[..], Some("application/json")).unwrap();
 
   // Verify index entry exists
   let index_manager = IndexManager::new(&engine);
@@ -285,7 +296,8 @@ fn test_pipeline_missing_source_skips_field() {
   let pipeline = IndexingPipeline::new(&engine);
 
   // Should not error
-  let result = pipeline.run("/items/item1.json", &data[..], Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/items/item1.json", &data[..], Some("application/json"));
   assert!(result.is_ok(), "Pipeline should not error on missing source");
 
   // No index entries should be created (index file may or may not exist)
@@ -308,7 +320,8 @@ fn test_pipeline_no_config_no_indexing() {
   // No config stored — pipeline should do nothing
   let data = br#"{"name":"test"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/nocfg/file.json", &data[..], Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/nocfg/file.json", &data[..], Some("application/json"));
   assert!(result.is_ok());
 
   // No indexes should exist
@@ -319,6 +332,7 @@ fn test_pipeline_no_config_no_indexing() {
 
 #[test]
 fn test_pipeline_non_json_data_skips() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -329,7 +343,7 @@ fn test_pipeline_non_json_data_skips() {
 
   // Store binary (non-JSON) data via store_file_with_indexing
   let binary_data = vec![0xFF, 0xFE, 0x00, 0x01, 0x02];
-  let result = ops.store_file_with_indexing(
+  let result = ops.store_file_with_indexing(&ctx,
     "/bindata/blob.bin",
     &binary_data,
     Some("application/octet-stream"),
@@ -351,6 +365,7 @@ fn test_pipeline_non_json_data_skips() {
 
 #[test]
 fn test_pipeline_type_array_expansion() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
 
@@ -358,7 +373,7 @@ fn test_pipeline_type_array_expansion() {
   // PathIndexConfig::deserialize handles this by creating two IndexFieldConfig entries
   let config_json = br#"{"indexes":[{"name":"title","type":["string","trigram"]}]}"#;
   let ops = DirectoryOps::new(&engine);
-  ops.store_file(
+  ops.store_file(&ctx,
     "/articles/.config/indexes.json",
     &config_json[..],
     Some("application/json"),
@@ -366,7 +381,7 @@ fn test_pipeline_type_array_expansion() {
 
   let data = br#"{"title":"Hello World"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/articles/post1.json", &data[..], Some("application/json")).unwrap();
+  pipeline.run(&ctx, "/articles/post1.json", &data[..], Some("application/json")).unwrap();
 
   // Verify both indexes were created
   let index_manager = IndexManager::new(&engine);
@@ -399,7 +414,8 @@ fn test_pipeline_logging_creates_log_on_error() {
   // Send non-JSON data — should trigger parse failure log
   let data = b"this is not json";
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/logged/bad.txt", &data[..], Some("text/plain")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/logged/bad.txt", &data[..], Some("text/plain")).unwrap();
 
   // Check that .logs/system/parsing.log was created
   let ops = DirectoryOps::new(&engine);
@@ -422,7 +438,8 @@ fn test_pipeline_logging_disabled_no_log() {
   // Send non-JSON data
   let data = b"not json either";
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/nolog/bad.txt", &data[..], Some("text/plain")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/nolog/bad.txt", &data[..], Some("text/plain")).unwrap();
 
   // Check that .logs/system/parsing.log was NOT created
   let ops = DirectoryOps::new(&engine);
@@ -436,13 +453,14 @@ fn test_pipeline_logging_disabled_no_log() {
 
 #[test]
 fn test_system_path_deeply_nested() {
+  let ctx = RequestContext::system();
   // Even deeply nested .logs paths should be caught
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   let data = br#"{"name":"deep"}"#;
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/a/b/c/.logs/deep/entry.json",
     &data[..],
     Some("application/json"),
@@ -455,6 +473,7 @@ fn test_system_path_deeply_nested() {
 
 #[test]
 fn test_system_path_not_triggered_by_similar_names() {
+  let ctx = RequestContext::system();
   // Paths like "/data/logs/file.json" (no dot prefix) should NOT be treated as system paths
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -464,7 +483,7 @@ fn test_system_path_not_triggered_by_similar_names() {
   store_index_config(&engine, "/data/logs", &config);
 
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing("/data/logs/entry.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/logs/entry.json", &data[..], Some("application/json")).unwrap();
 
   // This SHOULD trigger indexing since "logs" != ".logs"
   let index_manager = IndexManager::new(&engine);
@@ -484,12 +503,14 @@ fn test_pipeline_empty_json_object() {
   // Store an empty JSON object — field not found, should skip gracefully
   let data = br#"{}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/empty/empty.json", &data[..], Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/empty/empty.json", &data[..], Some("application/json"));
   assert!(result.is_ok());
 }
 
 #[test]
 fn test_pipeline_run_twice_overwrites_index() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
 
@@ -512,11 +533,11 @@ fn test_pipeline_run_twice_overwrites_index() {
   // Store first version via full pipeline (store_file_with_indexing creates file + runs pipeline)
   let ops = DirectoryOps::new(&engine);
   let data1 = br#"{"score":100}"#;
-  ops.store_file_with_indexing("/scores/player1.json", &data1[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/scores/player1.json", &data1[..], Some("application/json")).unwrap();
 
   // Overwrite with new score
   let data2 = br#"{"score":200}"#;
-  ops.store_file_with_indexing("/scores/player1.json", &data2[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/scores/player1.json", &data2[..], Some("application/json")).unwrap();
 
   // Should still have exactly 1 entry (not 2)
   let index_manager = IndexManager::new(&engine);

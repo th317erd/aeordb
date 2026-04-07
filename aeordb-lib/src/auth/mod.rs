@@ -18,7 +18,7 @@ pub use provider::{AuthProvider, AuthProviderError, FileAuthProvider, NoAuthProv
 pub use rate_limiter::RateLimiter;
 pub use refresh::{RefreshTokenRecord, generate_refresh_token, hash_refresh_token};
 
-use crate::engine::{StorageEngine, SystemTables, ROOT_USER_ID};
+use crate::engine::{RequestContext, StorageEngine, SystemTables, ROOT_USER_ID};
 
 /// Bootstrap a root API key if no keys exist yet.
 pub fn bootstrap_root_key(
@@ -47,8 +47,9 @@ pub fn bootstrap_root_key(
     is_revoked: false,
   };
 
+  let ctx = RequestContext::system();
   system_tables
-    .store_api_key_for_bootstrap(&record)
+    .store_api_key_for_bootstrap(&ctx, &record)
     .expect("failed to store root API key");
 
   Some(plaintext_key)

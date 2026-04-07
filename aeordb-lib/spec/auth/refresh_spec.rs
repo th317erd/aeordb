@@ -10,6 +10,7 @@ use aeordb::auth::refresh::{generate_refresh_token, hash_refresh_token, DEFAULT_
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
@@ -61,6 +62,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 /// Helper: create an API key in engine and return the plaintext key.
 fn seed_api_key(engine: &StorageEngine) -> String {
+  let ctx = RequestContext::system();
   let system_tables = SystemTables::new(engine);
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
@@ -72,7 +74,7 @@ fn seed_api_key(engine: &StorageEngine) -> String {
     created_at: chrono::Utc::now(),
     is_revoked: false,
   };
-  system_tables.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&ctx, &record).unwrap();
   plaintext_key
 }
 
@@ -108,6 +110,7 @@ async fn test_auth_token_endpoint_returns_refresh_token() {
 
 #[tokio::test]
 async fn test_refresh_returns_new_jwt() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -115,7 +118,7 @@ async fn test_refresh_returns_new_jwt() {
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
   system_tables
-    .store_refresh_token(&token_hash, "test-user", expires_at)
+    .store_refresh_token(&ctx, &token_hash, "test-user", expires_at)
     .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -139,6 +142,7 @@ async fn test_refresh_returns_new_jwt() {
 
 #[tokio::test]
 async fn test_refresh_rotates_refresh_token() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -146,7 +150,7 @@ async fn test_refresh_rotates_refresh_token() {
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
   system_tables
-    .store_refresh_token(&token_hash, "rotate-user", expires_at)
+    .store_refresh_token(&ctx, &token_hash, "rotate-user", expires_at)
     .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -171,6 +175,7 @@ async fn test_refresh_rotates_refresh_token() {
 
 #[tokio::test]
 async fn test_old_refresh_token_rejected_after_rotation() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -178,7 +183,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
   system_tables
-    .store_refresh_token(&token_hash, "rotation-user", expires_at)
+    .store_refresh_token(&ctx, &token_hash, "rotation-user", expires_at)
     .unwrap();
 
   // First refresh succeeds and rotates.
@@ -212,6 +217,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
 
 #[tokio::test]
 async fn test_expired_refresh_token_rejected() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -219,7 +225,7 @@ async fn test_expired_refresh_token_rejected() {
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
   system_tables
-    .store_refresh_token(&token_hash, "expired-user", expires_at)
+    .store_refresh_token(&ctx, &token_hash, "expired-user", expires_at)
     .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -314,6 +320,7 @@ async fn test_full_refresh_flow_from_api_key() {
 
 #[tokio::test]
 async fn test_revoked_refresh_token_rejected() {
+  let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   let system_tables = SystemTables::new(&engine);
@@ -321,10 +328,10 @@ async fn test_revoked_refresh_token_rejected() {
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
   system_tables
-    .store_refresh_token(&token_hash, "revoke-test-user", expires_at)
+    .store_refresh_token(&ctx, &token_hash, "revoke-test-user", expires_at)
     .unwrap();
 
-  system_tables.revoke_refresh_token(&token_hash).unwrap();
+  system_tables.revoke_refresh_token(&ctx, &token_hash).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()

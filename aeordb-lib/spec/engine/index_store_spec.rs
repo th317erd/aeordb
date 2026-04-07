@@ -4,12 +4,14 @@ use aeordb::engine::scalar_converter::{
   HashConverter, U64Converter, StringConverter,
 };
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 

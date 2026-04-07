@@ -9,6 +9,7 @@ use aeordb::engine::directory_entry::deserialize_child_entries;
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::tree_walker::{walk_version_tree, diff_trees};
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 
 fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
@@ -19,12 +20,13 @@ fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
 
 #[test]
 fn test_head_changes_on_file_store() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
   let head_before = engine.head_hash().unwrap();
 
-  ops.store_file("/test.txt", b"hello", None).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"hello", None).unwrap();
 
   let head_after = engine.head_hash().unwrap();
   assert_ne!(head_before, head_after, "HEAD must change after storing a file");
@@ -34,13 +36,14 @@ fn test_head_changes_on_file_store() {
 
 #[test]
 fn test_head_differs_between_states() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/a.txt", b"file A", None).unwrap();
+  ops.store_file(&ctx, "/a.txt", b"file A", None).unwrap();
   let head_a = engine.head_hash().unwrap();
 
-  ops.store_file("/b.txt", b"file B", None).unwrap();
+  ops.store_file(&ctx, "/b.txt", b"file B", None).unwrap();
   let head_b = engine.head_hash().unwrap();
 
   assert_ne!(head_a, head_b, "HEAD must differ after storing different files");
@@ -50,19 +53,20 @@ fn test_head_differs_between_states() {
 
 #[test]
 fn test_snapshot_preserves_state() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
   // Store initial files
-  ops.store_file("/original.txt", b"original content", Some("text/plain")).unwrap();
-  ops.store_file("/keep.txt", b"keep this", Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/original.txt", b"original content", Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/keep.txt", b"keep this", Some("text/plain")).unwrap();
 
   // Snapshot the current state
-  let snapshot = vm.create_snapshot("v1", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
   // Store more files after the snapshot
-  ops.store_file("/added-later.txt", b"added later", Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/added-later.txt", b"added later", Some("text/plain")).unwrap();
 
   // Walk the snapshot tree -- files added later must NOT appear
   let tree = walk_version_tree(&engine, &snapshot.root_hash).unwrap();
@@ -79,15 +83,16 @@ fn test_snapshot_preserves_state() {
 
 #[test]
 fn test_two_snapshots_different_trees() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/first.txt", b"first", None).unwrap();
-  let snap_a = vm.create_snapshot("snap-a", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/first.txt", b"first", None).unwrap();
+  let snap_a = vm.create_snapshot(&ctx, "snap-a", HashMap::new()).unwrap();
 
-  ops.store_file("/second.txt", b"second", None).unwrap();
-  let snap_b = vm.create_snapshot("snap-b", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/second.txt", b"second", None).unwrap();
+  let snap_b = vm.create_snapshot(&ctx, "snap-b", HashMap::new()).unwrap();
 
   assert_ne!(snap_a.root_hash, snap_b.root_hash, "snapshots must have different root hashes");
 
@@ -108,11 +113,12 @@ fn test_two_snapshots_different_trees() {
 
 #[test]
 fn test_content_hash_entry_exists() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let algo = engine.hash_algo();
 
-  ops.store_file("/foo.txt", b"foo data", None).unwrap();
+  ops.store_file(&ctx, "/foo.txt", b"foo data", None).unwrap();
 
   // The path-based key for root "/" should exist
   let path_key = algo.compute_hash(b"dir:/").unwrap();
@@ -130,13 +136,14 @@ fn test_content_hash_entry_exists() {
 
 #[test]
 fn test_child_entry_uses_content_hash() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
 
   // Create a subdirectory by storing a file inside it
-  ops.store_file("/subdir/file.txt", b"in subdir", None).unwrap();
+  ops.store_file(&ctx, "/subdir/file.txt", b"in subdir", None).unwrap();
 
   // Read the root directory to get ChildEntry for "subdir"
   let root_path_key = algo.compute_hash(b"dir:/").unwrap();
@@ -162,19 +169,20 @@ fn test_child_entry_uses_content_hash() {
 
 #[test]
 fn test_snapshot_directory_tree_immutable_after_delete() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
   // Store files
-  ops.store_file("/alpha.txt", b"alpha", None).unwrap();
-  ops.store_file("/beta.txt", b"beta", None).unwrap();
+  ops.store_file(&ctx, "/alpha.txt", b"alpha", None).unwrap();
+  ops.store_file(&ctx, "/beta.txt", b"beta", None).unwrap();
 
   // Snapshot
-  let snapshot = vm.create_snapshot("before-delete", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "before-delete", HashMap::new()).unwrap();
 
   // Delete a file
-  ops.delete_file("/alpha.txt").unwrap();
+  ops.delete_file(&ctx, "/alpha.txt").unwrap();
 
   // Current HEAD tree should NOT have alpha in its directory structure
   let current_head = engine.head_hash().unwrap();
@@ -200,16 +208,17 @@ fn test_snapshot_directory_tree_immutable_after_delete() {
 
 #[test]
 fn test_diff_between_snapshots_add_only() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/existing.txt", b"original", None).unwrap();
-  let snap_a = vm.create_snapshot("a", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/existing.txt", b"original", None).unwrap();
+  let snap_a = vm.create_snapshot(&ctx, "a", HashMap::new()).unwrap();
 
   // Add a new file (don't overwrite -- file records are path-addressed and overwrite)
-  ops.store_file("/new-file.txt", b"brand new", None).unwrap();
-  let snap_b = vm.create_snapshot("b", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/new-file.txt", b"brand new", None).unwrap();
+  let snap_b = vm.create_snapshot(&ctx, "b", HashMap::new()).unwrap();
 
   let tree_a = walk_version_tree(&engine, &snap_a.root_hash).unwrap();
   let tree_b = walk_version_tree(&engine, &snap_b.root_hash).unwrap();
@@ -224,11 +233,12 @@ fn test_diff_between_snapshots_add_only() {
 
 #[test]
 fn test_head_is_content_hash_not_path_hash() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let algo = engine.hash_algo();
 
-  ops.store_file("/test.txt", b"data", None).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"data", None).unwrap();
 
   let head = engine.head_hash().unwrap();
   let root_path_hash = algo.compute_hash(b"dir:/").unwrap();
@@ -286,6 +296,7 @@ fn test_empty_root_directory_head_is_content_hash() {
 
 #[test]
 fn test_multiple_stores_produce_unique_heads() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
@@ -293,7 +304,7 @@ fn test_multiple_stores_produce_unique_heads() {
   seen_heads.insert(engine.head_hash().unwrap());
 
   for i in 0..5 {
-    ops.store_file(&format!("/file-{}.txt", i), format!("content-{}", i).as_bytes(), None).unwrap();
+    ops.store_file(&ctx, &format!("/file-{}.txt", i), format!("content-{}", i).as_bytes(), None).unwrap();
     let head = engine.head_hash().unwrap();
     assert!(seen_heads.insert(head.clone()), "HEAD must be unique after each store (iteration {})", i);
   }
@@ -303,21 +314,22 @@ fn test_multiple_stores_produce_unique_heads() {
 
 #[test]
 fn test_snapshot_restore_sets_head_to_historical_content_hash() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/initial.txt", b"initial", None).unwrap();
-  let snapshot = vm.create_snapshot("checkpoint", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/initial.txt", b"initial", None).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "checkpoint", HashMap::new()).unwrap();
   let snapshot_head = engine.head_hash().unwrap();
 
   // Add more files to move HEAD forward
-  ops.store_file("/later.txt", b"later", None).unwrap();
+  ops.store_file(&ctx, "/later.txt", b"later", None).unwrap();
   let moved_head = engine.head_hash().unwrap();
   assert_ne!(snapshot_head, moved_head);
 
   // Restore snapshot
-  vm.restore_snapshot("checkpoint").unwrap();
+  vm.restore_snapshot(&ctx, "checkpoint").unwrap();
   let restored_head = engine.head_hash().unwrap();
 
   assert_eq!(restored_head, snapshot.root_hash, "restored HEAD must match snapshot root hash");
@@ -333,14 +345,15 @@ fn test_snapshot_restore_sets_head_to_historical_content_hash() {
 
 #[test]
 fn test_deep_nesting_content_hash_propagation() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/a/b/c/deep.txt", b"deep content", None).unwrap();
-  let snap = vm.create_snapshot("deep-snap", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/a/b/c/deep.txt", b"deep content", None).unwrap();
+  let snap = vm.create_snapshot(&ctx, "deep-snap", HashMap::new()).unwrap();
 
-  ops.store_file("/a/b/c/another.txt", b"another", None).unwrap();
+  ops.store_file(&ctx, "/a/b/c/another.txt", b"another", None).unwrap();
 
   // Walk the snapshot -- should only contain the one deep file
   let tree = walk_version_tree(&engine, &snap.root_hash).unwrap();
@@ -355,15 +368,16 @@ fn test_deep_nesting_content_hash_propagation() {
 
 #[test]
 fn test_snapshot_after_add_reflects_new_files() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/stays.txt", b"permanent", None).unwrap();
-  let snap_before = vm.create_snapshot("before-add", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/stays.txt", b"permanent", None).unwrap();
+  let snap_before = vm.create_snapshot(&ctx, "before-add", HashMap::new()).unwrap();
 
-  ops.store_file("/added.txt", b"new file", None).unwrap();
-  let snap_after = vm.create_snapshot("after-add", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/added.txt", b"new file", None).unwrap();
+  let snap_after = vm.create_snapshot(&ctx, "after-add", HashMap::new()).unwrap();
 
   let tree_before = walk_version_tree(&engine, &snap_before.root_hash).unwrap();
   let tree_after = walk_version_tree(&engine, &snap_after.root_hash).unwrap();
@@ -379,16 +393,17 @@ fn test_snapshot_after_add_reflects_new_files() {
 
 #[test]
 fn test_file_overwrite_different_size_changes_head() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/mutable.txt", b"short", None).unwrap();
+  ops.store_file(&ctx, "/mutable.txt", b"short", None).unwrap();
   let head_v1 = engine.head_hash().unwrap();
 
   // Sleep to ensure updated_at differs (millisecond resolution)
   std::thread::sleep(std::time::Duration::from_millis(2));
 
-  ops.store_file("/mutable.txt", b"a much longer version of the content", None).unwrap();
+  ops.store_file(&ctx, "/mutable.txt", b"a much longer version of the content", None).unwrap();
   let head_v2 = engine.head_hash().unwrap();
 
   // ChildEntry total_size changed, so directory content hash must differ
@@ -399,11 +414,12 @@ fn test_file_overwrite_different_size_changes_head() {
 
 #[test]
 fn test_path_and_content_entries_have_same_data() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let algo = engine.hash_algo();
 
-  ops.store_file("/test.txt", b"test data", None).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"test data", None).unwrap();
 
   // Get the path-based entry
   let path_key = algo.compute_hash(b"dir:/").unwrap();
@@ -420,12 +436,13 @@ fn test_path_and_content_entries_have_same_data() {
 
 #[test]
 fn test_list_directory_still_works() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/docs/readme.txt", b"readme", None).unwrap();
-  ops.store_file("/docs/notes.txt", b"notes", None).unwrap();
-  ops.store_file("/images/pic.png", b"png data", None).unwrap();
+  ops.store_file(&ctx, "/docs/readme.txt", b"readme", None).unwrap();
+  ops.store_file(&ctx, "/docs/notes.txt", b"notes", None).unwrap();
+  ops.store_file(&ctx, "/images/pic.png", b"png data", None).unwrap();
 
   let root_children = ops.list_directory("/").unwrap();
   let root_names: Vec<&str> = root_children.iter().map(|c| c.name.as_str()).collect();
@@ -442,16 +459,17 @@ fn test_list_directory_still_works() {
 
 #[test]
 fn test_create_directory_then_snapshot() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.create_directory("/empty-dir").unwrap();
-  ops.store_file("/file.txt", b"data", None).unwrap();
+  ops.create_directory(&ctx, "/empty-dir").unwrap();
+  ops.store_file(&ctx, "/file.txt", b"data", None).unwrap();
 
-  let snapshot = vm.create_snapshot("with-empty-dir", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "with-empty-dir", HashMap::new()).unwrap();
 
-  ops.store_file("/empty-dir/new-file.txt", b"new", None).unwrap();
+  ops.store_file(&ctx, "/empty-dir/new-file.txt", b"new", None).unwrap();
 
   // Snapshot tree should have the empty directory but not the file added after
   let tree = walk_version_tree(&engine, &snapshot.root_hash).unwrap();
@@ -483,12 +501,13 @@ fn test_content_hash_uses_distinct_prefix() {
 
 #[test]
 fn test_walk_head_tree_matches_current_state() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/a.txt", b"a", None).unwrap();
-  ops.store_file("/b.txt", b"b", None).unwrap();
-  ops.store_file("/sub/c.txt", b"c", None).unwrap();
+  ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
+  ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
+  ops.store_file(&ctx, "/sub/c.txt", b"c", None).unwrap();
 
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
@@ -503,12 +522,13 @@ fn test_walk_head_tree_matches_current_state() {
 
 #[test]
 fn test_snapshot_root_hash_is_valid_entry() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/test.txt", b"data", None).unwrap();
-  let snapshot = vm.create_snapshot("snap", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"data", None).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "snap", HashMap::new()).unwrap();
 
   // The snapshot root hash should be directly retrievable
   let entry = engine.get_entry(&snapshot.root_hash).unwrap();
@@ -519,17 +539,18 @@ fn test_snapshot_root_hash_is_valid_entry() {
 
 #[test]
 fn test_identical_content_produces_same_root_hash() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
   // Store a file, take a snapshot
-  ops.store_file("/test.txt", b"static content", None).unwrap();
-  let snap_1 = vm.create_snapshot("first", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"static content", None).unwrap();
+  let snap_1 = vm.create_snapshot(&ctx, "first", HashMap::new()).unwrap();
 
   // Without changing anything, take another snapshot
   // (Note: HEAD hasn't changed, so root_hash should be the same)
-  let snap_2 = vm.create_snapshot("second", HashMap::new()).unwrap();
+  let snap_2 = vm.create_snapshot(&ctx, "second", HashMap::new()).unwrap();
 
   assert_eq!(
     snap_1.root_hash, snap_2.root_hash,
@@ -541,17 +562,18 @@ fn test_identical_content_produces_same_root_hash() {
 
 #[test]
 fn test_content_hash_entry_immutable() {
+  let ctx = RequestContext::system();
   let (engine, _temp) = setup();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/first.txt", b"first", None).unwrap();
+  ops.store_file(&ctx, "/first.txt", b"first", None).unwrap();
 
   // Capture the current HEAD (content hash of root)
   let head_1 = engine.head_hash().unwrap();
   let (_h, _k, data_1) = engine.get_entry(&head_1).unwrap().unwrap();
 
   // Mutate the directory by adding another file
-  ops.store_file("/second.txt", b"second", None).unwrap();
+  ops.store_file(&ctx, "/second.txt", b"second", None).unwrap();
 
   // The old content hash entry should still exist with the same data
   let entry = engine.get_entry(&head_1).unwrap();

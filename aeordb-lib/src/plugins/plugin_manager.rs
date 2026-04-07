@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::types::{PluginMetadata, PluginType};
 use super::wasm_runtime::WasmPluginRuntime;
+use crate::engine::RequestContext;
 use crate::engine::StorageEngine;
 use crate::engine::SystemTables;
 
@@ -85,8 +86,9 @@ impl PluginManager {
     let encoded = serde_json::to_vec(&record)
       .map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
 
+    let ctx = RequestContext::system();
     self.system_tables()
-      .store_plugin(path, &encoded)
+      .store_plugin(&ctx, path, &encoded)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     tracing::info!(
@@ -136,8 +138,9 @@ impl PluginManager {
   ///
   /// Returns true if the plugin existed and was removed, false if not found.
   pub fn remove_plugin(&self, path: &str) -> Result<bool, PluginManagerError> {
+    let ctx = RequestContext::system();
     self.system_tables()
-      .remove_plugin(path)
+      .remove_plugin(&ctx, path)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))
   }
 

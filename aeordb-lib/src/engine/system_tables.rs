@@ -6,6 +6,7 @@ use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::refresh::RefreshTokenRecord;
 use crate::engine::entry_type::EntryType;
 use crate::engine::group::Group;
+use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{User, validate_user_id};
 
@@ -66,7 +67,7 @@ impl<'a> SystemTables<'a> {
   // -------------------------------------------------------------------------
 
   /// Store a config value by key.
-  pub fn store_config(&self, key: &str, value: &[u8]) -> Result<()> {
+  pub fn store_config(&self, _ctx: &RequestContext, key: &str, value: &[u8]) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_CONFIG}{key}"));
     self.engine.store_entry(EntryType::FileRecord, &hash, value)?;
     Ok(())
@@ -88,7 +89,7 @@ impl<'a> SystemTables<'a> {
   /// Store an API key record.
   /// SECURITY: Validates that user_id is not the nil UUID (root).
   /// Use `store_api_key_for_bootstrap` for the root bootstrap key only.
-  pub fn store_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
+  pub fn store_api_key(&self, _ctx: &RequestContext, record: &ApiKeyRecord) -> Result<()> {
     validate_user_id(&record.user_id)?;
     self.store_api_key_unchecked(record)
   }
@@ -97,7 +98,7 @@ impl<'a> SystemTables<'a> {
   /// (root user_id). It exists SOLELY for the bootstrap process that creates
   /// the initial root API key. NEVER expose this method to any external
   /// interface (HTTP, WASM plugins, native plugins, admin paths).
-  pub fn store_api_key_for_bootstrap(&self, record: &ApiKeyRecord) -> Result<()> {
+  pub fn store_api_key_for_bootstrap(&self, _ctx: &RequestContext, record: &ApiKeyRecord) -> Result<()> {
     self.store_api_key_unchecked(record)
   }
 
@@ -164,7 +165,7 @@ impl<'a> SystemTables<'a> {
 
   /// Revoke an API key by setting is_revoked = true.
   /// Returns true if the key was found, false otherwise.
-  pub fn revoke_api_key(&self, key_id: Uuid) -> Result<bool> {
+  pub fn revoke_api_key(&self, _ctx: &RequestContext, key_id: Uuid) -> Result<bool> {
     let key_id_string = key_id.to_string();
     let hash = self.hash_key(&format!("{PREFIX_API_KEY}{key_id_string}"));
     let entry = match self.engine.get_entry(&hash)? {
@@ -209,6 +210,7 @@ impl<'a> SystemTables<'a> {
   /// Store a magic link record, keyed by code_hash.
   pub fn store_magic_link(
     &self,
+    _ctx: &RequestContext,
     code_hash: &str,
     email: &str,
     expires_at: DateTime<Utc>,
@@ -242,7 +244,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Mark a magic link as used.
-  pub fn mark_magic_link_used(&self, code_hash: &str) -> Result<()> {
+  pub fn mark_magic_link_used(&self, _ctx: &RequestContext, code_hash: &str) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_MAGIC_LINK}{code_hash}"));
     let entry = match self.engine.get_entry(&hash)? {
       Some((_header, _key, value)) => value,
@@ -266,6 +268,7 @@ impl<'a> SystemTables<'a> {
   /// Store a refresh token record, keyed by token_hash.
   pub fn store_refresh_token(
     &self,
+    _ctx: &RequestContext,
     token_hash: &str,
     user_subject: &str,
     expires_at: DateTime<Utc>,
@@ -299,7 +302,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Revoke a refresh token by setting is_revoked = true.
-  pub fn revoke_refresh_token(&self, token_hash: &str) -> Result<()> {
+  pub fn revoke_refresh_token(&self, _ctx: &RequestContext, token_hash: &str) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_REFRESH_TOKEN}{token_hash}"));
     let entry = match self.engine.get_entry(&hash)? {
       Some((_header, _key, value)) => value,
@@ -321,7 +324,7 @@ impl<'a> SystemTables<'a> {
   // -------------------------------------------------------------------------
 
   /// Deploy (or overwrite) a plugin at the given path.
-  pub fn store_plugin(&self, path: &str, encoded: &[u8]) -> Result<()> {
+  pub fn store_plugin(&self, _ctx: &RequestContext, path: &str, encoded: &[u8]) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_PLUGIN}{path}"));
     self.engine.store_entry(EntryType::FileRecord, &hash, encoded)?;
 
@@ -368,7 +371,7 @@ impl<'a> SystemTables<'a> {
 
   /// Remove a plugin by path.
   /// Returns true if the plugin existed and was removed, false if not found.
-  pub fn remove_plugin(&self, path: &str) -> Result<bool> {
+  pub fn remove_plugin(&self, _ctx: &RequestContext, path: &str) -> Result<bool> {
     let hash = self.hash_key(&format!("{PREFIX_PLUGIN}{path}"));
     if !self.engine.has_entry(&hash)? {
       return Ok(false);
@@ -409,7 +412,7 @@ impl<'a> SystemTables<'a> {
 
   /// Store a user. Validates user_id != nil UUID.
   /// Automatically creates a per-user auto-group `user:{user_id}`.
-  pub fn store_user(&self, user: &User) -> Result<()> {
+  pub fn store_user(&self, ctx: &RequestContext, user: &User) -> Result<()> {
     validate_user_id(&user.user_id)?;
 
     let user_id_string = user.user_id.to_string();
@@ -440,7 +443,7 @@ impl<'a> SystemTables<'a> {
       "eq",
       &user_id_string,
     ).map_err(SystemTableError::Engine)?;
-    self.store_group(&auto_group)?;
+    self.store_group(ctx, &auto_group)?;
 
     Ok(())
   }
@@ -499,7 +502,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Update an existing user. Validates user_id != nil UUID.
-  pub fn update_user(&self, user: &User) -> Result<()> {
+  pub fn update_user(&self, _ctx: &RequestContext, user: &User) -> Result<()> {
     validate_user_id(&user.user_id)?;
 
     let user_id_string = user.user_id.to_string();
@@ -517,7 +520,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Delete a user. Also deletes the per-user auto-group.
-  pub fn delete_user(&self, user_id: &Uuid) -> Result<()> {
+  pub fn delete_user(&self, ctx: &RequestContext, user_id: &Uuid) -> Result<()> {
     let user_id_string = user_id.to_string();
 
     // Remove username lookup if user exists.
@@ -541,7 +544,7 @@ impl<'a> SystemTables<'a> {
 
     // Delete the auto-group.
     let group_name = format!("user:{}", user_id_string);
-    let _ = self.delete_group(&group_name);
+    let _ = self.delete_group(ctx, &group_name);
 
     Ok(())
   }
@@ -584,7 +587,7 @@ impl<'a> SystemTables<'a> {
   // -------------------------------------------------------------------------
 
   /// Store a group.
-  pub fn store_group(&self, group: &Group) -> Result<()> {
+  pub fn store_group(&self, _ctx: &RequestContext, group: &Group) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_GROUP}{}", group.name));
     let encoded = group.serialize();
     self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
@@ -634,7 +637,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Update a group.
-  pub fn update_group(&self, group: &Group) -> Result<()> {
+  pub fn update_group(&self, _ctx: &RequestContext, group: &Group) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_GROUP}{}", group.name));
     let encoded = group.serialize();
     self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
@@ -642,7 +645,7 @@ impl<'a> SystemTables<'a> {
   }
 
   /// Delete a group.
-  pub fn delete_group(&self, name: &str) -> Result<()> {
+  pub fn delete_group(&self, _ctx: &RequestContext, name: &str) -> Result<()> {
     let hash = self.hash_key(&format!("{PREFIX_GROUP}{name}"));
     if self.engine.has_entry(&hash)? {
       self.engine.mark_entry_deleted(&hash)?;

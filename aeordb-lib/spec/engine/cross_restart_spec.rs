@@ -9,6 +9,7 @@ use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_tables::SystemTables;
 use aeordb::engine::user::User;
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::RequestContext;
 use aeordb::auth::api_key::{generate_api_key, hash_api_key, verify_api_key, ApiKeyRecord};
 
 use chrono::Utc;
@@ -16,11 +17,12 @@ use uuid::Uuid;
 
 /// Create a fresh engine + temp dir for first session.
 fn create_engine(temp_dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let engine_file = temp_dir.path().join("test.aeordb");
   let engine_path = engine_file.to_str().unwrap();
   let engine = StorageEngine::create(engine_path).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
@@ -38,15 +40,16 @@ fn reopen_engine(temp_dir: &tempfile::TempDir) -> Arc<StorageEngine> {
 
 #[test]
 fn test_files_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store files
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
-    ops.store_file("/data/record.json", b"{\"id\": 1}", Some("application/json")).unwrap();
-    ops.store_file("/empty.txt", b"", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/data/record.json", b"{\"id\": 1}", Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
   }
 
   // Session 2: reopen and verify
@@ -65,15 +68,16 @@ fn test_files_persist_across_restart() {
 
 #[test]
 fn test_directories_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store files creating directory structure
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/docs/readme.txt", b"readme content", None).unwrap();
-    ops.store_file("/docs/guide.txt", b"guide content", None).unwrap();
-    ops.store_file("/src/main.rs", b"fn main() {}", None).unwrap();
+    ops.store_file(&ctx, "/docs/readme.txt", b"readme content", None).unwrap();
+    ops.store_file(&ctx, "/docs/guide.txt", b"guide content", None).unwrap();
+    ops.store_file(&ctx, "/src/main.rs", b"fn main() {}", None).unwrap();
   }
 
   // Session 2: verify directory listings
@@ -94,6 +98,7 @@ fn test_directories_persist_across_restart() {
 
 #[test]
 fn test_head_persists_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let head_before;
 
@@ -101,7 +106,7 @@ fn test_head_persists_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/file.txt", b"content", None).unwrap();
+    ops.store_file(&ctx, "/file.txt", b"content", None).unwrap();
     head_before = engine.head_hash().unwrap();
     assert!(!head_before.is_empty());
   }
@@ -118,19 +123,20 @@ fn test_head_persists_across_restart() {
 
 #[test]
 fn test_deleted_files_stay_deleted() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store and delete a file
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/ephemeral.txt", b"temporary data", None).unwrap();
+    ops.store_file(&ctx, "/ephemeral.txt", b"temporary data", None).unwrap();
 
     // Verify it exists before deletion
     let content = ops.read_file("/ephemeral.txt").unwrap();
     assert_eq!(content, b"temporary data");
 
-    ops.delete_file("/ephemeral.txt").unwrap();
+    ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
 
     // Verify it's gone in this session
     let result = ops.read_file("/ephemeral.txt");
@@ -147,15 +153,16 @@ fn test_deleted_files_stay_deleted() {
 
 #[test]
 fn test_deleted_files_not_in_directory_listing() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store two files, delete one
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/keep.txt", b"keeper", None).unwrap();
-    ops.store_file("/remove.txt", b"removable", None).unwrap();
-    ops.delete_file("/remove.txt").unwrap();
+    ops.store_file(&ctx, "/keep.txt", b"keeper", None).unwrap();
+    ops.store_file(&ctx, "/remove.txt", b"removable", None).unwrap();
+    ops.delete_file(&ctx, "/remove.txt").unwrap();
   }
 
   // Session 2: only the surviving file should appear
@@ -170,6 +177,7 @@ fn test_deleted_files_not_in_directory_listing() {
 
 #[test]
 fn test_has_entry_returns_false_for_deleted() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let file_key;
 
@@ -177,13 +185,13 @@ fn test_has_entry_returns_false_for_deleted() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/doomed.txt", b"doomed", None).unwrap();
+    ops.store_file(&ctx, "/doomed.txt", b"doomed", None).unwrap();
 
     let algo = engine.hash_algo();
     file_key = algo.compute_hash(b"file:/doomed.txt").unwrap();
     assert!(engine.has_entry(&file_key).unwrap(), "file should exist before deletion");
 
-    ops.delete_file("/doomed.txt").unwrap();
+    ops.delete_file(&ctx, "/doomed.txt").unwrap();
     assert!(!engine.has_entry(&file_key).unwrap(), "file should be gone after deletion");
   }
 
@@ -198,21 +206,22 @@ fn test_has_entry_returns_false_for_deleted() {
 
 #[test]
 fn test_snapshots_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: create snapshots
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/base.txt", b"base content", None).unwrap();
+    ops.store_file(&ctx, "/base.txt", b"base content", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     let mut meta = HashMap::new();
     meta.insert("author".to_string(), "test".to_string());
-    vm.create_snapshot("v1.0", meta).unwrap();
+    vm.create_snapshot(&ctx, "v1.0", meta).unwrap();
 
-    ops.store_file("/extra.txt", b"extra content", None).unwrap();
-    vm.create_snapshot("v2.0", HashMap::new()).unwrap();
+    ops.store_file(&ctx, "/extra.txt", b"extra content", None).unwrap();
+    vm.create_snapshot(&ctx, "v2.0", HashMap::new()).unwrap();
   }
 
   // Session 2: list snapshots
@@ -233,6 +242,7 @@ fn test_snapshots_persist_across_restart() {
 
 #[test]
 fn test_snapshot_root_hash_preserved() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let original_root_hash;
 
@@ -240,10 +250,10 @@ fn test_snapshot_root_hash_preserved() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/data.txt", b"snapshot data", None).unwrap();
+    ops.store_file(&ctx, "/data.txt", b"snapshot data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    let snapshot = vm.create_snapshot("pinned", HashMap::new()).unwrap();
+    let snapshot = vm.create_snapshot(&ctx, "pinned", HashMap::new()).unwrap();
     original_root_hash = snapshot.root_hash.clone();
   }
 
@@ -257,19 +267,20 @@ fn test_snapshot_root_hash_preserved() {
 
 #[test]
 fn test_snapshot_tree_walkable_after_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store files, snapshot, then add more files
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/alpha.txt", b"alpha", None).unwrap();
+    ops.store_file(&ctx, "/alpha.txt", b"alpha", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    vm.create_snapshot("snap1", HashMap::new()).unwrap();
+    vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     // Add more files AFTER snapshot
-    ops.store_file("/beta.txt", b"beta", None).unwrap();
+    ops.store_file(&ctx, "/beta.txt", b"beta", None).unwrap();
   }
 
   // Session 2: snapshot should resolve
@@ -290,17 +301,18 @@ fn test_snapshot_tree_walkable_after_restart() {
 
 #[test]
 fn test_forks_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: create forks
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/base.txt", b"base", None).unwrap();
+    ops.store_file(&ctx, "/base.txt", b"base", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    vm.create_fork("feature-a", None).unwrap();
-    vm.create_fork("feature-b", None).unwrap();
+    vm.create_fork(&ctx, "feature-a", None).unwrap();
+    vm.create_fork(&ctx, "feature-b", None).unwrap();
   }
 
   // Session 2: forks should be listed
@@ -317,6 +329,7 @@ fn test_forks_persist_across_restart() {
 
 #[test]
 fn test_fork_root_hash_preserved() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let original_root_hash;
 
@@ -324,10 +337,10 @@ fn test_fork_root_hash_preserved() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/data.txt", b"fork data", None).unwrap();
+    ops.store_file(&ctx, "/data.txt", b"fork data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    let fork = vm.create_fork("my-fork", None).unwrap();
+    let fork = vm.create_fork(&ctx, "my-fork", None).unwrap();
     original_root_hash = fork.root_hash.clone();
   }
 
@@ -345,6 +358,7 @@ fn test_fork_root_hash_preserved() {
 
 #[test]
 fn test_indexes_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: configure indexes, store JSON files
@@ -368,15 +382,15 @@ fn test_indexes_persist_across_restart() {
       logging: false,
     };
     let config_data = config.serialize();
-    ops.store_file("/people/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/people/.config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     // Store files with indexing
-    ops.store_file_with_indexing(
+    ops.store_file_with_indexing(&ctx,
       "/people/alice.json",
       b"{\"age\": 30}",
       Some("application/json"),
     ).unwrap();
-    ops.store_file_with_indexing(
+    ops.store_file_with_indexing(&ctx,
       "/people/bob.json",
       b"{\"age\": 25}",
       Some("application/json"),
@@ -393,6 +407,7 @@ fn test_indexes_persist_across_restart() {
 
 #[test]
 fn test_index_values_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: configure trigram index, store data
@@ -416,9 +431,9 @@ fn test_index_values_persist_across_restart() {
       logging: false,
     };
     let config_data = config.serialize();
-    ops.store_file("/contacts/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/contacts/.config/indexes.json", &config_data, Some("application/json")).unwrap();
 
-    ops.store_file_with_indexing(
+    ops.store_file_with_indexing(&ctx,
       "/contacts/john.json",
       b"{\"name\": \"Jonathan Smith\"}",
       Some("application/json"),
@@ -443,6 +458,7 @@ fn test_index_values_persist_across_restart() {
 
 #[test]
 fn test_compressed_files_readable_after_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store a file with compression
@@ -450,7 +466,7 @@ fn test_compressed_files_readable_after_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file_compressed(
+    ops.store_file_compressed(&ctx,
       "/compressed.txt",
       large_content.as_bytes(),
       Some("text/plain"),
@@ -472,6 +488,7 @@ fn test_compressed_files_readable_after_restart() {
 
 #[test]
 fn test_users_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let user_id;
 
@@ -482,10 +499,10 @@ fn test_users_persist_across_restart() {
 
     let user = User::new("alice", Some("alice@example.com"));
     user_id = user.user_id;
-    st.store_user(&user).unwrap();
+    st.store_user(&ctx, &user).unwrap();
 
     let user2 = User::new("bob", None);
-    st.store_user(&user2).unwrap();
+    st.store_user(&ctx, &user2).unwrap();
   }
 
   // Session 2: list users
@@ -507,6 +524,7 @@ fn test_users_persist_across_restart() {
 
 #[test]
 fn test_api_keys_persist_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let key_id = Uuid::new_v4();
   let plaintext_key;
@@ -518,7 +536,7 @@ fn test_api_keys_persist_across_restart() {
 
     // Create a user first (API keys need non-nil user_id)
     let user = User::new("keyowner", None);
-    st.store_user(&user).unwrap();
+    st.store_user(&ctx, &user).unwrap();
 
     plaintext_key = generate_api_key(key_id);
     let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -530,7 +548,7 @@ fn test_api_keys_persist_across_restart() {
       created_at: Utc::now(),
       is_revoked: false,
     };
-    st.store_api_key(&record).unwrap();
+    st.store_api_key(&ctx, &record).unwrap();
   }
 
   // Session 2: validate the key
@@ -581,6 +599,7 @@ fn test_backup_type_persists_across_restart() {
 
 #[test]
 fn test_complex_scenario_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let snapshot_root_hash;
   let fork_root_hash;
@@ -592,30 +611,30 @@ fn test_complex_scenario_across_restart() {
     let ops = DirectoryOps::new(&engine);
 
     // Store files
-    ops.store_file("/project/README.md", b"# My Project", Some("text/markdown")).unwrap();
-    ops.store_file("/project/src/lib.rs", b"pub fn hello() {}", Some("text/x-rust")).unwrap();
-    ops.store_file("/project/temp.log", b"log data", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/project/README.md", b"# My Project", Some("text/markdown")).unwrap();
+    ops.store_file(&ctx, "/project/src/lib.rs", b"pub fn hello() {}", Some("text/x-rust")).unwrap();
+    ops.store_file(&ctx, "/project/temp.log", b"log data", Some("text/plain")).unwrap();
 
     // Create snapshot before deletion
     let vm = VersionManager::new(&engine);
     let mut meta = HashMap::new();
     meta.insert("version".to_string(), "1.0".to_string());
-    let snap = vm.create_snapshot("release-1.0", meta).unwrap();
+    let snap = vm.create_snapshot(&ctx, "release-1.0", meta).unwrap();
     snapshot_root_hash = snap.root_hash.clone();
 
     // Delete a file
-    ops.delete_file("/project/temp.log").unwrap();
+    ops.delete_file(&ctx, "/project/temp.log").unwrap();
 
     // Create a fork
-    let fork = vm.create_fork("experiment", None).unwrap();
+    let fork = vm.create_fork(&ctx, "experiment", None).unwrap();
     fork_root_hash = fork.root_hash.clone();
 
     // Create second snapshot after deletion
-    vm.create_snapshot("release-1.1", HashMap::new()).unwrap();
+    vm.create_snapshot(&ctx, "release-1.1", HashMap::new()).unwrap();
 
     // Store compressed file
     let big_data = "repeated data ".repeat(200);
-    ops.store_file_compressed(
+    ops.store_file_compressed(&ctx,
       "/project/large.bin",
       big_data.as_bytes(),
       Some("application/octet-stream"),
@@ -626,7 +645,7 @@ fn test_complex_scenario_across_restart() {
     let st = SystemTables::new(&engine);
     let user = User::new("admin", Some("admin@example.com"));
     user_id = user.user_id;
-    st.store_user(&user).unwrap();
+    st.store_user(&ctx, &user).unwrap();
   }
 
   // Session 2: verify everything
@@ -694,14 +713,15 @@ fn test_complex_scenario_across_restart() {
 
 #[test]
 fn test_overwritten_file_persists_latest_version() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store then overwrite a file
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/mutable.txt", b"version 1", None).unwrap();
-    ops.store_file("/mutable.txt", b"version 2", None).unwrap();
+    ops.store_file(&ctx, "/mutable.txt", b"version 1", None).unwrap();
+    ops.store_file(&ctx, "/mutable.txt", b"version 2", None).unwrap();
   }
 
   // Session 2: should read the latest version
@@ -713,17 +733,18 @@ fn test_overwritten_file_persists_latest_version() {
 
 #[test]
 fn test_multiple_deletions_stay_deleted() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store and delete multiple files
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/a.txt", b"a", None).unwrap();
-    ops.store_file("/b.txt", b"b", None).unwrap();
-    ops.store_file("/c.txt", b"c", None).unwrap();
-    ops.delete_file("/a.txt").unwrap();
-    ops.delete_file("/c.txt").unwrap();
+    ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
+    ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
+    ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
+    ops.delete_file(&ctx, "/a.txt").unwrap();
+    ops.delete_file(&ctx, "/c.txt").unwrap();
   }
 
   // Session 2: only /b.txt should survive
@@ -741,15 +762,16 @@ fn test_multiple_deletions_stay_deleted() {
 
 #[test]
 fn test_store_delete_recreate_persists() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: store, delete, then recreate with different content
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/phoenix.txt", b"original", None).unwrap();
-    ops.delete_file("/phoenix.txt").unwrap();
-    ops.store_file("/phoenix.txt", b"reborn", None).unwrap();
+    ops.store_file(&ctx, "/phoenix.txt", b"original", None).unwrap();
+    ops.delete_file(&ctx, "/phoenix.txt").unwrap();
+    ops.store_file(&ctx, "/phoenix.txt", b"reborn", None).unwrap();
   }
 
   // Session 2: should read the recreated version
@@ -779,6 +801,7 @@ fn test_empty_database_reopens_cleanly() {
 
 #[test]
 fn test_large_file_persists_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Create a file larger than the chunk size (256KB) to exercise multi-chunk storage
@@ -788,7 +811,7 @@ fn test_large_file_persists_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/big.bin", &large_data, Some("application/octet-stream")).unwrap();
+    ops.store_file(&ctx, "/big.bin", &large_data, Some("application/octet-stream")).unwrap();
   }
 
   // Session 2: verify all chunks reassemble correctly
@@ -801,18 +824,19 @@ fn test_large_file_persists_across_restart() {
 
 #[test]
 fn test_deleted_snapshot_stays_deleted_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: create then delete a snapshot
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/data.txt", b"data", None).unwrap();
+    ops.store_file(&ctx, "/data.txt", b"data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    vm.create_snapshot("doomed-snap", HashMap::new()).unwrap();
-    vm.create_snapshot("keeper-snap", HashMap::new()).unwrap();
-    vm.delete_snapshot("doomed-snap").unwrap();
+    vm.create_snapshot(&ctx, "doomed-snap", HashMap::new()).unwrap();
+    vm.create_snapshot(&ctx, "keeper-snap", HashMap::new()).unwrap();
+    vm.delete_snapshot(&ctx, "doomed-snap").unwrap();
 
     // Verify only one remains in session
     let snaps = vm.list_snapshots().unwrap();
@@ -830,18 +854,19 @@ fn test_deleted_snapshot_stays_deleted_across_restart() {
 
 #[test]
 fn test_abandoned_fork_stays_gone_across_restart() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
   // Session 1: create then abandon a fork
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file("/data.txt", b"data", None).unwrap();
+    ops.store_file(&ctx, "/data.txt", b"data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
-    vm.create_fork("keep-fork", None).unwrap();
-    vm.create_fork("abandon-fork", None).unwrap();
-    vm.abandon_fork("abandon-fork").unwrap();
+    vm.create_fork(&ctx, "keep-fork", None).unwrap();
+    vm.create_fork(&ctx, "abandon-fork", None).unwrap();
+    vm.abandon_fork(&ctx, "abandon-fork").unwrap();
   }
 
   // Session 2: abandoned fork should stay gone

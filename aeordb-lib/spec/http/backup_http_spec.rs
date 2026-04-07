@@ -8,6 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -51,10 +52,11 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 /// Seed engine with test files.
 fn seed_engine(engine: &StorageEngine) {
+  let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file("/docs/hello.txt", b"Hello World", Some("text/plain"))
+    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
         .unwrap();
-    ops.store_file("/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
+    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
         .unwrap();
 }
 

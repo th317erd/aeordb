@@ -10,18 +10,21 @@ use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::IndexingPipeline;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use std::sync::Arc;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -29,7 +32,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 // ============================================================
@@ -76,7 +79,8 @@ fn test_parse_memory_limit_mb() {
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
   let data = b"some binary data";
   // Parser not found, but the pipeline should attempt it (not panic on memory limit parsing)
-  let result = pipeline.run("/data/file.bin", data, Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/data/file.bin", data, Some("application/octet-stream"));
   assert!(result.is_ok(), "Pipeline should not error when parser fails (logs instead)");
 
   // Verify log was written about the parser failure
@@ -105,7 +109,8 @@ fn test_parse_memory_limit_gb() {
   store_index_config(&engine, "/bigdata", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/bigdata/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/bigdata/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok());
 }
 
@@ -128,7 +133,8 @@ fn test_parse_memory_limit_kb() {
   store_index_config(&engine, "/smalldata", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/smalldata/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/smalldata/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok());
 }
 
@@ -151,7 +157,8 @@ fn test_parse_memory_limit_default_on_invalid() {
   store_index_config(&engine, "/fallback", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/fallback/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/fallback/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok());
 }
 
@@ -174,7 +181,8 @@ fn test_parse_memory_limit_plain_number() {
   store_index_config(&engine, "/rawlimit", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/rawlimit/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/rawlimit/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok());
 }
 
@@ -206,7 +214,8 @@ fn test_parser_envelope_structure() {
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
   let data = b"hello world";
-  pipeline.run("/envelope/test.txt", data, Some("text/plain")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/envelope/test.txt", data, Some("text/plain")).unwrap();
 
   let ops = DirectoryOps::new(&engine);
   let log = ops.read_file("/envelope/.logs/system/parsing.log").unwrap();
@@ -239,16 +248,19 @@ fn test_parser_envelope_data_is_base64() {
 
   // Test with binary data (including null bytes)
   let binary_data: Vec<u8> = (0..=255).collect();
-  let result = pipeline.run("/b64/binary.dat", &binary_data, Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/b64/binary.dat", &binary_data, Some("application/octet-stream"));
   assert!(result.is_ok(), "Pipeline should handle binary data without panic");
 
   // Test with empty data
-  let result = pipeline.run("/b64/empty.dat", &[], Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/b64/empty.dat", &[], Some("application/octet-stream"));
   assert!(result.is_ok(), "Pipeline should handle empty data without panic");
 
   // Test with large data
   let large_data = vec![0xABu8; 10_000];
-  let result = pipeline.run("/b64/large.dat", &large_data, Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/b64/large.dat", &large_data, Some("application/octet-stream"));
   assert!(result.is_ok(), "Pipeline should handle large data without panic");
 }
 
@@ -273,11 +285,13 @@ fn test_parser_envelope_meta_fields() {
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
   let data = b"PDF content";
-  let result = pipeline.run("/meta/report.pdf", data, Some("application/pdf"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/meta/report.pdf", data, Some("application/pdf"));
   assert!(result.is_ok());
 
   // Also test with None content type
-  let result = pipeline.run("/meta/unknown.xyz", data, None);
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/meta/unknown.xyz", data, None);
   assert!(result.is_ok(), "Pipeline should handle None content type");
 }
 
@@ -301,7 +315,8 @@ fn test_parser_envelope_filename_extraction() {
   store_index_config(&engine, "/docs/reports", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/docs/reports/test.pdf", b"pdf data", Some("application/pdf"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/docs/reports/test.pdf", b"pdf data", Some("application/pdf"));
   assert!(result.is_ok());
 
   // The log should mention the file path
@@ -340,7 +355,8 @@ fn test_parser_not_configured_uses_raw_json() {
 
   let data = br#"{"title":"Hello World"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/noparserdocs/doc.json", data, Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/noparserdocs/doc.json", data, Some("application/json")).unwrap();
 
   // Verify index was created with entry from raw JSON
   let index_manager = IndexManager::new(&engine);
@@ -355,6 +371,7 @@ fn test_parser_not_configured_uses_raw_json() {
 
 #[test]
 fn test_content_type_registry_lookup() {
+  let ctx = RequestContext::system();
   // Store /.config/parsers.json with a mapping, then verify the pipeline
   // attempts to use the mapped parser for that content type.
   let dir = tempfile::tempdir().unwrap();
@@ -363,7 +380,7 @@ fn test_content_type_registry_lookup() {
 
   // Store content-type registry
   let registry = br#"{"application/pdf":"/parsers/pdf","text/csv":"/parsers/csv"}"#;
-  ops.store_file("/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
 
   // Store index config with NO explicit parser (should fall back to registry)
   let config = PathIndexConfig {
@@ -380,7 +397,8 @@ fn test_content_type_registry_lookup() {
   let pm = PluginManager::new(engine_arc);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  pipeline.run("/uploads/report.pdf", b"pdf bytes", Some("application/pdf")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/uploads/report.pdf", b"pdf bytes", Some("application/pdf")).unwrap();
 
   // The log should mention the PDF parser was attempted
   let log = ops.read_file("/uploads/.logs/system/parsing.log").unwrap();
@@ -390,6 +408,7 @@ fn test_content_type_registry_lookup() {
 
 #[test]
 fn test_content_type_registry_not_found() {
+  let ctx = RequestContext::system();
   // Lookup unregistered content type should return None,
   // so pipeline falls back to raw JSON parsing.
   let dir = tempfile::tempdir().unwrap();
@@ -398,7 +417,7 @@ fn test_content_type_registry_not_found() {
 
   // Store registry with only PDF
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file("/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -419,7 +438,8 @@ fn test_content_type_registry_not_found() {
   // Use text/csv which is NOT in the registry — should fall back to raw JSON
   let data = br#"{"name":"test"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/csvdata/file.csv", data, Some("text/csv")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/csvdata/file.csv", data, Some("text/csv")).unwrap();
 
   // Raw JSON should be indexed
   let index_manager = IndexManager::new(&engine);
@@ -430,6 +450,7 @@ fn test_content_type_registry_not_found() {
 
 #[test]
 fn test_content_type_json_skips_registry() {
+  let ctx = RequestContext::system();
   // application/json should NEVER trigger a registry lookup —
   // it's handled natively as raw JSON.
   let dir = tempfile::tempdir().unwrap();
@@ -438,7 +459,7 @@ fn test_content_type_json_skips_registry() {
 
   // Store registry that maps application/json to a parser (should be ignored)
   let registry = br#"{"application/json":"/parsers/should_not_be_used"}"#;
-  ops.store_file("/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -459,7 +480,8 @@ fn test_content_type_json_skips_registry() {
   // Store JSON data — should be parsed directly, NOT through the registered parser
   let data = br#"{"value":"hello"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/jsondata/test.json", data, Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/jsondata/test.json", data, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/jsondata", "value").unwrap();
@@ -494,7 +516,8 @@ fn test_content_type_registry_not_exists() {
 
   let data = br#"{"key":"value"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/noreg/file.json", data, Some("text/plain")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/noreg/file.json", data, Some("text/plain")).unwrap();
 
   // Should fall back to raw JSON parsing
   let index_manager = IndexManager::new(&engine);
@@ -537,7 +560,8 @@ fn test_plugin_mapper_source_detection() {
 
   let data = br#"{"name":"Alice"}"#;
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  pipeline.run("/mapped/user.json", data, Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/mapped/user.json", data, Some("application/json")).unwrap();
 
   // Should have logged a mapper failure
   let ops = DirectoryOps::new(&engine);
@@ -575,7 +599,8 @@ fn test_plugin_mapper_source_without_args() {
 
   let data = br#"{"x":1}"#;
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/noargs/item.json", data, Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/noargs/item.json", data, Some("application/json"));
   assert!(result.is_ok(), "Pipeline should not crash when mapper has no args");
 }
 
@@ -603,7 +628,8 @@ fn test_plugin_mapper_invalid_source_object() {
 
   let data = br#"{"weird":"value"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/invalid_src/item.json", data, Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/invalid_src/item.json", data, Some("application/json"));
   assert!(result.is_ok(), "Invalid source object should be silently skipped");
 
   // No index should be created for this field
@@ -636,7 +662,8 @@ fn test_array_source_still_works() {
 
   let data = br#"{"info":{"status":"active"}}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/arraysrc/item.json", data, Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/arraysrc/item.json", data, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/arraysrc", "nested_val").unwrap();
@@ -668,7 +695,8 @@ fn test_default_source_uses_field_name() {
 
   let data = br#"{"email":"alice@example.com","name":"Alice"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/defaults/user.json", data, Some("application/json")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/defaults/user.json", data, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/defaults", "email").unwrap();
@@ -697,7 +725,8 @@ fn test_pipeline_with_none_plugin_manager_parser_config() {
 
   // Pipeline without plugin manager
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/nopm/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/nopm/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok(), "Pipeline should not crash without plugin manager");
 
   // Log should indicate plugin manager was required
@@ -731,7 +760,8 @@ fn test_pipeline_with_none_plugin_manager_mapper_source() {
 
   let pipeline = IndexingPipeline::new(&engine);
   let data = br#"{"name":"test"}"#;
-  let result = pipeline.run("/nopm_mapper/item.json", data, Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/nopm_mapper/item.json", data, Some("application/json"));
   assert!(result.is_ok(), "Pipeline should not crash without plugin manager for mapper");
 
   let ops = DirectoryOps::new(&engine);
@@ -746,13 +776,14 @@ fn test_pipeline_with_none_plugin_manager_mapper_source() {
 
 #[test]
 fn test_full_pipeline_method_exists() {
+  let ctx = RequestContext::system();
   // store_file_with_full_pipeline should be callable
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Call without plugin manager
-  let result = ops.store_file_with_full_pipeline(
+  let result = ops.store_file_with_full_pipeline(&ctx,
     "/test/file.json",
     br#"{"name":"test"}"#,
     Some("application/json"),
@@ -767,6 +798,7 @@ fn test_full_pipeline_method_exists() {
 
 #[test]
 fn test_full_pipeline_with_plugin_manager() {
+  let ctx = RequestContext::system();
   // store_file_with_full_pipeline should accept a PluginManager
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -777,7 +809,7 @@ fn test_full_pipeline_with_plugin_manager() {
   ).unwrap());
   let pm = PluginManager::new(engine_arc);
 
-  let result = ops.store_file_with_full_pipeline(
+  let result = ops.store_file_with_full_pipeline(&ctx,
     "/test2/data.json",
     br#"{"value":"hello"}"#,
     Some("application/json"),
@@ -791,6 +823,7 @@ fn test_full_pipeline_with_plugin_manager() {
 
 #[test]
 fn test_full_pipeline_indexes_json() {
+  let ctx = RequestContext::system();
   // Full pipeline should index JSON data just like store_file_with_indexing
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -812,7 +845,7 @@ fn test_full_pipeline_indexes_json() {
   };
   store_index_config(&engine, "/scored", &config);
 
-  ops.store_file_with_full_pipeline(
+  ops.store_file_with_full_pipeline(&ctx,
     "/scored/player.json",
     br#"{"score":42}"#,
     Some("application/json"),
@@ -827,6 +860,7 @@ fn test_full_pipeline_indexes_json() {
 
 #[test]
 fn test_full_pipeline_skips_system_paths() {
+  let ctx = RequestContext::system();
   // System paths should not be indexed even with full pipeline
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -848,7 +882,7 @@ fn test_full_pipeline_skips_system_paths() {
   };
   store_index_config(&engine, "/app", &config);
 
-  ops.store_file_with_full_pipeline(
+  ops.store_file_with_full_pipeline(&ctx,
     "/app/.logs/entry.json",
     br#"{"name":"log_entry"}"#,
     Some("application/json"),
@@ -878,7 +912,8 @@ fn test_with_plugin_manager_constructor() {
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
 
   // Run against a path with no config — should be a no-op
-  let result = pipeline.run("/empty/file.json", br#"{"a":1}"#, None);
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/empty/file.json", br#"{"a":1}"#, None);
   assert!(result.is_ok());
 }
 
@@ -905,12 +940,14 @@ fn test_parser_config_with_no_memory_limit_uses_default() {
   store_index_config(&engine, "/defmem", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  let result = pipeline.run("/defmem/file.bin", b"data", Some("application/octet-stream"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/defmem/file.bin", b"data", Some("application/octet-stream"));
   assert!(result.is_ok());
 }
 
 #[test]
 fn test_explicit_parser_overrides_content_type_registry() {
+  let ctx = RequestContext::system();
   // When both parser and content-type registry match, explicit parser should win
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -918,7 +955,7 @@ fn test_explicit_parser_overrides_content_type_registry() {
 
   // Store registry
   let registry = br#"{"application/pdf":"/parsers/registry_pdf"}"#;
-  ops.store_file("/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
 
   let engine_arc = Arc::new(StorageEngine::create(
     dir.path().join("pm.aeor").to_str().unwrap()
@@ -935,7 +972,8 @@ fn test_explicit_parser_overrides_content_type_registry() {
   store_index_config(&engine, "/override", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
-  pipeline.run("/override/doc.pdf", b"pdf data", Some("application/pdf")).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/override/doc.pdf", b"pdf data", Some("application/pdf")).unwrap();
 
   // Log should mention the explicit parser, not the registry one
   let log = ops.read_file("/override/.logs/system/parsing.log").unwrap();
@@ -946,13 +984,14 @@ fn test_explicit_parser_overrides_content_type_registry() {
 
 #[test]
 fn test_content_type_none_skips_registry() {
+  let ctx = RequestContext::system();
   // When content_type is None, registry lookup should return None
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file("/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -973,7 +1012,8 @@ fn test_content_type_none_skips_registry() {
   // content_type is None
   let data = br#"{"data":"test"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  pipeline.run("/notype/file.json", data, None).unwrap();
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/notype/file.json", data, None).unwrap();
 
   // Should still index as raw JSON
   let index_manager = IndexManager::new(&engine);
@@ -1006,7 +1046,8 @@ fn test_source_as_string_value_is_invalid() {
 
   let data = br#"{"field":"value"}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/strsrc/item.json", data, Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/strsrc/item.json", data, Some("application/json"));
   assert!(result.is_ok(), "String source should be silently skipped");
 
   let index_manager = IndexManager::new(&engine);
@@ -1055,7 +1096,8 @@ fn test_multiple_fields_mixed_sources() {
 
   let data = br#"{"name":"Alice","address":{"city":"Portland","state":"OR"}}"#;
   let pipeline = IndexingPipeline::new(&engine);
-  let result = pipeline.run("/mixed/user.json", data, Some("application/json"));
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/mixed/user.json", data, Some("application/json"));
   assert!(result.is_ok());
 
   let index_manager = IndexManager::new(&engine);

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::responses::{ErrorResponse, GroupResponse, UserResponse};
 use super::state::AppState;
-use crate::engine::{Group, SystemTables, User, is_root};
+use crate::engine::{Group, RequestContext, SystemTables, User, is_root};
 use crate::engine::user::SAFE_QUERY_FIELDS;
 use crate::auth::TokenClaims;
 
@@ -58,10 +58,11 @@ pub async fn create_user(
     return *response;
   }
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let user = User::new(&payload.username, payload.email.as_deref());
   let system_tables = SystemTables::new(&state.engine);
 
-  if let Err(error) = system_tables.store_user(&user) {
+  if let Err(error) = system_tables.store_user(&ctx, &user) {
     tracing::error!("Failed to create user: {}", error);
     return ErrorResponse::new(format!("Failed to create user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -167,6 +168,7 @@ pub async fn update_user(
     }
   };
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   if let Some(ref username) = payload.username {
     user.username = username.clone();
   }
@@ -178,7 +180,7 @@ pub async fn update_user(
   }
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
-  if let Err(error) = system_tables.update_user(&user) {
+  if let Err(error) = system_tables.update_user(&ctx, &user) {
     tracing::error!("Failed to update user: {}", error);
     return ErrorResponse::new(format!("Failed to update user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -223,10 +225,11 @@ pub async fn deactivate_user(
     }
   };
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   user.is_active = false;
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
-  if let Err(error) = system_tables.update_user(&user) {
+  if let Err(error) = system_tables.update_user(&ctx, &user) {
     tracing::error!("Failed to deactivate user: {}", error);
     return ErrorResponse::new(format!("Failed to deactivate user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -292,8 +295,9 @@ pub async fn create_group(
     }
   };
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_group(&group) {
+  if let Err(error) = system_tables.store_group(&ctx, &group) {
     tracing::error!("Failed to create group: {}", error);
     return ErrorResponse::new(format!("Failed to create group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -408,7 +412,8 @@ pub async fn update_group(
   }
   group.updated_at = chrono::Utc::now().timestamp_millis();
 
-  if let Err(error) = system_tables.update_group(&group) {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  if let Err(error) = system_tables.update_group(&ctx, &group) {
     tracing::error!("Failed to update group: {}", error);
     return ErrorResponse::new(format!("Failed to update group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -446,7 +451,8 @@ pub async fn delete_group(
     }
   }
 
-  if let Err(error) = system_tables.delete_group(&name) {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  if let Err(error) = system_tables.delete_group(&ctx, &name) {
     tracing::error!("Failed to delete group: {}", error);
     return ErrorResponse::new(format!("Failed to delete group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)

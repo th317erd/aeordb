@@ -9,16 +9,19 @@ use aeordb::engine::scalar_converter::{
 };
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -26,7 +29,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
@@ -186,6 +189,7 @@ fn test_index_manager_save_load_string_strategy() {
 
 #[test]
 fn test_index_manager_backward_compat() {
+  let ctx = RequestContext::system();
   // Verify that old-format .idx files (without strategy) still load.
   // We simulate the old format by directly storing a file at the legacy path.
   let dir = tempfile::tempdir().unwrap();
@@ -199,7 +203,7 @@ fn test_index_manager_backward_compat() {
   let data = index.serialize(hash_length);
 
   // Store at legacy path: /data/.indexes/score.idx
-  ops.store_file("/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
+  ops.store_file(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
   // load_index should find it via the old path
   let index_manager = IndexManager::new(&engine);
@@ -425,6 +429,7 @@ fn test_insert_expanded_with_multiple_values() {
 
 #[test]
 fn test_expand_value_in_indexing_pipeline() {
+  let ctx = RequestContext::system();
   // End-to-end: store a file with indexing and verify index entries exist
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -454,7 +459,7 @@ fn test_expand_value_in_indexing_pipeline() {
   store_index_config(&engine, "/users", &config);
 
   let data = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
 
@@ -471,6 +476,7 @@ fn test_expand_value_in_indexing_pipeline() {
 
 #[test]
 fn test_expand_value_in_indexing_pipeline_multiple_files() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -492,10 +498,10 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
   store_index_config(&engine, "/users", &config);
 
   let data1 = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data1, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data1, Some("application/json")).unwrap();
 
   let data2 = make_user_json("Bob", 25, "bob@test.com");
-  ops.store_file_with_indexing("/users/bob.json", &data2, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/bob.json", &data2, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let age_index = index_manager.load_index("/users", "age").unwrap()
@@ -505,6 +511,7 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
 
 #[test]
 fn test_expand_value_overwrite_file_updates_index() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
@@ -526,11 +533,11 @@ fn test_expand_value_overwrite_file_updates_index() {
   store_index_config(&engine, "/users", &config);
 
   let data1 = make_user_json("Alice", 30, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data1, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data1, Some("application/json")).unwrap();
 
   // Overwrite with different age
   let data2 = make_user_json("Alice", 35, "alice@test.com");
-  ops.store_file_with_indexing("/users/alice.json", &data2, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &data2, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let age_index = index_manager.load_index("/users", "age").unwrap()

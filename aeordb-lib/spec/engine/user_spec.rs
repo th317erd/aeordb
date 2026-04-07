@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use aeordb::engine::{
+  RequestContext,
   StorageEngine, SystemTables, User, ROOT_USER_ID,
   validate_user_id, is_root, SAFE_QUERY_FIELDS,
 };
@@ -129,11 +130,12 @@ fn test_safe_query_fields() {
 
 #[test]
 fn test_store_and_get_user() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("alice", Some("alice@example.com"));
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let retrieved = system_tables
     .get_user(&user.user_id)
@@ -158,11 +160,12 @@ fn test_get_user_not_found() {
 
 #[test]
 fn test_get_user_by_username() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("lookup_user", Some("lookup@example.com"));
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let retrieved = system_tables
     .get_user_by_username("lookup_user")
@@ -186,13 +189,14 @@ fn test_get_user_by_username_not_found() {
 
 #[test]
 fn test_list_users() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user_a = User::new("user_a", None);
   let user_b = User::new("user_b", None);
-  system_tables.store_user(&user_a).expect("store user a");
-  system_tables.store_user(&user_b).expect("store user b");
+  system_tables.store_user(&ctx, &user_a).expect("store user a");
+  system_tables.store_user(&ctx, &user_b).expect("store user b");
 
   let users = system_tables.list_users().expect("list users");
   assert_eq!(users.len(), 2);
@@ -213,16 +217,17 @@ fn test_list_users_empty() {
 
 #[test]
 fn test_update_user() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let mut user = User::new("original", Some("original@example.com"));
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   user.username = "updated".to_string();
   user.email = Some("updated@example.com".to_string());
   user.updated_at = chrono::Utc::now().timestamp_millis();
-  system_tables.update_user(&user).expect("update user");
+  system_tables.update_user(&ctx, &user).expect("update user");
 
   let retrieved = system_tables
     .get_user(&user.user_id)
@@ -235,13 +240,14 @@ fn test_update_user() {
 
 #[test]
 fn test_delete_user() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("deleteme", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
-  system_tables.delete_user(&user.user_id).expect("delete user");
+  system_tables.delete_user(&ctx, &user.user_id).expect("delete user");
 
   let result = system_tables
     .get_user(&user.user_id)
@@ -251,26 +257,28 @@ fn test_delete_user() {
 
 #[test]
 fn test_delete_user_removes_from_list() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("listdelete", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
   assert_eq!(system_tables.list_users().unwrap().len(), 1);
 
-  system_tables.delete_user(&user.user_id).expect("delete user");
+  system_tables.delete_user(&ctx, &user.user_id).expect("delete user");
   assert_eq!(system_tables.list_users().unwrap().len(), 0);
 }
 
 #[test]
 fn test_delete_user_removes_username_lookup() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("lookupdelete", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
-  system_tables.delete_user(&user.user_id).expect("delete user");
+  system_tables.delete_user(&ctx, &user.user_id).expect("delete user");
 
   let result = system_tables
     .get_user_by_username("lookupdelete")
@@ -280,30 +288,33 @@ fn test_delete_user_removes_username_lookup() {
 
 #[test]
 fn test_nil_uuid_rejected_on_store() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let mut user = User::new("root_impersonator", None);
   user.user_id = uuid::Uuid::nil();
 
-  let result = system_tables.store_user(&user);
+  let result = system_tables.store_user(&ctx, &user);
   assert!(result.is_err(), "nil UUID should be rejected on store");
 }
 
 #[test]
 fn test_nil_uuid_rejected_on_update() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let mut user = User::new("root_impersonator", None);
   user.user_id = uuid::Uuid::nil();
 
-  let result = system_tables.update_user(&user);
+  let result = system_tables.update_user(&ctx, &user);
   assert!(result.is_err(), "nil UUID should be rejected on update");
 }
 
 #[test]
 fn test_count_users() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
@@ -311,12 +322,12 @@ fn test_count_users() {
 
   let user_a = User::new("count_a", None);
   let user_b = User::new("count_b", None);
-  system_tables.store_user(&user_a).expect("store user a");
-  system_tables.store_user(&user_b).expect("store user b");
+  system_tables.store_user(&ctx, &user_a).expect("store user a");
+  system_tables.store_user(&ctx, &user_b).expect("store user b");
 
   assert_eq!(system_tables.count_users().unwrap(), 2);
 
-  system_tables.delete_user(&user_a.user_id).expect("delete user a");
+  system_tables.delete_user(&ctx, &user_a.user_id).expect("delete user a");
   assert_eq!(system_tables.count_users().unwrap(), 1);
 }
 
@@ -326,11 +337,12 @@ fn test_count_users() {
 
 #[test]
 fn test_auto_group_created_on_user_creation() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("autogroup_user", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
   let group = system_tables
@@ -348,11 +360,12 @@ fn test_auto_group_created_on_user_creation() {
 
 #[test]
 fn test_auto_group_deleted_on_user_deletion() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("autogroup_delete", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
   assert!(
@@ -360,7 +373,7 @@ fn test_auto_group_deleted_on_user_deletion() {
     "auto-group should exist before deletion"
   );
 
-  system_tables.delete_user(&user.user_id).expect("delete user");
+  system_tables.delete_user(&ctx, &user.user_id).expect("delete user");
 
   assert!(
     system_tables.get_group(&group_name).unwrap().is_none(),
@@ -370,11 +383,12 @@ fn test_auto_group_deleted_on_user_deletion() {
 
 #[test]
 fn test_auto_group_membership() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("membership_test", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
   let group = system_tables
@@ -396,11 +410,12 @@ fn test_auto_group_membership() {
 
 #[test]
 fn test_store_user_with_no_email() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("noemail", None);
-  system_tables.store_user(&user).expect("store user");
+  system_tables.store_user(&ctx, &user).expect("store user");
 
   let retrieved = system_tables
     .get_user(&user.user_id)
@@ -411,12 +426,13 @@ fn test_store_user_with_no_email() {
 
 #[test]
 fn test_store_duplicate_user_overwrites() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
   let user = User::new("dup_test", None);
-  system_tables.store_user(&user).expect("store first time");
-  system_tables.store_user(&user).expect("store second time");
+  system_tables.store_user(&ctx, &user).expect("store first time");
+  system_tables.store_user(&ctx, &user).expect("store second time");
 
   // Should still count as 1 user (registry deduplication).
   assert_eq!(system_tables.count_users().unwrap(), 1);
@@ -424,9 +440,10 @@ fn test_store_duplicate_user_overwrites() {
 
 #[test]
 fn test_delete_nonexistent_user_does_not_error() {
+  let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
   let system_tables = SystemTables::new(&engine);
 
-  let result = system_tables.delete_user(&uuid::Uuid::new_v4());
+  let result = system_tables.delete_user(&ctx, &uuid::Uuid::new_v4());
   assert!(result.is_ok());
 }

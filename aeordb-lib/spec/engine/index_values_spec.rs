@@ -10,16 +10,18 @@ use aeordb::engine::query_engine::{
 };
 use aeordb::engine::scalar_converter::{StringConverter, TrigramConverter};
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use aeordb::plugins::plugin_manager::PluginManager;
 use aeordb::plugins::types::PluginType;
 use std::sync::Arc;
 
 fn create_test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
+  let ctx = RequestContext::system();
     let dir = tempfile::tempdir().unwrap();
     let engine_path = dir.path().join("test.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let ops = DirectoryOps::new(&engine);
-    ops.ensure_root_directory().unwrap();
+    ops.ensure_root_directory(&ctx).unwrap();
     (Arc::new(engine), dir)
 }
 
@@ -62,6 +64,7 @@ fn setup_with_trigram_config(
     field_name: &str,
     source: &str,
 ) -> (Arc<StorageEngine>, tempfile::TempDir, PluginManager) {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
     let ops = DirectoryOps::new(&engine);
@@ -70,7 +73,7 @@ fn setup_with_trigram_config(
         r#"{{"parser":"plaintext-parser","indexes":[{{"name":"{}","source":{},"type":"trigram"}}]}}"#,
         field_name, source
     );
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
@@ -270,10 +273,11 @@ fn test_field_index_backward_compat_no_values() {
 
 #[test]
 fn test_fuzzy_contains_with_parser() {
+  let ctx = RequestContext::system();
     let (engine, _temp, pm) = setup_with_trigram_config("text", r#"["text"]"#);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/greeting.txt",
         b"Hello World this is a greeting document",
         Some("text/plain"),
@@ -313,10 +317,11 @@ fn test_fuzzy_contains_with_parser() {
 
 #[test]
 fn test_fuzzy_similar_with_parser() {
+  let ctx = RequestContext::system();
     let (engine, _temp, pm) = setup_with_trigram_config("text", r#"["text"]"#);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/greeting.txt",
         b"Hello World this is a greeting document",
         Some("text/plain"),
@@ -363,10 +368,11 @@ fn test_fuzzy_similar_with_parser() {
 
 #[test]
 fn test_no_parsed_cache_created() {
+  let ctx = RequestContext::system();
     let (engine, _temp, pm) = setup_with_trigram_config("text", r#"["text"]"#);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/hello.txt",
         b"Hello World",
         Some("text/plain"),
@@ -389,12 +395,13 @@ fn test_no_parsed_cache_created() {
 
 #[test]
 fn test_json_file_fuzzy_still_works() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let ops = DirectoryOps::new(&engine);
 
     // Config with trigram index but NO parser (expects JSON data)
     let config = r#"{"indexes":[{"name":"name","type":"trigram"}]}"#;
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
@@ -403,7 +410,7 @@ fn test_json_file_fuzzy_still_works() {
 
     // Store a JSON file — should index the name field directly
     let json_data = r#"{"name":"Alexander Hamilton"}"#;
-    ops.store_file_with_indexing(
+    ops.store_file_with_indexing(&ctx,
         "/docs/person.json",
         json_data.as_bytes(),
         Some("application/json"),
@@ -442,10 +449,11 @@ fn test_json_file_fuzzy_still_works() {
 
 #[test]
 fn test_multiple_files_values_independent() {
+  let ctx = RequestContext::system();
     let (engine, _temp, pm) = setup_with_trigram_config("text", r#"["text"]"#);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/alpha.txt",
         b"Alpha content here for testing",
         Some("text/plain"),
@@ -453,7 +461,7 @@ fn test_multiple_files_values_independent() {
     )
     .expect("store alpha");
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/beta.txt",
         b"Beta content here for testing",
         Some("text/plain"),
@@ -505,10 +513,11 @@ fn test_multiple_files_values_independent() {
 
 #[test]
 fn test_contains_query_no_match_returns_empty() {
+  let ctx = RequestContext::system();
     let (engine, _temp, pm) = setup_with_trigram_config("text", r#"["text"]"#);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/greeting.txt",
         b"Hello World this is a greeting document",
         Some("text/plain"),

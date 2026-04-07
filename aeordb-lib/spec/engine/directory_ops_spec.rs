@@ -1,12 +1,14 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::entry_type::EntryType;
+use aeordb::engine::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
@@ -14,10 +16,11 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
 fn test_store_and_read_file_roundtrip() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = b"Hello, world!";
-  ops.store_file("/greeting.txt", data, Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/greeting.txt", data, Some("text/plain")).unwrap();
 
   let read_back = ops.read_file("/greeting.txt").unwrap();
   assert_eq!(read_back, data);
@@ -27,10 +30,11 @@ fn test_store_and_read_file_roundtrip() {
 fn test_store_file_creates_chunks() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = vec![0xAB; 1024];
-  ops.store_file("/binary.dat", &data, None).unwrap();
+  ops.store_file(&ctx, "/binary.dat", &data, None).unwrap();
 
   // Verify the file record has chunk hashes
   let metadata = ops.get_metadata("/binary.dat").unwrap().unwrap();
@@ -41,10 +45,11 @@ fn test_store_file_creates_chunks() {
 fn test_store_file_creates_file_record() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = b"record test";
-  ops.store_file("/record.txt", data, Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/record.txt", data, Some("text/plain")).unwrap();
 
   let metadata = ops.get_metadata("/record.txt").unwrap().unwrap();
   assert_eq!(metadata.path, "/record.txt");
@@ -56,10 +61,11 @@ fn test_store_file_creates_file_record() {
 fn test_store_file_updates_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/file_a.txt", b"aaa", None).unwrap();
-  ops.store_file("/file_b.txt", b"bbb", None).unwrap();
+  ops.store_file(&ctx, "/file_a.txt", b"aaa", None).unwrap();
+  ops.store_file(&ctx, "/file_b.txt", b"bbb", None).unwrap();
 
   let children = ops.list_directory("/").unwrap();
   let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
@@ -71,9 +77,10 @@ fn test_store_file_updates_directory() {
 fn test_store_file_creates_intermediate_directories() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/a/b/c/deep.txt", b"deep", None).unwrap();
+  ops.store_file(&ctx, "/a/b/c/deep.txt", b"deep", None).unwrap();
 
   // All intermediate directories should exist
   assert!(ops.exists("/a").unwrap());
@@ -90,6 +97,7 @@ fn test_store_file_creates_intermediate_directories() {
 fn test_read_nonexistent_returns_error() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let result = ops.read_file("/does_not_exist.txt");
@@ -106,12 +114,13 @@ fn test_read_nonexistent_returns_error() {
 fn test_delete_file() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/to_delete.txt", b"delete me", None).unwrap();
+  ops.store_file(&ctx, "/to_delete.txt", b"delete me", None).unwrap();
   assert!(ops.exists("/to_delete.txt").unwrap());
 
-  ops.delete_file("/to_delete.txt").unwrap();
+  ops.delete_file(&ctx, "/to_delete.txt").unwrap();
 
   // The file record still exists in KV (append-only), but it should
   // no longer appear in the parent directory listing
@@ -124,10 +133,11 @@ fn test_delete_file() {
 fn test_delete_creates_deletion_record() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/ephemeral.txt", b"temp", None).unwrap();
-  ops.delete_file("/ephemeral.txt").unwrap();
+  ops.store_file(&ctx, "/ephemeral.txt", b"temp", None).unwrap();
+  ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
 
   // The deletion record is stored as an entry. We can't easily query it by path
   // without scanning, but we verify the operation succeeded without error above.
@@ -140,9 +150,10 @@ fn test_delete_creates_deletion_record() {
 fn test_delete_nonexistent_file_returns_error() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  let result = ops.delete_file("/ghost.txt");
+  let result = ops.delete_file(&ctx, "/ghost.txt");
   assert!(result.is_err());
 }
 
@@ -150,10 +161,11 @@ fn test_delete_nonexistent_file_returns_error() {
 fn test_list_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/docs/readme.md", b"# Readme", None).unwrap();
-  ops.store_file("/docs/guide.md", b"# Guide", None).unwrap();
+  ops.store_file(&ctx, "/docs/readme.md", b"# Readme", None).unwrap();
+  ops.store_file(&ctx, "/docs/guide.md", b"# Guide", None).unwrap();
 
   let children = ops.list_directory("/docs").unwrap();
   assert_eq!(children.len(), 2);
@@ -166,9 +178,10 @@ fn test_list_directory() {
 fn test_list_empty_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.create_directory("/empty").unwrap();
+  ops.create_directory(&ctx, "/empty").unwrap();
   let children = ops.list_directory("/empty").unwrap();
   assert!(children.is_empty());
 }
@@ -177,6 +190,7 @@ fn test_list_empty_directory() {
 fn test_list_nonexistent_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let result = ops.list_directory("/nonexistent");
@@ -187,9 +201,10 @@ fn test_list_nonexistent_directory() {
 fn test_create_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.create_directory("/mydir").unwrap();
+  ops.create_directory(&ctx, "/mydir").unwrap();
   assert!(ops.exists("/mydir").unwrap());
 
   let children = ops.list_directory("/mydir").unwrap();
@@ -205,10 +220,11 @@ fn test_create_directory() {
 fn test_exists_file() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(!ops.exists("/file.txt").unwrap());
-  ops.store_file("/file.txt", b"content", None).unwrap();
+  ops.store_file(&ctx, "/file.txt", b"content", None).unwrap();
   assert!(ops.exists("/file.txt").unwrap());
 }
 
@@ -216,10 +232,11 @@ fn test_exists_file() {
 fn test_exists_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(!ops.exists("/subdir").unwrap());
-  ops.create_directory("/subdir").unwrap();
+  ops.create_directory(&ctx, "/subdir").unwrap();
   assert!(ops.exists("/subdir").unwrap());
 }
 
@@ -227,6 +244,7 @@ fn test_exists_directory() {
 fn test_exists_nonexistent() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(!ops.exists("/nope").unwrap());
@@ -237,9 +255,10 @@ fn test_exists_nonexistent() {
 fn test_get_metadata() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/meta.txt", b"metadata test", Some("text/plain")).unwrap();
+  ops.store_file(&ctx, "/meta.txt", b"metadata test", Some("text/plain")).unwrap();
 
   let metadata = ops.get_metadata("/meta.txt").unwrap().unwrap();
   assert_eq!(metadata.path, "/meta.txt");
@@ -255,10 +274,11 @@ fn test_get_metadata() {
 fn test_streaming_read_yields_correct_data() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = b"streaming test data";
-  ops.store_file("/stream.txt", data, None).unwrap();
+  ops.store_file(&ctx, "/stream.txt", data, None).unwrap();
 
   let stream = ops.read_file_streaming("/stream.txt").unwrap();
   let mut collected = Vec::new();
@@ -272,11 +292,12 @@ fn test_streaming_read_yields_correct_data() {
 fn test_store_large_file_many_chunks() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   // 1 MB + 1 byte to ensure multiple chunks (default chunk = 256KB)
   let data = vec![0x42; 1_048_577];
-  ops.store_file("/large.bin", &data, Some("application/octet-stream")).unwrap();
+  ops.store_file(&ctx, "/large.bin", &data, Some("application/octet-stream")).unwrap();
 
   let metadata = ops.get_metadata("/large.bin").unwrap().unwrap();
   assert_eq!(metadata.total_size, data.len() as u64);
@@ -291,14 +312,15 @@ fn test_store_large_file_many_chunks() {
 fn test_store_preserves_content_type() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/image.png", b"fake png data", Some("image/png")).unwrap();
+  ops.store_file(&ctx, "/image.png", b"fake png data", Some("image/png")).unwrap();
   let metadata = ops.get_metadata("/image.png").unwrap().unwrap();
   assert_eq!(metadata.content_type.as_deref(), Some("image/png"));
 
   // No content type
-  ops.store_file("/raw.bin", b"raw", None).unwrap();
+  ops.store_file(&ctx, "/raw.bin", b"raw", None).unwrap();
   let metadata = ops.get_metadata("/raw.bin").unwrap().unwrap();
   assert!(metadata.content_type.is_none());
 }
@@ -307,12 +329,13 @@ fn test_store_preserves_content_type() {
 fn test_overwrite_file() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/mutable.txt", b"version 1", None).unwrap();
+  ops.store_file(&ctx, "/mutable.txt", b"version 1", None).unwrap();
   let meta1 = ops.get_metadata("/mutable.txt").unwrap().unwrap();
 
-  ops.store_file("/mutable.txt", b"version 2 is longer", None).unwrap();
+  ops.store_file(&ctx, "/mutable.txt", b"version 2 is longer", None).unwrap();
   let meta2 = ops.get_metadata("/mutable.txt").unwrap().unwrap();
 
   // Content should be updated
@@ -333,13 +356,14 @@ fn test_overwrite_file() {
 fn test_nested_directories() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.create_directory("/level1").unwrap();
-  ops.create_directory("/level1/level2").unwrap();
-  ops.create_directory("/level1/level2/level3").unwrap();
+  ops.create_directory(&ctx, "/level1").unwrap();
+  ops.create_directory(&ctx, "/level1/level2").unwrap();
+  ops.create_directory(&ctx, "/level1/level2/level3").unwrap();
 
-  ops.store_file(
+  ops.store_file(&ctx,
     "/level1/level2/level3/deep_file.txt",
     b"deep content",
     None,
@@ -358,6 +382,7 @@ fn test_nested_directories() {
 fn test_root_directory_exists_after_create() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(ops.exists("/").unwrap());
@@ -369,10 +394,11 @@ fn test_root_directory_exists_after_create() {
 fn test_path_normalization_applied() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   // Store with messy path
-  ops.store_file("messy//path///file.txt", b"normalized", None).unwrap();
+  ops.store_file(&ctx, "messy//path///file.txt", b"normalized", None).unwrap();
 
   // Read with clean path
   let data = ops.read_file("/messy/path/file.txt").unwrap();
@@ -386,13 +412,14 @@ fn test_path_normalization_applied() {
 fn test_dedup_identical_chunks() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = vec![0xFF; 1024];
 
   // Store the same data in two different files
-  ops.store_file("/copy1.bin", &data, None).unwrap();
-  ops.store_file("/copy2.bin", &data, None).unwrap();
+  ops.store_file(&ctx, "/copy1.bin", &data, None).unwrap();
+  ops.store_file(&ctx, "/copy2.bin", &data, None).unwrap();
 
   let meta1 = ops.get_metadata("/copy1.bin").unwrap().unwrap();
   let meta2 = ops.get_metadata("/copy2.bin").unwrap().unwrap();
@@ -405,9 +432,10 @@ fn test_dedup_identical_chunks() {
 fn test_store_empty_file() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/empty.txt", b"", None).unwrap();
+  ops.store_file(&ctx, "/empty.txt", b"", None).unwrap();
 
   let metadata = ops.get_metadata("/empty.txt").unwrap().unwrap();
   assert_eq!(metadata.total_size, 0);
@@ -421,10 +449,11 @@ fn test_store_empty_file() {
 fn test_directory_child_entry_types() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/mixed/file.txt", b"file", None).unwrap();
-  ops.create_directory("/mixed/subdir").unwrap();
+  ops.store_file(&ctx, "/mixed/file.txt", b"file", None).unwrap();
+  ops.create_directory(&ctx, "/mixed/subdir").unwrap();
 
   let children = ops.list_directory("/mixed").unwrap();
   assert_eq!(children.len(), 2);
@@ -440,9 +469,10 @@ fn test_directory_child_entry_types() {
 fn test_store_file_at_root() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/root_file.txt", b"at root", None).unwrap();
+  ops.store_file(&ctx, "/root_file.txt", b"at root", None).unwrap();
 
   let children = ops.list_directory("/").unwrap();
   assert_eq!(children.len(), 1);
@@ -453,12 +483,13 @@ fn test_store_file_at_root() {
 fn test_multiple_files_same_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   for i in 0..10 {
     let path = format!("/batch/file_{}.txt", i);
     let data = format!("content {}", i);
-    ops.store_file(&path, data.as_bytes(), None).unwrap();
+    ops.store_file(&ctx, &path, data.as_bytes(), None).unwrap();
   }
 
   let children = ops.list_directory("/batch").unwrap();
@@ -477,13 +508,14 @@ fn test_multiple_files_same_directory() {
 fn test_delete_then_recreate() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file("/phoenix.txt", b"version 1", None).unwrap();
-  ops.delete_file("/phoenix.txt").unwrap();
+  ops.store_file(&ctx, "/phoenix.txt", b"version 1", None).unwrap();
+  ops.delete_file(&ctx, "/phoenix.txt").unwrap();
 
   // Re-store at the same path
-  ops.store_file("/phoenix.txt", b"version 2", None).unwrap();
+  ops.store_file(&ctx, "/phoenix.txt", b"version 2", None).unwrap();
 
   let data = ops.read_file("/phoenix.txt").unwrap();
   assert_eq!(data, b"version 2");
@@ -502,9 +534,10 @@ fn test_open_and_reread() {
   // Create and store
   {
     let engine = StorageEngine::create(path_str).unwrap();
+    let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.ensure_root_directory().unwrap();
-    ops.store_file("/persistent.txt", b"survives reopen", None).unwrap();
+    ops.ensure_root_directory(&ctx).unwrap();
+    ops.store_file(&ctx, "/persistent.txt", b"survives reopen", None).unwrap();
   }
 
   // Reopen and read
@@ -520,10 +553,11 @@ fn test_open_and_reread() {
 fn test_collect_to_vec_convenience() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let data = b"convenience method test";
-  ops.store_file("/conv.txt", data, None).unwrap();
+  ops.store_file(&ctx, "/conv.txt", data, None).unwrap();
 
   let stream = ops.read_file_streaming("/conv.txt").unwrap();
   let collected = stream.collect_to_vec().unwrap();
@@ -534,11 +568,12 @@ fn test_collect_to_vec_convenience() {
 fn test_head_hash_updates() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let initial_head = engine.head_hash().unwrap();
 
-  ops.store_file("/trigger_head.txt", b"update head", None).unwrap();
+  ops.store_file(&ctx, "/trigger_head.txt", b"update head", None).unwrap();
 
   let updated_head = engine.head_hash().unwrap();
 

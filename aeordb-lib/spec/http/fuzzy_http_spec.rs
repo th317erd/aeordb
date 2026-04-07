@@ -9,6 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -56,11 +58,12 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 /// Set up a /people/ path with string + trigram + soundex + dmetaphone indexes on `name`.
 fn setup_fuzzy_users(engine: &StorageEngine) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
 
   let config = PathIndexConfig {
@@ -110,7 +113,7 @@ fn setup_fuzzy_users(engine: &StorageEngine) {
   ];
 
   for (filename, json) in &users {
-    ops.store_file_with_indexing(
+    ops.store_file_with_indexing(&ctx,
       &format!("/people/{}", filename),
       json.as_bytes(),
       Some("application/json"),

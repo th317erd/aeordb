@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
@@ -16,11 +18,12 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
 
 #[test]
 fn test_create_snapshot() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let snapshot = vm.create_snapshot("v1", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
   assert_eq!(snapshot.name, "v1");
   assert!(!snapshot.root_hash.is_empty());
   assert!(snapshot.created_at > 0);
@@ -28,6 +31,7 @@ fn test_create_snapshot() {
 
 #[test]
 fn test_create_snapshot_stores_metadata() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
@@ -36,7 +40,7 @@ fn test_create_snapshot_stores_metadata() {
   metadata.insert("author".to_string(), "test-user".to_string());
   metadata.insert("description".to_string(), "initial release".to_string());
 
-  let snapshot = vm.create_snapshot("v1", metadata.clone()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "v1", metadata.clone()).unwrap();
   assert_eq!(snapshot.metadata, metadata);
 
   // Verify it persists through listing
@@ -48,28 +52,30 @@ fn test_create_snapshot_stores_metadata() {
 
 #[test]
 fn test_create_snapshot_captures_head_hash() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
   // Store a file to change HEAD
-  ops.store_file("/test.txt", b"hello", None).unwrap();
+  ops.store_file(&ctx, "/test.txt", b"hello", None).unwrap();
   let head_hash = vm.get_head_hash().unwrap();
 
-  let snapshot = vm.create_snapshot("v1", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
   assert_eq!(snapshot.root_hash, head_hash);
 }
 
 #[test]
 fn test_restore_snapshot() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
   // Take a snapshot of current HEAD
   let original_head = vm.get_head_hash().unwrap();
-  vm.create_snapshot("before-change", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "before-change", HashMap::new()).unwrap();
 
   // Change HEAD to something different
   let new_root = engine.compute_hash(b"new-state").unwrap();
@@ -79,20 +85,21 @@ fn test_restore_snapshot() {
   assert_ne!(original_head, changed_head);
 
   // Restore snapshot — HEAD should revert
-  vm.restore_snapshot("before-change").unwrap();
+  vm.restore_snapshot(&ctx, "before-change").unwrap();
   let restored_head = vm.get_head_hash().unwrap();
   assert_eq!(restored_head, original_head);
 }
 
 #[test]
 fn test_restore_snapshot_rolls_back_state() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
   // Capture initial HEAD (root dir hash)
   let initial_head = vm.get_head_hash().unwrap();
-  vm.create_snapshot("checkpoint", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "checkpoint", HashMap::new()).unwrap();
 
   // Simulate state change by moving HEAD
   let state_a = engine.compute_hash(b"state-a").unwrap();
@@ -105,19 +112,20 @@ fn test_restore_snapshot_rolls_back_state() {
   assert_ne!(vm.get_head_hash().unwrap(), state_a);
 
   // Restore the checkpoint — HEAD should revert to initial
-  vm.restore_snapshot("checkpoint").unwrap();
+  vm.restore_snapshot(&ctx, "checkpoint").unwrap();
   assert_eq!(vm.get_head_hash().unwrap(), initial_head);
 }
 
 #[test]
 fn test_list_snapshots() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_snapshot("v1", HashMap::new()).unwrap();
-  vm.create_snapshot("v2", HashMap::new()).unwrap();
-  vm.create_snapshot("v3", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "v3", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();
   assert_eq!(snapshots.len(), 3);
@@ -125,16 +133,17 @@ fn test_list_snapshots() {
 
 #[test]
 fn test_list_snapshots_ordered_by_time() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_snapshot("alpha", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "alpha", HashMap::new()).unwrap();
   // Small delay to ensure distinct timestamps
   std::thread::sleep(std::time::Duration::from_millis(2));
-  vm.create_snapshot("beta", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "beta", HashMap::new()).unwrap();
   std::thread::sleep(std::time::Duration::from_millis(2));
-  vm.create_snapshot("gamma", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "gamma", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();
   assert_eq!(snapshots.len(), 3);
@@ -147,14 +156,15 @@ fn test_list_snapshots_ordered_by_time() {
 
 #[test]
 fn test_delete_snapshot() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_snapshot("to-delete", HashMap::new()).unwrap();
+  vm.create_snapshot(&ctx, "to-delete", HashMap::new()).unwrap();
   assert_eq!(vm.list_snapshots().unwrap().len(), 1);
 
-  vm.delete_snapshot("to-delete").unwrap();
+  vm.delete_snapshot(&ctx, "to-delete").unwrap();
   assert_eq!(vm.list_snapshots().unwrap().len(), 0);
 }
 
@@ -162,11 +172,12 @@ fn test_delete_snapshot() {
 
 #[test]
 fn test_create_fork() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let fork = vm.create_fork("feature-branch", None).unwrap();
+  let fork = vm.create_fork(&ctx, "feature-branch", None).unwrap();
   assert_eq!(fork.name, "feature-branch");
   assert!(!fork.root_hash.is_empty());
   assert!(fork.created_at > 0);
@@ -174,49 +185,52 @@ fn test_create_fork() {
 
 #[test]
 fn test_create_fork_from_head() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/base.txt", b"base content", None).unwrap();
+  ops.store_file(&ctx, "/base.txt", b"base content", None).unwrap();
   let head_hash = vm.get_head_hash().unwrap();
 
-  let fork = vm.create_fork("from-head", Some("HEAD")).unwrap();
+  let fork = vm.create_fork(&ctx, "from-head", Some("HEAD")).unwrap();
   assert_eq!(fork.root_hash, head_hash);
 }
 
 #[test]
 fn test_create_fork_from_snapshot() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/v1-file.txt", b"v1 content", None).unwrap();
-  let snapshot = vm.create_snapshot("v1", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/v1-file.txt", b"v1 content", None).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
   // Move HEAD forward
-  ops.store_file("/v2-file.txt", b"v2 content", None).unwrap();
+  ops.store_file(&ctx, "/v2-file.txt", b"v2 content", None).unwrap();
 
   // Fork from the snapshot, not HEAD
-  let fork = vm.create_fork("from-v1", Some("v1")).unwrap();
+  let fork = vm.create_fork(&ctx, "from-v1", Some("v1")).unwrap();
   assert_eq!(fork.root_hash, snapshot.root_hash);
 }
 
 #[test]
 fn test_fork_isolation() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
   // Establish baseline HEAD
-  ops.store_file("/shared.txt", b"shared", None).unwrap();
+  ops.store_file(&ctx, "/shared.txt", b"shared", None).unwrap();
   let head_before_fork = vm.get_head_hash().unwrap();
 
   // Create a fork
-  let _fork = vm.create_fork("isolated", None).unwrap();
+  let _fork = vm.create_fork(&ctx, "isolated", None).unwrap();
 
   // Update the fork's hash (simulating a write to the fork)
   let new_root = engine.compute_hash(b"fake-fork-root").unwrap();
@@ -233,17 +247,18 @@ fn test_fork_isolation() {
 
 #[test]
 fn test_promote_fork() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_fork("to-promote", None).unwrap();
+  vm.create_fork(&ctx, "to-promote", None).unwrap();
 
   // Update fork hash to something distinct
   let new_root = engine.compute_hash(b"promoted-root").unwrap();
   vm.update_fork_hash("to-promote", &new_root).unwrap();
 
-  vm.promote_fork("to-promote").unwrap();
+  vm.promote_fork(&ctx, "to-promote").unwrap();
 
   // HEAD should now be the fork's hash
   let head = vm.get_head_hash().unwrap();
@@ -255,22 +270,23 @@ fn test_promote_fork() {
 
 #[test]
 fn test_promote_fork_updates_head() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file("/before.txt", b"before", None).unwrap();
+  ops.store_file(&ctx, "/before.txt", b"before", None).unwrap();
   let original_head = vm.get_head_hash().unwrap();
 
-  let fork = vm.create_fork("update-head", None).unwrap();
+  let fork = vm.create_fork(&ctx, "update-head", None).unwrap();
   assert_eq!(fork.root_hash, original_head);
 
   // Simulate a fork diverging by updating its hash
   let diverged_root = engine.compute_hash(b"diverged-content").unwrap();
   vm.update_fork_hash("update-head", &diverged_root).unwrap();
 
-  vm.promote_fork("update-head").unwrap();
+  vm.promote_fork(&ctx, "update-head").unwrap();
 
   let new_head = vm.get_head_hash().unwrap();
   assert_eq!(new_head, diverged_root);
@@ -279,14 +295,15 @@ fn test_promote_fork_updates_head() {
 
 #[test]
 fn test_abandon_fork() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_fork("throwaway", None).unwrap();
+  vm.create_fork(&ctx, "throwaway", None).unwrap();
   assert_eq!(vm.list_forks().unwrap().len(), 1);
 
-  vm.abandon_fork("throwaway").unwrap();
+  vm.abandon_fork(&ctx, "throwaway").unwrap();
   assert_eq!(vm.list_forks().unwrap().len(), 0);
 
   // Fork hash should return None
@@ -295,13 +312,14 @@ fn test_abandon_fork() {
 
 #[test]
 fn test_list_forks() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_fork("fork-a", None).unwrap();
-  vm.create_fork("fork-b", None).unwrap();
-  vm.create_fork("fork-c", None).unwrap();
+  vm.create_fork(&ctx, "fork-a", None).unwrap();
+  vm.create_fork(&ctx, "fork-b", None).unwrap();
+  vm.create_fork(&ctx, "fork-c", None).unwrap();
 
   let forks = vm.list_forks().unwrap();
   assert_eq!(forks.len(), 3);
@@ -316,6 +334,7 @@ fn test_list_forks() {
 
 #[test]
 fn test_auto_snapshot_naming() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
@@ -323,7 +342,7 @@ fn test_auto_snapshot_naming() {
   let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
   let auto_name = format!("auto-{}", timestamp);
 
-  let snapshot = vm.create_snapshot(&auto_name, HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, &auto_name, HashMap::new()).unwrap();
   assert!(snapshot.name.starts_with("auto-"));
 
   // Verify it can be looked up
@@ -353,11 +372,12 @@ fn test_resolve_root_hash_head() {
 
 #[test]
 fn test_resolve_root_hash_fork() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let fork = vm.create_fork("my-fork", None).unwrap();
+  let fork = vm.create_fork(&ctx, "my-fork", None).unwrap();
 
   let resolved = vm.resolve_root_hash(Some("my-fork")).unwrap();
   assert_eq!(resolved, fork.root_hash);
@@ -365,11 +385,12 @@ fn test_resolve_root_hash_fork() {
 
 #[test]
 fn test_resolve_root_hash_snapshot() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let snapshot = vm.create_snapshot("my-snap", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "my-snap", HashMap::new()).unwrap();
 
   let resolved = vm.resolve_root_hash(Some("my-snap")).unwrap();
   assert_eq!(resolved, snapshot.root_hash);
@@ -379,12 +400,13 @@ fn test_resolve_root_hash_snapshot() {
 
 #[test]
 fn test_duplicate_snapshot_name_error() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_snapshot("unique", HashMap::new()).unwrap();
-  let result = vm.create_snapshot("unique", HashMap::new());
+  vm.create_snapshot(&ctx, "unique", HashMap::new()).unwrap();
+  let result = vm.create_snapshot(&ctx, "unique", HashMap::new());
 
   assert!(result.is_err());
   let error_message = format!("{}", result.unwrap_err());
@@ -393,16 +415,17 @@ fn test_duplicate_snapshot_name_error() {
 
 #[test]
 fn test_nonexistent_snapshot_error() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let result = vm.restore_snapshot("ghost");
+  let result = vm.restore_snapshot(&ctx, "ghost");
   assert!(result.is_err());
   let error_message = format!("{}", result.unwrap_err());
   assert!(error_message.contains("Not found"));
 
-  let result = vm.delete_snapshot("ghost");
+  let result = vm.delete_snapshot(&ctx, "ghost");
   assert!(result.is_err());
 
   let result = vm.get_snapshot_hash("ghost");
@@ -411,16 +434,17 @@ fn test_nonexistent_snapshot_error() {
 
 #[test]
 fn test_nonexistent_fork_error() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let result = vm.promote_fork("phantom");
+  let result = vm.promote_fork(&ctx, "phantom");
   assert!(result.is_err());
   let error_message = format!("{}", result.unwrap_err());
   assert!(error_message.contains("Not found"));
 
-  let result = vm.abandon_fork("phantom");
+  let result = vm.abandon_fork(&ctx, "phantom");
   assert!(result.is_err());
 
   // get_fork_hash returns Ok(None) for nonexistent, not an error
@@ -432,40 +456,43 @@ fn test_nonexistent_fork_error() {
 
 #[test]
 fn test_delete_snapshot_then_recreate() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_snapshot("recycled", HashMap::new()).unwrap();
-  vm.delete_snapshot("recycled").unwrap();
+  vm.create_snapshot(&ctx, "recycled", HashMap::new()).unwrap();
+  vm.delete_snapshot(&ctx, "recycled").unwrap();
 
   // Should be able to recreate after deletion
-  let snapshot = vm.create_snapshot("recycled", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "recycled", HashMap::new()).unwrap();
   assert_eq!(snapshot.name, "recycled");
 }
 
 #[test]
 fn test_abandon_fork_then_recreate() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_fork("temp", None).unwrap();
-  vm.abandon_fork("temp").unwrap();
+  vm.create_fork(&ctx, "temp", None).unwrap();
+  vm.abandon_fork(&ctx, "temp").unwrap();
 
   // Should be able to recreate
-  let fork = vm.create_fork("temp", None).unwrap();
+  let fork = vm.create_fork(&ctx, "temp", None).unwrap();
   assert_eq!(fork.name, "temp");
 }
 
 #[test]
 fn test_duplicate_fork_name_error() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  vm.create_fork("unique-fork", None).unwrap();
-  let result = vm.create_fork("unique-fork", None);
+  vm.create_fork(&ctx, "unique-fork", None).unwrap();
+  let result = vm.create_fork(&ctx, "unique-fork", None);
 
   assert!(result.is_err());
   let error_message = format!("{}", result.unwrap_err());
@@ -474,11 +501,12 @@ fn test_duplicate_fork_name_error() {
 
 #[test]
 fn test_create_fork_from_nonexistent_snapshot_error() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let result = vm.create_fork("bad-base", Some("no-such-snapshot"));
+  let result = vm.create_fork(&ctx, "bad-base", Some("no-such-snapshot"));
   assert!(result.is_err());
   let error_message = format!("{}", result.unwrap_err());
   assert!(error_message.contains("Not found"));
@@ -496,11 +524,12 @@ fn test_resolve_root_hash_nonexistent_name_error() {
 
 #[test]
 fn test_update_fork_hash() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let fork = vm.create_fork("mutable", None).unwrap();
+  let fork = vm.create_fork(&ctx, "mutable", None).unwrap();
   let original_hash = fork.root_hash.clone();
 
   let new_hash = engine.compute_hash(b"updated-root").unwrap();
@@ -580,11 +609,12 @@ fn test_fork_deserialize_corrupt_data() {
 
 #[test]
 fn test_snapshot_with_empty_metadata() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let snapshot = vm.create_snapshot("no-meta", HashMap::new()).unwrap();
+  let snapshot = vm.create_snapshot(&ctx, "no-meta", HashMap::new()).unwrap();
   assert!(snapshot.metadata.is_empty());
 
   let listed = vm.list_snapshots().unwrap();
@@ -594,12 +624,13 @@ fn test_snapshot_with_empty_metadata() {
 
 #[test]
 fn test_multiple_forks_independent_hashes() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
-  let fork_a = vm.create_fork("fork-a", None).unwrap();
-  let fork_b = vm.create_fork("fork-b", None).unwrap();
+  let fork_a = vm.create_fork(&ctx, "fork-a", None).unwrap();
+  let fork_b = vm.create_fork(&ctx, "fork-b", None).unwrap();
 
   // Both start from HEAD so same initial hash
   assert_eq!(fork_a.root_hash, fork_b.root_hash);
@@ -617,16 +648,17 @@ fn test_multiple_forks_independent_hashes() {
 
 #[test]
 fn test_resolve_prefers_fork_over_snapshot_with_same_name() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
   // Create a snapshot named "shared"
-  let _snapshot = vm.create_snapshot("shared", HashMap::new()).unwrap();
+  let _snapshot = vm.create_snapshot(&ctx, "shared", HashMap::new()).unwrap();
 
   // Create a fork named "shared" — fork key uses a different hash prefix
   // so no collision in KV store
-  vm.create_fork("shared", None).unwrap();
+  vm.create_fork(&ctx, "shared", None).unwrap();
 
   // Update fork's hash to something distinct
   let fork_root = engine.compute_hash(b"fork-wins").unwrap();

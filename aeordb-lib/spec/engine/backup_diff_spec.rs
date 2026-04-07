@@ -7,6 +7,7 @@ use aeordb::engine::errors::EngineError;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::tree_walker::{walk_version_tree, diff_trees};
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 use tempfile::TempDir;
 
@@ -30,11 +31,12 @@ fn db_path(dir: &TempDir, name: &str) -> String {
 // ============================================================
 #[test]
 fn test_patch_added_files() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
-    ops.store_file("/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
 
     let head = engine.head_hash().unwrap();
     // Use a bogus hash for the "base" — results in empty tree
@@ -56,16 +58,17 @@ fn test_patch_added_files() {
 // ============================================================
 #[test]
 fn test_patch_modified_files() {
+  let ctx = RequestContext::system();
     // Create base engine with one file
     let (engine_a, _temp_a) = create_temp_engine_for_tests();
     let ops_a = DirectoryOps::new(&engine_a);
-    ops_a.store_file("/data/file1.txt", b"original", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/data/file1.txt", b"original", Some("text/plain")).unwrap();
     let tree_a = walk_version_tree(&engine_a, &engine_a.head_hash().unwrap()).unwrap();
 
     // Create target engine with modified file
     let (engine_b, _temp_b) = create_temp_engine_for_tests();
     let ops_b = DirectoryOps::new(&engine_b);
-    ops_b.store_file("/data/file1.txt", b"modified content", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/data/file1.txt", b"modified content", Some("text/plain")).unwrap();
     let tree_b = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
 
     let diff = diff_trees(&tree_a, &tree_b);
@@ -77,17 +80,18 @@ fn test_patch_modified_files() {
 // ============================================================
 #[test]
 fn test_patch_deleted_files() {
+  let ctx = RequestContext::system();
     // Base: two files
     let (engine_a, _temp_a) = create_temp_engine_for_tests();
     let ops_a = DirectoryOps::new(&engine_a);
-    ops_a.store_file("/data/keep.txt", b"keep me", Some("text/plain")).unwrap();
-    ops_a.store_file("/data/remove.txt", b"remove me", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/data/keep.txt", b"keep me", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/data/remove.txt", b"remove me", Some("text/plain")).unwrap();
     let tree_a = walk_version_tree(&engine_a, &engine_a.head_hash().unwrap()).unwrap();
 
     // Target: only one file
     let (engine_b, _temp_b) = create_temp_engine_for_tests();
     let ops_b = DirectoryOps::new(&engine_b);
-    ops_b.store_file("/data/keep.txt", b"keep me", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/data/keep.txt", b"keep me", Some("text/plain")).unwrap();
     let tree_b = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
 
     let diff = diff_trees(&tree_a, &tree_b);
@@ -99,10 +103,11 @@ fn test_patch_deleted_files() {
 // ============================================================
 #[test]
 fn test_patch_backup_type() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xDE; 32];
     let output = db_path(&temp, "patch_type.aeordb");
@@ -119,10 +124,11 @@ fn test_patch_backup_type() {
 // ============================================================
 #[test]
 fn test_patch_base_target_hashes() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xDE; 32];
     let output = db_path(&temp, "patch_hashes.aeordb");
@@ -140,10 +146,11 @@ fn test_patch_base_target_hashes() {
 // ============================================================
 #[test]
 fn test_patch_cannot_be_opened_normally() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"data", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"data", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xDE; 32];
     let output = db_path(&temp, "patch_no_open.aeordb");
@@ -164,10 +171,11 @@ fn test_patch_cannot_be_opened_normally() {
 // ============================================================
 #[test]
 fn test_patch_can_be_opened_for_import() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"data", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"data", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xDE; 32];
     let output = db_path(&temp, "patch_import.aeordb");
@@ -183,17 +191,18 @@ fn test_patch_can_be_opened_for_import() {
 // ============================================================
 #[test]
 fn test_patch_only_new_chunks() {
+  let ctx = RequestContext::system();
     // Base engine: one file
     let (engine_base, _temp_base) = create_temp_engine_for_tests();
     let ops_base = DirectoryOps::new(&engine_base);
-    ops_base.store_file("/shared.txt", b"shared content", Some("text/plain")).unwrap();
+    ops_base.store_file(&ctx, "/shared.txt", b"shared content", Some("text/plain")).unwrap();
     let base_tree = walk_version_tree(&engine_base, &engine_base.head_hash().unwrap()).unwrap();
 
     // Target engine: same file + new file
     let (engine_target, _temp_target) = create_temp_engine_for_tests();
     let ops_target = DirectoryOps::new(&engine_target);
-    ops_target.store_file("/shared.txt", b"shared content", Some("text/plain")).unwrap();
-    ops_target.store_file("/unique.txt", b"brand new unique content", Some("text/plain")).unwrap();
+    ops_target.store_file(&ctx, "/shared.txt", b"shared content", Some("text/plain")).unwrap();
+    ops_target.store_file(&ctx, "/unique.txt", b"brand new unique content", Some("text/plain")).unwrap();
     let target_tree = walk_version_tree(&engine_target, &engine_target.head_hash().unwrap()).unwrap();
 
     // Verify through diff that shared chunks aren't in new_chunks
@@ -214,10 +223,11 @@ fn test_patch_only_new_chunks() {
 // ============================================================
 #[test]
 fn test_patch_no_changes_error() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
 
     let output = db_path(&temp, "patch_no_changes.aeordb");
@@ -238,12 +248,13 @@ fn test_patch_no_changes_error() {
 // ============================================================
 #[test]
 fn test_patch_nonexistent_snapshot() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
-    vm.create_snapshot("v1", HashMap::new()).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
+    vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
     let output = db_path(&temp, "patch_no_snap.aeordb");
 
@@ -291,20 +302,21 @@ fn test_patch_result_display() {
 // ============================================================
 #[test]
 fn test_patch_mixed_changes() {
+  let ctx = RequestContext::system();
     // Base: keep + modify + remove
     let (engine_a, _temp_a) = create_temp_engine_for_tests();
     let ops_a = DirectoryOps::new(&engine_a);
-    ops_a.store_file("/keep.txt", b"keep", Some("text/plain")).unwrap();
-    ops_a.store_file("/modify.txt", b"original", Some("text/plain")).unwrap();
-    ops_a.store_file("/remove.txt", b"going away", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/modify.txt", b"original", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/remove.txt", b"going away", Some("text/plain")).unwrap();
     let tree_a = walk_version_tree(&engine_a, &engine_a.head_hash().unwrap()).unwrap();
 
     // Target: keep + modified + added (remove gone)
     let (engine_b, _temp_b) = create_temp_engine_for_tests();
     let ops_b = DirectoryOps::new(&engine_b);
-    ops_b.store_file("/keep.txt", b"keep", Some("text/plain")).unwrap();
-    ops_b.store_file("/modify.txt", b"changed", Some("text/plain")).unwrap();
-    ops_b.store_file("/added.txt", b"new file", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/modify.txt", b"changed", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/added.txt", b"new file", Some("text/plain")).unwrap();
     let tree_b = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
 
     let diff = diff_trees(&tree_a, &tree_b);
@@ -321,12 +333,13 @@ fn test_patch_mixed_changes() {
 // ============================================================
 #[test]
 fn test_patch_writes_deletion_records() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
     // Store files, then delete some to make HEAD have fewer files than base
-    ops.store_file("/data/keep.txt", b"keep", Some("text/plain")).unwrap();
-    ops.store_file("/data/remove.txt", b"remove me", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/data/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/data/remove.txt", b"remove me", Some("text/plain")).unwrap();
 
     // Now delete one file — but since we use mutable hashing, we can't
     // diff within the same engine. Instead, test deletion records via
@@ -352,12 +365,13 @@ fn test_patch_writes_deletion_records() {
 // ============================================================
 #[test]
 fn test_patch_from_bogus_to_head_writes_all_entries() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/a.txt", b"aaa", Some("text/plain")).unwrap();
-    ops.store_file("/b.txt", b"bbb", Some("text/plain")).unwrap();
-    ops.store_file("/c.txt", b"ccc", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/c.txt", b"ccc", Some("text/plain")).unwrap();
 
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xFF; 32];
@@ -377,10 +391,11 @@ fn test_patch_from_bogus_to_head_writes_all_entries() {
 // ============================================================
 #[test]
 fn test_patch_head_equals_target() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xAB; 32];
     let output = db_path(&temp, "patch_head_target.aeordb");
@@ -396,10 +411,11 @@ fn test_patch_head_equals_target() {
 // ============================================================
 #[test]
 fn test_patch_result_hash_fields() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let bogus = vec![0xCC; 32];
     let output = db_path(&temp, "patch_hash_fields.aeordb");
@@ -428,10 +444,11 @@ fn test_patch_empty_to_empty_errors() {
 // ============================================================
 #[test]
 fn test_patch_directories_written() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/a/b/deep.txt", b"deep content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/a/b/deep.txt", b"deep content", Some("text/plain")).unwrap();
 
     let head = engine.head_hash().unwrap();
     let bogus = vec![0x11; 32];
@@ -449,10 +466,11 @@ fn test_patch_directories_written() {
 // ============================================================
 #[test]
 fn test_patch_output_not_created_on_error() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
     let head = engine.head_hash().unwrap();
     let output = db_path(&temp, "patch_should_not_exist.aeordb");
 
@@ -472,12 +490,13 @@ fn test_patch_output_not_created_on_error() {
 // ============================================================
 #[test]
 fn test_patch_snapshot_to_head() {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file("/test.txt", b"content", Some("text/plain")).unwrap();
-    vm.create_snapshot("v1", HashMap::new()).unwrap();
+    ops.store_file(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
+    vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
     // Since all snapshots share the same root hash in this architecture,
     // v1 -> HEAD is no changes. This is expected behavior.

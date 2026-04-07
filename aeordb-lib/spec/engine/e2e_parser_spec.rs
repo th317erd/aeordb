@@ -3,17 +3,19 @@
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_store::IndexManager;
+use aeordb::engine::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::plugins::plugin_manager::PluginManager;
 use aeordb::plugins::types::PluginType;
 use std::sync::Arc;
 
 fn create_test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
+  let ctx = RequestContext::system();
     let dir = tempfile::tempdir().unwrap();
     let engine_path = dir.path().join("test.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let ops = DirectoryOps::new(&engine);
-    ops.ensure_root_directory().unwrap();
+    ops.ensure_root_directory(&ctx).unwrap();
     (Arc::new(engine), dir)
 }
 
@@ -58,6 +60,7 @@ fn deploy_plaintext_parser(engine: &Arc<StorageEngine>) -> PluginManager {
 
 #[test]
 fn test_e2e_parser_deploy_and_store() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
@@ -72,12 +75,12 @@ fn test_e2e_parser_deploy_and_store() {
             {"name": "content", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file("/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store a text file — this should trigger the parser pipeline
     let text_content = "Hello World\nThis is a test document.\nIt has three lines.";
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/test.txt",
         text_content.as_bytes(),
         Some("text/plain"),
@@ -122,12 +125,13 @@ fn test_e2e_parser_deploy_and_store() {
 
 #[test]
 fn test_e2e_parser_query_u64_after_store() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
     let ops = DirectoryOps::new(&engine);
     // Index word_count as u64 — Eq queries on u64 use the scalar path (no recheck)
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"word_count","source":["metadata","word_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
@@ -135,7 +139,7 @@ fn test_e2e_parser_query_u64_after_store() {
     .expect("config");
 
     // "Hello World greeting" = 3 words
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/hello.txt",
         b"Hello World greeting",
         Some("text/plain"),
@@ -144,7 +148,7 @@ fn test_e2e_parser_query_u64_after_store() {
     .expect("store hello");
 
     // "Goodbye World farewell extra words here" = 6 words
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/goodbye.txt",
         b"Goodbye World farewell extra words here",
         Some("text/plain"),
@@ -211,11 +215,12 @@ fn test_e2e_parser_query_u64_after_store() {
 
 #[test]
 fn test_e2e_non_json_without_parser_skips() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let ops = DirectoryOps::new(&engine);
 
     // Config has indexes but NO parser
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"indexes":[{"name":"title","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
@@ -224,7 +229,7 @@ fn test_e2e_non_json_without_parser_skips() {
 
     // Store binary data — should not crash, just skip indexing
     let binary_data = vec![0u8, 1, 2, 3, 255, 254, 253];
-    let result = ops.store_file_with_indexing(
+    let result = ops.store_file_with_indexing(&ctx,
         "/docs/binary.bin",
         &binary_data,
         Some("application/octet-stream"),
@@ -242,12 +247,13 @@ fn test_e2e_non_json_without_parser_skips() {
 
 #[test]
 fn test_e2e_parser_with_source_path_resolution() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
     let ops = DirectoryOps::new(&engine);
     // Use nested source path: metadata.line_count
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"lines","source":["metadata","line_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
@@ -255,7 +261,7 @@ fn test_e2e_parser_with_source_path_resolution() {
     .expect("config");
 
     let text = "line one\nline two\nline three\nline four\nline five";
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/five_lines.txt",
         text.as_bytes(),
         Some("text/plain"),
@@ -280,11 +286,12 @@ fn test_e2e_parser_with_source_path_resolution() {
 
 #[test]
 fn test_e2e_parser_logging_on_failure() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let ops = DirectoryOps::new(&engine);
 
     // Config references a parser that doesn't exist
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"nonexistent-parser","logging":true,"indexes":[{"name":"title","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
@@ -293,7 +300,7 @@ fn test_e2e_parser_logging_on_failure() {
 
     // Store a file — parser not found, should log
     let pm = PluginManager::new(engine.clone());
-    let result = ops.store_file_with_full_pipeline(
+    let result = ops.store_file_with_full_pipeline(&ctx,
         "/docs/test.txt",
         b"hello",
         Some("text/plain"),
@@ -319,11 +326,12 @@ fn test_e2e_parser_logging_on_failure() {
 
 #[test]
 fn test_e2e_parser_multiple_files_distinct_queries() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"word_count","source":["metadata","word_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
@@ -332,7 +340,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
 
     // Store three files with distinct word counts
     // alpha: 9 words
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/alpha.txt",
         b"The quick brown fox jumps over the lazy dog",
         Some("text/plain"),
@@ -341,7 +349,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
     .expect("store alpha");
 
     // beta: 6 words
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/beta.txt",
         b"Python programming language is very popular",
         Some("text/plain"),
@@ -350,7 +358,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
     .expect("store beta");
 
     // gamma: 7 words
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/gamma.txt",
         b"The lazy cat sleeps all day long",
         Some("text/plain"),
@@ -424,11 +432,12 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
 
 #[test]
 fn test_e2e_parser_file_data_preserved() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"content","source":["text"],"type":"trigram"}]}"#.as_bytes(),
         Some("application/json"),
@@ -436,7 +445,7 @@ fn test_e2e_parser_file_data_preserved() {
     .expect("config");
 
     let original_text = b"This is the original file content that should be preserved exactly.";
-    ops.store_file_with_full_pipeline(
+    ops.store_file_with_full_pipeline(&ctx,
         "/docs/preserved.txt",
         original_text,
         Some("text/plain"),
@@ -455,11 +464,12 @@ fn test_e2e_parser_file_data_preserved() {
 
 #[test]
 fn test_e2e_parser_empty_file() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
     let pm = deploy_plaintext_parser(&engine);
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"content","source":["text"],"type":"trigram"}]}"#.as_bytes(),
         Some("application/json"),
@@ -467,7 +477,7 @@ fn test_e2e_parser_empty_file() {
     .expect("config");
 
     // Store an empty file — parser should handle gracefully
-    let result = ops.store_file_with_full_pipeline(
+    let result = ops.store_file_with_full_pipeline(&ctx,
         "/docs/empty.txt",
         b"",
         Some("text/plain"),
@@ -494,11 +504,12 @@ fn test_e2e_wasm_binary_is_valid() {
 
 #[test]
 fn test_e2e_no_parser_json_fallback() {
+  let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
 
     let ops = DirectoryOps::new(&engine);
     // Config with no parser — expects raw JSON data
-    ops.store_file(
+    ops.store_file(&ctx,
         "/docs/.config/indexes.json",
         r#"{"indexes":[{"name":"name","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
@@ -507,7 +518,7 @@ fn test_e2e_no_parser_json_fallback() {
 
     // Store a JSON file — should index directly without parser
     let json_data = r#"{"name":"Alice","age":30}"#;
-    let result = ops.store_file_with_indexing(
+    let result = ops.store_file_with_indexing(&ctx,
         "/docs/user.json",
         json_data.as_bytes(),
         Some("application/json"),

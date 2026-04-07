@@ -8,6 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 
 /// Create a fresh app with a shared JwtManager for test token creation.
@@ -175,6 +176,7 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
 
 #[tokio::test]
 async fn test_auth_token_with_valid_api_key_returns_jwt() {
+  let ctx = RequestContext::system();
   let (app, _, engine, _temp_dir) = test_app();
 
   // Create an API key via SystemTables
@@ -189,7 +191,7 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
     is_revoked: false,
   };
   let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&ctx, &record).unwrap();
 
   let request = Request::builder()
     .method("POST")
@@ -264,6 +266,7 @@ async fn test_create_api_key_returns_new_key() {
 
 #[tokio::test]
 async fn test_list_api_keys_returns_metadata() {
+  let ctx = RequestContext::system();
   let (app, jwt_manager, engine, _temp_dir) = test_app();
 
   // Seed a key
@@ -278,7 +281,7 @@ async fn test_list_api_keys_returns_metadata() {
     is_revoked: false,
   };
   let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&ctx, &record).unwrap();
 
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
@@ -302,6 +305,7 @@ async fn test_list_api_keys_returns_metadata() {
 
 #[tokio::test]
 async fn test_revoke_api_key_succeeds() {
+  let ctx = RequestContext::system();
   let (app, jwt_manager, engine, _temp_dir) = test_app();
 
   // Seed a key
@@ -316,7 +320,7 @@ async fn test_revoke_api_key_succeeds() {
     is_revoked: false,
   };
   let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&ctx, &record).unwrap();
 
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
@@ -336,6 +340,7 @@ async fn test_revoke_api_key_succeeds() {
 
 #[tokio::test]
 async fn test_revoked_api_key_cannot_get_token() {
+  let ctx = RequestContext::system();
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, _temp_dir) = create_temp_engine_for_tests();
 
@@ -351,10 +356,10 @@ async fn test_revoked_api_key_cannot_get_token() {
     is_revoked: false,
   };
   let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&record).unwrap();
+  system_tables.store_api_key(&ctx, &record).unwrap();
 
   // Revoke it
-  system_tables.revoke_api_key(key_id).unwrap();
+  system_tables.revoke_api_key(&ctx, key_id).unwrap();
 
   let app = create_app_with_jwt(jwt_manager.clone(), engine.clone());
 

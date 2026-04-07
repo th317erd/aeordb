@@ -6,6 +6,7 @@ use aeordb::engine::backup::{
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::tree_walker::walk_version_tree;
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 use tempfile::TempDir;
 
@@ -16,14 +17,15 @@ fn db_path(dir: &TempDir, name: &str) -> String {
 }
 
 fn setup_engine_with_files() -> (Arc<StorageEngine>, TempDir) {
+  let ctx = RequestContext::system();
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file("/docs/hello.txt", b"Hello World", Some("text/plain"))
+    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
         .unwrap();
-    ops.store_file("/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
+    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
         .unwrap();
-    ops.store_file("/images/photo.jpg", b"fake jpg data", Some("image/jpeg"))
+    ops.store_file(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg"))
         .unwrap();
 
     (engine, temp)
@@ -191,16 +193,17 @@ fn test_import_patch_wrong_base_force() {
 
 #[test]
 fn test_import_patch_applies_deletions() {
+  let ctx = RequestContext::system();
     // Create two engines to simulate diff with deletions
     let (engine_a, _temp_a) = create_temp_engine_for_tests();
     let ops_a = DirectoryOps::new(&engine_a);
-    ops_a.store_file("/keep.txt", b"keep", Some("text/plain")).unwrap();
-    ops_a.store_file("/remove.txt", b"remove me", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_a.store_file(&ctx, "/remove.txt", b"remove me", Some("text/plain")).unwrap();
     let tree_a = walk_version_tree(&engine_a, &engine_a.head_hash().unwrap()).unwrap();
 
     let (engine_b, _temp_b) = create_temp_engine_for_tests();
     let ops_b = DirectoryOps::new(&engine_b);
-    ops_b.store_file("/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_b.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
     let tree_b = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
 
     let diff = aeordb::engine::tree_walker::diff_trees(&tree_a, &tree_b);

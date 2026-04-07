@@ -2,12 +2,14 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{QueryBuilder, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, should_use_bitmap_compositing};
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let path = dir.path().join("test.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
   let ops = DirectoryOps::new(&engine);
-  ops.ensure_root_directory().unwrap();
+  ops.ensure_root_directory(&ctx).unwrap();
   engine
 }
 
@@ -19,6 +21,7 @@ fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
@@ -26,11 +29,12 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 /// Set up an engine with users indexed by age and name.
 fn setup_users_engine(dir: &tempfile::TempDir) -> StorageEngine {
+  let ctx = RequestContext::system();
   let engine = create_engine(dir);
   let ops = DirectoryOps::new(&engine);
 
@@ -57,25 +61,25 @@ fn setup_users_engine(dir: &tempfile::TempDir) -> StorageEngine {
   };
   store_index_config(&engine, "/users", &config);
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/alice.json",
     &make_user_json("Alice", 30, "alice@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/bob.json",
     &make_user_json("Bob", 25, "bob@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/charlie.json",
     &make_user_json("Charlie", 40, "charlie@test.com"),
     Some("application/json"),
   ).unwrap();
 
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/diana.json",
     &make_user_json("Diana", 35, "diana@test.com"),
     Some("application/json"),
@@ -296,12 +300,13 @@ fn test_query_count_returns_zero_when_empty() {
 
 #[test]
 fn test_query_after_delete() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Delete Alice
-  ops.delete_file_with_indexing("/users/alice.json").unwrap();
+  ops.delete_file_with_indexing(&ctx, "/users/alice.json").unwrap();
 
   let results = QueryBuilder::new(&engine, "/users")
     .field("age").eq(&30u64.to_be_bytes())
@@ -314,12 +319,13 @@ fn test_query_after_delete() {
 
 #[test]
 fn test_query_with_overwritten_file() {
+  let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   // Update Alice's age from 30 to 50
-  ops.store_file_with_indexing(
+  ops.store_file_with_indexing(&ctx,
     "/users/alice.json",
     &make_user_json("Alice", 50, "alice@test.com"),
     Some("application/json"),

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::nvt::NormalizedVectorTable;
+use crate::engine::request_context::RequestContext;
 use crate::engine::scalar_converter::{deserialize_converter, serialize_converter, ScalarConverter};
 use crate::engine::storage_engine::StorageEngine;
 
@@ -646,8 +647,9 @@ impl<'a> IndexManager<'a> {
     let index_path = Self::index_file_path(path, &index.field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
     let data = index.serialize(hash_length);
+    let ctx = RequestContext::system();
     let ops = DirectoryOps::new(self.engine);
-    ops.store_file(&index_path, &data, Some("application/octet-stream"))?;
+    ops.store_file(&ctx, &index_path, &data, Some("application/octet-stream"))?;
     Ok(())
   }
 
@@ -680,16 +682,18 @@ impl<'a> IndexManager<'a> {
 
   /// Delete an index for a field and strategy at the given path.
   pub fn delete_index(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
+    let ctx = RequestContext::system();
     let index_path = Self::index_file_path(path, field_name, strategy);
     let ops = DirectoryOps::new(self.engine);
-    ops.delete_file(&index_path)
+    ops.delete_file(&ctx, &index_path)
   }
 
   /// Delete an index using the legacy path format (no strategy).
   pub fn delete_index_legacy(&self, path: &str, field_name: &str) -> EngineResult<()> {
+    let ctx = RequestContext::system();
     let index_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
-    ops.delete_file(&index_path)
+    ops.delete_file(&ctx, &index_path)
   }
 
   /// Create an empty index for a field at the given path.

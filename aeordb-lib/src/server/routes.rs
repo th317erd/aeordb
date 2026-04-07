@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::responses::ErrorResponse;
 use super::state::AppState;
+use crate::engine::RequestContext;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord,
   generate_magic_link_code, hash_magic_link_code,
@@ -263,8 +264,10 @@ pub async fn auth_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let system_tables = SystemTables::new(&state.engine);
   if let Err(error) = system_tables.store_refresh_token(
+    &ctx,
     &refresh_token_hash,
     &record.user_id.to_string(),
     refresh_expires_at,
@@ -478,8 +481,9 @@ pub async fn request_magic_link(
       crate::auth::magic_link::DEFAULT_MAGIC_LINK_EXPIRY_SECONDS,
     );
 
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
   let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_magic_link(&code_hash, &payload.email, expires_at) {
+  if let Err(error) = system_tables.store_magic_link(&ctx, &code_hash, &payload.email, expires_at) {
     tracing::error!("Failed to store magic link: {}", error);
     // Still return 200 to prevent enumeration.
   }
@@ -538,7 +542,8 @@ pub async fn verify_magic_link(
   }
 
   // Mark as used.
-  if let Err(error) = system_tables.mark_magic_link_used(&code_hash) {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  if let Err(error) = system_tables.mark_magic_link_used(&ctx, &code_hash) {
     tracing::error!("Failed to mark magic link as used: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -621,7 +626,8 @@ pub async fn refresh_token(
   }
 
   // Revoke the old refresh token (rotation).
-  if let Err(error) = system_tables.revoke_refresh_token(&old_token_hash) {
+  let ctx = RequestContext::system(); // TODO: from claims when events are wired
+  if let Err(error) = system_tables.revoke_refresh_token(&ctx, &old_token_hash) {
     tracing::error!("Failed to revoke old refresh token: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -656,6 +662,7 @@ pub async fn refresh_token(
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
   if let Err(error) = system_tables.store_refresh_token(
+    &ctx,
     &new_refresh_hash,
     &record.user_subject,
     refresh_expires_at,
