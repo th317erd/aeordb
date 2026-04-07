@@ -42,6 +42,7 @@ pub mod tree_walker;
 pub mod version_manager;
 pub mod void_manager;
 pub mod wasm_converter;
+pub mod webhook;
 
 pub use append_writer::AppendWriter;
 pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
@@ -109,3 +110,4 @@ pub use engine_event::{
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;
 pub use request_context::RequestContext;
+pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};

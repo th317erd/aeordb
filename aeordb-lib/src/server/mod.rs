@@ -4,6 +4,7 @@ pub mod engine_routes;
 pub mod portal_routes;
 pub mod responses;
 pub mod routes;
+pub mod sse_routes;
 pub mod state;
 
 use std::sync::Arc;
@@ -177,6 +178,8 @@ pub fn create_app_with_all(
         .delete(engine_routes::engine_delete_file)
         .head(engine_routes::engine_head),
     )
+    // SSE event stream
+    .route("/events/stream", get(sse_routes::event_stream))
     // Query route
     .route("/query", post(engine_routes::query_endpoint))
     // Version: snapshot routes
@@ -256,6 +259,22 @@ pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
     .ensure_root_directory(&ctx)
     .expect("failed to create engine root directory");
   engine
+}
+
+/// Build the application router with a specific JwtManager and engine, returning
+/// the EventBus for test inspection (useful for SSE tests).
+pub fn create_app_with_jwt_engine_and_event_bus(
+  jwt_manager: Arc<JwtManager>,
+  engine: Arc<StorageEngine>,
+) -> (Router, Arc<EventBus>) {
+  let prometheus_handle = try_initialize_metrics();
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+  let event_bus = Arc::new(EventBus::new());
+
+  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus.clone());
+  (router, event_bus)
 }
 
 /// Create an engine backed by a temporary file (for tests).

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
-use aeordb::engine::spawn_heartbeat;
+use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher};
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_for_storage};
 
@@ -54,7 +54,10 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   }
 
   // Start the heartbeat task (emits DatabaseStats every 15 seconds).
-  let heartbeat_handle = spawn_heartbeat(event_bus, engine);
+  let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone());
+
+  // Start the webhook dispatcher (delivers matching events to registered URLs).
+  let webhook_handle = spawn_webhook_dispatcher(event_bus, engine);
 
   let address = SocketAddr::from(([0, 0, 0, 0], port));
   println!("Listening on http://{address}");
@@ -73,10 +76,12 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   {
     eprintln!("Server error: {error}");
     heartbeat_handle.abort();
+    webhook_handle.abort();
     std::process::exit(1);
   }
 
   heartbeat_handle.abort();
+  webhook_handle.abort();
   println!("Server shut down gracefully.");
 }
 

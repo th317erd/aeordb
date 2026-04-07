@@ -24,7 +24,7 @@
 - [x] Phase 1: EventBus + EngineEvent + RequestContext types — 32 tests
 - [x] Phase 2: Thread ctx through all engine methods + callers + tests (45 files)
 - [x] Phase 3: Emit events from engine methods — 34 tests
-- [ ] Phase 4: Heartbeat task
+- [x] Phase 4: Heartbeat task — 7 tests
 - [ ] Phase 5: SSE endpoint
 - [ ] Phase 6: Webhooks
 

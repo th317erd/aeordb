@@ -36,6 +36,10 @@ sha2 = "0.10"
 wasmi = "0.42"
 libloading = "0.8"
 
+# Webhook delivery
+reqwest = { version = "0.12", features = ["json"] }
+hmac = "0.12"
+
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
@@ -43,6 +47,7 @@ metrics-exporter-prometheus = "0.16"
 # Streaming
 futures-util = "0.3"
 http-body = "1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Replication / Consensus
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
@@ -325,3 +330,11 @@ path = "spec/engine/event_emission_spec.rs"
 [[test]]
 name = "heartbeat_spec"
 path = "spec/engine/heartbeat_spec.rs"
+
+[[test]]
+name = "webhook_spec"
+path = "spec/engine/webhook_spec.rs"
+
+[[test]]
+name = "sse_spec"
+path = "spec/http/sse_spec.rs"
