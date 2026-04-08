@@ -2,17 +2,15 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::engine::append_writer::AppendWriter;
+use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::kv_resize::KVResizeManager;
-use crate::engine::kv_store::{KVEntry, KVStore, KV_TYPE_CHUNK, KV_FLAG_DELETED};
+use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_FLAG_DELETED};
 use crate::engine::void_manager::VoidManager;
 use crate::storage::chunk::{Chunk, ChunkHash};
 use crate::storage::chunk_header::ChunkHeader;
 use crate::storage::chunk_storage::{ChunkStorage, ChunkStoreError};
-
-const DEFAULT_NVT_BUCKETS: usize = 1024;
 
 /// Implementation of the ChunkStorage trait backed by the custom append-only engine.
 ///
@@ -23,7 +21,7 @@ const DEFAULT_NVT_BUCKETS: usize = 1024;
 /// The value stored on disk is: ChunkHeader (33 bytes) + raw chunk data.
 pub struct EngineChunkStorage {
   writer: RwLock<AppendWriter>,
-  kv_manager: RwLock<KVResizeManager>,
+  kv_store: RwLock<DiskKVStore>,
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
 }
@@ -35,13 +33,18 @@ impl EngineChunkStorage {
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let hash_algo = writer.file_header().hash_algo;
-    let kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
-    let kv_manager = KVResizeManager::new(kv_store);
+
+    let kv_path = format!("{}.kv", path);
+    // Remove stale KV file if it exists
+    let _ = std::fs::remove_file(&kv_path);
+    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo)
+      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
     let void_manager = VoidManager::new(hash_algo);
 
     Ok(EngineChunkStorage {
       writer: RwLock::new(writer),
-      kv_manager: RwLock::new(kv_manager),
+      kv_store: RwLock::new(kv_store),
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -53,44 +56,55 @@ impl EngineChunkStorage {
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let hash_algo = writer.file_header().hash_algo;
-    let mut kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
     let mut void_manager = VoidManager::new(hash_algo);
 
-    // Rebuild KV store by scanning all entries in the file
-    let scanner = writer.scan_entries()
-      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+    let kv_path = format!("{}.kv", path);
 
-    for scanned_result in scanner {
-      let scanned = scanned_result
+    // Always rebuild from scan to ensure consistency
+    let _ = std::fs::remove_file(&kv_path);
+
+    let kv_store = {
+      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo)
         .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
-      match scanned.header.entry_type {
-        EntryType::Chunk => {
-          // The on-disk key IS the raw ChunkHash
-          let entry = KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash: scanned.key.clone(),
-            offset: scanned.offset,
-          };
-          kv_store.insert(entry);
-        }
-        EntryType::Void => {
-          void_manager.register_void(
-            scanned.header.total_length,
-            scanned.offset,
-          );
-        }
-        _ => {
-          // Other entry types not relevant for ChunkStorage
+      // Rebuild KV store by scanning all entries in the file
+      let scanner = writer.scan_entries()
+        .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
+      for scanned_result in scanner {
+        let scanned = scanned_result
+          .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
+        match scanned.header.entry_type {
+          EntryType::Chunk => {
+            let entry = KVEntry {
+              type_flags: KV_TYPE_CHUNK,
+              hash: scanned.key.clone(),
+              offset: scanned.offset,
+            };
+            kv.insert(entry);
+          }
+          EntryType::Void => {
+            void_manager.register_void(
+              scanned.header.total_length,
+              scanned.offset,
+            );
+          }
+          _ => {
+            // Other entry types not relevant for ChunkStorage
+          }
         }
       }
-    }
 
-    let kv_manager = KVResizeManager::new(kv_store);
+      kv.flush()
+        .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
+      kv
+    };
 
     Ok(EngineChunkStorage {
       writer: RwLock::new(writer),
-      kv_manager: RwLock::new(kv_manager),
+      kv_store: RwLock::new(kv_store),
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -112,7 +126,7 @@ impl ChunkStorage for EngineChunkStorage {
 
     // Dedup: if this hash already exists and is not deleted, skip
     {
-      let kv = self.kv_manager.read()
+      let mut kv = self.kv_store.write()
         .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
       if let Some(existing) = kv.get(&chunk_hash) {
         if !existing.is_deleted() {
@@ -153,7 +167,7 @@ impl ChunkStorage for EngineChunkStorage {
       offset,
     };
 
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
     kv.insert(kv_entry);
 
@@ -162,11 +176,11 @@ impl ChunkStorage for EngineChunkStorage {
 
   fn get_chunk(&self, hash: &ChunkHash) -> Result<Option<Chunk>, ChunkStoreError> {
     let kv_entry = {
-      let kv = self.kv_manager.read()
+      let mut kv = self.kv_store.write()
         .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
       match kv.get(hash.as_slice()) {
-        Some(entry) if !entry.is_deleted() => entry.clone(),
+        Some(entry) if !entry.is_deleted() => entry,
         _ => return Ok(None),
       }
     };
@@ -217,7 +231,7 @@ impl ChunkStorage for EngineChunkStorage {
   }
 
   fn has_chunk(&self, hash: &ChunkHash) -> Result<bool, ChunkStoreError> {
-    let kv = self.kv_manager.read()
+    let mut kv = self.kv_store.write()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     match kv.get(hash.as_slice()) {
@@ -227,7 +241,7 @@ impl ChunkStorage for EngineChunkStorage {
   }
 
   fn remove_chunk(&self, hash: &ChunkHash) -> Result<bool, ChunkStoreError> {
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let exists = match kv.get(hash.as_slice()) {
@@ -240,28 +254,34 @@ impl ChunkStorage for EngineChunkStorage {
     }
 
     // Logical delete via flag — void management handles the freed space
-    kv.primary_mut().update_flags(hash.as_slice(), KV_FLAG_DELETED);
+    kv.update_flags(hash.as_slice(), KV_FLAG_DELETED);
 
     Ok(true)
   }
 
   fn chunk_count(&self) -> Result<u64, ChunkStoreError> {
-    let kv = self.kv_manager.read()
+    let mut kv = self.kv_store.write()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
-    let count = kv.primary().iter()
-      .filter(|entry| entry.entry_type() == KV_TYPE_CHUNK && !entry.is_deleted())
+    let all_entries = kv.iter_all()
+      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
+    let count = all_entries.iter()
+      .filter(|entry| entry.entry_type() == KV_TYPE_CHUNK)
       .count();
 
     Ok(count as u64)
   }
 
   fn list_chunk_hashes(&self) -> Result<Vec<ChunkHash>, ChunkStoreError> {
-    let kv = self.kv_manager.read()
+    let mut kv = self.kv_store.write()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
-    let hashes: Vec<ChunkHash> = kv.primary().iter()
-      .filter(|entry| entry.entry_type() == KV_TYPE_CHUNK && !entry.is_deleted())
+    let all_entries = kv.iter_all()
+      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
+    let hashes: Vec<ChunkHash> = all_entries.iter()
+      .filter(|entry| entry.entry_type() == KV_TYPE_CHUNK)
       .filter_map(|entry| {
         if entry.hash.len() == 32 {
           let mut hash = [0u8; 32];

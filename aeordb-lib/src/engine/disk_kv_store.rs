@@ -447,3 +447,10 @@ impl DiskKVStore {
         self.cache_order.push(hash.to_vec());
     }
 }
+
+impl Drop for DiskKVStore {
+    fn drop(&mut self) {
+        // Best-effort flush of any remaining write buffer entries to disk.
+        let _ = self.flush();
+    }
+}

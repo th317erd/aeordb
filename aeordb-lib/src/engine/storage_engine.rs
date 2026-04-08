@@ -3,15 +3,15 @@ use std::sync::RwLock;
 
 use crate::engine::append_writer::AppendWriter;
 use crate::engine::compression::CompressionAlgorithm;
+use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::kv_resize::KVResizeManager;
 use serde::Serialize;
 
 use crate::engine::kv_store::{
-  KVEntry, KVStore,
+  KVEntry,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
   KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
   KV_FLAG_DELETED, KV_TYPE_FORK,
@@ -66,8 +66,6 @@ impl WriteBatch {
     }
 }
 
-const DEFAULT_NVT_BUCKETS: usize = 1024;
-
 /// Result type for entry retrieval: (header, key, value).
 pub type EntryData = (EntryHeader, Vec<u8>, Vec<u8>);
 
@@ -97,7 +95,7 @@ pub struct DatabaseStats {
 /// (directory ops, file ops) are built on top via `DirectoryOps`.
 pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
-  kv_manager: RwLock<KVResizeManager>,
+  kv_store: RwLock<DiskKVStore>,
   #[allow(dead_code)] // Used for future void reuse optimization
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
@@ -108,13 +106,17 @@ impl StorageEngine {
   pub fn create(path: &str) -> EngineResult<Self> {
     let writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
-    let kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
-    let kv_manager = KVResizeManager::new(kv_store);
+
+    let kv_path = format!("{}.kv", path);
+    // Remove stale KV file if it exists (e.g. from a previous failed create)
+    let _ = std::fs::remove_file(&kv_path);
+    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo)?;
+
     let void_manager = VoidManager::new(hash_algo);
 
     Ok(StorageEngine {
       writer: RwLock::new(writer),
-      kv_manager: RwLock::new(kv_manager),
+      kv_store: RwLock::new(kv_store),
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -124,75 +126,92 @@ impl StorageEngine {
   fn open_internal(path: &str) -> EngineResult<Self> {
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
-    let mut kv_store = KVStore::new(hash_algo, DEFAULT_NVT_BUCKETS);
+
+    let kv_path = format!("{}.kv", path);
+
     let mut void_manager = VoidManager::new(hash_algo);
 
-    // First pass: rebuild KV store from entry headers, collecting deletion records.
-    // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
-    // files that were recreated after the deletion.
-    let mut deletion_records: Vec<(String, u64)> = Vec::new();
-    let scanner = writer.scan_entries()?;
-    for scanned_result in scanner {
-      let scanned = scanned_result?;
-      let kv_type = match scanned.header.entry_type {
-        EntryType::Chunk => KV_TYPE_CHUNK,
-        EntryType::FileRecord => KV_TYPE_FILE_RECORD,
-        EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-        EntryType::DeletionRecord => {
-          // Collect deletion record paths for the post-scan pass.
-          if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
-            deletion_records.push((record.path, scanned.offset));
+    // Always rebuild the KV file from a scan of the main .aeordb file.
+    // This ensures consistency even if the previous .kv file was stale
+    // (e.g., unflushed write buffer from a concurrent or prior open).
+    let _ = std::fs::remove_file(&kv_path);
+
+    let kv_store = {
+      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo)?;
+
+      // First pass: rebuild KV store from entry headers, collecting deletion records.
+      // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
+      // files that were recreated after the deletion.
+      let mut deletion_records: Vec<(String, u64)> = Vec::new();
+      let scanner = writer.scan_entries()?;
+      for scanned_result in scanner {
+        let scanned = scanned_result?;
+        let kv_type = match scanned.header.entry_type {
+          EntryType::Chunk => KV_TYPE_CHUNK,
+          EntryType::FileRecord => KV_TYPE_FILE_RECORD,
+          EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
+          EntryType::DeletionRecord => {
+            // Collect deletion record paths for the post-scan pass.
+            if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
+              deletion_records.push((record.path, scanned.offset));
+            }
+            KV_TYPE_DELETION
           }
-          KV_TYPE_DELETION
+          EntryType::Void => {
+            void_manager.register_void(scanned.header.total_length, scanned.offset);
+            KV_TYPE_VOID
+          }
+          EntryType::Snapshot => KV_TYPE_SNAPSHOT,
+          EntryType::Fork => KV_TYPE_FORK,
+        };
+
+        let entry = KVEntry {
+          type_flags: kv_type,
+          hash: scanned.key.clone(),
+          offset: scanned.offset,
+        };
+        kv.insert(entry);
+      }
+
+      // Flush write buffer to disk before deletion replay
+      kv.flush()?;
+
+      // Second pass: replay deletions — re-mark entries as deleted.
+      // Only applies if the file/entry wasn't recreated after the deletion
+      // (i.e., the KV entry's offset is before the deletion record's offset).
+      for (path, deletion_offset) in &deletion_records {
+        let normalized = crate::engine::path_utils::normalize_path(path);
+
+        // Try file path hash (standard file deletions use "file:" prefix)
+        if let Ok(file_key) = hash_algo.compute_hash(format!("file:{}", normalized).as_bytes()) {
+          if let Some(entry) = kv.get(&file_key) {
+            if entry.offset < *deletion_offset {
+              kv.update_flags(&file_key, KV_FLAG_DELETED);
+            }
+          }
         }
-        EntryType::Void => {
-          void_manager.register_void(scanned.header.total_length, scanned.offset);
-          KV_TYPE_VOID
-        }
-        EntryType::Snapshot => KV_TYPE_SNAPSHOT,
-        EntryType::Fork => KV_TYPE_FORK,
-      };
 
-      let entry = KVEntry {
-        type_flags: kv_type,
-        hash: scanned.key.clone(),
-        offset: scanned.offset,
-      };
-      kv_store.insert(entry);
-    }
-
-    // Second pass: replay deletions — re-mark entries as deleted.
-    // Only applies if the file/entry wasn't recreated after the deletion
-    // (i.e., the KV entry's offset is before the deletion record's offset).
-    for (path, deletion_offset) in &deletion_records {
-      let normalized = crate::engine::path_utils::normalize_path(path);
-
-      // Try file path hash (standard file deletions use "file:" prefix)
-      if let Ok(file_key) = hash_algo.compute_hash(format!("file:{}", normalized).as_bytes()) {
-        if let Some(entry) = kv_store.get(&file_key) {
-          if entry.offset < *deletion_offset {
-            kv_store.update_flags(&file_key, KV_FLAG_DELETED);
+        // Try raw hash (for snapshot/fork deletions that store the domain-prefixed
+        // key directly, e.g. "snap:name" or "::aeordb:fork:name").
+        // Use the raw path string without normalization since these aren't file paths.
+        if let Ok(raw_key) = hash_algo.compute_hash(path.as_bytes()) {
+          if let Some(entry) = kv.get(&raw_key) {
+            if entry.offset < *deletion_offset {
+              kv.update_flags(&raw_key, KV_FLAG_DELETED);
+            }
           }
         }
       }
 
-      // Try raw hash (for snapshot/fork deletions that store the domain-prefixed
-      // key directly, e.g. "snap:name" or "::aeordb:fork:name").
-      // Use the raw path string without normalization since these aren't file paths.
-      if let Ok(raw_key) = hash_algo.compute_hash(path.as_bytes()) {
-        if let Some(entry) = kv_store.get(&raw_key) {
-          if entry.offset < *deletion_offset {
-            kv_store.update_flags(&raw_key, KV_FLAG_DELETED);
-          }
-        }
-      }
-    }
+      // Flush any deletion flag updates
+      kv.flush()?;
 
-    let kv_manager = KVResizeManager::new(kv_store);
+      kv
+    };
 
     Ok(StorageEngine {
       writer: RwLock::new(writer),
-      kv_manager: RwLock::new(kv_manager),
+      kv_store: RwLock::new(kv_store),
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -258,7 +277,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -308,7 +327,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -324,12 +343,12 @@ impl StorageEngine {
     hash: &[u8],
   ) -> EngineResult<Option<EntryData>> {
     let kv_entry = {
-      let kv = self.kv_manager.read()
+      let mut kv = self.kv_store.write()
         .map_err(|error| EngineError::IoError(
           std::io::Error::other(error.to_string()),
         ))?;
       match kv.get(hash) {
-        Some(entry) if !entry.is_deleted() => entry.clone(),
+        Some(entry) if !entry.is_deleted() => entry,
         _ => return Ok(None),
       }
     };
@@ -345,7 +364,7 @@ impl StorageEngine {
 
   /// Check if a non-deleted entry exists in the KV store.
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
-    let kv = self.kv_manager.read()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -428,7 +447,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -467,7 +486,7 @@ impl StorageEngine {
 
     // Single KV lock acquisition for all KV inserts
     {
-      let mut kv = self.kv_manager.write()
+      let mut kv = self.kv_store.write()
         .map_err(|error| EngineError::IoError(
           std::io::Error::other(error.to_string()),
         ))?;
@@ -487,7 +506,7 @@ impl StorageEngine {
 
   /// Check if a KV entry is marked as deleted.
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
-    let kv = self.kv_manager.read()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -499,11 +518,11 @@ impl StorageEngine {
 
   /// Mark a KV entry as deleted by setting the deleted flag.
   pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
-    let mut kv = self.kv_manager.write()
+    let mut kv = self.kv_store.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    let updated = kv.primary_mut().update_flags(hash, KV_FLAG_DELETED);
+    let updated = kv.update_flags(hash, KV_FLAG_DELETED);
     if !updated {
       return Err(EngineError::NotFound(
         format!("Entry not found for hash: {}", hex::encode(hash)),
@@ -517,14 +536,14 @@ impl StorageEngine {
   /// result — callers should check `is_entry_deleted` if needed.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let hashes: Vec<(Vec<u8>, u64)> = {
-      let kv = self.kv_manager.read()
+      let mut kv = self.kv_store.write()
         .map_err(|error| EngineError::IoError(
           std::io::Error::other(error.to_string()),
         ))?;
-      kv.primary()
-        .iter()
+      kv.iter_all()?
+        .into_iter()
         .filter(|entry| entry.entry_type() == target_type)
-        .map(|entry| (entry.hash.clone(), entry.offset))
+        .map(|entry| (entry.hash, entry.offset))
         .collect()
     };
 
@@ -545,25 +564,29 @@ impl StorageEngine {
   /// Return aggregate statistics about the database.
   pub fn stats(&self) -> DatabaseStats {
     // 1. Lock writer for file header info and file size
-    let (entry_count, kv_size_bytes, nvt_size_bytes, created_at, updated_at, db_file_size_bytes) = {
+    let (entry_count, created_at, updated_at, db_file_size_bytes) = {
       let writer = self.writer.read().expect("writer lock poisoned");
       let fh = writer.file_header();
       (
         fh.entry_count,
-        fh.kv_block_length,
-        fh.nvt_length,
         fh.created_at,
         fh.updated_at,
         writer.file_size(),
       )
     };
 
-    // 2. Lock kv_manager for entry counts
-    let (kv_entries, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count) = {
-      let kv = self.kv_manager.read().expect("kv_manager lock poisoned");
-      let store = kv.primary();
-      let kv_entries = store.len();
-      let nvt_buckets = store.nvt().bucket_count();
+    // 2. Lock kv_store for entry counts
+    let (kv_entries, kv_size_bytes, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count) = {
+      let mut kv = self.kv_store.write().expect("kv_store lock poisoned");
+      let kv_entries = kv.len();
+      let nvt_buckets = kv.bucket_count();
+
+      // Get the KV file size for stats
+      let kv_size_bytes = std::fs::metadata(kv.path())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+      let all_entries = kv.iter_all().unwrap_or_default();
 
       let mut chunk_count = 0usize;
       let mut file_count = 0usize;
@@ -571,10 +594,7 @@ impl StorageEngine {
       let mut snapshot_count = 0usize;
       let mut fork_count = 0usize;
 
-      for entry in store.iter() {
-        if entry.is_deleted() {
-          continue;
-        }
+      for entry in &all_entries {
         match entry.entry_type() {
           KV_TYPE_CHUNK => chunk_count += 1,
           KV_TYPE_FILE_RECORD => file_count += 1,
@@ -585,7 +605,7 @@ impl StorageEngine {
         }
       }
 
-      (kv_entries, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count)
+      (kv_entries, kv_size_bytes, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count)
     };
 
     // 3. Lock void_manager for void stats
@@ -599,7 +619,7 @@ impl StorageEngine {
       kv_entries,
       kv_size_bytes,
       nvt_buckets,
-      nvt_size_bytes,
+      nvt_size_bytes: 0, // NVT is internal to DiskKVStore
       chunk_count,
       file_count,
       directory_count,
