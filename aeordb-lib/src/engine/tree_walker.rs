@@ -64,8 +64,12 @@ fn walk_directory(
     return Ok(());
   }
 
-  // Parse child entries from the directory data
-  let children = deserialize_child_entries(&dir_data, hash_length)?;
+  // Parse child entries from the directory data — handle both flat and B-tree formats
+  let children = if crate::engine::btree::is_btree_format(&dir_data) {
+    crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
+  } else {
+    deserialize_child_entries(&dir_data, hash_length)?
+  };
 
   for child in &children {
     let child_path = if current_path == "/" {

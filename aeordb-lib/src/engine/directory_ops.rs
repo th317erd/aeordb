@@ -371,7 +371,13 @@ impl<'a> DirectoryOps<'a> {
         if value.is_empty() {
           return Ok(Vec::new());
         }
-        deserialize_child_entries(&value, hash_length)
+        if crate::engine::btree::is_btree_format(&value) {
+          // B-tree format: value is the root node data
+          crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length)
+        } else {
+          // Flat format
+          deserialize_child_entries(&value, hash_length)
+        }
       }
       None => Err(EngineError::NotFound(normalized)),
     }
@@ -616,6 +622,8 @@ impl<'a> DirectoryOps<'a> {
 
   /// Update parent directories after a child is added or modified.
   /// Propagates from the immediate parent up to root, updating HEAD at the end.
+  /// For directories with >= BTREE_CONVERSION_THRESHOLD children, uses B-tree
+  /// storage for O(log N) insertions instead of rewriting the entire flat list.
   fn update_parent_directories(
     &self,
     child_path: &str,
@@ -631,41 +639,72 @@ impl<'a> DirectoryOps<'a> {
 
     let dir_key = directory_path_hash(&parent, &algo)?;
 
-    // Read existing directory or create empty
-    let mut children = match self.engine.get_entry(&dir_key)? {
+    // Read existing directory
+    let existing = self.engine.get_entry(&dir_key)?;
+
+    let (dir_value, content_key) = match existing {
+      Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+        // === B-TREE FORMAT ===
+        // Compute the root node's content hash so we can insert into the tree
+        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length)?;
+        let root_hash = root_node.content_hash(hash_length, &algo)?;
+
+        // Insert into B-tree (writes only O(log N) nodes)
+        let new_root_hash = crate::engine::btree::btree_insert(
+          self.engine, &root_hash, child_entry, hash_length, &algo
+        )?;
+
+        // Load the new root node's data for the path-based entry
+        let new_root_entry = self.engine.get_entry(&new_root_hash)?
+          .ok_or_else(|| EngineError::NotFound("B-tree root not found after insert".to_string()))?;
+
+        (new_root_entry.2, new_root_hash)
+      }
       Some((_header, _key, value)) => {
-        if value.is_empty() {
+        // === FLAT FORMAT ===
+        let mut children = if value.is_empty() {
           Vec::new()
         } else {
           deserialize_child_entries(&value, hash_length)?
+        };
+
+        // Add or update the child
+        let child_name = &child_entry.name;
+        if let Some(existing) = children.iter_mut().find(|c| c.name == *child_name) {
+          *existing = child_entry;
+        } else {
+          children.push(child_entry);
+        }
+
+        // Check if we should convert to B-tree
+        if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+          // Convert flat -> B-tree
+          let root_hash = crate::engine::btree::btree_from_entries(
+            self.engine, children, hash_length, &algo
+          )?;
+          let root_entry = self.engine.get_entry(&root_hash)?
+            .ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
+          (root_entry.2, root_hash)
+        } else {
+          // Stay flat
+          let dir_value = serialize_child_entries(&children, hash_length);
+          let content_key = directory_content_hash(&dir_value, &algo)?;
+          self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+          (dir_value, content_key)
         }
       }
-      None => Vec::new(),
+      None => {
+        // New directory
+        let children = vec![child_entry];
+        let dir_value = serialize_child_entries(&children, hash_length);
+        let content_key = directory_content_hash(&dir_value, &algo)?;
+        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+        (dir_value, content_key)
+      }
     };
 
-    // Add or update the child entry
-    let child_name = &child_entry.name;
-    if let Some(existing) = children.iter_mut().find(|c| c.name == *child_name) {
-      *existing = child_entry;
-    } else {
-      children.push(child_entry);
-    }
-
-    // Serialize and store the updated directory at path-based key
-    let dir_value = serialize_child_entries(&children, hash_length);
-    self.engine.store_entry(
-      EntryType::DirectoryIndex,
-      &dir_key,
-      &dir_value,
-    )?;
-
-    // Also store at content-addressed key for immutable versioning
-    let content_key = directory_content_hash(&dir_value, &algo)?;
-    self.engine.store_entry(
-      EntryType::DirectoryIndex,
-      &content_key,
-      &dir_value,
-    )?;
+    // Store at path-based key
+    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
 
     // If this is root "/", update HEAD to content hash
     if parent == "/" {
@@ -688,6 +727,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Remove a child entry from its parent directory and propagate up.
+  /// Handles both flat and B-tree directory formats.
   fn remove_from_parent_directory(&self, child_path: &str) -> EngineResult<()> {
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -700,35 +740,54 @@ impl<'a> DirectoryOps<'a> {
     let dir_key = directory_path_hash(&parent, &algo)?;
     let child_name = file_name(child_path).unwrap_or("").to_string();
 
-    let mut children = match self.engine.get_entry(&dir_key)? {
+    let existing = self.engine.get_entry(&dir_key)?;
+
+    let (dir_value, content_key) = match existing {
+      Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+        // B-tree format: delete from tree
+        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length)?;
+        let root_hash = root_node.content_hash(hash_length, &algo)?;
+
+        match crate::engine::btree::btree_delete(self.engine, &root_hash, &child_name, hash_length, &algo)? {
+          Some(new_root_hash) => {
+            let new_root_entry = self.engine.get_entry(&new_root_hash)?
+              .ok_or_else(|| EngineError::NotFound("B-tree root not found after delete".to_string()))?;
+            (new_root_entry.2, new_root_hash)
+          }
+          None => {
+            // Tree is empty -- store empty flat directory
+            let dir_value = Vec::new();
+            let content_key = directory_content_hash(&dir_value, &algo)?;
+            self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+            (dir_value, content_key)
+          }
+        }
+      }
       Some((_header, _key, value)) => {
-        if value.is_empty() {
+        // Flat format
+        let mut children = if value.is_empty() {
           Vec::new()
         } else {
           deserialize_child_entries(&value, hash_length)?
-        }
+        };
+
+        children.retain(|c| c.name != child_name);
+
+        let dir_value = serialize_child_entries(&children, hash_length);
+        let content_key = directory_content_hash(&dir_value, &algo)?;
+        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+        (dir_value, content_key)
       }
-      None => Vec::new(),
+      None => {
+        let dir_value = Vec::new();
+        let content_key = directory_content_hash(&dir_value, &algo)?;
+        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+        (dir_value, content_key)
+      }
     };
 
-    // Remove the child
-    children.retain(|c| c.name != child_name);
-
-    // Re-store directory at path-based key
-    let dir_value = serialize_child_entries(&children, hash_length);
-    self.engine.store_entry(
-      EntryType::DirectoryIndex,
-      &dir_key,
-      &dir_value,
-    )?;
-
-    // Also store at content-addressed key for immutable versioning
-    let content_key = directory_content_hash(&dir_value, &algo)?;
-    self.engine.store_entry(
-      EntryType::DirectoryIndex,
-      &content_key,
-      &dir_value,
-    )?;
+    // Store at path-based key
+    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
 
     // Propagate up
     if parent == "/" {
