@@ -377,3 +377,7 @@ path = "spec/http/explain_spec.rs"
 [[test]]
 name = "explain_engine_spec"
 path = "spec/engine/explain_engine_spec.rs"
+
+[[test]]
+name = "btree_spec"
+path = "spec/engine/btree_spec.rs"

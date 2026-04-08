@@ -34,7 +34,13 @@
 
 ## Completed: Aggregations — 47 tests
 
-## Total: 1,912 tests, all passing
+## In Progress: Content-Addressed B-Tree Directories
+- [ ] Tasks 1-2: Node types + serialization + B-tree operations
+- [ ] Task 3: Integrate into DirectoryOps
+- [ ] Task 4: Update tree walker + backup
+- [ ] Task 5: Performance benchmark
+
+## Total: 1,944 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests

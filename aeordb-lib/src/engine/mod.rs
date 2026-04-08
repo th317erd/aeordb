@@ -1,5 +1,6 @@
 pub mod append_writer;
 pub mod backup;
+pub mod btree;
 pub mod compression;
 pub mod content_type;
 pub mod deletion_record;
@@ -113,3 +114,11 @@ pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;
 pub use request_context::RequestContext;
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};
+pub use btree::{
+    BTreeNode, LeafNode, InternalNode,
+    BTREE_MAX_LEAF_ENTRIES, BTREE_MIN_LEAF_ENTRIES,
+    BTREE_MAX_INTERNAL_KEYS, BTREE_MIN_INTERNAL_KEYS,
+    BTREE_CONVERSION_THRESHOLD, is_btree_format,
+    btree_insert, btree_lookup, btree_list, btree_list_from_node,
+    btree_delete, btree_from_entries, store_btree_node,
+};
