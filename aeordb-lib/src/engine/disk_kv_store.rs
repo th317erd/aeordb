@@ -271,16 +271,20 @@ impl DiskKVStore {
 
     /// Flush the write buffer to disk.
     /// Groups entries by bucket, reads each affected page, merges, writes back.
+    /// If any bucket page overflows (> MAX_ENTRIES_PER_PAGE), automatically
+    /// resizes to the next stage and retries the flush.
     pub fn flush(&mut self) -> EngineResult<()> {
         if self.write_buffer.is_empty() {
             return Ok(());
         }
 
         let hash_length = self.hash_algo.hash_length();
+        let mut overflow_entries: Vec<KVEntry> = Vec::new();
 
         // Group buffered entries by NVT bucket
+        let buffer_entries: Vec<KVEntry> = self.write_buffer.drain().map(|(_, e)| e).collect();
         let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
-        for (_hash, entry) in self.write_buffer.drain() {
+        for entry in buffer_entries {
             let bucket = self.nvt.bucket_for_value(&entry.hash);
             by_bucket.entry(bucket).or_default().push(entry);
         }
@@ -299,11 +303,8 @@ impl DiskKVStore {
 
             // Merge new entries into existing page
             for entry in new_entries {
-                if !upsert_in_page(&mut existing, entry) {
-                    // Page full — would need resize (Task 5 handles this).
-                    return Err(EngineError::IoError(std::io::Error::other(
-                        "KV bucket page overflow — resize needed",
-                    )));
+                if !upsert_in_page(&mut existing, entry.clone()) {
+                    overflow_entries.push(entry);
                 }
             }
 
@@ -314,6 +315,72 @@ impl DiskKVStore {
         }
 
         self.kv_file.sync_data()?;
+
+        // Handle overflows: resize to next stage and retry
+        if !overflow_entries.is_empty() {
+            self.resize_to_next_stage()?;
+            for entry in overflow_entries {
+                self.write_buffer.insert(entry.hash.clone(), entry);
+            }
+            return self.flush();
+        }
+
+        Ok(())
+    }
+
+    /// Resize the KV store to the next stage (more buckets, larger file).
+    /// Reads all entries from the current file, creates a new file at the
+    /// next stage, inserts all non-deleted entries, and swaps the files.
+    pub fn resize_to_next_stage(&mut self) -> EngineResult<()> {
+        let new_stage = (self.stage + 1).min(KV_STAGES.len() - 1);
+        if new_stage == self.stage {
+            return Err(EngineError::IoError(std::io::Error::other(
+                "KV store at maximum stage — cannot resize further",
+            )));
+        }
+
+        // Read all non-deleted entries from current file
+        let all_entries = self.iter_all()?;
+
+        // Create new store at a temp path with the next stage
+        let temp_path = self.kv_path.with_extension("kv.resize");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let mut new_store = DiskKVStore::create_at_stage(
+            &temp_path, self.hash_algo, new_stage,
+        )?;
+
+        // Insert all entries into the new store
+        for entry in &all_entries {
+            new_store.insert(entry.clone());
+        }
+        new_store.flush()?;
+
+        // Drop the new store (closes its file handle) so the temp file
+        // can be renamed on all platforms. Clear its write buffer first
+        // to prevent the Drop impl from trying to flush.
+        new_store.write_buffer.clear();
+        drop(new_store);
+
+        // Swap files: rename temp -> current path
+        std::fs::rename(&temp_path, &self.kv_path)?;
+
+        // Reopen at the original path
+        self.kv_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.kv_path)?;
+
+        // Update internal state
+        self.stage = new_stage;
+        self.bucket_count = KV_STAGES[new_stage].1;
+        self.nvt = NormalizedVectorTable::new(
+            Box::new(HashConverter), self.bucket_count,
+        );
+        self.entry_count = all_entries.len();
+        self.hot_cache.clear();
+        self.cache_order.clear();
+
         Ok(())
     }
 

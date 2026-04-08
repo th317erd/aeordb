@@ -123,6 +123,13 @@ impl StorageEngine {
   }
 
   /// Internal open logic shared by `open` and `open_for_import`.
+  ///
+  /// If the `.kv` file already exists on disk, it is opened directly — no
+  /// full entry scan is needed for the KV index. We still scan for void
+  /// entries (they're tracked in-memory, not persisted in the KV file).
+  ///
+  /// If the `.kv` file does NOT exist, we create it and populate it from a
+  /// full scan of the main `.aeordb` file, including deletion replay.
   fn open_internal(path: &str) -> EngineResult<Self> {
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
@@ -131,12 +138,68 @@ impl StorageEngine {
 
     let mut void_manager = VoidManager::new(hash_algo);
 
-    // Always rebuild the KV file from a scan of the main .aeordb file.
-    // This ensures consistency even if the previous .kv file was stale
-    // (e.g., unflushed write buffer from a concurrent or prior open).
-    let _ = std::fs::remove_file(&kv_path);
+    // Decide whether to reuse the existing .kv file or rebuild from scan.
+    // The .kv is valid if:
+    //   1. It exists and has a valid file size (multiple of page_size)
+    //   2. It can be opened without errors
+    //   3. It's not stale — if the .aeordb has data, the .kv must have entries
+    let aeordb_has_entries = writer.file_size() > crate::engine::file_header::FILE_HEADER_SIZE as u64;
+    let hash_length = hash_algo.hash_length();
+    let min_kv_size = crate::engine::kv_pages::KV_STAGES[0].1 as u64
+      * crate::engine::kv_pages::page_size(hash_length) as u64;
 
-    let kv_store = {
+    let kv_is_valid = if Path::new(&kv_path).exists() {
+      // Check file size first — a valid .kv is at least stage-0 size
+      let kv_file_size = std::fs::metadata(&kv_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+      if kv_file_size < min_kv_size {
+        // Too small to be a valid .kv — remove and rebuild
+        let _ = std::fs::remove_file(&kv_path);
+        false
+      } else {
+        match DiskKVStore::open(Path::new(&kv_path), hash_algo) {
+          Ok(kv) => {
+            if aeordb_has_entries && kv.len() == 0 {
+              // Stale .kv — remove and rebuild
+              drop(kv);
+              let _ = std::fs::remove_file(&kv_path);
+              false
+            } else {
+              // Valid — close and re-open below
+              drop(kv);
+              true
+            }
+          }
+          Err(_) => {
+            // Corrupt .kv — remove and rebuild
+            let _ = std::fs::remove_file(&kv_path);
+            false
+          }
+        }
+      }
+    } else {
+      false
+    };
+
+    let kv_store = if kv_is_valid {
+      // KV file is valid — open it directly (skip full KV rebuild).
+      let kv = DiskKVStore::open(Path::new(&kv_path), hash_algo)?;
+
+      // Still scan for void entries (they're an in-memory optimization,
+      // not persisted in the KV file).
+      let scanner = writer.scan_entries()?;
+      for scanned_result in scanner {
+        let scanned = scanned_result?;
+        if scanned.header.entry_type == EntryType::Void {
+          void_manager.register_void(scanned.header.total_length, scanned.offset);
+        }
+      }
+
+      kv
+    } else {
+      // No KV file — create and populate from a full entry scan.
       let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo)?;
 
       // First pass: rebuild KV store from entry headers, collecting deletion records.

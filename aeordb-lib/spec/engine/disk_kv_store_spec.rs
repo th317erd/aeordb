@@ -1,7 +1,10 @@
 use aeordb::engine::disk_kv_store::DiskKVStore;
+use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::kv_pages::*;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED, KV_FLAG_PENDING};
+use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::RequestContext;
 use tempfile::tempdir;
 
 // ============================================================================
@@ -697,4 +700,616 @@ fn test_stage_accessor() {
     let store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
     assert_eq!(store.stage(), 0);
     assert_eq!(store.bucket_count(), 1024);
+}
+
+// ============================================================================
+// Task 4: Startup without full entry scan
+// ============================================================================
+
+#[test]
+fn test_open_existing_kv_skips_rebuild() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+    let kv_path = dir.path().join("test.aeordb.kv");
+
+    // Session 1: create engine, store files, close
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/file1.txt", b"hello", Some("text/plain")).unwrap();
+        ops.store_file(&ctx, "/file2.txt", b"world", Some("text/plain")).unwrap();
+    }
+
+    // The .kv file should exist on disk
+    assert!(kv_path.exists(), ".kv file should exist after engine close");
+
+    // Record the .kv file's modification time
+    let kv_metadata_before = std::fs::metadata(&kv_path).unwrap();
+    let kv_mtime_before = kv_metadata_before.modified().unwrap();
+
+    // Session 2: reopen — .kv exists, should open without full KV rebuild
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+
+        // Verify all entries still accessible
+        let content1 = ops.read_file("/file1.txt").unwrap();
+        assert_eq!(content1, b"hello");
+        let content2 = ops.read_file("/file2.txt").unwrap();
+        assert_eq!(content2, b"world");
+    }
+
+    // The .kv file's modification time should NOT have changed (no rebuild)
+    let kv_metadata_after = std::fs::metadata(&kv_path).unwrap();
+    let kv_mtime_after = kv_metadata_after.modified().unwrap();
+    assert_eq!(
+        kv_mtime_before, kv_mtime_after,
+        ".kv file should not be modified when reopening with existing .kv"
+    );
+}
+
+#[test]
+fn test_open_missing_kv_rebuilds_from_scan() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+    let kv_path = dir.path().join("test.aeordb.kv");
+
+    // Session 1: create engine, store files, close
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/alpha.txt", b"alpha data", Some("text/plain")).unwrap();
+        ops.store_file(&ctx, "/beta.txt", b"beta data", Some("text/plain")).unwrap();
+    }
+
+    // Delete the .kv file to force a rebuild
+    assert!(kv_path.exists());
+    std::fs::remove_file(&kv_path).unwrap();
+    assert!(!kv_path.exists());
+
+    // Session 2: reopen — .kv missing, should rebuild from scan
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+
+        // Verify all entries still accessible after rebuild
+        let content1 = ops.read_file("/alpha.txt").unwrap();
+        assert_eq!(content1, b"alpha data");
+        let content2 = ops.read_file("/beta.txt").unwrap();
+        assert_eq!(content2, b"beta data");
+    }
+
+    // .kv should have been recreated
+    assert!(kv_path.exists(), ".kv file should be recreated after rebuild");
+}
+
+#[test]
+fn test_cross_restart_with_disk_kv_500_files() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+
+    // Session 1: store 500 files
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+
+        for i in 0..500u32 {
+            let path = format!("/data/file_{:04}.txt", i);
+            let content = format!("Content for file {}", i);
+            ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+        }
+    }
+
+    // Session 2: reopen (uses existing .kv), verify all 500 readable
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+
+        for i in 0..500u32 {
+            let path = format!("/data/file_{:04}.txt", i);
+            let expected = format!("Content for file {}", i);
+            let content = ops.read_file(&path).unwrap();
+            assert_eq!(content, expected.as_bytes(), "File {} mismatch after restart", i);
+        }
+    }
+}
+
+#[test]
+fn test_stale_kv_detected_and_rebuilt() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+    let kv_path = dir.path().join("test.aeordb.kv");
+
+    // Session 1: create engine with data
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/important.txt", b"critical data", None).unwrap();
+    }
+
+    // Simulate a stale .kv by replacing it with an empty one
+    // (same stage-0 size but all zeros)
+    let hash_algo = HashAlgorithm::Blake3_256;
+    std::fs::remove_file(&kv_path).unwrap();
+    {
+        let _empty_kv = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        // Drops immediately — empty .kv with no entries
+    }
+
+    // Session 2: should detect stale .kv and rebuild
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let content = ops.read_file("/important.txt").unwrap();
+        assert_eq!(content, b"critical data", "Data should be accessible after stale .kv rebuild");
+    }
+}
+
+#[test]
+fn test_corrupt_kv_triggers_rebuild() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+    let kv_path = dir.path().join("test.aeordb.kv");
+
+    // Session 1: create engine with data
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/data.txt", b"test data", None).unwrap();
+    }
+
+    // Corrupt the .kv file by truncating it
+    std::fs::write(&kv_path, b"garbage").unwrap();
+
+    // Session 2: should detect corrupt .kv and rebuild
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let content = ops.read_file("/data.txt").unwrap();
+        assert_eq!(content, b"test data", "Data should be accessible after corrupt .kv rebuild");
+    }
+}
+
+#[test]
+fn test_deletion_replay_on_kv_rebuild() {
+    let ctx = RequestContext::system();
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+    let kv_path = dir.path().join("test.aeordb.kv");
+
+    // Session 1: store file, delete it, close
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/ephemeral.txt", b"gone soon", None).unwrap();
+        ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
+        ops.store_file(&ctx, "/survivor.txt", b"still here", None).unwrap();
+    }
+
+    // Delete .kv to force a rebuild with deletion replay
+    std::fs::remove_file(&kv_path).unwrap();
+
+    // Session 2: deleted file should stay deleted after rebuild
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        assert!(
+            ops.read_file("/ephemeral.txt").is_err(),
+            "Deleted file should remain deleted after .kv rebuild"
+        );
+        let content = ops.read_file("/survivor.txt").unwrap();
+        assert_eq!(content, b"still here");
+    }
+}
+
+#[test]
+fn test_empty_database_kv_reuse() {
+    let dir = tempdir().unwrap();
+    let engine_path = dir.path().join("test.aeordb");
+    let engine_path_str = engine_path.to_str().unwrap();
+
+    // Session 1: create engine with no data (just root dir)
+    {
+        let engine = StorageEngine::create(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let ctx = RequestContext::system();
+        ops.ensure_root_directory(&ctx).unwrap();
+    }
+
+    // Session 2: reopen should work cleanly
+    {
+        let engine = StorageEngine::open(engine_path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let children = ops.list_directory("/").unwrap();
+        assert!(children.is_empty(), "Empty database root should have no children after reopen");
+    }
+}
+
+// ============================================================================
+// Task 5: KV resize on overflow
+// ============================================================================
+
+/// Generate a unique hash for a given index using blake3.
+fn make_unique_hash(index: u32) -> Vec<u8> {
+    blake3::hash(&index.to_le_bytes()).as_bytes().to_vec()
+}
+
+#[test]
+fn test_resize_on_overflow() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    assert_eq!(store.stage(), 0);
+    assert_eq!(store.bucket_count(), 1024);
+
+    // Stage 0: 1024 buckets * 32 entries per page = 32,768 max entries.
+    // Insert 35,000 entries to force at least one overflow and resize.
+    let count = 35_000u32;
+    let mut hashes = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        let hash = make_unique_hash(i);
+        hashes.push(hash.clone());
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64 * 100,
+        });
+    }
+    store.flush().unwrap();
+
+    // Verify resize happened — stage should have increased
+    assert!(
+        store.stage() >= 1,
+        "Store should have resized to at least stage 1, got stage {}",
+        store.stage()
+    );
+
+    // Verify all entries are findable
+    for (i, hash) in hashes.iter().enumerate() {
+        let entry = store.get(hash);
+        assert!(
+            entry.is_some(),
+            "Entry {} should be findable after resize",
+            i
+        );
+        assert_eq!(entry.unwrap().offset, i as u64 * 100);
+    }
+}
+
+#[test]
+fn test_resize_preserves_all_entries() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+
+    let count = 5000u32;
+    let mut hashes = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        let hash = make_unique_hash(i);
+        hashes.push(hash.clone());
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    // Even if resize was triggered by auto-flush, all 5000 should be findable
+    for (i, hash) in hashes.iter().enumerate() {
+        let entry = store.get(hash);
+        assert!(entry.is_some(), "Entry {} should be preserved", i);
+        assert_eq!(entry.unwrap().offset, i as u64);
+    }
+    assert_eq!(store.len(), count as usize);
+}
+
+#[test]
+fn test_resize_stage_increases() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    assert_eq!(store.stage(), 0);
+
+    // Force overflow: stage 0 has 1024 buckets * 32 = 32,768 capacity.
+    // The pigeonhole principle means some buckets may fill before the
+    // theoretical max. Insert enough to guarantee overflow.
+    for i in 0..35_000u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    assert!(
+        store.stage() >= 1,
+        "Stage should increase after overflow, got {}",
+        store.stage()
+    );
+    assert!(
+        store.bucket_count() > 1024,
+        "Bucket count should increase after resize, got {}",
+        store.bucket_count()
+    );
+}
+
+#[test]
+fn test_resize_persists_across_reopen() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let count = 35_000u32;
+    let mut hashes = Vec::with_capacity(count as usize);
+
+    // Create, fill to overflow, close
+    {
+        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        for i in 0..count {
+            let hash = make_unique_hash(i);
+            hashes.push(hash.clone());
+            store.insert(KVEntry {
+                type_flags: KV_TYPE_CHUNK,
+                hash,
+                offset: i as u64,
+            });
+        }
+        store.flush().unwrap();
+        assert!(store.stage() >= 1);
+    }
+
+    // Reopen and verify
+    {
+        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        assert!(
+            store.stage() >= 1,
+            "Stage should persist across reopen, got {}",
+            store.stage()
+        );
+
+        // Verify all entries findable after reopen
+        for (i, hash) in hashes.iter().enumerate() {
+            let entry = store.get(hash);
+            assert!(
+                entry.is_some(),
+                "Entry {} should be findable after reopen of resized store",
+                i
+            );
+        }
+    }
+}
+
+#[test]
+fn test_flush_after_resize_works() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+
+    // Trigger resize
+    for i in 0..35_000u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    let stage_after_resize = store.stage();
+    assert!(stage_after_resize >= 1);
+
+    // Now insert more entries after resize
+    let extra_hashes: Vec<Vec<u8>> = (100_000..100_500u32)
+        .map(|i| make_unique_hash(i))
+        .collect();
+
+    for (i, hash) in extra_hashes.iter().enumerate() {
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_FILE_RECORD,
+            hash: hash.clone(),
+            offset: (i as u64 + 1_000_000),
+        });
+    }
+    store.flush().unwrap();
+
+    // Verify new entries are findable
+    for (i, hash) in extra_hashes.iter().enumerate() {
+        let entry = store.get(hash);
+        assert!(entry.is_some(), "Post-resize entry {} should be findable", i);
+        let found = entry.unwrap();
+        assert_eq!(found.offset, i as u64 + 1_000_000);
+        assert_eq!(found.entry_type(), KV_TYPE_FILE_RECORD);
+    }
+
+    // Stage should not have changed (500 more entries shouldn't trigger another resize)
+    assert_eq!(store.stage(), stage_after_resize);
+}
+
+#[test]
+fn test_create_at_stage() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    // Create directly at stage 2
+    let mut store = DiskKVStore::create_at_stage(&kv_path, hash_algo, 2).unwrap();
+    assert_eq!(store.stage(), 2);
+    assert_eq!(store.bucket_count(), KV_STAGES[2].1);
+
+    // Insert and verify
+    let hash = make_unique_hash(42);
+    store.insert(KVEntry {
+        type_flags: KV_TYPE_CHUNK,
+        hash: hash.clone(),
+        offset: 999,
+    });
+    store.flush().unwrap();
+
+    let entry = store.get(&hash).unwrap();
+    assert_eq!(entry.offset, 999);
+}
+
+#[test]
+fn test_create_at_stage_clamps_to_max() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    // Request a stage beyond the max — should clamp
+    let store = DiskKVStore::create_at_stage(&kv_path, hash_algo, 999).unwrap();
+    assert_eq!(store.stage(), KV_STAGES.len() - 1);
+}
+
+#[test]
+fn test_resize_at_max_stage_returns_error() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let last_stage = KV_STAGES.len() - 1;
+    let mut store = DiskKVStore::create_at_stage(&kv_path, hash_algo, last_stage).unwrap();
+    assert_eq!(store.stage(), last_stage);
+
+    // Attempting to resize when already at max stage should error
+    let result = store.resize_to_next_stage();
+    assert!(result.is_err(), "Resize at max stage should return an error");
+}
+
+#[test]
+fn test_resize_clears_hot_cache() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+
+    // Insert some entries and flush to populate disk
+    for i in 0..100u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    // Read entries to populate hot cache
+    let cache_hash = make_unique_hash(50);
+    let _ = store.get(&cache_hash);
+    assert!(store.is_cached(&cache_hash), "Entry should be in hot cache");
+
+    // Force resize
+    for i in 100..35_100u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    // Cache should be cleared after resize
+    assert!(
+        !store.is_cached(&cache_hash),
+        "Hot cache should be cleared after resize"
+    );
+
+    // But entry should still be findable
+    let entry = store.get(&cache_hash);
+    assert!(entry.is_some(), "Entry should still be findable after resize");
+    assert_eq!(entry.unwrap().offset, 50);
+}
+
+#[test]
+fn test_deleted_entries_not_migrated_on_resize() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+
+    // Insert entries, delete some
+    for i in 0..100u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    // Delete entries 0-49
+    for i in 0..50u32 {
+        let hash = make_unique_hash(i);
+        store.mark_deleted(&hash);
+    }
+    store.flush().unwrap();
+
+    let count_before = store.len();
+    assert_eq!(count_before, 50, "Should have 50 non-deleted entries");
+
+    // Trigger resize
+    for i in 1000..35_000u32 {
+        let hash = make_unique_hash(i);
+        store.insert(KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64,
+        });
+    }
+    store.flush().unwrap();
+
+    // Deleted entries should NOT be in the new store
+    for i in 0..50u32 {
+        let hash = make_unique_hash(i);
+        assert!(
+            store.get(&hash).is_none(),
+            "Deleted entry {} should not exist after resize",
+            i
+        );
+    }
+
+    // Non-deleted entries should still exist
+    for i in 50..100u32 {
+        let hash = make_unique_hash(i);
+        assert!(
+            store.get(&hash).is_some(),
+            "Non-deleted entry {} should survive resize",
+            i
+        );
+    }
 }
