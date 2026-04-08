@@ -40,7 +40,14 @@
 - [ ] Task 4: Update tree walker + backup
 - [ ] Task 5: Performance benchmark
 
-## Total: 1,944 tests, all passing
+## In Progress: Disk-Resident KV Store
+- [ ] Tasks 1-2: KV page format + DiskKVStore
+- [ ] Task 3: Wire into StorageEngine
+- [ ] Task 4: Startup without entry scan
+- [ ] Task 5: KV resize on overflow
+- [ ] Task 6: Benchmark to 250K
+
+## Total: 2,037 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests

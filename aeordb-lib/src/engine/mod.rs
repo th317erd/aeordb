@@ -3,6 +3,7 @@ pub mod backup;
 pub mod btree;
 pub mod compression;
 pub mod content_type;
+pub mod disk_kv_store;
 pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_ops;
@@ -25,6 +26,7 @@ pub mod index_config;
 pub mod index_store;
 pub mod indexing_pipeline;
 pub mod json_parser;
+pub mod kv_pages;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod nvt;
@@ -58,6 +60,12 @@ pub use errors::{EngineError, EngineResult};
 pub use file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
 pub use file_record::FileRecord;
 pub use hash_algorithm::HashAlgorithm;
+pub use disk_kv_store::DiskKVStore;
+pub use kv_pages::{
+  KV_STAGES, MAX_ENTRIES_PER_PAGE,
+  page_size, bucket_page_offset, serialize_page, deserialize_page,
+  find_in_page, upsert_in_page, stage_for_count,
+};
 pub use kv_store::{
   KVEntry, KVStore,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION,
