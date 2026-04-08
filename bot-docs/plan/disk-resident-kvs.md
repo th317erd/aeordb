@@ -34,11 +34,20 @@ hash → NVT (in memory) → bucket index → KV block page (on disk) → KV ent
 
 ## 3. NVT Resolution
 
-Current: 1,024 buckets. Too few at scale — 250K entries = ~250 per bucket.
+The NVT bucket count scales with the KV block stage — not a fixed size.
 
-New default: **65,536 buckets** (64K). At 250K entries = ~4 per bucket. At 1M entries = ~15 per bucket. Each bucket page read is tiny.
+| Stage | KV Block Size | NVT Buckets | Entries/Bucket (at capacity) |
+|-------|-------------|-------------|------------------------------|
+| 0 | 64 KB | 1,024 | ~1-2 |
+| 1 | 256 KB | 4,096 | ~1-2 |
+| 2 | 1 MB | 8,192 | ~3 |
+| 3 | 4 MB | 16,384 | ~6 |
+| 4 | 16 MB | 32,768 | ~12 |
+| 5 | 64 MB | 65,536 | ~23 |
+| 6 | 256 MB | 65,536 | ~92 |
+| 7 | 1 GB | 131,072 | ~183 |
 
-NVT size in memory: 64K × 16 bytes = 1MB. Negligible.
+Small databases start with 1,024 buckets (same as today). The NVT grows alongside the KV block when a resize is triggered. No waste for small databases, high resolution at scale.
 
 ---
 
@@ -321,3 +330,5 @@ Write throughput should be nearly flat — bounded by disk I/O for page writes a
 - Compression of KV block pages
 - MMAP for KV block access (use explicit seek + read for now)
 - Concurrent readers during KV page write (single-writer model)
+
+These have been added to `future-plans.md`.

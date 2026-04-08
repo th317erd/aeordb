@@ -508,6 +508,18 @@ Map trigrams to scalars. Each string produces multiple index entries (one per tr
 ### GPU-Offloaded NVT Compositing
 NVT masks are packed u64 bitsets — directly compatible with GPU compute shaders. Upload masks, run AND/OR/NOT kernels, download result. Database queries at framerate speeds.
 
+### Metrics-Driven KV Growth Prediction
+Use the metrics/event system to track write rate. If growth rate exceeds a threshold, skip one or two stages in the KV block stage table to proactively allocate headroom. Avoids frequent resizes during bulk imports.
+
+### KV Block Page Compression
+Compress KV block pages on disk (zstd, already available). Reduces disk I/O for large KV blocks at the cost of CPU for decompress on read. Most beneficial at stages 5+ where the KV block exceeds 64MB.
+
+### MMAP for KV Block Access
+Memory-map the KV block instead of explicit seek+read. Let the OS page cache handle hot/cold page management. Simplifies the hot cache implementation — the OS IS the cache. Requires careful handling of resize (remap after growth).
+
+### Concurrent KV Readers During Write
+Current model: single writer lock for all KV operations. At high concurrency, reads block behind writes. Allow concurrent readers via RwLock or lock-free read path (readers see a consistent snapshot while writer modifies a copy).
+
 ---
 
 ## URGENT: Event System (WebSocket + In-Process Channels)
