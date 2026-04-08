@@ -646,7 +646,7 @@ impl<'a> DirectoryOps<'a> {
       Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
         // === B-TREE FORMAT ===
         // Insert using already-loaded data (no redundant read/deserialize/hash)
-        let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_with_data(
+        let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_batched(
           self.engine, &value, child_entry, hash_length, &algo
         )?;
 

@@ -2,7 +2,7 @@ use crate::engine::directory_entry::{ChildEntry, serialize_child_entries, deseri
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::storage_engine::StorageEngine;
+use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 
 /// Maximum entries in a leaf node before splitting.
 pub const BTREE_MAX_LEAF_ENTRIES: usize = 40;
@@ -626,6 +626,121 @@ pub fn btree_delete(
                     } else {
                         let new_hash = store_btree_node(engine, &node, hash_length, algo)?;
                         Ok(Some(new_hash))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── Batched B-tree insert (write buffering) ────────────────────────────────
+
+/// Insert into a B-tree with batched writes.
+/// All node writes are accumulated in a WriteBatch and flushed at the end,
+/// reducing lock acquisitions from O(tree_depth) to O(1).
+/// Returns (new_root_hash, new_root_data) so the caller doesn't need to read it back.
+pub fn btree_insert_batched(
+    engine: &StorageEngine,
+    root_data: &[u8],
+    entry: ChildEntry,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+) -> EngineResult<(Vec<u8>, Vec<u8>)> {
+    let mut batch = WriteBatch::new();
+    let root_node = BTreeNode::deserialize(root_data, hash_length)?;
+
+    let result = btree_insert_node_batched(engine, root_node, entry, hash_length, algo, &mut batch)?;
+
+    let (new_hash, new_data) = match result {
+        InsertResult::Done(hash, data) => (hash, data),
+        InsertResult::Split(left_hash, split_key, right_hash) => {
+            let new_root = BTreeNode::Internal(InternalNode {
+                keys: vec![split_key],
+                children: vec![left_hash, right_hash],
+            });
+            let new_data = new_root.serialize(hash_length);
+            let new_hash = new_root.content_hash(hash_length, algo)?;
+            batch.add(EntryType::DirectoryIndex, new_hash.clone(), new_data.clone());
+            (new_hash, new_data)
+        }
+    };
+
+    // Flush all node writes in one batch
+    engine.flush_batch(batch)?;
+
+    Ok((new_hash, new_data))
+}
+
+fn btree_insert_node_batched(
+    engine: &StorageEngine,
+    node: BTreeNode,
+    entry: ChildEntry,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+    batch: &mut WriteBatch,
+) -> EngineResult<InsertResult> {
+    match node {
+        BTreeNode::Leaf(mut leaf) => {
+            leaf.upsert(entry);
+
+            if leaf.is_full() {
+                let (left, split_key, right) = leaf.split();
+                let left_node = BTreeNode::Leaf(left);
+                let right_node = BTreeNode::Leaf(right);
+                let left_hash = left_node.content_hash(hash_length, algo)?;
+                let right_hash = right_node.content_hash(hash_length, algo)?;
+                batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length));
+                batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length));
+                Ok(InsertResult::Split(left_hash, split_key, right_hash))
+            } else {
+                let node = BTreeNode::Leaf(leaf);
+                let data = node.serialize(hash_length);
+                let hash = node.content_hash(hash_length, algo)?;
+                batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+                Ok(InsertResult::Done(hash, data))
+            }
+        }
+        BTreeNode::Internal(mut internal) => {
+            let child_idx = internal.find_child_index(&entry.name);
+            let child_hash = internal.children[child_idx].clone();
+
+            // Read child node (still needs disk read)
+            let child_data = engine.get_entry(&child_hash)?
+                .ok_or_else(|| EngineError::NotFound(format!(
+                    "B-tree child not found: {}", hex::encode(&child_hash)
+                )))?;
+            let child_node = BTreeNode::deserialize(&child_data.2, hash_length)?;
+
+            let child_result = btree_insert_node_batched(engine, child_node, entry, hash_length, algo, batch)?;
+
+            match child_result {
+                InsertResult::Done(new_child_hash, _) => {
+                    internal.children[child_idx] = new_child_hash;
+                    let node = BTreeNode::Internal(internal);
+                    let data = node.serialize(hash_length);
+                    let hash = node.content_hash(hash_length, algo)?;
+                    batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+                    Ok(InsertResult::Done(hash, data))
+                }
+                InsertResult::Split(left_hash, split_key, right_hash) => {
+                    internal.children[child_idx] = left_hash;
+                    internal.insert_key(split_key.clone(), right_hash);
+
+                    if internal.is_full() {
+                        let (left, parent_split_key, right) = internal.split();
+                        let left_node = BTreeNode::Internal(left);
+                        let right_node = BTreeNode::Internal(right);
+                        let left_hash = left_node.content_hash(hash_length, algo)?;
+                        let right_hash = right_node.content_hash(hash_length, algo)?;
+                        batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length));
+                        batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length));
+                        Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
+                    } else {
+                        let node = BTreeNode::Internal(internal);
+                        let data = node.serialize(hash_length);
+                        let hash = node.content_hash(hash_length, algo)?;
+                        batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+                        Ok(InsertResult::Done(hash, data))
                     }
                 }
             }

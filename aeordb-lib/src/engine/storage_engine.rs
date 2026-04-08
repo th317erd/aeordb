@@ -18,6 +18,54 @@ use crate::engine::kv_store::{
 };
 use crate::engine::void_manager::VoidManager;
 
+/// A buffered batch of entries to write in one sequential operation.
+/// Accumulates entries in memory and flushes them all with a single
+/// lock acquisition on both the writer and KV store.
+pub struct WriteBatch {
+    entries: Vec<BatchEntry>,
+}
+
+struct BatchEntry {
+    entry_type: EntryType,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    kv_type: u8,
+}
+
+impl WriteBatch {
+    pub fn new() -> Self {
+        WriteBatch { entries: Vec::new() }
+    }
+
+    /// Add an entry to the batch.
+    pub fn add(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>) {
+        let kv_type = match entry_type {
+            EntryType::Chunk => KV_TYPE_CHUNK,
+            EntryType::FileRecord => KV_TYPE_FILE_RECORD,
+            EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
+            EntryType::DeletionRecord => KV_TYPE_DELETION,
+            EntryType::Snapshot => KV_TYPE_SNAPSHOT,
+            EntryType::Void => KV_TYPE_VOID,
+            EntryType::Fork => KV_TYPE_FORK,
+        };
+        self.entries.push(BatchEntry {
+            entry_type,
+            key,
+            value,
+            kv_type,
+        });
+    }
+
+    /// Number of entries in the batch.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 const DEFAULT_NVT_BUCKETS: usize = 1024;
 
 /// Result type for entry retrieval: (header, key, value).
@@ -387,6 +435,54 @@ impl StorageEngine {
     kv.insert(kv_entry);
 
     Ok(offset)
+  }
+
+  /// Write all entries in a batch with a single lock acquisition.
+  /// Each entry is appended sequentially, then all are registered in the KV store.
+  /// Returns the file offsets where entries were written.
+  pub fn flush_batch(&self, batch: WriteBatch) -> EngineResult<Vec<u64>> {
+    if batch.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let mut offsets = Vec::with_capacity(batch.entries.len());
+
+    // Single write lock acquisition for all entries
+    {
+      let mut writer = self.writer.write()
+        .map_err(|error| EngineError::IoError(
+          std::io::Error::other(error.to_string()),
+        ))?;
+
+      for entry in &batch.entries {
+        let offset = writer.append_entry(
+          entry.entry_type,
+          &entry.key,
+          &entry.value,
+          0, // flags
+        )?;
+        offsets.push(offset);
+      }
+    }
+
+    // Single KV lock acquisition for all KV inserts
+    {
+      let mut kv = self.kv_manager.write()
+        .map_err(|error| EngineError::IoError(
+          std::io::Error::other(error.to_string()),
+        ))?;
+
+      for (i, entry) in batch.entries.iter().enumerate() {
+        let kv_entry = KVEntry {
+          type_flags: entry.kv_type,
+          hash: entry.key.clone(),
+          offset: offsets[i],
+        };
+        kv.insert(kv_entry);
+      }
+    }
+
+    Ok(offsets)
   }
 
   /// Check if a KV entry is marked as deleted.

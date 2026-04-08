@@ -84,7 +84,7 @@ pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
 pub use engine_chunk_storage::EngineChunkStorage;
-pub use storage_engine::StorageEngine;
+pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash};
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
@@ -119,6 +119,7 @@ pub use btree::{
     BTREE_MAX_LEAF_ENTRIES, BTREE_MIN_LEAF_ENTRIES,
     BTREE_MAX_INTERNAL_KEYS, BTREE_MIN_INTERNAL_KEYS,
     BTREE_CONVERSION_THRESHOLD, is_btree_format,
-    btree_insert, btree_insert_with_data, btree_lookup, btree_list, btree_list_from_node,
+    btree_insert, btree_insert_with_data, btree_insert_batched,
+    btree_lookup, btree_list, btree_list_from_node,
     btree_delete, btree_from_entries, store_btree_node,
 };

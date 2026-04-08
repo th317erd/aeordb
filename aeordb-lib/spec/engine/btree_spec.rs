@@ -4,10 +4,11 @@ use aeordb::engine::btree::{
     BTreeNode, LeafNode, InternalNode,
     BTREE_MAX_LEAF_ENTRIES, BTREE_MAX_INTERNAL_KEYS,
     BTREE_LEAF_MARKER, BTREE_INTERNAL_MARKER,
-    is_btree_format, btree_insert, btree_lookup, btree_list,
+    is_btree_format, btree_insert, btree_insert_batched, btree_lookup, btree_list,
     btree_list_from_node, btree_delete, btree_from_entries,
     store_btree_node,
 };
+use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::storage_engine::StorageEngine;
@@ -893,4 +894,382 @@ fn test_btree_insert_performance_1000() {
     // Should complete in well under 5 seconds for 500 inserts
     assert!(duration.as_millis() < 5000, "500 inserts took {}ms - too slow", duration.as_millis());
     eprintln!("btree_insert: 500 inserts into 500-entry tree took {}ms", duration.as_millis());
+}
+
+// ─── WriteBatch tests ───────────────────────────────────────────────────────
+
+#[test]
+fn test_write_batch_basic() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+
+    let mut batch = WriteBatch::new();
+    batch.add(
+        aeordb::engine::EntryType::Chunk,
+        vec![1u8; 32],
+        b"hello".to_vec(),
+    );
+    batch.add(
+        aeordb::engine::EntryType::Chunk,
+        vec![2u8; 32],
+        b"world".to_vec(),
+    );
+
+    assert_eq!(batch.len(), 2);
+    assert!(!batch.is_empty());
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert_eq!(offsets.len(), 2);
+    // Offsets should be distinct and in order
+    assert!(offsets[0] < offsets[1], "Second offset should be after first");
+
+    // Verify both entries are readable
+    let e1 = engine.get_entry(&vec![1u8; 32]).unwrap();
+    assert!(e1.is_some());
+    assert_eq!(e1.unwrap().2, b"hello");
+    let e2 = engine.get_entry(&vec![2u8; 32]).unwrap();
+    assert!(e2.is_some());
+    assert_eq!(e2.unwrap().2, b"world");
+}
+
+#[test]
+fn test_write_batch_empty() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let batch = WriteBatch::new();
+    assert!(batch.is_empty());
+    assert_eq!(batch.len(), 0);
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert!(offsets.is_empty());
+}
+
+#[test]
+fn test_write_batch_single_entry() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let mut batch = WriteBatch::new();
+    batch.add(
+        aeordb::engine::EntryType::DirectoryIndex,
+        vec![0xAA; 32],
+        b"some directory data".to_vec(),
+    );
+
+    assert_eq!(batch.len(), 1);
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert_eq!(offsets.len(), 1);
+
+    let entry = engine.get_entry(&vec![0xAA; 32]).unwrap();
+    assert!(entry.is_some());
+    assert_eq!(entry.unwrap().2, b"some directory data");
+}
+
+#[test]
+fn test_write_batch_large() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let mut batch = WriteBatch::new();
+
+    for i in 0u8..100 {
+        let mut key = vec![0u8; 32];
+        key[0] = i;
+        key[1] = i;
+        batch.add(
+            aeordb::engine::EntryType::Chunk,
+            key,
+            format!("value_{}", i).into_bytes(),
+        );
+    }
+
+    assert_eq!(batch.len(), 100);
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert_eq!(offsets.len(), 100);
+
+    // Verify all readable
+    for i in 0u8..100 {
+        let mut key = vec![0u8; 32];
+        key[0] = i;
+        key[1] = i;
+        let entry = engine.get_entry(&key).unwrap();
+        assert!(entry.is_some(), "Entry {} should be readable", i);
+        assert_eq!(entry.unwrap().2, format!("value_{}", i).into_bytes());
+    }
+}
+
+#[test]
+fn test_write_batch_mixed_entry_types() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let mut batch = WriteBatch::new();
+
+    batch.add(aeordb::engine::EntryType::Chunk, vec![1u8; 32], b"chunk".to_vec());
+    batch.add(aeordb::engine::EntryType::DirectoryIndex, vec![2u8; 32], b"dir".to_vec());
+    batch.add(aeordb::engine::EntryType::FileRecord, vec![3u8; 32], b"file".to_vec());
+
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert_eq!(offsets.len(), 3);
+
+    // All should be readable
+    assert!(engine.get_entry(&vec![1u8; 32]).unwrap().is_some());
+    assert!(engine.get_entry(&vec![2u8; 32]).unwrap().is_some());
+    assert!(engine.get_entry(&vec![3u8; 32]).unwrap().is_some());
+}
+
+#[test]
+fn test_write_batch_duplicate_key_last_wins() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let mut batch = WriteBatch::new();
+
+    // Same key, different values
+    batch.add(aeordb::engine::EntryType::Chunk, vec![1u8; 32], b"first".to_vec());
+    batch.add(aeordb::engine::EntryType::Chunk, vec![1u8; 32], b"second".to_vec());
+
+    let offsets = engine.flush_batch(batch).unwrap();
+    assert_eq!(offsets.len(), 2);
+
+    // The KV store should have the second (last) value since it overwrites
+    let entry = engine.get_entry(&vec![1u8; 32]).unwrap().unwrap();
+    assert_eq!(entry.2, b"second");
+}
+
+// ─── Batched B-tree insert tests ────────────────────────────────────────────
+
+#[test]
+fn test_btree_insert_batched_single() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let root_data = engine.get_entry(&root).unwrap().unwrap().2;
+
+    let (new_hash, _) = btree_insert_batched(&engine, &root_data, make_entry("alpha"), hash_length, &algo).unwrap();
+
+    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length).unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().name, "alpha");
+}
+
+#[test]
+fn test_btree_insert_batched_multiple_sequential() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let mut current_data = engine.get_entry(&root).unwrap().unwrap().2;
+
+    for i in 0..20 {
+        let (new_hash, new_data) = btree_insert_batched(
+            &engine, &current_data, make_entry(&format!("item_{:03}", i)), hash_length, &algo
+        ).unwrap();
+        current_data = new_data;
+
+        // Verify findable after each insert
+        let found = btree_lookup(&engine, &new_hash, &format!("item_{:03}", i), hash_length).unwrap();
+        assert!(found.is_some(), "Could not find item_{:03} after insert", i);
+    }
+
+    // Verify all entries
+    let last_hash = BTreeNode::deserialize(&current_data, hash_length).unwrap()
+        .content_hash(hash_length, &algo).unwrap();
+    let all = btree_list(&engine, &last_hash, hash_length).unwrap();
+    assert_eq!(all.len(), 20);
+}
+
+#[test]
+fn test_btree_insert_batched_causes_split() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let mut current_data = engine.get_entry(&root).unwrap().unwrap().2;
+    let mut last_hash = root;
+
+    let count = BTREE_MAX_LEAF_ENTRIES + 5;
+    for i in 0..count {
+        let (new_hash, new_data) = btree_insert_batched(
+            &engine, &current_data, make_entry(&format!("entry_{:04}", i)), hash_length, &algo
+        ).unwrap();
+        current_data = new_data;
+        last_hash = new_hash;
+    }
+
+    // Root should now be an internal node (split happened)
+    let root_data = engine.get_entry(&last_hash).unwrap().unwrap();
+    let root_node = BTreeNode::deserialize(&root_data.2, hash_length).unwrap();
+    assert!(!root_node.is_leaf(), "Root should be internal after split");
+
+    // All entries findable
+    for i in 0..count {
+        let found = btree_lookup(&engine, &last_hash, &format!("entry_{:04}", i), hash_length).unwrap();
+        assert!(found.is_some(), "Could not find entry_{:04} after batched insert", i);
+    }
+}
+
+#[test]
+fn test_btree_insert_batched_correctness() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    // Build initial tree
+    let entries: Vec<ChildEntry> = (0..100).map(|i| make_entry(&format!("f_{:05}", i))).collect();
+    let root_hash = btree_from_entries(&engine, entries, hash_length, &algo).unwrap();
+    let root_data = engine.get_entry(&root_hash).unwrap().unwrap().2;
+
+    // Insert using batched version
+    let (new_hash, _) = btree_insert_batched(&engine, &root_data, make_entry("f_new"), hash_length, &algo).unwrap();
+
+    // Verify the new entry is findable
+    let found = btree_lookup(&engine, &new_hash, "f_new", hash_length).unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().name, "f_new");
+
+    // Verify all old entries still findable
+    let all = btree_list(&engine, &new_hash, hash_length).unwrap();
+    assert_eq!(all.len(), 101);
+}
+
+#[test]
+fn test_btree_insert_batched_update_existing() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let mut current_data = engine.get_entry(&root).unwrap().unwrap().2;
+
+    let (_, new_data) = btree_insert_batched(
+        &engine, &current_data, make_entry("alpha"), hash_length, &algo
+    ).unwrap();
+    current_data = new_data;
+
+    // Update with different hash
+    let (new_hash, _) = btree_insert_batched(
+        &engine, &current_data, make_entry_with_hash("alpha", 0xFF), hash_length, &algo
+    ).unwrap();
+
+    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length).unwrap().unwrap();
+    assert_eq!(found.hash, vec![0xFF; 32]);
+
+    let all = btree_list(&engine, &new_hash, hash_length).unwrap();
+    assert_eq!(all.len(), 1);
+}
+
+#[test]
+fn test_btree_insert_batched_sorted_order() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let mut current_data = engine.get_entry(&root).unwrap().unwrap().2;
+    let mut last_hash = root;
+
+    // Insert in reverse order
+    for i in (0..50).rev() {
+        let (new_hash, new_data) = btree_insert_batched(
+            &engine, &current_data, make_entry(&format!("item_{:03}", i)), hash_length, &algo
+        ).unwrap();
+        current_data = new_data;
+        last_hash = new_hash;
+    }
+
+    let entries = btree_list(&engine, &last_hash, hash_length).unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "Entries should be in sorted order");
+}
+
+#[test]
+fn test_btree_insert_batched_matches_unbatched() {
+    // Verify that batched and unbatched produce identical tree content
+    let (engine1, _temp1) = create_temp_engine_for_tests();
+    let (engine2, _temp2) = create_temp_engine_for_tests();
+    let algo = engine1.hash_algo();
+    let hash_length = algo.hash_length();
+
+    // Unbatched path
+    let mut root1 = create_empty_root(&engine1);
+    for i in 0..60 {
+        root1 = btree_insert(&engine1, &root1, make_entry(&format!("item_{:03}", i)), hash_length, &algo).unwrap();
+    }
+
+    // Batched path
+    let root2_hash = {
+        let empty_root = create_empty_root(&engine2);
+        let mut current_data = engine2.get_entry(&empty_root).unwrap().unwrap().2;
+        let mut last_hash = empty_root;
+        for i in 0..60 {
+            let (new_hash, new_data) = btree_insert_batched(
+                &engine2, &current_data, make_entry(&format!("item_{:03}", i)), hash_length, &algo
+            ).unwrap();
+            current_data = new_data;
+            last_hash = new_hash;
+        }
+        last_hash
+    };
+
+    // Both should have the same entries
+    let list1 = btree_list(&engine1, &root1, hash_length).unwrap();
+    let list2 = btree_list(&engine2, &root2_hash, hash_length).unwrap();
+    assert_eq!(list1.len(), list2.len());
+    for (a, b) in list1.iter().zip(list2.iter()) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.total_size, b.total_size);
+    }
+}
+
+#[test]
+fn test_btree_insert_batched_performance() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let entries: Vec<ChildEntry> = (0..500).map(|i| make_entry(&format!("f_{:05}", i))).collect();
+    let root_hash = btree_from_entries(&engine, entries, hash_length, &algo).unwrap();
+
+    let start = std::time::Instant::now();
+    let mut current_data = engine.get_entry(&root_hash).unwrap().unwrap().2;
+    let mut last_hash = root_hash;
+    for i in 500..1000 {
+        let (new_hash, new_data) = btree_insert_batched(
+            &engine, &current_data, make_entry(&format!("f_{:05}", i)), hash_length, &algo
+        ).unwrap();
+        current_data = new_data;
+        last_hash = new_hash;
+    }
+    let batched_duration = start.elapsed();
+
+    let all = btree_list(&engine, &last_hash, hash_length).unwrap();
+    assert_eq!(all.len(), 1000);
+
+    // Should be faster than the non-batched threshold
+    assert!(batched_duration.as_millis() < 3000, "500 batched inserts took {}ms", batched_duration.as_millis());
+    eprintln!("btree_insert_batched: 500 inserts into 500-entry tree took {}ms", batched_duration.as_millis());
+}
+
+#[test]
+fn test_btree_insert_batched_many_splits() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let root = create_empty_root(&engine);
+    let mut current_data = engine.get_entry(&root).unwrap().unwrap().2;
+    let mut last_hash = root;
+
+    for i in 0..500 {
+        let (new_hash, new_data) = btree_insert_batched(
+            &engine, &current_data, make_entry(&format!("item_{:05}", i)), hash_length, &algo
+        ).unwrap();
+        current_data = new_data;
+        last_hash = new_hash;
+    }
+
+    // All findable
+    for i in 0..500 {
+        let found = btree_lookup(&engine, &last_hash, &format!("item_{:05}", i), hash_length).unwrap();
+        assert!(found.is_some(), "Could not find item_{:05} after 500 batched inserts", i);
+    }
+
+    let entries = btree_list(&engine, &last_hash, hash_length).unwrap();
+    assert_eq!(entries.len(), 500);
 }
