@@ -71,9 +71,42 @@ impl KVStore {
         self.entries[index] = entry;
       }
       Err(index) => {
+        // Determine which bucket this entry belongs to
+        let bucket_index = self.nvt.bucket_for_value(&entry.hash);
+
         // New entry: insert at sorted position
         self.entries.insert(index, entry);
-        self.rebuild_nvt();
+
+        // Incrementally update NVT — O(buckets) instead of O(entries)
+        self.nvt_increment(bucket_index, index);
+      }
+    }
+  }
+
+  /// Incrementally update the NVT after inserting one entry at `insert_index`
+  /// into bucket `bucket_index`. Much faster than full rebuild — O(bucket_count)
+  /// instead of O(entry_count).
+  fn nvt_increment(&mut self, bucket_index: usize, insert_index: usize) {
+    let bucket_count = self.nvt.bucket_count();
+
+    // Shift offsets of all buckets whose start is at or after insert_index
+    for i in 0..bucket_count {
+      let bucket = self.nvt.get_bucket(i);
+      if i == bucket_index {
+        // This is the bucket we're inserting into
+        if bucket.entry_count == 0 {
+          // Bucket was empty — set it up
+          self.nvt.update_bucket(i, insert_index as u64, 1);
+        } else {
+          // Bucket already has entries — just increment count
+          // The offset stays the same if insert_index == bucket start,
+          // or the bucket already accounts for this position
+          let new_offset = bucket.kv_block_offset.min(insert_index as u64);
+          self.nvt.update_bucket(i, new_offset, bucket.entry_count + 1);
+        }
+      } else if bucket.kv_block_offset as usize >= insert_index && bucket.entry_count > 0 {
+        // This bucket starts after the insertion point — shift offset by 1
+        self.nvt.update_bucket(i, bucket.kv_block_offset + 1, bucket.entry_count);
       }
     }
   }
@@ -103,11 +136,34 @@ impl KVStore {
     let position = self.entries.binary_search_by(|entry| entry.hash.as_slice().cmp(hash));
     match position {
       Ok(index) => {
+        let bucket_index = self.nvt.bucket_for_value(hash);
         let removed = self.entries.remove(index);
-        self.rebuild_nvt();
+        self.nvt_decrement(bucket_index, index);
         Some(removed)
       }
       Err(_) => None,
+    }
+  }
+
+  /// Incrementally update the NVT after removing one entry at `remove_index`
+  /// from bucket `bucket_index`.
+  fn nvt_decrement(&mut self, bucket_index: usize, remove_index: usize) {
+    let bucket_count = self.nvt.bucket_count();
+
+    for i in 0..bucket_count {
+      let bucket = self.nvt.get_bucket(i);
+      if bucket.entry_count == 0 {
+        continue;
+      }
+      if i == bucket_index {
+        if bucket.entry_count <= 1 {
+          self.nvt.update_bucket(i, 0, 0);
+        } else {
+          self.nvt.update_bucket(i, bucket.kv_block_offset, bucket.entry_count - 1);
+        }
+      } else if bucket.kv_block_offset as usize > remove_index {
+        self.nvt.update_bucket(i, bucket.kv_block_offset - 1, bucket.entry_count);
+      }
     }
   }
 
