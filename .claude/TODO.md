@@ -32,16 +32,9 @@
 - [x] Tasks 1-3: Types + execute_paginated + sorting — 31 tests
 - [x] Tasks 4-5+7: Cursors + HTTP envelope + QueryBuilder — 25 tests
 
-## In Progress: Aggregations
-- [ ] AggregateQuery, AggregateResult, GroupResult types
-- [ ] bytes_to_numeric helper (reverse json_value_to_bytes)
-- [ ] execute_aggregate in QueryEngine
-- [ ] COUNT, SUM, AVG, MIN, MAX
-- [ ] GROUP BY (single + multi-field)
-- [ ] HTTP API (aggregate in query request + response)
-- [ ] Tests (unit + integration + HTTP + E2E)
+## Completed: Aggregations — 47 tests
 
-## Total: 1,865 tests, all passing
+## Total: 1,912 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
