@@ -6,7 +6,7 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_store::{FieldIndex, IndexManager};
 use aeordb::engine::query_engine::{
-    FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy,
+    FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
 };
 use aeordb::engine::scalar_converter::{StringConverter, TrigramConverter};
 use aeordb::engine::storage_engine::StorageEngine;
@@ -302,6 +302,7 @@ fn test_fuzzy_contains_with_parser() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results = qe.execute(&query).expect("contains query");
@@ -355,6 +356,7 @@ fn test_fuzzy_similar_with_parser() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results = qe.execute(&query).expect("similar query");
@@ -447,6 +449,7 @@ fn test_json_file_fuzzy_still_works() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results = qe.execute(&query).expect("contains query on JSON");
@@ -560,6 +563,7 @@ fn test_contains_query_no_match_returns_empty() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results = qe.execute(&query).expect("contains query");

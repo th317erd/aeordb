@@ -2,7 +2,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{
     QueryEngine, QueryBuilder, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy,
-    SortField, SortDirection, DEFAULT_QUERY_LIMIT,
+    SortField, SortDirection, DEFAULT_QUERY_LIMIT, ExplainMode,
 };
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
@@ -135,6 +135,7 @@ fn make_query_all_people() -> Query {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     }
 }
 
@@ -265,6 +266,7 @@ fn test_empty_result_set() {
         include_total: true,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let paginated = qe.execute_paginated(&query).unwrap();
 
@@ -443,6 +445,7 @@ fn test_sort_non_order_preserving_errors() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let result = qe.execute_paginated(&query);
@@ -708,6 +711,7 @@ fn test_execute_paginated_with_no_node() {
         include_total: true,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let paginated = qe.execute_paginated(&query).unwrap();
 

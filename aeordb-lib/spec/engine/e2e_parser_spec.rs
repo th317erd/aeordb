@@ -157,7 +157,7 @@ fn test_e2e_parser_query_u64_after_store() {
     .expect("store goodbye");
 
     use aeordb::engine::query_engine::{
-        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy,
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
     };
     let qe = QueryEngine::new(&engine);
 
@@ -177,6 +177,7 @@ fn test_e2e_parser_query_u64_after_store() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results = qe.execute(&query).expect("query word_count=3");
@@ -207,6 +208,7 @@ fn test_e2e_parser_query_u64_after_store() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
 
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
@@ -379,7 +381,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
     .expect("store gamma");
 
     use aeordb::engine::query_engine::{
-        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy,
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
     };
     let qe = QueryEngine::new(&engine);
 
@@ -399,6 +401,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let results = qe.execute(&query).expect("query word_count=9");
     assert!(
@@ -423,6 +426,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
     assert!(
@@ -447,6 +451,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let results_range = qe.execute(&query_range).expect("query word_count 7-10");
     assert!(

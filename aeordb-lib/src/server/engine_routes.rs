@@ -16,7 +16,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery};
+use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -494,6 +494,8 @@ pub struct QueryRequest {
   pub before: Option<String>,
   pub include_total: Option<bool>,
   pub aggregate: Option<AggregateRequestData>,
+  pub select: Option<Vec<String>>,
+  pub explain: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -694,6 +696,67 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
   Err(format!("Invalid where clause structure: {}", value))
 }
 
+// ---------------------------------------------------------------------------
+// Projection helpers
+// ---------------------------------------------------------------------------
+
+/// Map virtual `@`-prefixed field names to their actual JSON keys.
+fn map_select_fields(select: &[String]) -> Vec<String> {
+  select.iter().map(|s| {
+    match s.as_str() {
+      "@path" => "path".to_string(),
+      "@score" => "score".to_string(),
+      "@size" => "total_size".to_string(),
+      "@content_type" => "content_type".to_string(),
+      "@created_at" => "created_at".to_string(),
+      "@updated_at" => "updated_at".to_string(),
+      "@matched_by" => "matched_by".to_string(),
+      other => other.to_string(),
+    }
+  }).collect()
+}
+
+/// Filter a JSON response to include only selected fields.
+/// For arrays of objects (results), filters each object.
+/// For objects with a "results" array (envelope), filters each result inside.
+/// Envelope fields (has_more, next_cursor, etc.) are never stripped.
+fn apply_projection(response: &mut serde_json::Value, select: &[String]) {
+  if select.is_empty() {
+    return;
+  }
+
+  // Build the set of allowed keys
+  let allowed: std::collections::HashSet<&str> = select.iter().map(|s| s.as_str()).collect();
+
+  if let Some(obj) = response.as_object_mut() {
+    // Check if this is an envelope with "results" array
+    if let Some(results) = obj.get_mut("results") {
+      if let Some(arr) = results.as_array_mut() {
+        for item in arr.iter_mut() {
+          filter_object(item, &allowed);
+        }
+      }
+    }
+    // else: flat object (e.g., aggregation result) — don't filter it
+  } else if let Some(arr) = response.as_array_mut() {
+    // Flat array of results
+    for item in arr.iter_mut() {
+      filter_object(item, &allowed);
+    }
+  }
+}
+
+fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::HashSet<&str>) {
+  if let Some(obj) = value.as_object_mut() {
+    let keys: Vec<String> = obj.keys().cloned().collect();
+    for key in keys {
+      if !allowed.contains(key.as_str()) {
+        obj.remove(&key);
+      }
+    }
+  }
+}
+
 /// POST /query -- execute an index query and return matching file metadata.
 /// Supports both legacy array format and nested boolean object format.
 /// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total_count? }
@@ -726,6 +789,51 @@ pub async fn query_endpoint(
     }).collect())
     .unwrap_or_default();
 
+  // Determine explain mode
+  let explain_mode = match body.explain.as_ref() {
+    Some(v) if v == "analyze" || v == &serde_json::json!("analyze") => ExplainMode::Analyze,
+    Some(v) if v.as_bool().unwrap_or(false) || v == "plan" || v == &serde_json::json!("plan") => ExplainMode::Plan,
+    _ => ExplainMode::Off,
+  };
+
+  // Handle EXPLAIN mode -- short-circuits normal response path
+  if explain_mode != ExplainMode::Off {
+    let agg = body.aggregate.as_ref().map(|agg_data| AggregateQuery {
+      count: agg_data.count,
+      sum: agg_data.sum.clone(),
+      avg: agg_data.avg.clone(),
+      min: agg_data.min.clone(),
+      max: agg_data.max.clone(),
+      group_by: agg_data.group_by.clone(),
+    });
+
+    let query = Query {
+      path: body.path.clone(),
+      field_queries: Vec::new(),
+      node: if is_empty { None } else { Some(query_node.clone()) },
+      limit: body.limit,
+      offset: body.offset,
+      order_by: order_by.clone(),
+      after: body.after.clone(),
+      before: body.before.clone(),
+      include_total: body.include_total.unwrap_or(false),
+      strategy: QueryStrategy::Full,
+      aggregate: agg,
+      explain: explain_mode,
+    };
+
+    let query_engine = QueryEngine::new(&state.engine);
+    match query_engine.execute_explain(&query) {
+      Ok(result) => {
+        return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
+      }
+      Err(e) => {
+        return ErrorResponse::new(format!("Explain failed: {}", e))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+      }
+    }
+  }
+
   // If aggregate query, use execute_aggregate
   if let Some(ref agg_data) = body.aggregate {
     let agg_query = AggregateQuery {
@@ -749,12 +857,21 @@ pub async fn query_endpoint(
       include_total: body.include_total.unwrap_or(false),
       strategy: QueryStrategy::Full,
       aggregate: Some(agg_query),
+      explain: ExplainMode::Off,
     };
 
     let query_engine = QueryEngine::new(&state.engine);
     match query_engine.execute_aggregate(&query) {
       Ok(result) => {
-        return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
+        let mut response_value = serde_json::to_value(&result).unwrap();
+        // Apply projection if select is specified
+        if let Some(ref select) = body.select {
+          if !select.is_empty() {
+            let mapped = map_select_fields(select);
+            apply_projection(&mut response_value, &mapped);
+          }
+        }
+        return (StatusCode::OK, Json(response_value)).into_response();
       }
       Err(EngineError::NotFound(msg)) => {
         return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
@@ -778,6 +895,7 @@ pub async fn query_endpoint(
     include_total: body.include_total.unwrap_or(false),
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&state.engine);
@@ -815,6 +933,14 @@ pub async fn query_endpoint(
       if paginated.default_limit_hit {
         response["default_limit_hit"] = serde_json::json!(true);
         response["default_limit"] = serde_json::json!(DEFAULT_QUERY_LIMIT);
+      }
+
+      // Apply projection if select is specified
+      if let Some(ref select) = body.select {
+        if !select.is_empty() {
+          let mapped = map_select_fields(select);
+          apply_projection(&mut response, &mapped);
+        }
       }
 
       (StatusCode::OK, Json(response)).into_response()

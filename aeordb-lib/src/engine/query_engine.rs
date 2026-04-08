@@ -130,6 +130,28 @@ pub enum QueryStrategy {
   Auto,
 }
 
+/// EXPLAIN mode for query introspection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExplainMode {
+  Off,
+  Plan,     // plan only, no execution
+  Analyze,  // plan + execution + results
+}
+
+impl Default for ExplainMode {
+  fn default() -> Self { ExplainMode::Off }
+}
+
+/// Result of an EXPLAIN query.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainResult {
+  pub plan: serde_json::Value,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub execution: Option<serde_json::Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub results: Option<serde_json::Value>,
+}
+
 /// A complete query: path + query node tree + optional limit + strategy.
 #[derive(Debug, Clone)]
 pub struct Query {
@@ -144,6 +166,7 @@ pub struct Query {
   pub include_total: bool,
   pub strategy: QueryStrategy,
   pub aggregate: Option<AggregateQuery>,
+  pub explain: ExplainMode,
 }
 
 /// Aggregation query -- what statistics to compute over the result set.
@@ -476,6 +499,159 @@ impl<'a> QueryEngine<'a> {
       prev_cursor,
       default_limit_hit,
     })
+  }
+
+  /// Execute an EXPLAIN query, returning plan info and optionally execution metrics + results.
+  pub fn execute_explain(&self, query: &Query) -> EngineResult<ExplainResult> {
+    let index_manager = IndexManager::new(self.engine);
+
+    // Build the plan by analyzing the query structure
+    let plan = self.build_plan(query, &index_manager)?;
+
+    if query.explain == ExplainMode::Plan {
+      return Ok(ExplainResult {
+        plan,
+        execution: None,
+        results: None,
+      });
+    }
+
+    // Analyze mode: execute and time it
+    let start = std::time::Instant::now();
+
+    let (results_json, candidate_count, result_count) = if query.aggregate.is_some() {
+      let agg_result = self.execute_aggregate(query)?;
+      let count = agg_result.count.unwrap_or(0);
+      (Some(serde_json::to_value(&agg_result).unwrap_or_default()), count as usize, count as usize)
+    } else {
+      let paginated = self.execute_paginated(query)?;
+      let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
+      let returned = paginated.results.len();
+      let results_value = serde_json::json!({
+        "results": paginated.results.iter().map(|r| {
+          serde_json::json!({
+            "path": r.file_record.path,
+            "score": r.score,
+          })
+        }).collect::<Vec<_>>(),
+        "has_more": paginated.has_more,
+      });
+      (Some(results_value), total as usize, returned)
+    };
+
+    let duration = start.elapsed();
+
+    let execution = serde_json::json!({
+      "total_duration_ms": duration.as_secs_f64() * 1000.0,
+      "candidates_generated": candidate_count,
+      "results_returned": result_count,
+    });
+
+    Ok(ExplainResult {
+      plan,
+      execution: Some(execution),
+      results: results_json,
+    })
+  }
+
+  /// Build a query execution plan without running the query.
+  fn build_plan(&self, query: &Query, index_manager: &IndexManager) -> EngineResult<serde_json::Value> {
+    let mut plan = serde_json::Map::new();
+
+    // Analyze the query node tree
+    if let Some(ref node) = query.node {
+      plan.insert("query_tree".to_string(), self.explain_node(node, &query.path, index_manager)?);
+      plan.insert("bitmap_compositing".to_string(),
+        serde_json::json!(should_use_bitmap_compositing(node)));
+    }
+
+    if !query.order_by.is_empty() {
+      let sort_fields: Vec<serde_json::Value> = query.order_by.iter().map(|sf| {
+        serde_json::json!({
+          "field": sf.field,
+          "direction": match sf.direction { SortDirection::Asc => "asc", SortDirection::Desc => "desc" },
+        })
+      }).collect();
+      plan.insert("order_by".to_string(), serde_json::json!(sort_fields));
+    }
+
+    if let Some(ref agg) = query.aggregate {
+      plan.insert("aggregate".to_string(), serde_json::json!({
+        "count": agg.count,
+        "sum": agg.sum,
+        "avg": agg.avg,
+        "min": agg.min,
+        "max": agg.max,
+        "group_by": agg.group_by,
+      }));
+    }
+
+    plan.insert("limit".to_string(), serde_json::json!(query.limit.unwrap_or(DEFAULT_QUERY_LIMIT)));
+    if let Some(offset) = query.offset {
+      plan.insert("offset".to_string(), serde_json::json!(offset));
+    }
+
+    Ok(serde_json::Value::Object(plan))
+  }
+
+  /// Explain a single query node, showing field info, operation, and index details.
+  fn explain_node(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<serde_json::Value> {
+    match node {
+      QueryNode::Field(fq) => {
+        let op_name = match &fq.operation {
+          QueryOp::Eq(_) => "eq",
+          QueryOp::Gt(_) => "gt",
+          QueryOp::Lt(_) => "lt",
+          QueryOp::Between(_, _) => "between",
+          QueryOp::In(_) => "in",
+          QueryOp::Contains(_) => "contains",
+          QueryOp::Similar(_, _) => "similar",
+          QueryOp::Phonetic(_) => "phonetic",
+          QueryOp::Fuzzy(_, _) => "fuzzy",
+          QueryOp::Match(_) => "match",
+        };
+
+        let indexes = index_manager.load_indexes_for_field(path, &fq.field_name)
+          .unwrap_or_default();
+        let index_info: Vec<serde_json::Value> = indexes.iter().map(|idx| {
+          serde_json::json!({
+            "strategy": idx.converter.strategy(),
+            "type": idx.converter.name(),
+            "entries": idx.entries.len(),
+            "order_preserving": idx.converter.is_order_preserving(),
+            "values_stored": idx.values.len(),
+          })
+        }).collect();
+
+        let needs_recheck = matches!(&fq.operation,
+          QueryOp::Contains(_) | QueryOp::Similar(_, _) |
+          QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_));
+
+        Ok(serde_json::json!({
+          "type": "field",
+          "field": fq.field_name,
+          "operation": op_name,
+          "indexes": index_info,
+          "recheck": needs_recheck,
+        }))
+      }
+      QueryNode::And(children) => {
+        let child_plans: Vec<serde_json::Value> = children.iter()
+          .map(|c| self.explain_node(c, path, index_manager))
+          .collect::<EngineResult<Vec<_>>>()?;
+        Ok(serde_json::json!({"type": "and", "children": child_plans}))
+      }
+      QueryNode::Or(children) => {
+        let child_plans: Vec<serde_json::Value> = children.iter()
+          .map(|c| self.explain_node(c, path, index_manager))
+          .collect::<EngineResult<Vec<_>>>()?;
+        Ok(serde_json::json!({"type": "or", "children": child_plans}))
+      }
+      QueryNode::Not(child) => {
+        let child_plan = self.explain_node(child, path, index_manager)?;
+        Ok(serde_json::json!({"type": "not", "child": child_plan}))
+      }
+    }
   }
 
   /// Internal query execution that returns all matching results without applying limit.
@@ -1679,6 +1855,7 @@ impl<'a> QueryBuilder<'a> {
       include_total: self.include_total_value,
       strategy: self.strategy_value.clone(),
       aggregate: None,
+      explain: ExplainMode::Off,
     }
   }
 

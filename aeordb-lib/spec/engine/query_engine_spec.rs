@@ -1,6 +1,6 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
-use aeordb::engine::query_engine::{QueryBuilder, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, should_use_bitmap_compositing};
+use aeordb::engine::query_engine::{QueryBuilder, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, should_use_bitmap_compositing, ExplainMode};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -271,6 +271,7 @@ fn test_query_no_field_queries_returns_empty() {
     include_total: false,
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -375,6 +376,7 @@ fn test_query_via_raw_query_struct() {
     include_total: false,
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -542,6 +544,7 @@ fn test_query_node_tree() {
     include_total: false,
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -670,6 +673,7 @@ fn test_query_node_not_complement() {
     include_total: false,
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -906,6 +910,7 @@ fn test_in_query_via_query_node() {
     include_total: false,
     strategy: QueryStrategy::Full,
     aggregate: None,
+    explain: ExplainMode::Off,
   };
 
   let query_engine = QueryEngine::new(&engine);

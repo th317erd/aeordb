@@ -4,7 +4,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{
     AggregateQuery, QueryEngine, Query, QueryNode, FieldQuery,
-    QueryOp, QueryStrategy, bytes_to_f64, bytes_to_json_value, is_numeric_type,
+    QueryOp, QueryStrategy, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode,
 };
 use aeordb::engine::scalar_converter::{
     CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64,
@@ -109,6 +109,7 @@ fn make_all_people_query(agg: AggregateQuery, limit: Option<usize>) -> Query {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: Some(agg),
+        explain: ExplainMode::Off,
     }
 }
 
@@ -155,6 +156,7 @@ fn test_count_with_filter() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: Some(agg),
+        explain: ExplainMode::Off,
     };
     let result = qe.execute_aggregate(&query).unwrap();
 
@@ -516,6 +518,7 @@ fn test_group_by_default_limit() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: Some(agg),
+        explain: ExplainMode::Off,
     };
     let result = qe.execute_aggregate(&query).unwrap();
 
@@ -582,6 +585,7 @@ fn test_empty_result_set() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: Some(agg),
+        explain: ExplainMode::Off,
     };
     let result = qe.execute_aggregate(&query).unwrap();
 
@@ -830,6 +834,7 @@ fn test_aggregate_no_aggregate_query() {
         include_total: false,
         strategy: QueryStrategy::Full,
         aggregate: None,
+        explain: ExplainMode::Off,
     };
     let result = qe.execute_aggregate(&query);
     assert!(result.is_err(), "should error when no aggregate query is set");
