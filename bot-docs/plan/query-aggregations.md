@@ -123,17 +123,17 @@ Groups are by the combination of all group_by fields:
 
 ---
 
-## 4. Default group limit
+## 4. Group limiting
 
-GROUP BY results are capped by the default limit (20 groups). Users can override with `"group_limit": N`. This prevents cardinality explosions from GROUP BY on high-cardinality fields (email, UUID).
+GROUP BY results respect the same `limit` field as regular queries. Default limit (20) applies. Users override with `"limit": N`. Same `default_limit_hit` behavior.
 
 ```json
 {
   "aggregate": {
     "count": true,
-    "group_by": ["department"],
-    "group_limit": 50
-  }
+    "group_by": ["department"]
+  },
+  "limit": 50
 }
 ```
 
@@ -141,8 +141,9 @@ If the default limit is hit:
 ```json
 {
   "groups": [...],
+  "has_more": true,
   "default_limit_hit": true,
-  "total_groups": 150
+  "default_limit": 20
 }
 ```
 
