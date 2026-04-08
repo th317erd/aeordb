@@ -119,6 +119,6 @@ pub use btree::{
     BTREE_MAX_LEAF_ENTRIES, BTREE_MIN_LEAF_ENTRIES,
     BTREE_MAX_INTERNAL_KEYS, BTREE_MIN_INTERNAL_KEYS,
     BTREE_CONVERSION_THRESHOLD, is_btree_format,
-    btree_insert, btree_lookup, btree_list, btree_list_from_node,
+    btree_insert, btree_insert_with_data, btree_lookup, btree_list, btree_list_from_node,
     btree_delete, btree_from_entries, store_btree_node,
 };

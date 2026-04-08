@@ -865,3 +865,32 @@ fn test_content_hash_domain_prefix() {
     let no_prefix = algo.compute_hash(&serialized).unwrap();
     assert_ne!(actual, no_prefix, "Domain prefix should change the hash");
 }
+
+// ─── Performance test ──────────────────────────────────────────────────────
+
+#[test]
+fn test_btree_insert_performance_1000() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    // Build initial tree with 500 entries
+    let entries: Vec<ChildEntry> = (0..500).map(|i| make_entry(&format!("file_{:05}", i))).collect();
+    let root_hash = btree_from_entries(&engine, entries, hash_length, &algo).unwrap();
+
+    // Insert 500 more and time it
+    let start = std::time::Instant::now();
+    let mut current_root = root_hash;
+    for i in 500..1000 {
+        current_root = btree_insert(&engine, &current_root, make_entry(&format!("file_{:05}", i)), hash_length, &algo).unwrap();
+    }
+    let duration = start.elapsed();
+
+    // Verify all 1000 findable
+    let listed = btree_list(&engine, &current_root, hash_length).unwrap();
+    assert_eq!(listed.len(), 1000);
+
+    // Should complete in well under 5 seconds for 500 inserts
+    assert!(duration.as_millis() < 5000, "500 inserts took {}ms - too slow", duration.as_millis());
+    eprintln!("btree_insert: 500 inserts into 500-entry tree took {}ms", duration.as_millis());
+}

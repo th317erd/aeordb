@@ -645,20 +645,12 @@ impl<'a> DirectoryOps<'a> {
     let (dir_value, content_key) = match existing {
       Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
         // === B-TREE FORMAT ===
-        // Compute the root node's content hash so we can insert into the tree
-        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length)?;
-        let root_hash = root_node.content_hash(hash_length, &algo)?;
-
-        // Insert into B-tree (writes only O(log N) nodes)
-        let new_root_hash = crate::engine::btree::btree_insert(
-          self.engine, &root_hash, child_entry, hash_length, &algo
+        // Insert using already-loaded data (no redundant read/deserialize/hash)
+        let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_with_data(
+          self.engine, &value, child_entry, hash_length, &algo
         )?;
 
-        // Load the new root node's data for the path-based entry
-        let new_root_entry = self.engine.get_entry(&new_root_hash)?
-          .ok_or_else(|| EngineError::NotFound("B-tree root not found after insert".to_string()))?;
-
-        (new_root_entry.2, new_root_hash)
+        (new_root_data, new_root_hash)
       }
       Some((_header, _key, value)) => {
         // === FLAT FORMAT ===

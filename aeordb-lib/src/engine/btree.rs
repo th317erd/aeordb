@@ -296,8 +296,8 @@ pub fn is_btree_format(data: &[u8]) -> bool {
 
 /// Result of a B-tree insert that may cause a split.
 enum InsertResult {
-    /// Inserted without split. Returns new root hash.
-    Done(Vec<u8>),
+    /// Inserted without split. Returns (new_hash, serialized_data).
+    Done(Vec<u8>, Vec<u8>),
     /// Node was split. Returns (new_left_hash, split_key, new_right_hash).
     Split(Vec<u8>, String, Vec<u8>),
 }
@@ -311,36 +311,49 @@ pub fn btree_insert(
     hash_length: usize,
     algo: &HashAlgorithm,
 ) -> EngineResult<Vec<u8>> {
-    let result = btree_insert_recursive(engine, root_hash, entry, hash_length, algo)?;
+    let root_data = engine.get_entry(root_hash)?
+        .ok_or_else(|| EngineError::NotFound(format!(
+            "B-tree root not found: {}", hex::encode(root_hash)
+        )))?;
+    let (new_hash, _) = btree_insert_with_data(engine, &root_data.2, entry, hash_length, algo)?;
+    Ok(new_hash)
+}
+
+/// Insert into a B-tree, starting from an already-loaded root node.
+/// Avoids re-reading the root from the engine.
+/// Returns (new_root_hash, new_root_data) so the caller doesn't need to read it back.
+pub fn btree_insert_with_data(
+    engine: &StorageEngine,
+    root_data: &[u8],
+    entry: ChildEntry,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+) -> EngineResult<(Vec<u8>, Vec<u8>)> {
+    let root_node = BTreeNode::deserialize(root_data, hash_length)?;
+
+    let result = btree_insert_node(engine, root_node, entry, hash_length, algo)?;
 
     match result {
-        InsertResult::Done(new_root_hash) => Ok(new_root_hash),
+        InsertResult::Done(new_hash, new_data) => Ok((new_hash, new_data)),
         InsertResult::Split(left_hash, split_key, right_hash) => {
-            // Root was split — create a new root
             let new_root = BTreeNode::Internal(InternalNode {
                 keys: vec![split_key],
                 children: vec![left_hash, right_hash],
             });
-            let new_root_hash = store_btree_node(engine, &new_root, hash_length, algo)?;
-            Ok(new_root_hash)
+            let new_data = new_root.serialize(hash_length);
+            let new_hash = store_btree_node(engine, &new_root, hash_length, algo)?;
+            Ok((new_hash, new_data))
         }
     }
 }
 
-fn btree_insert_recursive(
+fn btree_insert_node(
     engine: &StorageEngine,
-    node_hash: &[u8],
+    node: BTreeNode,
     entry: ChildEntry,
     hash_length: usize,
     algo: &HashAlgorithm,
 ) -> EngineResult<InsertResult> {
-    // Load the node
-    let node_data = engine.get_entry(node_hash)?
-        .ok_or_else(|| EngineError::NotFound(format!(
-            "B-tree node not found: {}", hex::encode(node_hash)
-        )))?;
-    let node = BTreeNode::deserialize(&node_data.2, hash_length)?;
-
     match node {
         BTreeNode::Leaf(mut leaf) => {
             leaf.upsert(entry);
@@ -352,21 +365,33 @@ fn btree_insert_recursive(
                 let right_hash = store_btree_node(engine, &BTreeNode::Leaf(right), hash_length, algo)?;
                 Ok(InsertResult::Split(left_hash, split_key, right_hash))
             } else {
-                let new_hash = store_btree_node(engine, &BTreeNode::Leaf(leaf), hash_length, algo)?;
-                Ok(InsertResult::Done(new_hash))
+                let node = BTreeNode::Leaf(leaf);
+                let data = node.serialize(hash_length);
+                let hash = store_btree_node(engine, &node, hash_length, algo)?;
+                Ok(InsertResult::Done(hash, data))
             }
         }
         BTreeNode::Internal(mut internal) => {
             let child_idx = internal.find_child_index(&entry.name);
             let child_hash = internal.children[child_idx].clone();
 
-            let child_result = btree_insert_recursive(engine, &child_hash, entry, hash_length, algo)?;
+            // Read the child node
+            let child_data = engine.get_entry(&child_hash)?
+                .ok_or_else(|| EngineError::NotFound(format!(
+                    "B-tree child not found: {}", hex::encode(&child_hash)
+                )))?;
+            let child_node = BTreeNode::deserialize(&child_data.2, hash_length)?;
+
+            // Recurse into child
+            let child_result = btree_insert_node(engine, child_node, entry, hash_length, algo)?;
 
             match child_result {
-                InsertResult::Done(new_child_hash) => {
+                InsertResult::Done(new_child_hash, _) => {
                     internal.children[child_idx] = new_child_hash;
-                    let new_hash = store_btree_node(engine, &BTreeNode::Internal(internal), hash_length, algo)?;
-                    Ok(InsertResult::Done(new_hash))
+                    let node = BTreeNode::Internal(internal);
+                    let data = node.serialize(hash_length);
+                    let hash = store_btree_node(engine, &node, hash_length, algo)?;
+                    Ok(InsertResult::Done(hash, data))
                 }
                 InsertResult::Split(left_hash, split_key, right_hash) => {
                     internal.children[child_idx] = left_hash;
@@ -378,8 +403,10 @@ fn btree_insert_recursive(
                         let right_hash = store_btree_node(engine, &BTreeNode::Internal(right), hash_length, algo)?;
                         Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
                     } else {
-                        let new_hash = store_btree_node(engine, &BTreeNode::Internal(internal), hash_length, algo)?;
-                        Ok(InsertResult::Done(new_hash))
+                        let node = BTreeNode::Internal(internal);
+                        let data = node.serialize(hash_length);
+                        let hash = store_btree_node(engine, &node, hash_length, algo)?;
+                        Ok(InsertResult::Done(hash, data))
                     }
                 }
             }
@@ -396,10 +423,7 @@ pub fn store_btree_node(
 ) -> EngineResult<Vec<u8>> {
     let serialized = node.serialize(hash_length);
     let content_hash = node.content_hash(hash_length, algo)?;
-    // Only store if not already present (content-addressed dedup)
-    if !engine.has_entry(&content_hash)? {
-        engine.store_entry(EntryType::DirectoryIndex, &content_hash, &serialized)?;
-    }
+    engine.store_entry(EntryType::DirectoryIndex, &content_hash, &serialized)?;
     Ok(content_hash)
 }
 
