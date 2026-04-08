@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::Engine as _;
+use serde::Serialize;
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -8,7 +9,11 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::index_store::{FieldIndex, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::nvt_ops::NVTMask;
-use crate::engine::scalar_converter::{ScalarConverter, TrigramConverter};
+use crate::engine::scalar_converter::{
+    ScalarConverter, TrigramConverter,
+    CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64,
+    CONVERTER_TYPE_I64, CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
+};
 use crate::engine::storage_engine::StorageEngine;
 
 /// A query operation on a field.
@@ -138,6 +143,53 @@ pub struct Query {
   pub before: Option<String>,
   pub include_total: bool,
   pub strategy: QueryStrategy,
+  pub aggregate: Option<AggregateQuery>,
+}
+
+/// Aggregation query -- what statistics to compute over the result set.
+#[derive(Debug, Clone, Default)]
+pub struct AggregateQuery {
+    pub count: bool,
+    pub sum: Vec<String>,
+    pub avg: Vec<String>,
+    pub min: Vec<String>,
+    pub max: Vec<String>,
+    pub group_by: Vec<String>,
+}
+
+/// Result of an aggregation query.
+#[derive(Debug, Clone, Serialize)]
+pub struct AggregateResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub sum: HashMap<String, f64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub avg: HashMap<String, f64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub min: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub max: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<GroupResult>>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default_limit_hit: bool,
+}
+
+/// A single group in a GROUP BY result.
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupResult {
+    pub key: HashMap<String, serde_json::Value>,
+    pub count: u64,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub sum: HashMap<String, f64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub avg: HashMap<String, f64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub min: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub max: HashMap<String, serde_json::Value>,
 }
 
 /// A single query result.
@@ -1160,6 +1212,319 @@ impl<'a> QueryEngine<'a> {
       _ => Ok((1.0, String::new())), // Non-fuzzy ops always score 1.0
     }
   }
+
+  /// Execute an aggregation query.
+  pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
+    let agg = query.aggregate.as_ref().ok_or_else(|| {
+        EngineError::NotFound("No aggregate query specified".to_string())
+    })?;
+
+    // Run the filter to get matching file hashes
+    let result_hashes = self.execute_internal(query)?;
+    let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter()
+        .map(|r| r.file_hash.clone())
+        .collect();
+
+    let index_manager = IndexManager::new(self.engine);
+    let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+    let explicit_limit = query.limit.is_some();
+
+    // COUNT
+    let count = if agg.count {
+        Some(result_hash_set.len() as u64)
+    } else {
+        None
+    };
+
+    // Collect all aggregate field names
+    let mut agg_fields: HashSet<&str> = HashSet::new();
+    for f in &agg.sum { agg_fields.insert(f); }
+    for f in &agg.avg { agg_fields.insert(f); }
+    for f in &agg.min { agg_fields.insert(f); }
+    for f in &agg.max { agg_fields.insert(f); }
+
+    // Load indexes for aggregate fields
+    let mut field_indexes: HashMap<String, (HashMap<Vec<u8>, Vec<u8>>, u8)> = HashMap::new();
+    for field_name in &agg_fields {
+        let indexes = index_manager.load_indexes_for_field(&query.path, field_name)?;
+        let index = indexes.into_iter().next().ok_or_else(|| {
+            EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name))
+        })?;
+        let type_tag = index.converter.type_tag();
+        field_indexes.insert(field_name.to_string(), (index.values, type_tag));
+    }
+
+    // Validate SUM/AVG fields are numeric
+    for field_name in &agg.sum {
+        if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
+            if !is_numeric_type(*type_tag) {
+                return Err(EngineError::NotFound(format!(
+                    "Cannot compute SUM on field '{}' -- requires numeric index type", field_name
+                )));
+            }
+        }
+    }
+    for field_name in &agg.avg {
+        if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
+            if !is_numeric_type(*type_tag) {
+                return Err(EngineError::NotFound(format!(
+                    "Cannot compute AVG on field '{}' -- requires numeric index type", field_name
+                )));
+            }
+        }
+    }
+
+    // If no GROUP BY, compute flat aggregates
+    if agg.group_by.is_empty() {
+        let (sum, avg, min, max) = compute_aggregates(
+            &result_hash_set, agg, &field_indexes,
+        );
+
+        return Ok(AggregateResult {
+            count,
+            sum,
+            avg,
+            min,
+            max,
+            groups: None,
+            has_more: false,
+            default_limit_hit: false,
+        });
+    }
+
+    // GROUP BY: load group field indexes
+    let mut group_field_data: Vec<(String, HashMap<Vec<u8>, Vec<u8>>, u8)> = Vec::new();
+    for gf in &agg.group_by {
+        let indexes = index_manager.load_indexes_for_field(&query.path, gf)?;
+        let index = indexes.into_iter().next().ok_or_else(|| {
+            EngineError::NotFound(format!("No index found for group_by field '{}'", gf))
+        })?;
+        let type_tag = index.converter.type_tag();
+        group_field_data.push((gf.clone(), index.values, type_tag));
+    }
+
+    // Bucket results by group key
+    let mut groups: HashMap<String, (HashMap<String, serde_json::Value>, Vec<Vec<u8>>)> = HashMap::new();
+
+    for file_hash in &result_hash_set {
+        // Build group key from all group_by fields
+        let mut key_map = HashMap::new();
+        let mut key_parts: Vec<String> = Vec::new();
+
+        for (field_name, values, type_tag) in &group_field_data {
+            let value = values.get(file_hash.as_slice())
+                .map(|bytes| bytes_to_json_value(bytes, *type_tag))
+                .unwrap_or(serde_json::Value::Null);
+            key_parts.push(format!("{}={}", field_name, value));
+            key_map.insert(field_name.clone(), value);
+        }
+
+        let group_key = key_parts.join("|");
+        groups.entry(group_key)
+            .or_insert_with(|| (key_map, Vec::new()))
+            .1.push(file_hash.clone());
+    }
+
+    // Compute aggregates per group
+    let mut group_results: Vec<GroupResult> = Vec::new();
+
+    for (_key_str, (key_map, group_hashes)) in &groups {
+        let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
+        let (sum, avg, min, max) = compute_aggregates(&group_hash_set, agg, &field_indexes);
+
+        group_results.push(GroupResult {
+            key: key_map.clone(),
+            count: group_hashes.len() as u64,
+            sum,
+            avg,
+            min,
+            max,
+        });
+    }
+
+    // Sort groups by count descending (most populated first)
+    group_results.sort_by(|a, b| b.count.cmp(&a.count));
+
+    // Apply limit to groups
+    let has_more = group_results.len() > effective_limit;
+    group_results.truncate(effective_limit);
+    let default_limit_hit = !explicit_limit && has_more;
+
+    Ok(AggregateResult {
+        count,
+        sum: HashMap::new(),
+        avg: HashMap::new(),
+        min: HashMap::new(),
+        max: HashMap::new(),
+        groups: Some(group_results),
+        has_more,
+        default_limit_hit,
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation helpers
+// ---------------------------------------------------------------------------
+
+/// Parse raw value bytes into a numeric f64, using the converter type to determine format.
+pub fn bytes_to_f64(bytes: &[u8], type_tag: u8) -> Option<f64> {
+    match type_tag {
+        CONVERTER_TYPE_U8 => {
+            if bytes.len() >= 1 { Some(bytes[0] as f64) }
+            else { None }
+        }
+        CONVERTER_TYPE_U16 => {
+            if bytes.len() >= 2 { Some(u16::from_be_bytes([bytes[0], bytes[1]]) as f64) }
+            else { None }
+        }
+        CONVERTER_TYPE_U32 => {
+            if bytes.len() >= 4 { Some(u32::from_be_bytes(bytes[..4].try_into().ok()?) as f64) }
+            else { None }
+        }
+        CONVERTER_TYPE_U64 => {
+            if bytes.len() >= 8 { Some(u64::from_be_bytes(bytes[..8].try_into().ok()?) as f64) }
+            else { None }
+        }
+        CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
+            if bytes.len() >= 8 { Some(i64::from_be_bytes(bytes[..8].try_into().ok()?) as f64) }
+            else { None }
+        }
+        CONVERTER_TYPE_F64 => {
+            if bytes.len() >= 8 { Some(f64::from_be_bytes(bytes[..8].try_into().ok()?)) }
+            else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Parse raw value bytes into a JSON value for display (MIN/MAX, GROUP BY keys).
+pub fn bytes_to_json_value(bytes: &[u8], type_tag: u8) -> serde_json::Value {
+    match type_tag {
+        CONVERTER_TYPE_U8 => {
+            if bytes.len() >= 1 { serde_json::json!(bytes[0]) }
+            else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_U16 => {
+            if bytes.len() >= 2 { serde_json::json!(u16::from_be_bytes([bytes[0], bytes[1]])) }
+            else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_U32 => {
+            if bytes.len() >= 4 {
+                serde_json::json!(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
+            } else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_U64 => {
+            if bytes.len() >= 8 {
+                serde_json::json!(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
+            } else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
+            if bytes.len() >= 8 {
+                serde_json::json!(i64::from_be_bytes(bytes[..8].try_into().unwrap()))
+            } else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_F64 => {
+            if bytes.len() >= 8 {
+                serde_json::json!(f64::from_be_bytes(bytes[..8].try_into().unwrap()))
+            } else { serde_json::Value::Null }
+        }
+        CONVERTER_TYPE_STRING => {
+            serde_json::json!(String::from_utf8_lossy(bytes).to_string())
+        }
+        _ => {
+            // Unknown type -- try as UTF-8 string, fall back to hex
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                serde_json::json!(s)
+            } else {
+                serde_json::json!(hex::encode(bytes))
+            }
+        }
+    }
+}
+
+/// Check if a converter type supports numeric aggregation (SUM/AVG).
+pub fn is_numeric_type(type_tag: u8) -> bool {
+    matches!(type_tag,
+        CONVERTER_TYPE_U8 | CONVERTER_TYPE_U16 | CONVERTER_TYPE_U32 | CONVERTER_TYPE_U64 |
+        CONVERTER_TYPE_I64 | CONVERTER_TYPE_F64
+    )
+}
+
+/// Shared aggregation computation: iterates the hash set, computes SUM, AVG, MIN, MAX.
+fn compute_aggregates(
+    hash_set: &HashSet<Vec<u8>>,
+    agg: &AggregateQuery,
+    field_indexes: &HashMap<String, (HashMap<Vec<u8>, Vec<u8>>, u8)>,
+) -> (HashMap<String, f64>, HashMap<String, f64>, HashMap<String, serde_json::Value>, HashMap<String, serde_json::Value>) {
+    let mut sum_map: HashMap<String, f64> = HashMap::new();
+    let mut avg_counts: HashMap<String, (f64, u64)> = HashMap::new();
+    let mut min_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
+    let mut max_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
+
+    for file_hash in hash_set {
+        // SUM
+        for field_name in &agg.sum {
+            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+                if let Some(bytes) = values.get(file_hash.as_slice()) {
+                    if let Some(num) = bytes_to_f64(bytes, *type_tag) {
+                        *sum_map.entry(field_name.clone()).or_insert(0.0) += num;
+                    }
+                }
+            }
+        }
+
+        // AVG (accumulate sum + count)
+        for field_name in &agg.avg {
+            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+                if let Some(bytes) = values.get(file_hash.as_slice()) {
+                    if let Some(num) = bytes_to_f64(bytes, *type_tag) {
+                        let entry = avg_counts.entry(field_name.clone()).or_insert((0.0, 0));
+                        entry.0 += num;
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+
+        // MIN
+        for field_name in &agg.min {
+            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+                if let Some(bytes) = values.get(file_hash.as_slice()) {
+                    let current = min_map.get(field_name.as_str());
+                    if current.is_none() || bytes.as_slice() < current.unwrap().1.as_slice() {
+                        min_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
+                    }
+                }
+            }
+        }
+
+        // MAX
+        for field_name in &agg.max {
+            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+                if let Some(bytes) = values.get(file_hash.as_slice()) {
+                    let current = max_map.get(field_name.as_str());
+                    if current.is_none() || bytes.as_slice() > current.unwrap().1.as_slice() {
+                        max_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    let avg_map: HashMap<String, f64> = avg_counts.into_iter()
+        .map(|(k, (sum, count))| (k, if count > 0 { sum / count as f64 } else { 0.0 }))
+        .collect();
+
+    let min_display: HashMap<String, serde_json::Value> = min_map.into_iter()
+        .map(|(k, (v, _))| (k, v))
+        .collect();
+
+    let max_display: HashMap<String, serde_json::Value> = max_map.into_iter()
+        .map(|(k, (v, _))| (k, v))
+        .collect();
+
+    (sum_map, avg_map, min_display, max_display)
 }
 
 /// Chainable query builder.
@@ -1313,6 +1678,7 @@ impl<'a> QueryBuilder<'a> {
       before: self.before_value.clone(),
       include_total: self.include_total_value,
       strategy: self.strategy_value.clone(),
+      aggregate: None,
     }
   }
 

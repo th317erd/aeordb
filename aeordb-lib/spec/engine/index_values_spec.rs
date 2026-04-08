@@ -301,6 +301,7 @@ fn test_fuzzy_contains_with_parser() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results = qe.execute(&query).expect("contains query");
@@ -353,6 +354,7 @@ fn test_fuzzy_similar_with_parser() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results = qe.execute(&query).expect("similar query");
@@ -444,6 +446,7 @@ fn test_json_file_fuzzy_still_works() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results = qe.execute(&query).expect("contains query on JSON");
@@ -556,6 +559,7 @@ fn test_contains_query_no_match_returns_empty() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results = qe.execute(&query).expect("contains query");

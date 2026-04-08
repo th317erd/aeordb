@@ -134,6 +134,7 @@ fn make_query_all_people() -> Query {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     }
 }
 
@@ -263,6 +264,7 @@ fn test_empty_result_set() {
         before: None,
         include_total: true,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
     let paginated = qe.execute_paginated(&query).unwrap();
 
@@ -440,6 +442,7 @@ fn test_sort_non_order_preserving_errors() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let result = qe.execute_paginated(&query);
@@ -704,6 +707,7 @@ fn test_execute_paginated_with_no_node() {
         before: None,
         include_total: true,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
     let paginated = qe.execute_paginated(&query).unwrap();
 

@@ -357,3 +357,11 @@ path = "spec/engine/query_pagination_spec.rs"
 [[test]]
 name = "query_pagination_http_spec"
 path = "spec/http/query_pagination_http_spec.rs"
+
+[[test]]
+name = "aggregation_spec"
+path = "spec/engine/aggregation_spec.rs"
+
+[[test]]
+name = "aggregation_http_spec"
+path = "spec/http/aggregation_http_spec.rs"

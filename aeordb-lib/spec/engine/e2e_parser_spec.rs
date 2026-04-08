@@ -176,6 +176,7 @@ fn test_e2e_parser_query_u64_after_store() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results = qe.execute(&query).expect("query word_count=3");
@@ -205,6 +206,7 @@ fn test_e2e_parser_query_u64_after_store() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
 
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
@@ -396,6 +398,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
     let results = qe.execute(&query).expect("query word_count=9");
     assert!(
@@ -419,6 +422,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
     assert!(
@@ -442,6 +446,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
         before: None,
         include_total: false,
         strategy: QueryStrategy::Full,
+        aggregate: None,
     };
     let results_range = qe.execute(&query_range).expect("query word_count 7-10");
     assert!(

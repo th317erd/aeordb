@@ -16,7 +16,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT};
+use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -493,6 +493,23 @@ pub struct QueryRequest {
   pub after: Option<String>,
   pub before: Option<String>,
   pub include_total: Option<bool>,
+  pub aggregate: Option<AggregateRequestData>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AggregateRequestData {
+    #[serde(default)]
+    pub count: bool,
+    #[serde(default)]
+    pub sum: Vec<String>,
+    #[serde(default)]
+    pub avg: Vec<String>,
+    #[serde(default)]
+    pub min: Vec<String>,
+    #[serde(default)]
+    pub max: Vec<String>,
+    #[serde(default)]
+    pub group_by: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -709,10 +726,50 @@ pub async fn query_endpoint(
     }).collect())
     .unwrap_or_default();
 
+  // If aggregate query, use execute_aggregate
+  if let Some(ref agg_data) = body.aggregate {
+    let agg_query = AggregateQuery {
+        count: agg_data.count,
+        sum: agg_data.sum.clone(),
+        avg: agg_data.avg.clone(),
+        min: agg_data.min.clone(),
+        max: agg_data.max.clone(),
+        group_by: agg_data.group_by.clone(),
+    };
+
+    let query = Query {
+      path: body.path.clone(),
+      field_queries: Vec::new(),
+      node: if is_empty { None } else { Some(query_node) },
+      limit: body.limit,
+      offset: body.offset,
+      order_by,
+      after: body.after.clone(),
+      before: body.before.clone(),
+      include_total: body.include_total.unwrap_or(false),
+      strategy: QueryStrategy::Full,
+      aggregate: Some(agg_query),
+    };
+
+    let query_engine = QueryEngine::new(&state.engine);
+    match query_engine.execute_aggregate(&query) {
+      Ok(result) => {
+        return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
+      }
+      Err(EngineError::NotFound(msg)) => {
+        return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
+      }
+      Err(e) => {
+        return ErrorResponse::new(format!("Aggregation failed: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+      }
+    }
+  }
+
   let query = Query {
     path: body.path.clone(),
     field_queries: Vec::new(),
-    node: if is_empty { None } else { Some(query_node) },
+    node: if is_empty { None } else { Some(query_node.clone()) },
     limit: body.limit,
     offset: body.offset,
     order_by,
@@ -720,6 +777,7 @@ pub async fn query_endpoint(
     before: body.before.clone(),
     include_total: body.include_total.unwrap_or(false),
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&state.engine);

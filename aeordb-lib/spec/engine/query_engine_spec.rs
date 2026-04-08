@@ -270,6 +270,7 @@ fn test_query_no_field_queries_returns_empty() {
     before: None,
     include_total: false,
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -373,6 +374,7 @@ fn test_query_via_raw_query_struct() {
     before: None,
     include_total: false,
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -539,6 +541,7 @@ fn test_query_node_tree() {
     before: None,
     include_total: false,
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -666,6 +669,7 @@ fn test_query_node_not_complement() {
     before: None,
     include_total: false,
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&engine);
@@ -901,6 +905,7 @@ fn test_in_query_via_query_node() {
     before: None,
     include_total: false,
     strategy: QueryStrategy::Full,
+    aggregate: None,
   };
 
   let query_engine = QueryEngine::new(&engine);
