@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 1,750 (all passing)
+## Test Count: 2,147 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -78,3 +78,5 @@
 - `aeordb-lib/src/engine/heartbeat.rs` — 15-second clock-aligned heartbeat with DatabaseStats
 - `aeordb-lib/src/server/sse_routes.rs` — GET /events/stream SSE endpoint
 - `aeordb-lib/src/engine/webhook.rs` — webhook dispatcher with HMAC-SHA256 signatures
+- `aeordb-lib/src/engine/gc.rs` — gc_mark (walk all live roots), gc_sweep (in-place overwrite), run_gc
+- `aeordb-lib/src/server/gc_routes.rs` — POST /admin/gc endpoint (root-only, dry_run support)

@@ -12,7 +12,7 @@ Manual mark-and-sweep GC. The user decides when to run it. No automatic triggers
 
 **Mark:** Walk all live version trees (HEAD + snapshots + forks). Collect every reachable hash.
 
-**Sweep:** Everything in the KV store not in the reachable set is garbage. Mark as void (reclaimable space).
+**Sweep:** Everything in the KV store not in the reachable set is garbage. Overwrite in-place with best-effort strategy: DeletionRecord if it fits, then Void in remaining space if it fits, fallback to append for anything that doesn't fit in-place.
 
 ---
 
@@ -54,17 +54,40 @@ fn gc(engine: &StorageEngine) -> GcResult {
         live.insert(fork_key_hash);
     }
 
-    // SWEEP: iterate all KV entries, mark non-live as void
+    // SWEEP: iterate all KV entries, overwrite non-live in-place
     let all_entries = engine.kv_store.iter_all()?;
     let mut garbage_count = 0;
     let mut reclaimed_bytes = 0;
 
+    // Header sizes for in-place math
+    let header_size = 31 + engine.hash_algo.hash_length(); // 63 for Blake3_256
+    let min_deletion_size = header_size + 12;              // 75 for Blake3_256
+    let min_void_size = header_size;                       // 63 for Blake3_256
+
     for entry in &all_entries {
         if !live.contains(&entry.hash) && !entry.is_deleted() {
-            // This entry is garbage
-            engine.mark_entry_deleted(&entry.hash)?;
+            let entry_size = engine.read_entry_size(entry.offset)?;
+
+            // Best-effort in-place overwrite:
+            if entry_size >= min_deletion_size {
+                // Write DeletionRecord in-place at entry's offset
+                engine.write_deletion_at(entry.offset, min_deletion_size)?;
+                let remaining = entry_size - min_deletion_size;
+                if remaining >= min_void_size {
+                    // Write Void in the leftover space
+                    engine.write_void_at(entry.offset + min_deletion_size, remaining)?;
+                    void_manager.register_void(remaining, entry.offset + min_deletion_size);
+                }
+                // else: small remainder, abandoned (not worth tracking)
+            } else {
+                // Too small for in-place DeletionRecord — append to end
+                engine.mark_entry_deleted(&entry.hash)?;
+            }
+
+            // Remove from KV store either way
+            engine.kv_remove(&entry.hash)?;
             garbage_count += 1;
-            // Optionally: register as void for space reuse
+            reclaimed_bytes += entry_size;
         }
     }
 
@@ -172,7 +195,28 @@ Requires admin auth (root user).
 
 ---
 
-## 6. What gets collected
+## 6. In-place sweep strategy
+
+Sweep overwrites garbage entries in-place rather than appending new entries to the end of the file. This avoids file growth during GC.
+
+**Sizes (Blake3_256 default):**
+- Entry header: 31 bytes fixed + 32 bytes hash = **63 bytes**
+- Minimum DeletionRecord (D): 63 header + 12 payload = **75 bytes**
+- Minimum Void (V): 63 bytes (header only, zero-fill value)
+
+**Decision tree per garbage entry:**
+1. Entry size >= 75 (D)? → Write DeletionRecord in-place at the entry's offset
+2. Remaining space >= 63 (V)? → Write Void in the leftover space, register with VoidManager
+3. Remaining space < 63? → Abandoned remainder (too small to track, a few bytes at most)
+4. Entry size < 75? → Fallback: append DeletionRecord to end of file (rare — almost everything is >= 75 bytes)
+
+**No minimum entry size constraint imposed.** This is a best-effort optimization. The value is in reclaiming thousands of entries, not in saving a few bytes on edge cases.
+
+**Requires:** `AppendWriter::write_entry_at(offset, ...)` — a new method that seeks to a specific offset and writes an entry there (the writer already uses seek for reads and header updates).
+
+---
+
+## 7. What gets collected
 
 - Old B-tree nodes from structural sharing (no longer referenced by any version)
 - Orphaned chunks from deleted/overwritten files
@@ -183,7 +227,7 @@ Requires admin auth (root user).
 
 ---
 
-## 7. What does NOT get collected
+## 8. What does NOT get collected
 
 - Anything reachable from HEAD, any snapshot, or any fork
 - The file header
@@ -193,7 +237,7 @@ Requires admin auth (root user).
 
 ---
 
-## 8. System table protection
+## 9. System table protection
 
 System tables (users, groups, API keys, config) are stored via `SystemTables` which uses the engine. Their entries must be marked as live during the mark phase.
 
@@ -212,7 +256,7 @@ Or simpler: any path starting with `/.system/` or `/.config/` is always live.
 
 ---
 
-## 9. GC events
+## 10. GC events
 
 Emit an event when GC runs:
 
@@ -231,7 +275,7 @@ Emit an event when GC runs:
 
 ---
 
-## 10. Edge cases
+## 11. Edge cases
 
 - **GC during writes:** The engine is single-writer. GC acquires the write lock. No concurrent writes during GC. This is fine — GC is a maintenance operation.
 - **Empty database:** 0 garbage. No-op.
@@ -241,7 +285,7 @@ Emit an event when GC runs:
 
 ---
 
-## 11. Implementation phases
+## 12. Implementation phases
 
 ### Phase 1 — Mark phase (walk_and_mark)
 - Recursive tree walker that collects all reachable hashes
@@ -249,24 +293,30 @@ Emit an event when GC runs:
 - Structural sharing optimization (skip already-visited)
 - Tests: mark on simple tree, mark with snapshots, mark with B-tree
 
-### Phase 2 — Sweep phase
-- Iterate KV entries, mark non-live as deleted
-- Count garbage entries and estimate reclaimed bytes
-- GcResult struct
-- Tests: sweep finds garbage, sweep preserves live, dry_run mode
+### Phase 2 — In-place sweep infrastructure
+- `AppendWriter::write_entry_at(offset, ...)` — seek-and-write at arbitrary offset
+- `AppendWriter::write_void_at(offset, size)` — write void entry at offset
+- Tests: write_entry_at roundtrip, write_void_at creates valid void
 
-### Phase 3 — CLI command
+### Phase 3 — Sweep phase
+- Iterate KV entries, in-place overwrite non-live entries
+- Best-effort DeletionRecord + Void in-place, fallback to append
+- Count garbage entries and reclaimed bytes
+- GcResult struct, dry_run mode
+- Tests: sweep finds garbage, sweep preserves live, in-place overwrite, dry_run
+
+### Phase 4 — CLI command
 - `aeordb gc --database <path> [--dry-run]`
 - Output formatting
 
-### Phase 4 — HTTP endpoint
+### Phase 5 — HTTP endpoint
 - `POST /admin/gc [?dry_run=true]`
 - Admin auth required
 - GC event emission
 
 ---
 
-## 12. Non-goals (deferred)
+## 13. Non-goals (deferred)
 
 - Automatic GC scheduling (needs cron system)
 - Void consolidation (merging adjacent voids — separate feature)

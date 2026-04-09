@@ -46,7 +46,7 @@
 - [x] Tasks 4-5: Startup without scan + resize on overflow — 17 tests
 - [x] Task 6: Benchmark (flat ~1000/s to 250K)
 
-## Total: 2,095 tests, all passing
+## Total: 2,147 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
@@ -67,9 +67,16 @@
 - [ ] Task 13: E2E test with real WASM parser (deferred — needs compiled WASM binary)
 - [x] Tasks 14-15: HTTP verified + docs updated
 
+## Completed: Garbage Collection (Mark-and-Sweep) — 36 tests
+- [x] Task 1: In-place write infrastructure (write_entry_at, write_void_at) — 5 tests
+- [x] Task 2: GC mark phase (walk all live roots, collect reachable hashes) — 6 tests
+- [x] Task 3: GC sweep phase (in-place overwrite garbage, dry-run, events) — 8 tests
+- [x] Task 4: CLI command (aeordb gc --database --dry-run)
+- [x] Task 5: HTTP endpoint (POST /admin/gc) — 11 tests
+- [x] Task 6: Edge case tests (folded into Task 3)
+
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code
-- [ ] Chunk ownership & garbage collection
 - [ ] Cron/background task system
 - [ ] Pre-hashed client uploads
 - [ ] Fork merging (true merge, not just fast-forward)
