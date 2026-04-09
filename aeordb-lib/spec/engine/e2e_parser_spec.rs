@@ -584,3 +584,448 @@ fn test_e2e_deploy_invalid_wasm_fails() {
     );
     assert!(result.is_err(), "deploying invalid WASM should fail");
 }
+
+// ============================================================
+// Test: Contains query on trigram-indexed parser field
+// ============================================================
+
+#[test]
+fn test_e2e_parser_contains_on_trigram_field() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    // Config with trigram index on text field
+    let config = r#"{
+        "parser": "plaintext-parser",
+        "indexes": [
+            {"name": "text", "source": ["text"], "type": "trigram"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store config");
+
+    // Store a text file
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/fox.txt",
+        b"The quick brown fox jumps over the lazy dog",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store fox.txt");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    // Contains query for "quick brown"
+    let query = Query {
+        path: "/docs/".to_string(),
+        field_queries: vec![],
+        node: Some(QueryNode::Field(FieldQuery {
+            field_name: "text".to_string(),
+            operation: QueryOp::Contains("quick brown".to_string()),
+        })),
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
+        strategy: QueryStrategy::Full,
+        aggregate: None,
+        explain: ExplainMode::Off,
+    };
+
+    let results = qe.execute(&query).expect("contains query");
+    assert!(
+        results.iter().any(|r| r.file_record.path.contains("fox.txt")),
+        "Contains('quick brown') should find fox.txt, got: {:?}",
+        results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
+    );
+}
+
+// ============================================================
+// Test: Similar query on trigram-indexed parser field
+// ============================================================
+
+#[test]
+fn test_e2e_parser_similar_on_trigram_field() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    let config = r#"{
+        "parser": "plaintext-parser",
+        "indexes": [
+            {"name": "text", "source": ["text"], "type": "trigram"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store config");
+
+    // Store two files
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/fox.txt",
+        b"The quick brown fox jumps over the lazy dog",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store fox.txt");
+
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/greeting.txt",
+        b"Hello World",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store greeting.txt");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    // Similar query with typos — should still find greeting.txt
+    let query = Query {
+        path: "/docs/".to_string(),
+        field_queries: vec![],
+        node: Some(QueryNode::Field(FieldQuery {
+            field_name: "text".to_string(),
+            operation: QueryOp::Similar("Helllo Wrld".to_string(), 0.3),
+        })),
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
+        strategy: QueryStrategy::Full,
+        aggregate: None,
+        explain: ExplainMode::Off,
+    };
+
+    let results = qe.execute(&query).expect("similar query");
+    assert!(
+        results.iter().any(|r| r.file_record.path.contains("greeting.txt")),
+        "Similar('Helllo Wrld', 0.3) should find greeting.txt, got: {:?}",
+        results.iter().map(|r| (&r.file_record.path, r.score)).collect::<Vec<_>>()
+    );
+    // Score should be positive
+    let greeting_result = results.iter().find(|r| r.file_record.path.contains("greeting.txt")).unwrap();
+    assert!(
+        greeting_result.score > 0.0,
+        "greeting.txt should have positive similarity score, got {}",
+        greeting_result.score
+    );
+}
+
+// ============================================================
+// Test: Contains returns empty for non-matching text
+// ============================================================
+
+#[test]
+fn test_e2e_parser_contains_no_match() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    let config = r#"{
+        "parser": "plaintext-parser",
+        "indexes": [
+            {"name": "text", "source": ["text"], "type": "trigram"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store config");
+
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/fox.txt",
+        b"The quick brown fox jumps over the lazy dog",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store fox.txt");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    let query = Query {
+        path: "/docs/".to_string(),
+        field_queries: vec![],
+        node: Some(QueryNode::Field(FieldQuery {
+            field_name: "text".to_string(),
+            operation: QueryOp::Contains("zzzzznothere".to_string()),
+        })),
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
+        strategy: QueryStrategy::Full,
+        aggregate: None,
+        explain: ExplainMode::Off,
+    };
+
+    let results = qe.execute(&query).expect("contains no-match query");
+    assert!(
+        results.is_empty(),
+        "Contains('zzzzznothere') should return empty results, got {} results: {:?}",
+        results.len(),
+        results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
+    );
+}
+
+// ============================================================
+// Test: String index Eq on parser-extracted title field
+// ============================================================
+
+#[test]
+fn test_e2e_parser_string_eq_on_title() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    // Config with string index on title
+    let config = r#"{
+        "parser": "plaintext-parser",
+        "indexes": [
+            {"name": "title", "source": ["title"], "type": "string"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store config");
+
+    // Store a file whose first line is the title
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/important.txt",
+        b"My Important Document\nThis is the body of the document.\nIt has multiple lines.",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store important.txt");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    // Eq query on title field with the exact first line
+    let query = Query {
+        path: "/docs/".to_string(),
+        field_queries: vec![],
+        node: Some(QueryNode::Field(FieldQuery {
+            field_name: "title".to_string(),
+            operation: QueryOp::Eq("My Important Document".as_bytes().to_vec()),
+        })),
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
+        strategy: QueryStrategy::Full,
+        aggregate: None,
+        explain: ExplainMode::Off,
+    };
+
+    let results = qe.execute(&query).expect("string eq query on title");
+    assert!(
+        results.iter().any(|r| r.file_record.path.contains("important.txt")),
+        "Eq('My Important Document') on title should find important.txt, got: {:?}",
+        results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
+    );
+}
+
+// ============================================================
+// Test: Content-type auto-routing via parsers.json
+// ============================================================
+
+#[test]
+fn test_e2e_parser_content_type_auto_routing() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    // Deploy global content-type -> parser mapping
+    let parsers_json = r#"{"text/plain": "plaintext-parser"}"#;
+    ops.store_file(&ctx, "/.config/parsers.json", parsers_json.as_bytes(), Some("application/json"))
+        .expect("store parsers.json");
+
+    // Index config at /auto/ with NO parser field — relies on content-type routing
+    let config = r#"{
+        "indexes": [
+            {"name": "word_count", "source": ["metadata", "word_count"], "type": "u64"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/auto/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store auto config");
+
+    // "one two three four five" = 5 words
+    ops.store_file_with_full_pipeline(&ctx,
+        "/auto/test.txt",
+        b"one two three four five",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store test.txt via auto-routing");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    // Query for word_count == 5
+    let query = Query {
+        path: "/auto/".to_string(),
+        field_queries: vec![],
+        node: Some(QueryNode::Field(FieldQuery {
+            field_name: "word_count".to_string(),
+            operation: QueryOp::Eq(5u64.to_be_bytes().to_vec()),
+        })),
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        after: None,
+        before: None,
+        include_total: false,
+        strategy: QueryStrategy::Full,
+        aggregate: None,
+        explain: ExplainMode::Off,
+    };
+
+    let results = qe.execute(&query).expect("query word_count=5 via auto-routing");
+    assert!(
+        results.iter().any(|r| r.file_record.path.contains("test.txt")),
+        "Content-type auto-routing should find test.txt for word_count=5, got: {:?}",
+        results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
+    );
+}
+
+// ============================================================
+// Test: Multiple files with distinct trigram Contains queries
+// ============================================================
+
+#[test]
+fn test_e2e_parser_multiple_files_trigram_contains() {
+    let ctx = RequestContext::system();
+    let (engine, _temp) = create_test_engine();
+    let pm = deploy_plaintext_parser(&engine);
+
+    let ops = DirectoryOps::new(&engine);
+
+    let config = r#"{
+        "parser": "plaintext-parser",
+        "indexes": [
+            {"name": "text", "source": ["text"], "type": "trigram"}
+        ]
+    }"#;
+    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+        .expect("store config");
+
+    // Store 3 files with distinct content
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/astronomy.txt",
+        b"The Andromeda galaxy is approximately 2.537 million light-years from Earth",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store astronomy.txt");
+
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/cooking.txt",
+        b"Sauteing mushrooms in garlic butter creates a wonderful umami flavor",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store cooking.txt");
+
+    ops.store_file_with_full_pipeline(&ctx,
+        "/docs/programming.txt",
+        b"Rust borrow checker ensures memory safety without garbage collection",
+        Some("text/plain"),
+        Some(&pm),
+    )
+    .expect("store programming.txt");
+
+    use aeordb::engine::query_engine::{
+        FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
+    };
+    let qe = QueryEngine::new(&engine);
+
+    // Helper to run a Contains query
+    let run_contains = |text: &str| -> Vec<String> {
+        let query = Query {
+            path: "/docs/".to_string(),
+            field_queries: vec![],
+            node: Some(QueryNode::Field(FieldQuery {
+                field_name: "text".to_string(),
+                operation: QueryOp::Contains(text.to_string()),
+            })),
+            limit: None,
+            offset: None,
+            order_by: Vec::new(),
+            after: None,
+            before: None,
+            include_total: false,
+            strategy: QueryStrategy::Full,
+            aggregate: None,
+            explain: ExplainMode::Off,
+        };
+        qe.execute(&query).expect("contains query")
+            .iter()
+            .map(|r| r.file_record.path.clone())
+            .collect()
+    };
+
+    // Each unique substring should only match its file
+    let astro_results = run_contains("Andromeda galaxy");
+    assert!(
+        astro_results.iter().any(|p| p.contains("astronomy.txt")),
+        "Contains('Andromeda galaxy') should find astronomy.txt, got: {:?}",
+        astro_results
+    );
+    assert!(
+        !astro_results.iter().any(|p| p.contains("cooking.txt") || p.contains("programming.txt")),
+        "Contains('Andromeda galaxy') should NOT find other files, got: {:?}",
+        astro_results
+    );
+
+    let cook_results = run_contains("garlic butter");
+    assert!(
+        cook_results.iter().any(|p| p.contains("cooking.txt")),
+        "Contains('garlic butter') should find cooking.txt, got: {:?}",
+        cook_results
+    );
+    assert!(
+        !cook_results.iter().any(|p| p.contains("astronomy.txt") || p.contains("programming.txt")),
+        "Contains('garlic butter') should NOT find other files, got: {:?}",
+        cook_results
+    );
+
+    let prog_results = run_contains("borrow checker");
+    assert!(
+        prog_results.iter().any(|p| p.contains("programming.txt")),
+        "Contains('borrow checker') should find programming.txt, got: {:?}",
+        prog_results
+    );
+    assert!(
+        !prog_results.iter().any(|p| p.contains("astronomy.txt") || p.contains("cooking.txt")),
+        "Contains('borrow checker') should NOT find other files, got: {:?}",
+        prog_results
+    );
+}

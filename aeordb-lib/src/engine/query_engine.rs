@@ -1042,14 +1042,12 @@ impl<'a> QueryEngine<'a> {
           }
         };
 
-        // For Contains (substring), use unpadded trigrams to avoid
-        // word-boundary padding mismatches. For similarity/fuzzy, use
-        // the standard padded trigrams.
-        let trigrams = if matches!(&field_query.operation, QueryOp::Contains(_)) {
-          crate::engine::fuzzy::extract_trigrams_no_pad(query_str)
-        } else {
-          crate::engine::fuzzy::extract_trigrams(query_str)
-        };
+        // Use the same padded trigram extraction for all fuzzy ops.
+        // During indexing, expand_value calls extract_trigrams (padded,
+        // per-word). Contains candidate generation must use the same
+        // trigrams so lookups match.  The recheck phase verifies the
+        // actual substring / similarity against the stored value.
+        let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
         let converter = TrigramConverter;
 
         let mut candidates = HashSet::new();
