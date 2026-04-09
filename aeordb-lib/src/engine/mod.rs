@@ -48,7 +48,6 @@ pub mod user;
 pub mod tree_walker;
 pub mod version_manager;
 pub mod void_manager;
-pub mod wasm_converter;
 pub mod webhook;
 
 pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
@@ -85,7 +84,7 @@ pub use scalar_converter::{
   I64Converter, F64Converter, StringConverter, TimestampConverter,
   TrigramConverter, PhoneticConverter, PhoneticAlgorithm,
   serialize_converter, deserialize_converter,
-  CONVERTER_TYPE_WASM, CONVERTER_TYPE_TRIGRAM, CONVERTER_TYPE_PHONETIC,
+  CONVERTER_TYPE_TRIGRAM, CONVERTER_TYPE_PHONETIC,
 };
 pub use fuzzy::{extract_trigrams, extract_trigrams_no_pad, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
@@ -106,7 +105,6 @@ pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
-pub use wasm_converter::{WasmConverter, WasmBatchConverter};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
 pub use group_cache::GroupCache;

@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 2,192 tests, all passing
+## Total: ~2,202 tests, all passing
 
 ---
 
@@ -24,6 +24,7 @@
 - [x] Garbage Collection (mark-and-sweep, in-place overwrite, CLI + HTTP) — 36 tests
 - [x] Concurrent KV Readers (snapshot double-buffering, lock-free reads) — 20 tests
 - [x] Pre-Hashed Client Uploads (4-phase protocol, dedup, atomic commit) — 28 tests
+- [x] Content-Addressed FileRecords (dual-key storage, correct snapshot versioning) — 10 tests
 
 ---
 
@@ -41,7 +42,6 @@
 - [ ] Server-side compilation + in-database SDK + schema-as-code
 - [ ] Cron/background task system
 - [ ] Fork merging (true merge with conflict detection, not just fast-forward)
-- [ ] Concurrent parallel writers (coordinator pattern)
 - [ ] File defragmentation (rewrite file to eliminate voids)
 - [ ] Encryption, vaults, zero-knowledge multi-user storage
 - [ ] Multi-database sharding

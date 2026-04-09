@@ -11,7 +11,6 @@ pub const CONVERTER_TYPE_I64: u8 = 0x06;
 pub const CONVERTER_TYPE_F64: u8 = 0x07;
 pub const CONVERTER_TYPE_STRING: u8 = 0x08;
 pub const CONVERTER_TYPE_TIMESTAMP: u8 = 0x09;
-pub const CONVERTER_TYPE_WASM: u8 = 0x0A;
 pub const CONVERTER_TYPE_TRIGRAM: u8 = 0x0B;
 pub const CONVERTER_TYPE_PHONETIC: u8 = 0x0C;
 
@@ -182,43 +181,6 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
         }
       };
       Ok(Box::new(PhoneticConverter::new(algo)))
-    }
-    CONVERTER_TYPE_WASM => {
-      // Deserialize: 1 byte order_preserving flag + 2 bytes name length + name + wasm_bytes
-      if payload.is_empty() {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "WasmConverter data too short for order_preserving flag".to_string(),
-        });
-      }
-      let order_preserving = payload[0] != 0;
-      let mut cursor = 1;
-      if payload.len() < cursor + 2 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "WasmConverter data too short for name length".to_string(),
-        });
-      }
-      let name_length = u16::from_le_bytes([payload[cursor], payload[cursor + 1]]) as usize;
-      cursor += 2;
-      if payload.len() < cursor + name_length {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "WasmConverter data too short for name".to_string(),
-        });
-      }
-      let name = String::from_utf8(payload[cursor..cursor + name_length].to_vec())
-        .map_err(|error| EngineError::CorruptEntry {
-          offset: cursor as u64,
-          reason: format!("Invalid UTF-8 name in WasmConverter: {}", error),
-        })?;
-      cursor += name_length;
-      let wasm_bytes = payload[cursor..].to_vec();
-      Ok(Box::new(super::wasm_converter::WasmConverter::from_parts(
-        name,
-        order_preserving,
-        wasm_bytes,
-      )))
     }
     unknown => {
       Err(EngineError::CorruptEntry {

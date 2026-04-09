@@ -1,5 +1,5 @@
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::directory_ops::{file_path_hash, directory_path_hash, file_content_hash};
+use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION};

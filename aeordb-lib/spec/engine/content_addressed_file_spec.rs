@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
 use aeordb::engine::{
-  DirectoryOps, EntryType, RequestContext, StorageEngine, VersionManager,
+  DirectoryOps, RequestContext, VersionManager,
   file_path_hash, file_content_hash,
 };
-use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::gc::run_gc;
 use aeordb::server::create_temp_engine_for_tests;
@@ -20,7 +19,6 @@ fn test_file_stored_at_both_path_and_content_keys() {
   ops.store_file(&ctx, "/dual.txt", b"dual key data", Some("text/plain")).unwrap();
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
 
   // Path-based key should resolve
   let path_key = file_path_hash("/dual.txt", &algo).unwrap();
@@ -62,7 +60,7 @@ fn test_child_entry_uses_content_hash_not_path_hash() {
   assert_ne!(file_hash, &path_key, "ChildEntry.hash should be content hash, not path hash");
 
   // It should be the content hash
-  let hash_length = algo.hash_length();
+  let _hash_length = algo.hash_length();
   let (_header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
   let expected_content_key = file_content_hash(&value, &algo).unwrap();
   assert_eq!(file_hash, &expected_content_key, "ChildEntry.hash should equal computed content hash");
@@ -88,7 +86,6 @@ fn test_overwrite_changes_content_key_but_path_key_still_works() {
   let ops = DirectoryOps::new(&engine);
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
 
   // Store v1
   ops.store_file(&ctx, "/versioned.txt", b"version 1", Some("text/plain")).unwrap();
@@ -234,7 +231,6 @@ fn test_gc_sweeps_old_content_keys_after_overwrite() {
   let ops = DirectoryOps::new(&engine);
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
 
   // Store v1
   ops.store_file(&ctx, "/mutable.txt", b"v1 data", Some("text/plain")).unwrap();
@@ -271,7 +267,6 @@ fn test_gc_preserves_snapshot_content_keys() {
   let vm = VersionManager::new(&engine);
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
 
   // Store v1 and snapshot
   ops.store_file(&ctx, "/pinned.txt", b"v1 pinned", Some("text/plain")).unwrap();
