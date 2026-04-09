@@ -19,32 +19,25 @@
 - [x] Document Parsers (WASM plugin SDK, content-type, source resolution) — 88 tests
 - [x] Version Export, Patch & Import (CLI + HTTP) — 135 tests
 - [x] Event System (EventBus, SSE, Webhooks, Heartbeat) — 144 tests
-- [x] Content-Addressed B-Tree Directories (auto-convert at 256, integrated into DirectoryOps + tree walker) — 93 tests
+- [x] Content-Addressed B-Tree Directories — 93 tests
 - [x] Disk-Resident KV Store (bucket pages, NVT index, hot file WAL) — 58 tests
 - [x] Garbage Collection (mark-and-sweep, in-place overwrite, CLI + HTTP) — 36 tests
-- [x] Concurrent KV Readers (snapshot double-buffering, in-memory page cache, lock-free reads) — 20 tests
+- [x] Concurrent KV Readers (snapshot double-buffering, lock-free reads) — 20 tests
+- [x] Pre-Hashed Client Uploads (4-phase protocol, dedup, atomic commit) — 28 tests
 
 ---
 
 ## Minor Loose Ends
 
 - [ ] Version Export Phase 7: E2E manual verification (code + tests done, just needs a human run)
-- [ ] WASM Parser E2E test (test code written, needs compiled `wasm32-unknown-unknown` binary from `aeordb-parsers/plaintext`)
+- [ ] WASM Parser E2E test (test code written, needs compiled `wasm32-unknown-unknown` binary)
 
 ---
-
-## Completed: Pre-Hashed Client Uploads — 28 tests
-- [x] Task 1: Config + dedup check endpoints — 11 tests
-- [x] Task 2: Chunk upload with hash verification — 6 tests
-- [x] Task 3: Batch commit engine function (batch_commit.rs)
-- [x] Task 4: Commit HTTP endpoint — 7 tests
-- [x] Task 5: E2E integration tests — 4 tests
 
 ## Future Plans (Not Started)
 
 - [ ] Server-side compilation + in-database SDK + schema-as-code
 - [ ] Cron/background task system
-- [x] ~~Pre-hashed client uploads~~ (done)
 - [ ] Fork merging (true merge with conflict detection, not just fast-forward)
 - [ ] Concurrent parallel writers (coordinator pattern)
 - [ ] File defragmentation (rewrite file to eliminate voids)
