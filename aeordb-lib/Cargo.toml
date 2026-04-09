@@ -406,3 +406,15 @@ path = "spec/engine/gc_spec.rs"
 [[test]]
 name = "gc_http_spec"
 path = "spec/http/gc_http_spec.rs"
+
+[[test]]
+name = "upload_spec"
+path = "spec/http/upload_spec.rs"
+
+[[test]]
+name = "upload_commit_spec"
+path = "spec/http/upload_commit_spec.rs"
+
+[[test]]
+name = "upload_e2e_spec"
+path = "spec/http/upload_e2e_spec.rs"

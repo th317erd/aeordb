@@ -7,6 +7,7 @@ pub mod responses;
 pub mod routes;
 pub mod sse_routes;
 pub mod state;
+pub mod upload_routes;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -181,6 +182,8 @@ pub fn create_app_with_all(
         .delete(engine_routes::engine_delete_file)
         .head(engine_routes::engine_head),
     )
+    // Upload check (pre-hashed uploads)
+    .route("/upload/check", post(upload_routes::upload_check))
     // SSE event stream
     .route("/events/stream", get(sse_routes::event_stream))
     // Query route
@@ -225,7 +228,9 @@ pub fn create_app_with_all(
     // Portal (embedded dashboard UI)
     .route("/portal", get(portal_routes::portal_index))
     .route("/portal/", get(portal_routes::portal_index))
-    .route("/portal/{filename}", get(portal_routes::portal_asset));
+    .route("/portal/{filename}", get(portal_routes::portal_asset))
+    // Upload config (public, no auth)
+    .route("/upload/config", get(upload_routes::upload_config));
 
   public_routes
     .merge(protected_routes)
