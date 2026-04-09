@@ -372,3 +372,175 @@ async fn test_config_post_method_not_allowed() {
         response.status()
     );
 }
+
+// ===========================================================================
+// 12. PUT /upload/chunks/{hash} with valid hash -> 201
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_valid_hash() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let chunk_data = b"hello world chunk upload test";
+    let hash_hex = compute_chunk_hash(chunk_data);
+
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .header("authorization", &auth)
+        .body(Body::from(chunk_data.to_vec()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let json = body_json(response.into_body()).await;
+    assert_eq!(json["status"].as_str().unwrap(), "created");
+    assert_eq!(json["hash"].as_str().unwrap(), hash_hex);
+}
+
+// ===========================================================================
+// 13. PUT /upload/chunks/{hash} with wrong hash -> 400
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_hash_mismatch() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let chunk_data = b"some chunk data";
+    // Use a valid hex string that doesn't match the actual hash
+    let wrong_hash = hex::encode([0xAAu8; 32]);
+
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", wrong_hash))
+        .header("authorization", &auth)
+        .body(Body::from(chunk_data.to_vec()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let json = body_json(response.into_body()).await;
+    assert!(json["error"].as_str().unwrap().contains("Hash mismatch"));
+}
+
+// ===========================================================================
+// 14. PUT /upload/chunks/{hash} too large -> 400
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_too_large() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let oversized = vec![0u8; 262_145]; // one byte over limit
+    let hash_hex = compute_chunk_hash(&oversized);
+
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .header("authorization", &auth)
+        .body(Body::from(oversized))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let json = body_json(response.into_body()).await;
+    assert!(json["error"].as_str().unwrap().contains("maximum size"));
+}
+
+// ===========================================================================
+// 15. PUT /upload/chunks/{hash} dedup: first 201, second 200 "exists"
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_dedup() {
+    let (_app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let chunk_data = b"dedup test chunk data";
+    let hash_hex = compute_chunk_hash(chunk_data);
+
+    // First upload -> 201 created
+    let app = rebuild_app(&jwt_manager, &engine);
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .header("authorization", &auth)
+        .body(Body::from(chunk_data.to_vec()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let json = body_json(response.into_body()).await;
+    assert_eq!(json["status"].as_str().unwrap(), "created");
+
+    // Second upload -> 200 exists
+    let app = rebuild_app(&jwt_manager, &engine);
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .header("authorization", &auth)
+        .body(Body::from(chunk_data.to_vec()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response.into_body()).await;
+    assert_eq!(json["status"].as_str().unwrap(), "exists");
+    assert_eq!(json["hash"].as_str().unwrap(), hash_hex);
+}
+
+// ===========================================================================
+// 16. PUT /upload/chunks/{hash} empty chunk -> 201
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_empty_chunk() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let chunk_data: &[u8] = b"";
+    let hash_hex = compute_chunk_hash(chunk_data);
+
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let json = body_json(response.into_body()).await;
+    assert_eq!(json["status"].as_str().unwrap(), "created");
+    assert_eq!(json["hash"].as_str().unwrap(), hash_hex);
+}
+
+// ===========================================================================
+// 17. PUT /upload/chunks/{hash} requires auth (no token -> 401)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_chunk_upload_requires_auth() {
+    let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+
+    let chunk_data = b"auth test chunk";
+    let hash_hex = compute_chunk_hash(chunk_data);
+
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/upload/chunks/{}", hash_hex))
+        .body(Body::from(chunk_data.to_vec()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

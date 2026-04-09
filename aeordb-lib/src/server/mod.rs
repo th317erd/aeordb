@@ -182,8 +182,9 @@ pub fn create_app_with_all(
         .delete(engine_routes::engine_delete_file)
         .head(engine_routes::engine_head),
     )
-    // Upload check (pre-hashed uploads)
+    // Upload check and chunk upload (pre-hashed uploads)
     .route("/upload/check", post(upload_routes::upload_check))
+    .route("/upload/chunks/{hash}", put(upload_routes::upload_chunk))
     // SSE event stream
     .route("/events/stream", get(sse_routes::event_stream))
     // Query route
