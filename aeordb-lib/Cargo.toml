@@ -389,3 +389,7 @@ path = "spec/engine/btree_directory_spec.rs"
 [[test]]
 name = "disk_kv_store_spec"
 path = "spec/engine/disk_kv_store_spec.rs"
+
+[[test]]
+name = "gc_spec"
+path = "spec/engine/gc_spec.rs"

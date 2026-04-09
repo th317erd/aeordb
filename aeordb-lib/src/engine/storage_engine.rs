@@ -657,6 +657,72 @@ impl StorageEngine {
     Ok(())
   }
 
+  /// Read only the entry header at a given file offset.
+  /// Used by GC to determine entry size without reading the full payload.
+  pub fn read_entry_header_at(&self, offset: u64) -> EngineResult<EntryHeader> {
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let (header, _key, _value) = writer.read_entry_at(offset)?;
+    Ok(header)
+  }
+
+  /// Write a DeletionRecord entry at a specific file offset (in-place).
+  /// Returns the total bytes written.
+  pub fn write_deletion_at(&self, offset: u64, path: &str) -> EngineResult<u32> {
+    let deletion = crate::engine::deletion_record::DeletionRecord::new(
+      path.to_string(),
+      Some("gc".to_string()),
+    );
+    let value = deletion.serialize();
+    let key = self.compute_hash(
+      format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes(),
+    )?;
+
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    writer.write_entry_at(offset, EntryType::DeletionRecord, &key, &value)
+  }
+
+  /// Write a void entry at a specific file offset (in-place).
+  pub fn write_void_at(&self, offset: u64, size: u32) -> EngineResult<()> {
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    writer.write_void_at(offset, size)?;
+
+    let mut vm = self.void_manager.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    vm.register_void(size, offset);
+
+    Ok(())
+  }
+
+  /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
+  pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
+    let mut kv = self.kv_store.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    kv.mark_deleted(hash);
+    Ok(())
+  }
+
+  /// Iterate all live KV entries. Used by GC sweep.
+  pub fn iter_kv_entries(&self) -> EngineResult<Vec<KVEntry>> {
+    let mut kv = self.kv_store.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    kv.iter_all()
+  }
+
   /// Return all (key_hash, value) pairs for entries matching a KV type.
   /// Reads each entry's value from disk. Includes deleted entries in the
   /// result — callers should check `is_entry_deleted` if needed.

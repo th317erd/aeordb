@@ -152,6 +152,70 @@ impl AppendWriter {
     self.append_entry(EntryType::Void, key, &value, 0)
   }
 
+  /// Write an entry at a specific file offset (in-place overwrite).
+  /// Does NOT update current_offset or entry_count — this overwrites existing space.
+  pub fn write_entry_at(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+  ) -> EngineResult<u32> {
+    let hash_algo = self.file_header.hash_algo;
+    let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
+    let total_length =
+      EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let header = EntryHeader {
+      entry_version: 1,
+      entry_type,
+      flags: 0,
+      hash_algo,
+      compression_algo: CompressionAlgorithm::None,
+      encryption_algo: 0,
+      key_length: key.len() as u32,
+      value_length: value.len() as u32,
+      timestamp: now,
+      total_length,
+      hash,
+    };
+
+    self.file.seek(SeekFrom::Start(offset))?;
+    let header_bytes = header.serialize();
+    self.file.write_all(&header_bytes)?;
+    self.file.write_all(key)?;
+    self.file.write_all(value)?;
+    self.file.sync_all()?;
+
+    Ok(total_length)
+  }
+
+  /// Write a void entry at a specific file offset (in-place overwrite).
+  /// The void fills exactly `size` bytes starting at `offset`.
+  pub fn write_void_at(&mut self, offset: u64, size: u32) -> EngineResult<()> {
+    let hash_algo = self.file_header.hash_algo;
+    let header_size = 31 + hash_algo.hash_length();
+
+    if (size as usize) < header_size {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "Void size {} is smaller than minimum entry size {}",
+          size, header_size
+        ),
+      });
+    }
+
+    let key = b"";
+    let value_length = size as usize - header_size;
+    let value = vec![0u8; value_length];
+
+    self.write_entry_at(offset, EntryType::Void, key, &value)?;
+    Ok(())
+  }
+
   pub fn read_entry_at(&mut self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
     self.file.seek(SeekFrom::Start(offset))?;
     let header = EntryHeader::deserialize(&mut self.file)?;
