@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use aeordb::engine::disk_kv_store::DiskKVStore;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
+use aeordb::engine::kv_pages::{bucket_page_offset, page_size};
 use aeordb::engine::kv_snapshot::ReadSnapshot;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_FLAG_DELETED};
 use aeordb::engine::nvt::NormalizedVectorTable;
@@ -35,12 +37,27 @@ fn make_deleted_entry(seed: u8, offset: u64) -> KVEntry {
     }
 }
 
+/// Read all pages from a KV file into memory.
+fn read_pages_from_kv(kv_path: &std::path::Path, bucket_count: usize, hash_length: usize) -> Vec<Vec<u8>> {
+    let mut file = File::open(kv_path).unwrap();
+    let psize = page_size(hash_length);
+    let mut pages = Vec::with_capacity(bucket_count);
+    for bucket in 0..bucket_count {
+        let offset = bucket_page_offset(bucket, hash_length);
+        let mut page_data = vec![0u8; psize];
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.read_exact(&mut page_data).unwrap();
+        pages.push(page_data);
+    }
+    pages
+}
+
 /// Create a DiskKVStore with entries flushed to disk, then return
-/// the store's bucket_count and a separately-opened read-only File handle.
+/// the store's bucket_count and in-memory pages.
 fn create_flushed_store(
     dir: &std::path::Path,
     entries: &[KVEntry],
-) -> (usize, File) {
+) -> (usize, Vec<Vec<u8>>) {
     let kv_path = dir.join("test.kv");
     let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
     for entry in entries {
@@ -48,9 +65,9 @@ fn create_flushed_store(
     }
     store.flush().unwrap();
     let bucket_count = store.bucket_count();
-    // Open a separate read handle
-    let file = OpenOptions::new().read(true).open(&kv_path).unwrap();
-    (bucket_count, file)
+    let hash_length = HashAlgorithm::Blake3_256.hash_length();
+    let pages = read_pages_from_kv(&kv_path, bucket_count, hash_length);
+    (bucket_count, pages)
 }
 
 fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
@@ -58,6 +75,11 @@ fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
         Box::new(HashConverter),
         bucket_count,
     ))
+}
+
+/// Create empty pages for a given bucket count and hash length.
+fn empty_pages(bucket_count: usize, hash_length: usize) -> Vec<Vec<u8>> {
+    vec![vec![0u8; page_size(hash_length)]; bucket_count]
 }
 
 // ============================================================================
@@ -73,8 +95,6 @@ fn test_snapshot_get_finds_entry_in_buffer() {
     let bucket_count = store.bucket_count();
     drop(store);
 
-    let file = OpenOptions::new().read(true).open(&kv_path).unwrap();
-
     let entry = make_entry(42, 12345);
     let mut buffer = HashMap::new();
     buffer.insert(entry.hash.clone(), entry.clone());
@@ -85,9 +105,10 @@ fn test_snapshot_get_finds_entry_in_buffer() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         1,
+        empty_pages(bucket_count, 32),
     );
 
-    let result = snap.get(&make_hash(42), &file);
+    let result = snap.get(&make_hash(42));
     assert!(result.is_some());
     assert_eq!(result.unwrap().offset, 12345);
 }
@@ -100,8 +121,6 @@ fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
     let bucket_count = store.bucket_count();
     drop(store);
 
-    let file = OpenOptions::new().read(true).open(&kv_path).unwrap();
-
     let entry = make_deleted_entry(42, 12345);
     let mut buffer = HashMap::new();
     buffer.insert(entry.hash.clone(), entry.clone());
@@ -112,13 +131,14 @@ fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         0,
+        empty_pages(bucket_count, 32),
     );
 
-    let result = snap.get(&make_hash(42), &file);
+    let result = snap.get(&make_hash(42));
     assert!(result.is_none(), "Deleted entry in buffer should return None from get()");
 
     // But get_raw should still find it
-    let raw = snap.get_raw(&make_hash(42), &file);
+    let raw = snap.get_raw(&make_hash(42));
     assert!(raw.is_some(), "get_raw should return deleted entries");
     assert!(raw.unwrap().is_deleted());
 
@@ -130,26 +150,27 @@ fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
 fn test_snapshot_get_falls_through_to_disk() {
     let dir = tempdir().unwrap();
     let entries = vec![make_entry(1, 100), make_entry(2, 200), make_entry(3, 300)];
-    let (bucket_count, file) = create_flushed_store(dir.path(), &entries);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &entries);
 
-    // Empty buffer — all lookups must hit disk
+    // Empty buffer — all lookups must hit pages
     let snap = ReadSnapshot::new(
         HashMap::new(),
         make_nvt(bucket_count),
         bucket_count,
         HashAlgorithm::Blake3_256,
         3,
+        pages,
     );
 
-    let r1 = snap.get(&make_hash(1), &file);
+    let r1 = snap.get(&make_hash(1));
     assert!(r1.is_some());
     assert_eq!(r1.unwrap().offset, 100);
 
-    let r2 = snap.get(&make_hash(2), &file);
+    let r2 = snap.get(&make_hash(2));
     assert!(r2.is_some());
     assert_eq!(r2.unwrap().offset, 200);
 
-    let r3 = snap.get(&make_hash(3), &file);
+    let r3 = snap.get(&make_hash(3));
     assert!(r3.is_some());
     assert_eq!(r3.unwrap().offset, 300);
 }
@@ -158,7 +179,7 @@ fn test_snapshot_get_falls_through_to_disk() {
 fn test_snapshot_get_returns_none_for_missing() {
     let dir = tempdir().unwrap();
     let entries = vec![make_entry(1, 100)];
-    let (bucket_count, file) = create_flushed_store(dir.path(), &entries);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &entries);
 
     let snap = ReadSnapshot::new(
         HashMap::new(),
@@ -166,14 +187,15 @@ fn test_snapshot_get_returns_none_for_missing() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         1,
+        pages,
     );
 
     // Hash 99 was never inserted
-    let result = snap.get(&make_hash(99), &file);
+    let result = snap.get(&make_hash(99));
     assert!(result.is_none(), "Missing hash should return None");
 
     // Also check buffer miss for a hash not in buffer or disk
-    let result2 = snap.get(&make_hash(200), &file);
+    let result2 = snap.get(&make_hash(200));
     assert!(result2.is_none());
 }
 
@@ -183,7 +205,7 @@ fn test_snapshot_buffer_wins_over_disk() {
 
     // Put entry with seed=10, offset=1000 on disk
     let disk_entry = make_entry(10, 1000);
-    let (bucket_count, file) = create_flushed_store(dir.path(), &[disk_entry]);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &[disk_entry]);
 
     // Put entry with same hash but different offset in buffer
     let buffer_entry = make_entry(10, 9999);
@@ -196,9 +218,10 @@ fn test_snapshot_buffer_wins_over_disk() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         1,
+        pages,
     );
 
-    let result = snap.get(&make_hash(10), &file);
+    let result = snap.get(&make_hash(10));
     assert!(result.is_some());
     assert_eq!(
         result.unwrap().offset, 9999,
@@ -212,7 +235,7 @@ fn test_snapshot_iter_all_merges_buffer_and_disk() {
 
     // Disk: entries 1, 2, 3
     let disk_entries = vec![make_entry(1, 100), make_entry(2, 200), make_entry(3, 300)];
-    let (bucket_count, file) = create_flushed_store(dir.path(), &disk_entries);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
 
     // Buffer: entry 4 (new) and entry 2 with updated offset
     let mut buffer = HashMap::new();
@@ -227,9 +250,10 @@ fn test_snapshot_iter_all_merges_buffer_and_disk() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         4,
+        pages,
     );
 
-    let all = snap.iter_all(&file).unwrap();
+    let all = snap.iter_all().unwrap();
     assert_eq!(all.len(), 4, "Should have 4 unique entries (3 disk + 1 new, with 1 overlap)");
 
     // Verify the buffer version of entry 2 won
@@ -247,7 +271,7 @@ fn test_snapshot_iter_all_excludes_deleted() {
 
     // Disk: entries 1, 2
     let disk_entries = vec![make_entry(1, 100), make_entry(2, 200)];
-    let (bucket_count, file) = create_flushed_store(dir.path(), &disk_entries);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
 
     // Buffer: delete entry 2 via tombstone
     let mut buffer = HashMap::new();
@@ -260,9 +284,10 @@ fn test_snapshot_iter_all_excludes_deleted() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         1,
+        pages,
     );
 
-    let all = snap.iter_all(&file).unwrap();
+    let all = snap.iter_all().unwrap();
     assert_eq!(all.len(), 1, "Deleted entry should be excluded from iter_all");
 
     // Only entry 1 should remain
@@ -282,7 +307,7 @@ fn test_snapshot_get_concurrent_file_handles() {
         make_entry(20, 2000),
         make_entry(30, 3000),
     ];
-    let (bucket_count, file) = create_flushed_store(dir.path(), &disk_entries);
+    let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
 
     let snap = ReadSnapshot::new(
         HashMap::new(),
@@ -290,20 +315,20 @@ fn test_snapshot_get_concurrent_file_handles() {
         bucket_count,
         HashAlgorithm::Blake3_256,
         3,
+        pages,
     );
 
-    // Multiple sequential get() calls — each internally does try_clone on the file
-    // This verifies the file handle cloning works correctly for repeated reads.
+    // Multiple sequential get() calls — all served from in-memory pages.
     for _ in 0..5 {
-        let r10 = snap.get(&make_hash(10), &file);
+        let r10 = snap.get(&make_hash(10));
         assert!(r10.is_some());
         assert_eq!(r10.unwrap().offset, 1000);
 
-        let r20 = snap.get(&make_hash(20), &file);
+        let r20 = snap.get(&make_hash(20));
         assert!(r20.is_some());
         assert_eq!(r20.unwrap().offset, 2000);
 
-        let r30 = snap.get(&make_hash(30), &file);
+        let r30 = snap.get(&make_hash(30));
         assert!(r30.is_some());
         assert_eq!(r30.unwrap().offset, 3000);
     }
@@ -321,6 +346,7 @@ fn test_snapshot_accessors() {
         1024,
         HashAlgorithm::Blake3_256,
         0,
+        empty_pages(1024, 32),
     );
 
     assert_eq!(snap.len(), 0);
@@ -344,6 +370,7 @@ fn test_snapshot_accessors_with_data() {
         2048,
         HashAlgorithm::Blake3_256,
         5,
+        empty_pages(2048, 32),
     );
 
     assert_eq!(snap.len(), 5);
@@ -360,6 +387,7 @@ fn test_snapshot_is_deleted_in_buffer_false_for_missing() {
         1024,
         HashAlgorithm::Blake3_256,
         0,
+        empty_pages(1024, 32),
     );
 
     assert!(!snap.is_deleted_in_buffer(&make_hash(99)));
@@ -377,6 +405,7 @@ fn test_snapshot_is_deleted_in_buffer_false_for_live_entry() {
         1024,
         HashAlgorithm::Blake3_256,
         1,
+        empty_pages(1024, 32),
     );
 
     assert!(

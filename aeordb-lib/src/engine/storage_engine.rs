@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
-use std::fs::File;
 
 use arc_swap::ArcSwap;
 
@@ -101,7 +100,6 @@ pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
-  kv_file: File,
   #[allow(dead_code)]
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
@@ -124,7 +122,6 @@ impl StorageEngine {
     let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
 
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
-    let kv_file = std::fs::File::open(format!("{}.kv", path))?;
 
     let void_manager = VoidManager::new(hash_algo);
 
@@ -132,7 +129,6 @@ impl StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
-      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -324,13 +320,11 @@ impl StorageEngine {
     }
 
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
-    let kv_file = std::fs::File::open(&kv_path)?;
 
     Ok(StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
-      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -485,7 +479,7 @@ impl StorageEngine {
     hash: &[u8],
   ) -> EngineResult<Option<EntryData>> {
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get(hash, &self.kv_file) {
+    let kv_entry = match snapshot.get(hash) {
       Some(entry) if !entry.is_deleted() => entry,
       _ => return Ok(None),
     };
@@ -502,7 +496,7 @@ impl StorageEngine {
   /// Check if a non-deleted entry exists in the KV store.
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();
-    match snapshot.get(hash, &self.kv_file) {
+    match snapshot.get(hash) {
       Some(entry) => Ok(!entry.is_deleted()),
       None => Ok(false),
     }
@@ -641,7 +635,7 @@ impl StorageEngine {
   /// Check if a KV entry is marked as deleted.
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();
-    match snapshot.get_raw(hash, &self.kv_file) {
+    match snapshot.get_raw(hash) {
       Some(entry) => Ok(entry.is_deleted()),
       None => Ok(false),
     }
@@ -722,7 +716,7 @@ impl StorageEngine {
   /// Iterate all live KV entries. Used by GC sweep.
   pub fn iter_kv_entries(&self) -> EngineResult<Vec<KVEntry>> {
     let snapshot = self.kv_snapshot.load();
-    snapshot.iter_all(&self.kv_file)
+    snapshot.iter_all()
   }
 
   /// Return all (key_hash, value) pairs for entries matching a KV type.
@@ -731,7 +725,7 @@ impl StorageEngine {
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let hashes: Vec<(Vec<u8>, u64)> = {
       let snapshot = self.kv_snapshot.load();
-      snapshot.iter_all(&self.kv_file)?
+      snapshot.iter_all()?
         .into_iter()
         .filter(|entry| entry.entry_type() == target_type)
         .map(|entry| (entry.hash, entry.offset))
@@ -776,7 +770,7 @@ impl StorageEngine {
       std::fs::metadata(kv.path()).map(|m| m.len()).unwrap_or(0)
     };
 
-    let all_entries = snapshot.iter_all(&self.kv_file).unwrap_or_default();
+    let all_entries = snapshot.iter_all().unwrap_or_default();
 
     let mut chunk_count = 0usize;
     let mut file_count = 0usize;
