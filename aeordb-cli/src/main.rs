@@ -75,6 +75,14 @@ enum Commands {
     #[arg(long)]
     hash: String,
   },
+  /// Run garbage collection to reclaim unreachable entries
+  Gc {
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    /// Report what would be collected without actually deleting
+    #[arg(long)]
+    dry_run: bool,
+  },
 }
 
 #[tokio::main]
@@ -105,6 +113,9 @@ async fn main() {
     }
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);
+    }
+    Commands::Gc { database, dry_run } => {
+      commands::gc::run(&database, dry_run);
     }
   }
 }
