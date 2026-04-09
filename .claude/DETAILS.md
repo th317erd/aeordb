@@ -12,7 +12,7 @@
 - **Entry format**: magic 0x0AE012DB, versioned headers, dynamic hash algorithm
 - **Six entity types**: Chunk, FileRecord, DirectoryIndex, DeletionRecord, Snapshot, Void
 - **NVT**: hash-to-scalar [0.0,1.0] → bucket-based KV block indexing
-- **KV Store**: sorted hash→offset array at front of file
+- **KV Store**: disk-resident bucket pages, lock-free snapshot reads via ArcSwap, Mutex for writes
 - **Void management**: deterministic hashes by size, best-fit with splitting
 - **StorageEngine**: top-level combining writer, KV manager, void manager
 - **DirectoryOps**: store/read/delete files, list directories, parent propagation
@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,147 (all passing)
+## Test Count: 2,164 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -80,3 +80,4 @@
 - `aeordb-lib/src/engine/webhook.rs` — webhook dispatcher with HMAC-SHA256 signatures
 - `aeordb-lib/src/engine/gc.rs` — gc_mark (walk all live roots), gc_sweep (in-place overwrite), run_gc
 - `aeordb-lib/src/server/gc_routes.rs` — POST /admin/gc endpoint (root-only, dry_run support)
+- `aeordb-lib/src/engine/kv_snapshot.rs` — ReadSnapshot (lock-free immutable KV read view via ArcSwap)

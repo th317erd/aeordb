@@ -46,7 +46,7 @@
 - [x] Tasks 4-5: Startup without scan + resize on overflow — 17 tests
 - [x] Task 6: Benchmark (flat ~1000/s to 250K)
 
-## Total: 2,147 tests, all passing
+## Total: 2,164 tests, all passing
 
 ## In Progress: Fuzzy Search, Trigram Indexing & Phonetic Matching
 - [x] Phase 1: Multi-Index Foundation (strategy(), expand_value(), scored QueryResult, IndexManager changes) — 30 tests
@@ -74,6 +74,13 @@
 - [x] Task 4: CLI command (aeordb gc --database --dry-run)
 - [x] Task 5: HTTP endpoint (POST /admin/gc) — 11 tests
 - [x] Task 6: Edge case tests (folded into Task 3)
+
+## Completed: Concurrent KV Readers (Snapshot Double-Buffering) — 20 new tests
+- [x] Task 1: ReadSnapshot struct + lock-free get/iter_all — 12 tests
+- [x] Task 2: Refactor DiskKVStore — remove hot cache, snapshot publishing, threshold 512
+- [x] Task 3: Wire StorageEngine reads to snapshots
+- [x] Task 4: Wire EngineChunkStorage to snapshots
+- [x] Task 5: Concurrency tests (multi-threaded contention) — 8 tests
 
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code
