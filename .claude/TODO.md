@@ -27,10 +27,12 @@
 
 ---
 
-## Minor Loose Ends
+## Minor Loose Ends — Cleared
 
-- [ ] Version Export Phase 7: E2E manual verification (code + tests done, just needs a human run)
-- [ ] WASM Parser E2E test (test code written, needs compiled `wasm32-unknown-unknown` binary)
+- [x] Version Export Phase 7: E2E manual verification — passed (export, diff, import all work)
+- [x] WASM Parser E2E test — 11/11 tests pass (binary compiled, 167KB)
+- [x] Snapshot versioning bug — fixed via content-addressed FileRecord keys (10 tests)
+- [x] Hot file naming mismatch — fixed (derive db_name from .aeordb stem)
 
 ---
 
