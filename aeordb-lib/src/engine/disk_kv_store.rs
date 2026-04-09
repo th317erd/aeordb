@@ -79,7 +79,10 @@ impl DiskKVStore {
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
 
         let (hot_file, hot_path) = if let Some(dir) = hot_dir {
-            let db_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            // Derive db_name: "test.aeordb.kv" → stem "test.aeordb" → stem "test"
+            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            let db_name = std::path::Path::new(kv_stem)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
             let (f, p) = Self::init_hot_file(dir, db_name);
             (Some(f), Some(p))
         } else {
@@ -223,7 +226,10 @@ impl DiskKVStore {
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
 
         let (hot_file, hot_path) = if let Some(dir) = hot_dir {
-            let db_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            // Derive db_name: "test.aeordb.kv" → stem "test.aeordb" → stem "test"
+            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            let db_name = std::path::Path::new(kv_stem)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
             let (f, p) = Self::init_hot_file(dir, db_name);
             (Some(f), Some(p))
         } else {
