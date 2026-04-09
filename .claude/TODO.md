@@ -81,6 +81,7 @@
 - [x] Task 3: Wire StorageEngine reads to snapshots
 - [x] Task 4: Wire EngineChunkStorage to snapshots
 - [x] Task 5: Concurrency tests (multi-threaded contention) — 8 tests
+- [x] Fix: in-memory page cache (eliminated concurrent read/write race on disk pages)
 
 ## Remaining Future Plans
 - [ ] Server-side compilation + in-database SDK + schema-as-code
