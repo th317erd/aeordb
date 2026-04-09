@@ -526,28 +526,6 @@ fn test_update_offset() {
 }
 
 #[test]
-fn test_hot_cache_hit() {
-    let dir = tempdir().unwrap();
-    let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
-
-    store.insert(make_entry(1, 100));
-    store.flush().unwrap();
-
-    // First get: from disk (populates cache)
-    let hash = make_hash(1);
-    assert!(!store.is_cached(&hash));
-
-    let _ = store.get(&hash);
-    assert!(store.is_cached(&hash), "Entry should be in hot cache after get");
-
-    // Second get: from cache
-    let result = store.get(&hash);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().offset, 100);
-}
-
-#[test]
 fn test_update_flags_missing() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
@@ -672,25 +650,6 @@ fn test_cache_eviction() {
         let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
         assert!(store.get(&hash).is_some());
     }
-}
-
-#[test]
-fn test_insert_invalidates_cache() {
-    let dir = tempdir().unwrap();
-    let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
-
-    store.insert(make_entry(1, 100));
-    store.flush().unwrap();
-
-    // Populate cache
-    let hash = make_hash(1);
-    let _ = store.get(&hash);
-    assert!(store.is_cached(&hash));
-
-    // Insert should invalidate cache
-    store.insert(make_entry(1, 999));
-    assert!(!store.is_cached(&hash), "Cache should be invalidated after insert");
 }
 
 #[test]
@@ -1204,53 +1163,6 @@ fn test_resize_at_max_stage_returns_error() {
     // Attempting to resize when already at max stage should error
     let result = store.resize_to_next_stage();
     assert!(result.is_err(), "Resize at max stage should return an error");
-}
-
-#[test]
-fn test_resize_clears_hot_cache() {
-    let dir = tempdir().unwrap();
-    let kv_path = dir.path().join("test.kv");
-    let hash_algo = HashAlgorithm::Blake3_256;
-
-    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
-
-    // Insert some entries and flush to populate disk
-    for i in 0..100u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    // Read entries to populate hot cache
-    let cache_hash = make_unique_hash(50);
-    let _ = store.get(&cache_hash);
-    assert!(store.is_cached(&cache_hash), "Entry should be in hot cache");
-
-    // Force resize
-    for i in 100..35_100u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    // Cache should be cleared after resize
-    assert!(
-        !store.is_cached(&cache_hash),
-        "Hot cache should be cleared after resize"
-    );
-
-    // But entry should still be findable
-    let entry = store.get(&cache_hash);
-    assert!(entry.is_some(), "Entry should still be findable after resize");
-    assert_eq!(entry.unwrap().offset, 50);
 }
 
 #[test]

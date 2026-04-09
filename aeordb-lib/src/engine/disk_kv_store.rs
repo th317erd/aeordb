@@ -2,19 +2,20 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::kv_pages::*;
+use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
 
 /// Number of buffered writes before auto-flush to disk.
-const WRITE_BUFFER_THRESHOLD: usize = 1000;
-
-/// Maximum entries in the hot cache (simple LRU eviction).
-const HOT_CACHE_MAX: usize = 10_000;
+const WRITE_BUFFER_THRESHOLD: usize = 512;
 
 /// Number of entries buffered before flushing to the hot file.
 const HOT_BUFFER_THRESHOLD: usize = 10;
@@ -22,16 +23,12 @@ const HOT_BUFFER_THRESHOLD: usize = 10;
 /// A disk-resident KV store backed by NVT-indexed bucket pages.
 ///
 /// The KV data lives in a separate `.kv` file. Lookups flow through:
-/// write_buffer -> hot_cache -> NVT bucket -> disk page scan.
+/// write_buffer -> NVT bucket -> disk page scan.
 pub struct DiskKVStore {
     /// NVT for O(1) bucket lookup from hash bytes.
     nvt: NormalizedVectorTable,
     /// Write buffer: absorbs recent inserts before flushing to disk.
     write_buffer: HashMap<Vec<u8>, KVEntry>,
-    /// Hot cache: recently read entries from disk.
-    hot_cache: HashMap<Vec<u8>, KVEntry>,
-    /// LRU order tracking for hot cache eviction (oldest first).
-    cache_order: Vec<Vec<u8>>,
     /// File handle for the KV pages on disk.
     kv_file: File,
     /// Path to the KV file.
@@ -50,6 +47,10 @@ pub struct DiskKVStore {
     hot_path: Option<PathBuf>,
     /// Micro-buffer of entries pending write to the hot file.
     hot_buffer: Vec<KVEntry>,
+    /// Shared snapshot for lock-free readers. Updated after every mutation.
+    snapshot: Arc<ArcSwap<ReadSnapshot>>,
+    /// Shared NVT wrapped in Arc — re-cloned only on flush/resize.
+    shared_nvt: Arc<NormalizedVectorTable>,
 }
 
 impl DiskKVStore {
@@ -85,11 +86,19 @@ impl DiskKVStore {
             (None, None)
         };
 
+        let shared_nvt = Arc::new(nvt.clone());
+        let initial_snapshot = ReadSnapshot::new(
+            HashMap::new(),
+            Arc::clone(&shared_nvt),
+            bucket_count,
+            hash_algo,
+            0,
+        );
+        let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
+
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
-            hot_cache: HashMap::new(),
-            cache_order: Vec::new(),
             kv_file: file,
             kv_path: path.to_path_buf(),
             stage,
@@ -99,6 +108,8 @@ impl DiskKVStore {
             hot_file,
             hot_path,
             hot_buffer: Vec::new(),
+            snapshot,
+            shared_nvt,
         })
     }
 
@@ -128,11 +139,19 @@ impl DiskKVStore {
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
 
+        let shared_nvt = Arc::new(nvt.clone());
+        let initial_snapshot = ReadSnapshot::new(
+            HashMap::new(),
+            Arc::clone(&shared_nvt),
+            bucket_count,
+            hash_algo,
+            0,
+        );
+        let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
+
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
-            hot_cache: HashMap::new(),
-            cache_order: Vec::new(),
             kv_file: file,
             kv_path: path.to_path_buf(),
             stage,
@@ -142,6 +161,8 @@ impl DiskKVStore {
             hot_file: None,
             hot_path: None,
             hot_buffer: Vec::new(),
+            snapshot,
+            shared_nvt,
         })
     }
 
@@ -203,11 +224,19 @@ impl DiskKVStore {
             (None, None)
         };
 
+        let shared_nvt = Arc::new(nvt.clone());
+        let initial_snapshot = ReadSnapshot::new(
+            HashMap::new(),
+            Arc::clone(&shared_nvt),
+            bucket_count,
+            hash_algo,
+            entry_count,
+        );
+        let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
+
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
-            hot_cache: HashMap::new(),
-            cache_order: Vec::new(),
             kv_file: file,
             kv_path: path.to_path_buf(),
             stage,
@@ -217,11 +246,13 @@ impl DiskKVStore {
             hot_file,
             hot_path,
             hot_buffer: Vec::new(),
+            snapshot,
+            shared_nvt,
         })
     }
 
     /// Look up an entry by hash.
-    /// Search order: write_buffer -> hot_cache -> disk page.
+    /// Search order: write_buffer -> disk page.
     pub fn get(&mut self, hash: &[u8]) -> Option<KVEntry> {
         // 1. Check write buffer first (most recent writes)
         if let Some(entry) = self.write_buffer.get(hash) {
@@ -231,15 +262,7 @@ impl DiskKVStore {
             return Some(entry.clone());
         }
 
-        // 2. Check hot cache
-        if let Some(entry) = self.hot_cache.get(hash) {
-            if entry.is_deleted() {
-                return None;
-            }
-            return Some(entry.clone());
-        }
-
-        // 3. Read from disk via NVT bucket mapping
+        // 2. Read from disk via NVT bucket mapping
         let bucket_index = self.nvt.bucket_for_value(hash);
         let hash_length = self.hash_algo.hash_length();
         let offset = bucket_page_offset(bucket_index, hash_length);
@@ -256,9 +279,6 @@ impl DiskKVStore {
         let entries = deserialize_page(&page_data, hash_length).ok()?;
         let found = find_in_page(&entries, hash)?.clone();
 
-        // Cache the result
-        self.cache_put(hash, &found);
-
         Some(found)
     }
 
@@ -268,10 +288,6 @@ impl DiskKVStore {
     pub fn insert(&mut self, entry: KVEntry) {
         let is_new = !self.write_buffer.contains_key(&entry.hash)
             && !self.entry_exists_on_disk(&entry.hash);
-
-        // Invalidate hot cache for this hash
-        self.hot_cache.remove(&entry.hash);
-        self.cache_order.retain(|h| h != &entry.hash);
 
         self.write_buffer.insert(entry.hash.clone(), entry.clone());
 
@@ -287,8 +303,15 @@ impl DiskKVStore {
             }
         }
 
-        if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
+        let did_flush = if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
             let _ = self.flush();
+            true
+        } else {
+            false
+        };
+
+        if !did_flush {
+            self.publish_snapshot();
         }
     }
 
@@ -365,6 +388,9 @@ impl DiskKVStore {
         self.flush_hot_buffer()?;
         self.truncate_hot_file()?;
 
+        // Publish snapshot with fresh NVT clone (disk state changed)
+        self.publish_snapshot_with_new_nvt();
+
         // Handle overflows: resize to next stage and retry
         if !overflow_entries.is_empty() {
             self.resize_to_next_stage()?;
@@ -427,8 +453,9 @@ impl DiskKVStore {
             Box::new(HashConverter), self.bucket_count,
         );
         self.entry_count = all_entries.len();
-        self.hot_cache.clear();
-        self.cache_order.clear();
+
+        // Publish snapshot with fresh NVT clone (bucket layout changed)
+        self.publish_snapshot_with_new_nvt();
 
         Ok(())
     }
@@ -442,10 +469,9 @@ impl DiskKVStore {
     pub fn mark_deleted(&mut self, hash: &[u8]) {
         if let Some(mut entry) = self.get(hash) {
             entry.type_flags |= KV_FLAG_DELETED;
-            self.hot_cache.remove(hash);
-            self.cache_order.retain(|h| h != hash);
             self.write_buffer.insert(hash.to_vec(), entry);
             self.entry_count = self.entry_count.saturating_sub(1);
+            self.publish_snapshot();
         }
     }
 
@@ -498,9 +524,8 @@ impl DiskKVStore {
         if let Some(mut entry) = self.get(hash) {
             let entry_type = entry.type_flags & 0x0F;
             entry.type_flags = entry_type | (new_flags & 0xF0);
-            self.hot_cache.remove(hash);
-            self.cache_order.retain(|h| h != hash);
             self.write_buffer.insert(hash.to_vec(), entry);
+            self.publish_snapshot();
             true
         } else {
             false
@@ -512,9 +537,8 @@ impl DiskKVStore {
     pub fn update_offset(&mut self, hash: &[u8], new_offset: u64) -> bool {
         if let Some(mut entry) = self.get(hash) {
             entry.offset = new_offset;
-            self.hot_cache.remove(hash);
-            self.cache_order.retain(|h| h != hash);
             self.write_buffer.insert(hash.to_vec(), entry);
+            self.publish_snapshot();
             true
         } else {
             false
@@ -541,9 +565,31 @@ impl DiskKVStore {
         self.hash_algo
     }
 
-    /// Check if a hash exists in the hot cache.
-    pub fn is_cached(&self, hash: &[u8]) -> bool {
-        self.hot_cache.contains_key(hash)
+    // ========================================================================
+    // Snapshot publishing methods
+    // ========================================================================
+
+    /// Publish a new read snapshot from current state.
+    fn publish_snapshot(&self) {
+        let snapshot = ReadSnapshot::new(
+            self.write_buffer.clone(),
+            Arc::clone(&self.shared_nvt),
+            self.bucket_count,
+            self.hash_algo,
+            self.entry_count,
+        );
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
+    /// Publish a snapshot with a fresh NVT clone (called after flush/resize).
+    fn publish_snapshot_with_new_nvt(&mut self) {
+        self.shared_nvt = Arc::new(self.nvt.clone());
+        self.publish_snapshot();
+    }
+
+    /// Get a reference to the ArcSwap for readers to load snapshots from.
+    pub fn snapshot_handle(&self) -> &Arc<ArcSwap<ReadSnapshot>> {
+        &self.snapshot
     }
 
     // ========================================================================
@@ -645,22 +691,6 @@ impl DiskKVStore {
         self.hot_buffer.len()
     }
 
-    /// Add an entry to the hot cache with LRU eviction.
-    fn cache_put(&mut self, hash: &[u8], entry: &KVEntry) {
-        // Remove existing entry from order tracking if present
-        self.cache_order.retain(|h| h != hash);
-
-        if self.hot_cache.len() >= HOT_CACHE_MAX && !self.hot_cache.contains_key(hash) {
-            // Evict oldest entry
-            if let Some(old_hash) = self.cache_order.first().cloned() {
-                self.hot_cache.remove(&old_hash);
-                self.cache_order.remove(0);
-            }
-        }
-
-        self.hot_cache.insert(hash.to_vec(), entry.clone());
-        self.cache_order.push(hash.to_vec());
-    }
 }
 
 impl Drop for DiskKVStore {
