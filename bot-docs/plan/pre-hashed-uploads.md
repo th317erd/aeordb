@@ -192,7 +192,21 @@ All endpoints under `/upload/` prefix.
 
 ---
 
-## 6. Error Cases
+## 6. Clarifications (from critical analysis)
+
+**Chunk ordering:** The `chunks` array in the commit request is the **assembly order**. The first hash is the first 256KB of the file, the second hash is the next 256KB, etc. The server preserves this order in the FileRecord's `chunk_hashes` field. Reordering = data corruption.
+
+**Content-type precedence:** Client-provided `content_type` in the commit wins. If the client omits it (null or absent), the server detects from the first chunk's magic bytes using `detect_content_type`. Same precedence as the existing PUT endpoint.
+
+**GC race with uploads:** A chunk could theoretically be garbage-collected between the dedup check (phase 3) and the commit (phase 4b) if a GC run happens in between. This is accepted — GC is manual (user-triggered via `POST /admin/gc` or CLI `aeordb gc`). The user should not run GC during active upload sessions. If this race occurs, the commit returns the missing hashes in the error response, and the client can re-upload them and retry the commit.
+
+**Dedup check size:** No hard limit on the number of hashes in a `POST /upload/check` request. Even 40,000 hashes (a ~3MB JSON payload) result in sub-second KV lookups with snapshot-based reads. Clients should batch reasonably but the server accepts whatever the HTTP body limit allows (currently 10GB).
+
+**Concurrent commits:** Two clients committing simultaneously with overlapping paths serialize at the engine write lock. The second commit's version of a file overwrites the first. This is the same behavior as two concurrent PUT requests today — last writer wins. No change.
+
+---
+
+## 7. Error Cases
 
 | Scenario | Response |
 |----------|----------|
@@ -206,7 +220,7 @@ All endpoints under `/upload/` prefix.
 
 ---
 
-## 7. Implementation Phases
+## 8. Implementation Phases
 
 ### Phase 1 — Upload config endpoint + dedup check
 - `GET /upload/config` returns hash algo + chunk size
@@ -230,7 +244,7 @@ All endpoints under `/upload/` prefix.
 
 ---
 
-## 8. Non-goals (deferred)
+## 9. Non-goals (deferred)
 
 - Resumable uploads (track upload session state server-side)
 - Client SDK library (the protocol is HTTP — any client can implement it)
