@@ -19,6 +19,7 @@ tokio = { workspace = true }
 blake3 = "1"
 hex = "0.4"
 zstd = "0.13"
+arc-swap = "1"
 
 # Serialization
 serde = { workspace = true }
@@ -389,6 +390,14 @@ path = "spec/engine/btree_directory_spec.rs"
 [[test]]
 name = "disk_kv_store_spec"
 path = "spec/engine/disk_kv_store_spec.rs"
+
+[[test]]
+name = "kv_snapshot_spec"
+path = "spec/engine/kv_snapshot_spec.rs"
+
+[[test]]
+name = "kv_concurrency_spec"
+path = "spec/engine/kv_concurrency_spec.rs"
 
 [[test]]
 name = "gc_spec"

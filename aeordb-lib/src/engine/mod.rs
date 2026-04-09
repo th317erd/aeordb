@@ -30,6 +30,7 @@ pub mod json_parser;
 pub mod kv_pages;
 pub mod kv_resize;
 pub mod kv_store;
+pub mod kv_snapshot;
 pub mod nvt;
 pub mod nvt_ops;
 pub mod path_utils;
@@ -67,6 +68,7 @@ pub use kv_pages::{
   page_size, bucket_page_offset, serialize_page, deserialize_page,
   find_in_page, upsert_in_page, stage_for_count,
 };
+pub use kv_snapshot::ReadSnapshot;
 pub use kv_store::{
   KVEntry, KVStore,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION,
