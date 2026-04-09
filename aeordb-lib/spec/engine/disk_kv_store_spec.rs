@@ -231,14 +231,14 @@ fn test_create_and_open() {
 
     // Create and insert
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         store.insert(make_entry(1, 100));
         store.flush().unwrap();
     }
 
     // Reopen and verify
     {
-        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         let entry = store.get(&make_hash(1));
         assert!(entry.is_some());
         assert_eq!(entry.unwrap().offset, 100);
@@ -249,7 +249,7 @@ fn test_create_and_open() {
 fn test_insert_and_get() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     let entry = make_entry(42, 12345);
     store.insert(entry.clone());
@@ -266,7 +266,7 @@ fn test_insert_and_get() {
 fn test_insert_multiple() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     for i in 0..100u8 {
         store.insert(make_entry(i, i as u64 * 100));
@@ -284,7 +284,7 @@ fn test_insert_multiple() {
 fn test_get_missing() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     let result = store.get(&make_hash(99));
     assert!(result.is_none());
@@ -294,7 +294,7 @@ fn test_get_missing() {
 fn test_contains() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     assert!(store.contains(&make_hash(1)));
@@ -305,7 +305,7 @@ fn test_contains() {
 fn test_mark_deleted() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     assert!(store.contains(&make_hash(1)));
@@ -323,14 +323,14 @@ fn test_flush_persists() {
 
     // Create, insert, flush
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         store.insert(make_entry(7, 777));
         store.flush().unwrap();
     }
 
     // Reopen and verify
     {
-        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         let entry = store.get(&make_hash(7));
         assert!(entry.is_some());
         assert_eq!(entry.unwrap().offset, 777);
@@ -345,7 +345,7 @@ fn test_auto_flush() {
 
     // Insert > WRITE_BUFFER_THRESHOLD entries to trigger auto-flush
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         // We need unique hashes, use blake3 on different data
         for i in 0..1050u32 {
             let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
@@ -362,7 +362,7 @@ fn test_auto_flush() {
 
     // Reopen and verify some entries persist
     {
-        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         // Check a few entries
         for i in [0u32, 500, 999, 1049] {
             let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
@@ -377,7 +377,7 @@ fn test_auto_flush() {
 fn test_iter_all() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     for i in 0..10u8 {
         store.insert(make_entry(i, i as u64 * 10));
@@ -392,7 +392,7 @@ fn test_iter_all() {
 fn test_iter_all_with_unflushed() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     // Flush some entries to disk
     for i in 0..5u8 {
@@ -413,7 +413,7 @@ fn test_iter_all_with_unflushed() {
 fn test_upsert_same_hash() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     store.flush().unwrap();
@@ -434,7 +434,7 @@ fn test_large_dataset() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     let count = 5000u32;
     let mut hashes = Vec::with_capacity(count as usize);
@@ -462,7 +462,7 @@ fn test_large_dataset() {
 fn test_entry_count() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     assert_eq!(store.len(), 0);
     assert!(store.is_empty());
@@ -484,7 +484,7 @@ fn test_update_flags() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     store.insert(make_entry(1, 100));
     store.flush().unwrap();
@@ -501,7 +501,7 @@ fn test_update_flags() {
     store.flush().unwrap();
     drop(store);
 
-    let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
     let entry = store.get(&make_hash(1)).unwrap();
     assert!(entry.is_pending());
 }
@@ -510,7 +510,7 @@ fn test_update_flags() {
 fn test_update_offset() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
 
@@ -529,7 +529,7 @@ fn test_update_offset() {
 fn test_hot_cache_hit() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     store.flush().unwrap();
@@ -551,7 +551,7 @@ fn test_hot_cache_hit() {
 fn test_update_flags_missing() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     let result = store.update_flags(&make_hash(99), KV_FLAG_PENDING);
     assert!(!result);
@@ -561,7 +561,7 @@ fn test_update_flags_missing() {
 fn test_mark_deleted_missing() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     // Should not panic on missing entry
     store.mark_deleted(&make_hash(99));
@@ -575,7 +575,7 @@ fn test_mark_deleted_persists() {
     let hash_algo = HashAlgorithm::Blake3_256;
 
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         store.insert(make_entry(1, 100));
         store.flush().unwrap();
         store.mark_deleted(&make_hash(1));
@@ -583,7 +583,7 @@ fn test_mark_deleted_persists() {
     }
 
     {
-        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         assert!(store.get(&make_hash(1)).is_none(), "Deleted entry should not be found after reopen");
     }
 }
@@ -592,7 +592,7 @@ fn test_mark_deleted_persists() {
 fn test_iter_all_excludes_deleted() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     store.insert(make_entry(2, 200));
@@ -609,9 +609,9 @@ fn test_create_existing_file_fails() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
 
-    let _store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let _store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
     // Creating again at same path should fail
-    let result = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256);
+    let result = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None);
     assert!(result.is_err());
 }
 
@@ -620,7 +620,7 @@ fn test_open_nonexistent_fails() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("nonexistent.kv");
 
-    let result = DiskKVStore::open(&kv_path, HashAlgorithm::Blake3_256);
+    let result = DiskKVStore::open(&kv_path, HashAlgorithm::Blake3_256, None);
     assert!(result.is_err());
 }
 
@@ -631,7 +631,7 @@ fn test_entry_count_after_reopen() {
     let hash_algo = HashAlgorithm::Blake3_256;
 
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         for i in 0..50u8 {
             store.insert(make_entry(i, i as u64));
         }
@@ -639,7 +639,7 @@ fn test_entry_count_after_reopen() {
     }
 
     {
-        let store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         assert_eq!(store.len(), 50);
     }
 }
@@ -648,7 +648,7 @@ fn test_entry_count_after_reopen() {
 fn test_cache_eviction() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     // Insert and flush enough entries
     for i in 0..100u32 {
@@ -678,7 +678,7 @@ fn test_cache_eviction() {
 fn test_insert_invalidates_cache() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
 
     store.insert(make_entry(1, 100));
     store.flush().unwrap();
@@ -697,7 +697,7 @@ fn test_insert_invalidates_cache() {
 fn test_stage_accessor() {
     let dir = tempdir().unwrap();
     let kv_path = dir.path().join("test.kv");
-    let store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256).unwrap();
+    let store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
     assert_eq!(store.stage(), 0);
     assert_eq!(store.bucket_count(), 1024);
 }
@@ -844,7 +844,7 @@ fn test_stale_kv_detected_and_rebuilt() {
     let hash_algo = HashAlgorithm::Blake3_256;
     std::fs::remove_file(&kv_path).unwrap();
     {
-        let _empty_kv = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let _empty_kv = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         // Drops immediately — empty .kv with no entries
     }
 
@@ -957,7 +957,7 @@ fn test_resize_on_overflow() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
     assert_eq!(store.stage(), 0);
     assert_eq!(store.bucket_count(), 1024);
 
@@ -1002,7 +1002,7 @@ fn test_resize_preserves_all_entries() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     let count = 5000u32;
     let mut hashes = Vec::with_capacity(count as usize);
@@ -1033,7 +1033,7 @@ fn test_resize_stage_increases() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
     assert_eq!(store.stage(), 0);
 
     // Force overflow: stage 0 has 1024 buckets * 32 = 32,768 capacity.
@@ -1072,7 +1072,7 @@ fn test_resize_persists_across_reopen() {
 
     // Create, fill to overflow, close
     {
-        let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
         for i in 0..count {
             let hash = make_unique_hash(i);
             hashes.push(hash.clone());
@@ -1088,7 +1088,7 @@ fn test_resize_persists_across_reopen() {
 
     // Reopen and verify
     {
-        let mut store = DiskKVStore::open(&kv_path, hash_algo).unwrap();
+        let mut store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
         assert!(
             store.stage() >= 1,
             "Stage should persist across reopen, got {}",
@@ -1113,7 +1113,7 @@ fn test_flush_after_resize_works() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     // Trigger resize
     for i in 0..35_000u32 {
@@ -1212,7 +1212,7 @@ fn test_resize_clears_hot_cache() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     // Insert some entries and flush to populate disk
     for i in 0..100u32 {
@@ -1259,7 +1259,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
     let kv_path = dir.path().join("test.kv");
     let hash_algo = HashAlgorithm::Blake3_256;
 
-    let mut store = DiskKVStore::create(&kv_path, hash_algo).unwrap();
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
 
     // Insert entries, delete some
     for i in 0..100u32 {
@@ -1312,4 +1312,444 @@ fn test_deleted_entries_not_migrated_on_resize() {
             i
         );
     }
+}
+
+// ============================================================================
+// Hot file (write-ahead journal) tests
+// ============================================================================
+
+#[test]
+fn test_hot_file_created_on_insert() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+
+    // Hot file should exist after creation
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+    assert!(hot_path.exists(), "Hot file should exist after init");
+
+    // Insert one entry
+    store.insert(make_entry(1, 100));
+
+    // Hot buffer should have the entry (not yet flushed to file since < threshold)
+    assert_eq!(store.hot_buffer_len(), 1);
+
+    // Force flush the hot buffer
+    store.flush_hot_buffer().unwrap();
+    assert_eq!(store.hot_buffer_len(), 0);
+
+    // Hot file should have data now
+    let metadata = std::fs::metadata(&hot_path).unwrap();
+    assert!(metadata.len() > 0, "Hot file should have data after flush");
+}
+
+#[test]
+fn test_hot_file_contains_entries() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Insert 5 entries
+    for i in 0..5u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+
+    // Force flush hot buffer to file
+    store.flush_hot_buffer().unwrap();
+
+    // Read back the hot file
+    let hash_length = hash_algo.hash_length();
+    let entries = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries.len(), 5, "Hot file should contain 5 entries");
+
+    // Verify entries match
+    for (i, entry) in entries.iter().enumerate() {
+        let expected = make_entry(i as u8, (i as u64) * 100);
+        assert_eq!(entry.hash, expected.hash, "Hash mismatch at index {}", i);
+        assert_eq!(entry.type_flags, expected.type_flags, "Flags mismatch at index {}", i);
+        assert_eq!(entry.offset, expected.offset, "Offset mismatch at index {}", i);
+    }
+}
+
+#[test]
+fn test_hot_file_truncated_on_flush() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Insert entries
+    for i in 0..5u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+
+    // Force hot buffer flush so file has data
+    store.flush_hot_buffer().unwrap();
+    let size_before = std::fs::metadata(&hot_path).unwrap().len();
+    assert!(size_before > 0, "Hot file should have data before KV flush");
+
+    // Now flush the KV store — this should truncate the hot file
+    store.flush().unwrap();
+
+    let size_after = std::fs::metadata(&hot_path).unwrap().len();
+    assert_eq!(size_after, 0, "Hot file should be empty after KV flush");
+}
+
+#[test]
+fn test_hot_file_replay_on_open() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("replay_test.aeordb");
+    let db_str = db_path.to_str().unwrap();
+    let hot_dir = dir.path();
+
+    // Create a StorageEngine with hot dir
+    {
+        let engine = StorageEngine::create_with_hot_dir(db_str, Some(hot_dir)).unwrap();
+        let ctx = RequestContext::system();
+        let directory_ops = DirectoryOps::new(&engine);
+        directory_ops.ensure_root_directory(&ctx).unwrap();
+
+        // Store some entries (they go to the KV store's write buffer and hot file)
+        for i in 0..50u8 {
+            let key = engine.compute_hash(&[i]).unwrap();
+            engine.store_entry(
+                aeordb::engine::entry_type::EntryType::Chunk,
+                &key,
+                &vec![i; 64],
+            ).unwrap();
+        }
+
+        // DON'T flush — simulate crash by dropping without explicit flush
+        // The write buffer gets flushed by Drop, but the hot file has entries
+        // Note: We need to prevent Drop from flushing to simulate a true crash.
+        // Instead, let's verify the hot file mechanism by writing entries to a
+        // manual hot file after the engine is dropped.
+    }
+
+    // Manually create a hot file with known entries for replay testing
+    let hash_algo = HashAlgorithm::Blake3_256;
+    let hash_length = hash_algo.hash_length();
+
+    // Create entries to replay
+    let replay_entries: Vec<KVEntry> = (200..210u8).map(|i| {
+        let hash = blake3::hash(&[i]).as_bytes().to_vec();
+        KVEntry {
+            type_flags: KV_TYPE_CHUNK,
+            hash,
+            offset: i as u64 * 1000,
+        }
+    }).collect();
+
+    // Write a hot file manually
+    let hot_file_path = dir.path().join("replay_test-hot001");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&hot_file_path)
+            .unwrap();
+        use std::io::Write;
+        for entry in &replay_entries {
+            let mut buf = Vec::with_capacity(hash_length + 1 + 8);
+            buf.extend_from_slice(&entry.hash[..hash_length]);
+            buf.push(entry.type_flags);
+            buf.extend_from_slice(&entry.offset.to_le_bytes());
+            file.write_all(&buf).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
+    assert!(hot_file_path.exists(), "Hot file should exist before replay");
+
+    // Open with hot_dir — should replay the hot file entries
+    let engine = StorageEngine::open_with_hot_dir(db_str, Some(hot_dir)).unwrap();
+
+    // Hot file should be deleted after replay
+    assert!(!hot_file_path.exists(), "Hot file should be deleted after replay");
+
+    // Verify replay entries are in the KV store
+    for entry in &replay_entries {
+        let result = engine.has_entry(&entry.hash).unwrap();
+        assert!(result, "Replayed entry should exist in KV store");
+    }
+}
+
+#[test]
+fn test_hot_file_deleted_after_replay() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("delete_test.aeordb");
+    let db_str = db_path.to_str().unwrap();
+    let hot_dir = dir.path();
+
+    // Create database first
+    {
+        let _engine = StorageEngine::create_with_hot_dir(db_str, Some(hot_dir)).unwrap();
+    }
+
+    // Create a hot file with one entry
+    let hash_algo = HashAlgorithm::Blake3_256;
+    let hash_length = hash_algo.hash_length();
+    let hot_file_path = dir.path().join("delete_test-hot001");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&hot_file_path)
+            .unwrap();
+        use std::io::Write;
+        let hash = blake3::hash(&[42u8]).as_bytes().to_vec();
+        let mut buf = Vec::with_capacity(hash_length + 1 + 8);
+        buf.extend_from_slice(&hash[..hash_length]);
+        buf.push(KV_TYPE_CHUNK);
+        buf.extend_from_slice(&1000u64.to_le_bytes());
+        file.write_all(&buf).unwrap();
+    }
+
+    assert!(hot_file_path.exists());
+
+    // Open — should replay and delete
+    let _engine = StorageEngine::open_with_hot_dir(db_str, Some(hot_dir)).unwrap();
+
+    assert!(!hot_file_path.exists(), "Hot file should be removed after replay");
+}
+
+#[test]
+fn test_no_hot_file_when_disabled() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    // Create with hot_dir = None
+    let store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
+
+    assert!(store.hot_path().is_none(), "No hot path when disabled");
+    assert_eq!(store.hot_buffer_len(), 0);
+}
+
+#[test]
+fn test_hot_buffer_threshold_auto_flush() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Insert 9 entries — should stay in hot buffer
+    for i in 0..9u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+    assert_eq!(store.hot_buffer_len(), 9, "Should have 9 entries in buffer");
+    let hot_size = std::fs::metadata(&hot_path).unwrap().len();
+    assert_eq!(hot_size, 0, "Hot file should be empty before threshold");
+
+    // Insert 10th entry — should trigger auto-flush of hot buffer
+    store.insert(make_entry(9, 900));
+    assert_eq!(store.hot_buffer_len(), 0, "Buffer should be empty after auto-flush");
+
+    let hot_size = std::fs::metadata(&hot_path).unwrap().len();
+    let hash_length = hash_algo.hash_length();
+    let entry_size = hash_length + 1 + 8;
+    assert_eq!(hot_size as usize, 10 * entry_size, "Hot file should have 10 entries");
+}
+
+#[test]
+fn test_hot_file_survives_no_flush() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+    let hash_length = hash_algo.hash_length();
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Insert enough to trigger hot buffer flush (threshold=10), but not KV flush (threshold=1000)
+    for i in 0..15u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+
+    // Force-flush remaining buffer entries to hot file
+    store.flush_hot_buffer().unwrap();
+
+    // Verify hot file has entries BEFORE any KV flush
+    let entries = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries.len(), 15, "Hot file should have 15 entries before KV flush");
+
+    // Now simulate what would survive a crash: use std::mem::forget to skip Drop
+    // (which would call flush and truncate the hot file).
+    std::mem::forget(store);
+
+    // Hot file should still have data since Drop was skipped
+    let entries_after = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries_after.len(), 15, "Hot file should survive when Drop is skipped (simulated crash)");
+}
+
+#[test]
+fn test_read_hot_file_empty() {
+    let dir = tempdir().unwrap();
+    let hot_path = dir.path().join("empty-hot001");
+    std::fs::write(&hot_path, b"").unwrap();
+
+    let entries = DiskKVStore::read_hot_file(&hot_path, 32).unwrap();
+    assert!(entries.is_empty(), "Reading empty hot file should return no entries");
+}
+
+#[test]
+fn test_read_hot_file_truncated_entry() {
+    let dir = tempdir().unwrap();
+    let hot_path = dir.path().join("truncated-hot001");
+    let hash_length = 32;
+    let _entry_size = hash_length + 1 + 8; // 41 bytes
+
+    // Write 2 full entries + 10 bytes of a truncated third entry
+    let mut data = Vec::new();
+    for i in 0..2u8 {
+        let hash = blake3::hash(&[i]).as_bytes().to_vec();
+        data.extend_from_slice(&hash[..hash_length]);
+        data.push(KV_TYPE_CHUNK);
+        data.extend_from_slice(&((i as u64) * 100).to_le_bytes());
+    }
+    // Add partial entry (only 10 bytes)
+    data.extend_from_slice(&[0u8; 10]);
+
+    std::fs::write(&hot_path, &data).unwrap();
+
+    let entries = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries.len(), 2, "Should only read 2 complete entries, skipping truncated tail");
+}
+
+#[test]
+fn test_read_hot_file_nonexistent() {
+    let dir = tempdir().unwrap();
+    let hot_path = dir.path().join("nonexistent-hot001");
+
+    let result = DiskKVStore::read_hot_file(&hot_path, 32);
+    assert!(result.is_err(), "Reading nonexistent hot file should error");
+}
+
+#[test]
+fn test_hot_file_insert_without_hot_file_does_not_crash() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
+
+    // Insert many entries — should work fine without hot file
+    for i in 0..50u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+
+    // Flush should also work fine
+    store.flush().unwrap();
+
+    assert_eq!(store.hot_buffer_len(), 0);
+}
+
+#[test]
+fn test_hot_file_open_with_hot_dir() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    // Create and close
+    {
+        let store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+        let hot_path = store.hot_path().unwrap().to_path_buf();
+        assert!(hot_path.exists());
+    }
+
+    // Open with hot_dir
+    let store = DiskKVStore::open(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    assert!(store.hot_path().is_some(), "Hot path should be set after open with hot_dir");
+    assert!(store.hot_path().unwrap().exists(), "Hot file should exist after open");
+}
+
+#[test]
+fn test_hot_file_open_without_hot_dir() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hash_algo = HashAlgorithm::Blake3_256;
+
+    // Create (without hot dir) and close
+    {
+        let _store = DiskKVStore::create(&kv_path, hash_algo, None).unwrap();
+    }
+
+    // Open without hot_dir
+    let store = DiskKVStore::open(&kv_path, hash_algo, None).unwrap();
+    assert!(store.hot_path().is_none(), "No hot path when opened without hot_dir");
+}
+
+#[test]
+fn test_hot_file_multiple_flush_cycles() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+    let hash_length = hash_algo.hash_length();
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Cycle 1: insert, flush hot, verify, flush KV
+    for i in 0..5u8 {
+        store.insert(make_entry(i, (i as u64) * 100));
+    }
+    store.flush_hot_buffer().unwrap();
+    let entries = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries.len(), 5);
+
+    store.flush().unwrap();
+    let hot_size = std::fs::metadata(&hot_path).unwrap().len();
+    assert_eq!(hot_size, 0, "Hot file should be empty after KV flush");
+
+    // Cycle 2: insert more, flush hot, verify
+    for i in 10..18u8 {
+        store.insert(make_entry(i, (i as u64) * 200));
+    }
+    store.flush_hot_buffer().unwrap();
+    let entries = DiskKVStore::read_hot_file(&hot_path, hash_length).unwrap();
+    assert_eq!(entries.len(), 8, "Cycle 2 should have 8 entries");
+
+    store.flush().unwrap();
+    let hot_size = std::fs::metadata(&hot_path).unwrap().len();
+    assert_eq!(hot_size, 0, "Hot file should be empty after second KV flush");
+}
+
+#[test]
+fn test_hot_file_entry_size_correctness() {
+    let dir = tempdir().unwrap();
+    let kv_path = dir.path().join("test.kv");
+    let hot_dir = dir.path();
+    let hash_algo = HashAlgorithm::Blake3_256;
+    let hash_length = hash_algo.hash_length();
+    let expected_entry_size = hash_length + 1 + 8; // 32 + 1 + 8 = 41
+
+    let mut store = DiskKVStore::create(&kv_path, hash_algo, Some(hot_dir)).unwrap();
+    let hot_path = store.hot_path().unwrap().to_path_buf();
+
+    // Insert exactly 1 entry and flush to hot file
+    store.insert(make_entry(42, 9999));
+    store.flush_hot_buffer().unwrap();
+
+    let file_size = std::fs::metadata(&hot_path).unwrap().len();
+    assert_eq!(
+        file_size as usize, expected_entry_size,
+        "Single entry should be exactly {} bytes (hash_length={} + 1 + 8)",
+        expected_entry_size, hash_length
+    );
 }

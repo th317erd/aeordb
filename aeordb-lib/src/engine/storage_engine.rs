@@ -102,15 +102,20 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-  /// Create a new database file at the given path.
+  /// Create a new database file at the given path (no hot file — for tests/tools).
   pub fn create(path: &str) -> EngineResult<Self> {
+    Self::create_with_hot_dir(path, None)
+  }
+
+  /// Create a new database file at the given path with an optional hot directory.
+  pub fn create_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
     let writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
     let kv_path = format!("{}.kv", path);
     // Remove stale KV file if it exists (e.g. from a previous failed create)
     let _ = std::fs::remove_file(&kv_path);
-    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo)?;
+    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
 
     let void_manager = VoidManager::new(hash_algo);
 
@@ -130,7 +135,10 @@ impl StorageEngine {
   ///
   /// If the `.kv` file does NOT exist, we create it and populate it from a
   /// full scan of the main `.aeordb` file, including deletion replay.
-  fn open_internal(path: &str) -> EngineResult<Self> {
+  ///
+  /// When `hot_dir` is Some, hot files are replayed into the KV store on open,
+  /// then deleted. A new hot file is initialized for ongoing crash recovery.
+  fn open_internal(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
@@ -159,7 +167,7 @@ impl StorageEngine {
         let _ = std::fs::remove_file(&kv_path);
         false
       } else {
-        match DiskKVStore::open(Path::new(&kv_path), hash_algo) {
+        match DiskKVStore::open(Path::new(&kv_path), hash_algo, None) {
           Ok(kv) => {
             if aeordb_has_entries && kv.len() == 0 {
               // Stale .kv — remove and rebuild
@@ -183,9 +191,32 @@ impl StorageEngine {
       false
     };
 
+    // Collect hot file entries to replay (before opening the KV store).
+    let mut hot_entries_to_replay: Vec<KVEntry> = Vec::new();
+    if let Some(hdir) = hot_dir {
+      let db_name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+      let hot_pattern = format!("{}-hot", db_name);
+      if let Ok(dir_entries) = std::fs::read_dir(hdir) {
+        for dir_entry in dir_entries.flatten() {
+          let name = dir_entry.file_name();
+          let name_str = name.to_string_lossy();
+          if name_str.starts_with(&hot_pattern) {
+            let hash_length = hash_algo.hash_length();
+            if let Ok(hot_entries) = DiskKVStore::read_hot_file(&dir_entry.path(), hash_length) {
+              if !hot_entries.is_empty() {
+                hot_entries_to_replay.extend(hot_entries);
+              }
+            }
+            // Delete the hot file after reading
+            let _ = std::fs::remove_file(dir_entry.path());
+          }
+        }
+      }
+    }
+
     let kv_store = if kv_is_valid {
       // KV file is valid — open it directly (skip full KV rebuild).
-      let kv = DiskKVStore::open(Path::new(&kv_path), hash_algo)?;
+      let kv = DiskKVStore::open(Path::new(&kv_path), hash_algo, hot_dir)?;
 
       // Still scan for void entries (they're an in-memory optimization,
       // not persisted in the KV file).
@@ -200,7 +231,7 @@ impl StorageEngine {
       kv
     } else {
       // No KV file — create and populate from a full entry scan.
-      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo)?;
+      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
 
       // First pass: rebuild KV store from entry headers, collecting deletion records.
       // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
@@ -272,6 +303,15 @@ impl StorageEngine {
       kv
     };
 
+    // Replay hot entries into the KV store, then flush
+    let mut kv_store = kv_store;
+    if !hot_entries_to_replay.is_empty() {
+      for entry in hot_entries_to_replay {
+        kv_store.insert(entry);
+      }
+      kv_store.flush()?;
+    }
+
     Ok(StorageEngine {
       writer: RwLock::new(writer),
       kv_store: RwLock::new(kv_store),
@@ -281,9 +321,32 @@ impl StorageEngine {
   }
 
   /// Open an existing database file, rebuilding the KV store from a file scan.
-  /// Refuses to open patch databases (backup_type > 1).
+  /// Refuses to open patch databases (backup_type > 1). No hot file (for tests/tools).
   pub fn open(path: &str) -> EngineResult<Self> {
-    let engine = Self::open_internal(path)?;
+    let engine = Self::open_internal(path, None)?;
+
+    // Guard: refuse to open patch databases as normal databases
+    let header = engine.writer.read().expect("writer lock").file_header().clone();
+    if header.backup_type > 1 {
+      let base = hex::encode(&header.base_hash);
+      let target = hex::encode(&header.target_hash);
+      return Err(EngineError::PatchDatabase(format!(
+        "This is a patch export and cannot be used as a standalone database.\n\n\
+         Base version:   {}\n\
+         Target version: {}\n\n\
+         To apply this patch, import it into a database at the base version:\n\
+         aeordb import --database <your.aeordb> --file {}",
+        base, target, path
+      )));
+    }
+
+    Ok(engine)
+  }
+
+  /// Open an existing database with a hot directory for crash recovery.
+  /// Replays any existing hot files on startup, then initializes a new hot file.
+  pub fn open_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
+    let engine = Self::open_internal(path, hot_dir)?;
 
     // Guard: refuse to open patch databases as normal databases
     let header = engine.writer.read().expect("writer lock").file_header().clone();
@@ -305,7 +368,7 @@ impl StorageEngine {
 
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path)
+    Self::open_internal(path, None)
   }
 
   /// Store an entry: append to file, register in KV store.

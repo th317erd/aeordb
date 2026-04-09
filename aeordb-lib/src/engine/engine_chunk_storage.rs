@@ -37,7 +37,7 @@ impl EngineChunkStorage {
     let kv_path = format!("{}.kv", path);
     // Remove stale KV file if it exists
     let _ = std::fs::remove_file(&kv_path);
-    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo)
+    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, None)
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let void_manager = VoidManager::new(hash_algo);
@@ -64,7 +64,7 @@ impl EngineChunkStorage {
     let _ = std::fs::remove_file(&kv_path);
 
     let kv_store = {
-      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo)
+      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo, None)
         .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
       // Rebuild KV store by scanning all entries in the file

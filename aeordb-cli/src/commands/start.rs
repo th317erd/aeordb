@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
+use std::path::Path;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
 use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher};
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::{create_app_with_auth_mode, create_engine_for_storage};
+use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
 
-pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>) {
+pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>, hot_dir_arg: Option<&str>) {
   let log_config = LogConfig {
     format: match log_format {
       "json" => LogFormat::Json,
@@ -27,12 +28,24 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     AuthMode::SelfContained => println!("Auth: self-contained"),
     AuthMode::File(path) => println!("Auth: file://{path}"),
   }
+  // Resolve hot directory: use --hot-dir if specified, otherwise default to
+  // the database file's parent directory.
+  let default_hot_dir = Path::new(database)
+    .parent()
+    .unwrap_or(Path::new("."))
+    .to_path_buf();
+  let hot_dir = hot_dir_arg
+    .map(|s| std::path::PathBuf::from(s))
+    .unwrap_or(default_hot_dir);
+  let hot_dir_ref = hot_dir.as_path();
+
+  println!("Hot dir: {}", hot_dir_ref.display());
   println!();
 
   // For SelfContained mode, bootstrap the root key using the engine before
   // building the app (preserves existing behavior).
   if auth_mode == AuthMode::SelfContained {
-    let engine = create_engine_for_storage(database);
+    let engine = create_engine_with_hot_dir(database, Some(hot_dir_ref));
     if let Some(root_key) = bootstrap_root_key(&engine) {
       println!("==========================================================");
       println!("  ROOT API KEY (shown once, save it now!):");
@@ -43,7 +56,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     drop(engine);
   }
 
-  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode);
+  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref));
 
   if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");

@@ -22,6 +22,9 @@ enum Commands {
     /// Auth provider URI: false/null/no/0, self, file:///path/to/identity
     #[arg(long)]
     auth: Option<String>,
+    /// Directory for write-ahead hot files (defaults to database file's parent directory)
+    #[arg(long)]
+    hot_dir: Option<String>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -79,8 +82,8 @@ async fn main() {
   let cli = Cli::parse();
 
   match cli.command {
-    Commands::Start { port, database, log_format, auth } => {
-      commands::start::run(port, &database, &log_format, auth.as_deref()).await;
+    Commands::Start { port, database, log_format, auth, hot_dir } => {
+      commands::start::run(port, &database, &log_format, auth.as_deref(), hot_dir.as_deref()).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

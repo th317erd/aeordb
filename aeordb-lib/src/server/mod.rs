@@ -45,8 +45,9 @@ pub fn create_app(engine_path: &str) -> Router {
 pub fn create_app_with_auth_mode(
   engine_path: &str,
   auth_mode: &AuthMode,
+  hot_dir: Option<&std::path::Path>,
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>) {
-  let engine = create_engine_for_storage(engine_path);
+  let engine = create_engine_with_hot_dir(engine_path, hot_dir);
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
     AuthMode::Disabled => (Arc::new(NoAuthProvider::new()), None),
@@ -242,14 +243,19 @@ fn try_initialize_metrics() -> PrometheusHandle {
 use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
 
-/// Create or open a StorageEngine at the given path.
+/// Create or open a StorageEngine at the given path (no hot file — for tests/tools).
 pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
+  create_engine_with_hot_dir(engine_path, None)
+}
+
+/// Create or open a StorageEngine with an optional hot directory for crash recovery.
+pub fn create_engine_with_hot_dir(engine_path: &str, hot_dir: Option<&std::path::Path>) -> Arc<StorageEngine> {
   let path = std::path::Path::new(engine_path);
   let engine = if path.exists() {
-    StorageEngine::open(engine_path)
+    StorageEngine::open_with_hot_dir(engine_path, hot_dir)
       .expect("failed to open storage engine")
   } else {
-    StorageEngine::create(engine_path)
+    StorageEngine::create_with_hot_dir(engine_path, hot_dir)
       .expect("failed to create storage engine")
   };
   let engine = Arc::new(engine);

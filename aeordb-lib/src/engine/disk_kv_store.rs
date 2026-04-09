@@ -16,6 +16,9 @@ const WRITE_BUFFER_THRESHOLD: usize = 1000;
 /// Maximum entries in the hot cache (simple LRU eviction).
 const HOT_CACHE_MAX: usize = 10_000;
 
+/// Number of entries buffered before flushing to the hot file.
+const HOT_BUFFER_THRESHOLD: usize = 10;
+
 /// A disk-resident KV store backed by NVT-indexed bucket pages.
 ///
 /// The KV data lives in a separate `.kv` file. Lookups flow through:
@@ -41,12 +44,19 @@ pub struct DiskKVStore {
     entry_count: usize,
     /// Number of buckets at the current stage.
     bucket_count: usize,
+    /// Write-ahead journal file for crash recovery. None = disabled (tests).
+    hot_file: Option<File>,
+    /// Path to the hot file on disk.
+    hot_path: Option<PathBuf>,
+    /// Micro-buffer of entries pending write to the hot file.
+    hot_buffer: Vec<KVEntry>,
 }
 
 impl DiskKVStore {
     /// Create a new disk KV store at the given path.
     /// Writes empty pages for stage 0.
-    pub fn create(path: &Path, hash_algo: HashAlgorithm) -> EngineResult<Self> {
+    /// When `hot_dir` is Some, a write-ahead hot file is created for crash recovery.
+    pub fn create(path: &Path, hash_algo: HashAlgorithm, hot_dir: Option<&Path>) -> EngineResult<Self> {
         let stage = 0;
         let (_block_size, bucket_count) = KV_STAGES[stage];
         let hash_length = hash_algo.hash_length();
@@ -67,6 +77,14 @@ impl DiskKVStore {
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
 
+        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
+            let db_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            let (f, p) = Self::init_hot_file(dir, db_name);
+            (Some(f), Some(p))
+        } else {
+            (None, None)
+        };
+
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
@@ -78,11 +96,14 @@ impl DiskKVStore {
             hash_algo,
             entry_count: 0,
             bucket_count,
+            hot_file,
+            hot_path,
+            hot_buffer: Vec::new(),
         })
     }
 
     /// Create a new disk KV store at the given path with a specific stage.
-    /// Used during resize operations.
+    /// Used during resize operations. No hot file — callers manage their own journaling.
     pub fn create_at_stage(
         path: &Path,
         hash_algo: HashAlgorithm,
@@ -118,12 +139,16 @@ impl DiskKVStore {
             hash_algo,
             entry_count: 0,
             bucket_count,
+            hot_file: None,
+            hot_path: None,
+            hot_buffer: Vec::new(),
         })
     }
 
     /// Open an existing disk KV store from a `.kv` file.
     /// Rebuilds entry count by scanning page headers.
-    pub fn open(path: &Path, hash_algo: HashAlgorithm) -> EngineResult<Self> {
+    /// When `hot_dir` is Some, a write-ahead hot file is created for crash recovery.
+    pub fn open(path: &Path, hash_algo: HashAlgorithm, hot_dir: Option<&Path>) -> EngineResult<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -170,6 +195,14 @@ impl DiskKVStore {
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
 
+        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
+            let db_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            let (f, p) = Self::init_hot_file(dir, db_name);
+            (Some(f), Some(p))
+        } else {
+            (None, None)
+        };
+
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
@@ -181,6 +214,9 @@ impl DiskKVStore {
             hash_algo,
             entry_count,
             bucket_count,
+            hot_file,
+            hot_path,
+            hot_buffer: Vec::new(),
         })
     }
 
@@ -228,6 +264,7 @@ impl DiskKVStore {
 
     /// Insert or update an entry in the write buffer.
     /// Auto-flushes when the buffer exceeds WRITE_BUFFER_THRESHOLD.
+    /// Also journals the entry to the hot file buffer for crash recovery.
     pub fn insert(&mut self, entry: KVEntry) {
         let is_new = !self.write_buffer.contains_key(&entry.hash)
             && !self.entry_exists_on_disk(&entry.hash);
@@ -236,10 +273,18 @@ impl DiskKVStore {
         self.hot_cache.remove(&entry.hash);
         self.cache_order.retain(|h| h != &entry.hash);
 
-        self.write_buffer.insert(entry.hash.clone(), entry);
+        self.write_buffer.insert(entry.hash.clone(), entry.clone());
 
         if is_new {
             self.entry_count += 1;
+        }
+
+        // Journal to hot file buffer
+        if self.hot_file.is_some() {
+            self.hot_buffer.push(entry);
+            if self.hot_buffer.len() >= HOT_BUFFER_THRESHOLD {
+                let _ = self.flush_hot_buffer();
+            }
         }
 
         if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
@@ -315,6 +360,10 @@ impl DiskKVStore {
         }
 
         self.kv_file.sync_data()?;
+
+        // Hot file: flush remaining buffer, then truncate (all data is on KV pages now)
+        self.flush_hot_buffer()?;
+        self.truncate_hot_file()?;
 
         // Handle overflows: resize to next stage and retry
         if !overflow_entries.is_empty() {
@@ -495,6 +544,105 @@ impl DiskKVStore {
     /// Check if a hash exists in the hot cache.
     pub fn is_cached(&self, hash: &[u8]) -> bool {
         self.hot_cache.contains_key(hash)
+    }
+
+    // ========================================================================
+    // Hot file (write-ahead journal) methods
+    // ========================================================================
+
+    /// Initialize the hot file. Called during create/open.
+    /// Panics (via process::exit) if the file cannot be opened.
+    fn init_hot_file(hot_dir: &Path, db_name: &str) -> (File, PathBuf) {
+        let hot_name = format!("{}-hot001", db_name);
+        let hot_path = hot_dir.join(hot_name);
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&hot_path)
+            .unwrap_or_else(|e| {
+                eprintln!("FATAL: Cannot open hot file at {}: {}", hot_path.display(), e);
+                eprintln!("The database cannot start without a hot file for crash recovery.");
+                eprintln!("Check permissions and disk space, or specify --hot-dir to use a different location.");
+                std::process::exit(1);
+            });
+
+        (file, hot_path)
+    }
+
+    /// Flush the hot buffer to the hot file on disk.
+    pub fn flush_hot_buffer(&mut self) -> EngineResult<()> {
+        if self.hot_buffer.is_empty() || self.hot_file.is_none() {
+            return Ok(());
+        }
+
+        let hash_length = self.hash_algo.hash_length();
+        let entry_size = hash_length + 1 + 8;
+
+        if let Some(ref mut file) = self.hot_file {
+            for entry in &self.hot_buffer {
+                let mut buf = Vec::with_capacity(entry_size);
+                let hash_bytes = &entry.hash;
+                buf.extend_from_slice(&hash_bytes[..hash_length.min(hash_bytes.len())]);
+                // Pad if hash is shorter than hash_length
+                if hash_bytes.len() < hash_length {
+                    buf.extend(std::iter::repeat(0u8).take(hash_length - hash_bytes.len()));
+                }
+                buf.push(entry.type_flags);
+                buf.extend_from_slice(&entry.offset.to_le_bytes());
+                file.write_all(&buf)?;
+            }
+            file.sync_data()?;
+            self.hot_buffer.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Read entries from a hot file on disk.
+    pub fn read_hot_file(path: &Path, hash_length: usize) -> EngineResult<Vec<KVEntry>> {
+        let mut file = File::open(path)?;
+        let file_size = file.metadata()?.len() as usize;
+        let entry_size = hash_length + 1 + 8;
+
+        if file_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let entry_count = file_size / entry_size;
+        let mut entries = Vec::with_capacity(entry_count);
+
+        let mut buf = vec![0u8; entry_size];
+        for _ in 0..entry_count {
+            if file.read_exact(&mut buf).is_err() {
+                break; // truncated entry at end — skip
+            }
+            let hash = buf[..hash_length].to_vec();
+            let type_flags = buf[hash_length];
+            let offset = u64::from_le_bytes(buf[hash_length + 1..hash_length + 9].try_into().unwrap());
+            entries.push(KVEntry { type_flags, hash, offset });
+        }
+
+        Ok(entries)
+    }
+
+    /// Truncate the hot file (after successful KV flush).
+    fn truncate_hot_file(&mut self) -> EngineResult<()> {
+        if let Some(ref mut file) = self.hot_file {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+        }
+        Ok(())
+    }
+
+    /// Return the path to the hot file, if one is configured.
+    pub fn hot_path(&self) -> Option<&Path> {
+        self.hot_path.as_deref()
+    }
+
+    /// Return the number of entries currently in the hot buffer (for testing).
+    pub fn hot_buffer_len(&self) -> usize {
+        self.hot_buffer.len()
     }
 
     /// Add an entry to the hot cache with LRU eviction.
