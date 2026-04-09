@@ -18,6 +18,7 @@ pub mod heartbeat;
 pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
+pub mod gc;
 pub mod group;
 pub mod phonetic;
 pub mod group_cache;
@@ -97,6 +98,7 @@ pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, 
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
 pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};
+pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
@@ -117,6 +119,7 @@ pub use engine_event::{
     EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
     EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
     EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
+    EVENT_GC_COMPLETED, GcEventData,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

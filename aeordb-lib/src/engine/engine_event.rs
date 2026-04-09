@@ -121,6 +121,16 @@ pub struct HeartbeatData {
     pub nvt_buckets: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GcEventData {
+    pub versions_scanned: usize,
+    pub live_entries: usize,
+    pub garbage_entries: usize,
+    pub reclaimed_bytes: u64,
+    pub duration_ms: u64,
+    pub dry_run: bool,
+}
+
 // --- Event type constants ---
 pub const EVENT_ENTRIES_CREATED: &str = "entries_created";
 pub const EVENT_ENTRIES_UPDATED: &str = "entries_updated";
@@ -142,3 +152,4 @@ pub const EVENT_API_KEYS_REVOKED: &str = "api_keys_revoked";
 pub const EVENT_PLUGINS_DEPLOYED: &str = "plugins_deployed";
 pub const EVENT_PLUGINS_REMOVED: &str = "plugins_removed";
 pub const EVENT_HEARTBEAT: &str = "heartbeat";
+pub const EVENT_GC_COMPLETED: &str = "gc_completed";
