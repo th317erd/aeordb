@@ -15,7 +15,7 @@ use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Default chunk size for splitting file data (256 KB).
-const DEFAULT_CHUNK_SIZE: usize = 262_144;
+pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
 
 /// Compute the domain-prefixed hash for a file path.
 pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
@@ -46,7 +46,7 @@ pub fn directory_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult
 }
 
 /// Compute the domain-prefixed hash for a chunk.
-fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+pub fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   let mut input = Vec::with_capacity(6 + data.len());
   input.extend_from_slice(b"chunk:");
   input.extend_from_slice(data);

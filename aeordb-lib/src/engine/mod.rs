@@ -1,5 +1,6 @@
 pub mod append_writer;
 pub mod backup;
+pub mod batch_commit;
 pub mod btree;
 pub mod compression;
 pub mod content_type;
@@ -50,6 +51,7 @@ pub mod void_manager;
 pub mod wasm_converter;
 pub mod webhook;
 
+pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
 pub use append_writer::AppendWriter;
 pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
 pub use content_type::detect_content_type;
@@ -96,7 +98,7 @@ pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
 pub use engine_chunk_storage::EngineChunkStorage;
 pub use storage_engine::{StorageEngine, WriteBatch};
-pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash};
+pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, chunk_content_hash, DEFAULT_CHUNK_SIZE};
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
 pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};

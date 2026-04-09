@@ -16,6 +16,7 @@ pub enum EngineError {
   ReservedUserId,
   UnsafeQueryField(String),
   PatchDatabase(String),
+  InvalidInput(String),
 }
 
 impl fmt::Display for EngineError {
@@ -45,6 +46,7 @@ impl fmt::Display for EngineError {
       EngineError::ReservedUserId => write!(formatter, "Cannot use the nil UUID (root user ID) for regular users or API keys"),
       EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
       EngineError::PatchDatabase(msg) => write!(formatter, "Patch database: {}", msg),
+      EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
     }
   }
 }
