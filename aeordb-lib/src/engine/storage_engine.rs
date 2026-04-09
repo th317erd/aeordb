@@ -1,5 +1,8 @@
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
+use std::fs::File;
+
+use arc_swap::ArcSwap;
 
 use crate::engine::append_writer::AppendWriter;
 use crate::engine::compression::CompressionAlgorithm;
@@ -8,6 +11,7 @@ use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::kv_snapshot::ReadSnapshot;
 use serde::Serialize;
 
 use crate::engine::kv_store::{
@@ -95,8 +99,10 @@ pub struct DatabaseStats {
 /// (directory ops, file ops) are built on top via `DirectoryOps`.
 pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
-  kv_store: RwLock<DiskKVStore>,
-  #[allow(dead_code)] // Used for future void reuse optimization
+  kv_writer: Mutex<DiskKVStore>,
+  kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  kv_file: File,
+  #[allow(dead_code)]
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
 }
@@ -117,11 +123,16 @@ impl StorageEngine {
     let _ = std::fs::remove_file(&kv_path);
     let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
 
+    let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
+    let kv_file = std::fs::File::open(format!("{}.kv", path))?;
+
     let void_manager = VoidManager::new(hash_algo);
 
     Ok(StorageEngine {
       writer: RwLock::new(writer),
-      kv_store: RwLock::new(kv_store),
+      kv_writer: Mutex::new(kv_store),
+      kv_snapshot,
+      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -312,9 +323,14 @@ impl StorageEngine {
       kv_store.flush()?;
     }
 
+    let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
+    let kv_file = std::fs::File::open(&kv_path)?;
+
     Ok(StorageEngine {
       writer: RwLock::new(writer),
-      kv_store: RwLock::new(kv_store),
+      kv_writer: Mutex::new(kv_store),
+      kv_snapshot,
+      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -403,7 +419,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -453,7 +469,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -468,15 +484,10 @@ impl StorageEngine {
     &self,
     hash: &[u8],
   ) -> EngineResult<Option<EntryData>> {
-    let kv_entry = {
-      let mut kv = self.kv_store.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-      match kv.get(hash) {
-        Some(entry) if !entry.is_deleted() => entry,
-        _ => return Ok(None),
-      }
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get(hash, &self.kv_file) {
+      Some(entry) if !entry.is_deleted() => entry,
+      _ => return Ok(None),
     };
 
     let mut writer = self.writer.write()
@@ -490,11 +501,8 @@ impl StorageEngine {
 
   /// Check if a non-deleted entry exists in the KV store.
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    match kv.get(hash) {
+    let snapshot = self.kv_snapshot.load();
+    match snapshot.get(hash, &self.kv_file) {
       Some(entry) => Ok(!entry.is_deleted()),
       None => Ok(false),
     }
@@ -573,7 +581,7 @@ impl StorageEngine {
       offset,
     };
 
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -612,7 +620,7 @@ impl StorageEngine {
 
     // Single KV lock acquisition for all KV inserts
     {
-      let mut kv = self.kv_store.write()
+      let mut kv = self.kv_writer.lock()
         .map_err(|error| EngineError::IoError(
           std::io::Error::other(error.to_string()),
         ))?;
@@ -632,11 +640,8 @@ impl StorageEngine {
 
   /// Check if a KV entry is marked as deleted.
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    match kv.get(hash) {
+    let snapshot = self.kv_snapshot.load();
+    match snapshot.get_raw(hash, &self.kv_file) {
       Some(entry) => Ok(entry.is_deleted()),
       None => Ok(false),
     }
@@ -644,7 +649,7 @@ impl StorageEngine {
 
   /// Mark a KV entry as deleted by setting the deleted flag.
   pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -706,7 +711,7 @@ impl StorageEngine {
 
   /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
   pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
@@ -716,11 +721,8 @@ impl StorageEngine {
 
   /// Iterate all live KV entries. Used by GC sweep.
   pub fn iter_kv_entries(&self) -> EngineResult<Vec<KVEntry>> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    kv.iter_all()
+    let snapshot = self.kv_snapshot.load();
+    snapshot.iter_all(&self.kv_file)
   }
 
   /// Return all (key_hash, value) pairs for entries matching a KV type.
@@ -728,11 +730,8 @@ impl StorageEngine {
   /// result — callers should check `is_entry_deleted` if needed.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let hashes: Vec<(Vec<u8>, u64)> = {
-      let mut kv = self.kv_store.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-      kv.iter_all()?
+      let snapshot = self.kv_snapshot.load();
+      snapshot.iter_all(&self.kv_file)?
         .into_iter()
         .filter(|entry| entry.entry_type() == target_type)
         .map(|entry| (entry.hash, entry.offset))
@@ -767,38 +766,34 @@ impl StorageEngine {
       )
     };
 
-    // 2. Lock kv_store for entry counts
-    let (kv_entries, kv_size_bytes, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count) = {
-      let mut kv = self.kv_store.write().expect("kv_store lock poisoned");
-      let kv_entries = kv.len();
-      let nvt_buckets = kv.bucket_count();
+    // 2. Use snapshot for entry counts (lock-free)
+    let snapshot = self.kv_snapshot.load();
+    let kv_entries = snapshot.len();
+    let nvt_buckets = snapshot.bucket_count();
 
-      // Get the KV file size for stats
-      let kv_size_bytes = std::fs::metadata(kv.path())
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-      let all_entries = kv.iter_all().unwrap_or_default();
-
-      let mut chunk_count = 0usize;
-      let mut file_count = 0usize;
-      let mut directory_count = 0usize;
-      let mut snapshot_count = 0usize;
-      let mut fork_count = 0usize;
-
-      for entry in &all_entries {
-        match entry.entry_type() {
-          KV_TYPE_CHUNK => chunk_count += 1,
-          KV_TYPE_FILE_RECORD => file_count += 1,
-          KV_TYPE_DIRECTORY => directory_count += 1,
-          KV_TYPE_SNAPSHOT => snapshot_count += 1,
-          KV_TYPE_FORK => fork_count += 1,
-          _ => {}
-        }
-      }
-
-      (kv_entries, kv_size_bytes, nvt_buckets, chunk_count, file_count, directory_count, snapshot_count, fork_count)
+    let kv_size_bytes = {
+      let kv = self.kv_writer.lock().expect("kv_writer lock poisoned");
+      std::fs::metadata(kv.path()).map(|m| m.len()).unwrap_or(0)
     };
+
+    let all_entries = snapshot.iter_all(&self.kv_file).unwrap_or_default();
+
+    let mut chunk_count = 0usize;
+    let mut file_count = 0usize;
+    let mut directory_count = 0usize;
+    let mut snapshot_count = 0usize;
+    let mut fork_count = 0usize;
+
+    for entry in &all_entries {
+      match entry.entry_type() {
+        KV_TYPE_CHUNK => chunk_count += 1,
+        KV_TYPE_FILE_RECORD => file_count += 1,
+        KV_TYPE_DIRECTORY => directory_count += 1,
+        KV_TYPE_SNAPSHOT => snapshot_count += 1,
+        KV_TYPE_FORK => fork_count += 1,
+        _ => {}
+      }
+    }
 
     // 3. Lock void_manager for void stats
     let (void_count, void_space_bytes) = {

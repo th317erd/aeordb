@@ -1,11 +1,15 @@
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
+use std::fs::File;
+
+use arc_swap::ArcSwap;
 
 use crate::engine::append_writer::AppendWriter;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_FLAG_DELETED};
 use crate::engine::void_manager::VoidManager;
 use crate::storage::chunk::{Chunk, ChunkHash};
@@ -21,7 +25,9 @@ use crate::storage::chunk_storage::{ChunkStorage, ChunkStoreError};
 /// The value stored on disk is: ChunkHeader (33 bytes) + raw chunk data.
 pub struct EngineChunkStorage {
   writer: RwLock<AppendWriter>,
-  kv_store: RwLock<DiskKVStore>,
+  kv_writer: Mutex<DiskKVStore>,
+  kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  kv_file: File,
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
 }
@@ -40,11 +46,17 @@ impl EngineChunkStorage {
     let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, None)
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
+    let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
+    let kv_file = std::fs::File::open(&kv_path)
+      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
     let void_manager = VoidManager::new(hash_algo);
 
     Ok(EngineChunkStorage {
       writer: RwLock::new(writer),
-      kv_store: RwLock::new(kv_store),
+      kv_writer: Mutex::new(kv_store),
+      kv_snapshot,
+      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -102,9 +114,15 @@ impl EngineChunkStorage {
       kv
     };
 
+    let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
+    let kv_file = std::fs::File::open(&kv_path)
+      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
+
     Ok(EngineChunkStorage {
       writer: RwLock::new(writer),
-      kv_store: RwLock::new(kv_store),
+      kv_writer: Mutex::new(kv_store),
+      kv_snapshot,
+      kv_file,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -126,7 +144,7 @@ impl ChunkStorage for EngineChunkStorage {
 
     // Dedup: if this hash already exists and is not deleted, skip
     {
-      let mut kv = self.kv_store.write()
+      let mut kv = self.kv_writer.lock()
         .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
       if let Some(existing) = kv.get(&chunk_hash) {
         if !existing.is_deleted() {
@@ -167,7 +185,7 @@ impl ChunkStorage for EngineChunkStorage {
       offset,
     };
 
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
     kv.insert(kv_entry);
 
@@ -176,10 +194,8 @@ impl ChunkStorage for EngineChunkStorage {
 
   fn get_chunk(&self, hash: &ChunkHash) -> Result<Option<Chunk>, ChunkStoreError> {
     let kv_entry = {
-      let mut kv = self.kv_store.write()
-        .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
-
-      match kv.get(hash.as_slice()) {
+      let snapshot = self.kv_snapshot.load();
+      match snapshot.get(hash.as_slice(), &self.kv_file) {
         Some(entry) if !entry.is_deleted() => entry,
         _ => return Ok(None),
       }
@@ -231,17 +247,15 @@ impl ChunkStorage for EngineChunkStorage {
   }
 
   fn has_chunk(&self, hash: &ChunkHash) -> Result<bool, ChunkStoreError> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
-
-    match kv.get(hash.as_slice()) {
+    let snapshot = self.kv_snapshot.load();
+    match snapshot.get(hash.as_slice(), &self.kv_file) {
       Some(entry) => Ok(!entry.is_deleted()),
       None => Ok(false),
     }
   }
 
   fn remove_chunk(&self, hash: &ChunkHash) -> Result<bool, ChunkStoreError> {
-    let mut kv = self.kv_store.write()
+    let mut kv = self.kv_writer.lock()
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let exists = match kv.get(hash.as_slice()) {
@@ -260,10 +274,8 @@ impl ChunkStorage for EngineChunkStorage {
   }
 
   fn chunk_count(&self) -> Result<u64, ChunkStoreError> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
-
-    let all_entries = kv.iter_all()
+    let snapshot = self.kv_snapshot.load();
+    let all_entries = snapshot.iter_all(&self.kv_file)
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let count = all_entries.iter()
@@ -274,10 +286,8 @@ impl ChunkStorage for EngineChunkStorage {
   }
 
   fn list_chunk_hashes(&self) -> Result<Vec<ChunkHash>, ChunkStoreError> {
-    let mut kv = self.kv_store.write()
-      .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
-
-    let all_entries = kv.iter_all()
+    let snapshot = self.kv_snapshot.load();
+    let all_entries = snapshot.iter_all(&self.kv_file)
       .map_err(|error| ChunkStoreError::IoError(error.to_string()))?;
 
     let hashes: Vec<ChunkHash> = all_entries.iter()
