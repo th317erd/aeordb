@@ -8,7 +8,7 @@ use crate::engine::directory_entry::{
     ChildEntry, deserialize_child_entries, serialize_child_entries,
 };
 use crate::engine::directory_ops::{
-    directory_content_hash, directory_path_hash, file_path_hash,
+    directory_content_hash, directory_path_hash, file_content_hash, file_path_hash,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_type::EntryType;
@@ -159,11 +159,17 @@ pub fn commit_files(
 
         // Store the FileRecord
         let file_value = file_record.serialize(hash_length);
+
+        // Content-addressed key (immutable — for versioning via ChildEntry.hash)
+        let file_content_key = file_content_hash(&file_value, &algo)?;
+        engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+
+        // Path-based key (mutable — for reads, indexing, deletion)
         engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
 
         let child = ChildEntry {
             entry_type: EntryType::FileRecord.to_u8(),
-            hash: file_key.clone(),
+            hash: file_content_key.clone(),
             total_size,
             created_at: file_record.created_at,
             updated_at: file_record.updated_at,

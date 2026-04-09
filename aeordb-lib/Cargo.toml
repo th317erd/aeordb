@@ -400,6 +400,10 @@ name = "kv_concurrency_spec"
 path = "spec/engine/kv_concurrency_spec.rs"
 
 [[test]]
+name = "content_addressed_file_spec"
+path = "spec/engine/content_addressed_file_spec.rs"
+
+[[test]]
 name = "gc_spec"
 path = "spec/engine/gc_spec.rs"
 

@@ -45,6 +45,15 @@ pub fn directory_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult
   algo.compute_hash(&input)
 }
 
+/// Compute a content-addressed hash for a serialized FileRecord.
+/// Uses the "filec:" domain prefix, distinct from the path-based "file:" prefix.
+pub fn file_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+  let mut input = Vec::with_capacity(6 + data.len());
+  input.extend_from_slice(b"filec:");
+  input.extend_from_slice(data);
+  algo.compute_hash(&input)
+}
+
 /// Compute the domain-prefixed hash for a chunk.
 pub fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   let mut input = Vec::with_capacity(6 + data.len());
@@ -247,12 +256,18 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let file_value = file_record.serialize(hash_length);
+
+    // Content-addressed key (immutable — for versioning via ChildEntry.hash)
+    let file_content_key = file_content_hash(&file_value, &algo)?;
+    self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+
+    // Path-based key (mutable — for reads, indexing, deletion)
     self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
 
-    // Build child entry for directory update
+    // Build child entry with content-addressed hash (not path hash)
     let child = ChildEntry {
       entry_type: EntryType::FileRecord.to_u8(),
-      hash: file_key.clone(),
+      hash: file_content_key.clone(),
       total_size: data.len() as u64,
       created_at: file_record.created_at,
       updated_at: file_record.updated_at,

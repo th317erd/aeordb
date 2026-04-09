@@ -150,6 +150,11 @@ fn mark_file_entry(
     for chunk_hash in &file_record.chunk_hashes {
       live.insert(chunk_hash.clone());
     }
+
+    // Also mark the path-based key as live (mutable index for reads/indexing)
+    let algo = engine.hash_algo();
+    let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+    live.insert(path_key);
   }
 
   Ok(())

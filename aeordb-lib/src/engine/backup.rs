@@ -1,5 +1,5 @@
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
+use crate::engine::directory_ops::{file_path_hash, directory_path_hash, file_content_hash};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION};
@@ -81,10 +81,19 @@ fn write_tree_to_engine(
         }
     }
 
-    // Write FileRecords
-    for (_path, (file_hash, _record)) in &tree.files {
+    // Write FileRecords at both content-hash and path-hash keys.
+    // The tree walker stores content hashes as file_hash, but read_file
+    // looks up by path hash, so both must be present in the exported database.
+    let file_algo = output.hash_algo();
+    for (path, (file_hash, _record)) in &tree.files {
         if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+            // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::FileRecord, &key, &value)?;
+            // Also write at path-hash key (for read_file lookups)
+            let path_key = file_path_hash(path, &file_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+            }
             files_written += 1;
         }
     }
@@ -177,18 +186,27 @@ pub fn create_patch(
         }
     }
 
-    // Write added FileRecords
-    for (_path, (file_hash, _record)) in &diff.added {
+    // Write added FileRecords at both content-hash and path-hash keys
+    let patch_algo = output.hash_algo();
+    for (path, (file_hash, _record)) in &diff.added {
         if let Some((_header, key, value)) = source.get_entry(file_hash)? {
             output.store_entry(EntryType::FileRecord, &key, &value)?;
+            let path_key = file_path_hash(path, &patch_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+            }
             files_added += 1;
         }
     }
 
-    // Write modified FileRecords
-    for (_path, (file_hash, _record)) in &diff.modified {
+    // Write modified FileRecords at both content-hash and path-hash keys
+    for (path, (file_hash, _record)) in &diff.modified {
         if let Some((_header, key, value)) = source.get_entry(file_hash)? {
             output.store_entry(EntryType::FileRecord, &key, &value)?;
+            let path_key = file_path_hash(path, &patch_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+            }
             files_modified += 1;
         }
     }
