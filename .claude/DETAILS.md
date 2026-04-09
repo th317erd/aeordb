@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,164 (all passing)
+## Test Count: 2,192 (all passing)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -81,3 +81,5 @@
 - `aeordb-lib/src/engine/gc.rs` — gc_mark (walk all live roots), gc_sweep (in-place overwrite), run_gc
 - `aeordb-lib/src/server/gc_routes.rs` — POST /admin/gc endpoint (root-only, dry_run support)
 - `aeordb-lib/src/engine/kv_snapshot.rs` — ReadSnapshot (lock-free immutable KV read view via ArcSwap)
+- `aeordb-lib/src/engine/batch_commit.rs` — commit_files (atomic multi-file commit from pre-uploaded chunks)
+- `aeordb-lib/src/server/upload_routes.rs` — /upload/config, /upload/check, /upload/chunks/{hash}, /upload/commit

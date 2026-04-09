@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 2,164 tests, all passing
+## Total: 2,192 tests, all passing
 
 ---
 
@@ -33,11 +33,18 @@
 
 ---
 
+## Completed: Pre-Hashed Client Uploads — 28 tests
+- [x] Task 1: Config + dedup check endpoints — 11 tests
+- [x] Task 2: Chunk upload with hash verification — 6 tests
+- [x] Task 3: Batch commit engine function (batch_commit.rs)
+- [x] Task 4: Commit HTTP endpoint — 7 tests
+- [x] Task 5: E2E integration tests — 4 tests
+
 ## Future Plans (Not Started)
 
 - [ ] Server-side compilation + in-database SDK + schema-as-code
 - [ ] Cron/background task system
-- [ ] Pre-hashed client uploads
+- [x] ~~Pre-hashed client uploads~~ (done)
 - [ ] Fork merging (true merge with conflict detection, not just fast-forward)
 - [ ] Concurrent parallel writers (coordinator pattern)
 - [ ] File defragmentation (rewrite file to eliminate voids)
