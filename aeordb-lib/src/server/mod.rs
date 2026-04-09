@@ -1,6 +1,7 @@
 pub mod admin_routes;
 pub mod backup_routes;
 pub mod engine_routes;
+pub mod gc_routes;
 pub mod portal_routes;
 pub mod responses;
 pub mod routes;
@@ -171,6 +172,7 @@ pub fn create_app_with_all(
     .route("/admin/diff", post(backup_routes::diff_backup))
     .route("/admin/import", post(backup_routes::import_backup))
     .route("/admin/promote", post(backup_routes::promote_head))
+    .route("/admin/gc", post(gc_routes::run_gc_endpoint))
     // Engine routes (custom storage engine)
     .route(
       "/engine/{*path}",
