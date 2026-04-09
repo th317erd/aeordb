@@ -5,6 +5,9 @@ use axum::Extension;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::TokenClaims;
+use crate::engine::batch_commit::{commit_files, CommitFile};
+use crate::engine::errors::EngineError;
+use crate::engine::RequestContext;
 use crate::engine::{EntryType, should_compress, CompressionAlgorithm, compress};
 use crate::server::state::AppState;
 
@@ -140,5 +143,42 @@ pub async fn upload_chunk(
     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
       "error": format!("Failed to store chunk: {}", e)
     }))).into_response(),
+  }
+}
+
+#[derive(Deserialize)]
+pub struct CommitRequest {
+  pub files: Vec<CommitFile>,
+}
+
+/// POST /upload/commit — atomically commit multiple files from pre-uploaded chunks.
+pub async fn upload_commit(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Json(body): Json<CommitRequest>,
+) -> Response {
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+
+  let engine = state.engine.clone();
+  let result = tokio::task::spawn_blocking(move || {
+    commit_files(&engine, &ctx, body.files)
+  }).await;
+
+  match result {
+    Ok(Ok(commit_result)) => {
+      (StatusCode::OK, Json(serde_json::json!(commit_result))).into_response()
+    }
+    Ok(Err(e)) => {
+      let status = match &e {
+        EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+      };
+      (status, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    }
+    Err(e) => {
+      (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+        "error": format!("Commit task panicked: {}", e)
+      }))).into_response()
+    }
   }
 }

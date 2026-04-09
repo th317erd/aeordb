@@ -185,6 +185,7 @@ pub fn create_app_with_all(
     // Upload check and chunk upload (pre-hashed uploads)
     .route("/upload/check", post(upload_routes::upload_check))
     .route("/upload/chunks/{hash}", put(upload_routes::upload_chunk))
+    .route("/upload/commit", post(upload_routes::upload_commit))
     // SSE event stream
     .route("/events/stream", get(sse_routes::event_stream))
     // Query route
