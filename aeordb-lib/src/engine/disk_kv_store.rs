@@ -342,6 +342,73 @@ impl DiskKVStore {
         }
     }
 
+    /// Bulk insert entries without snapshot publishing, hot file journaling,
+    /// or disk dedup checks. Used during resize where all entries are known-unique
+    /// and the store is a temporary target. Call `flush()` after all inserts.
+    pub fn bulk_insert(&mut self, entries: &[KVEntry]) {
+        for entry in entries {
+            self.write_buffer.insert(entry.hash.clone(), entry.clone());
+            self.entry_count += 1;
+
+            if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
+                let _ = self.flush_no_snapshot();
+            }
+        }
+    }
+
+    /// Flush write buffer to disk without publishing a snapshot.
+    /// Used by `bulk_insert` during resize to avoid O(entries × pages) I/O.
+    fn flush_no_snapshot(&mut self) -> EngineResult<()> {
+        if self.write_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let hash_length = self.hash_algo.hash_length();
+        let mut overflow_entries: Vec<KVEntry> = Vec::new();
+
+        let buffer_entries: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+        let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
+        for entry in buffer_entries {
+            let bucket = self.nvt.bucket_for_value(&entry.hash);
+            by_bucket.entry(bucket).or_default().push(entry);
+        }
+
+        for (bucket_index, new_entries) in by_bucket {
+            let offset = bucket_page_offset(bucket_index, hash_length);
+            let psize = page_size(hash_length);
+
+            let mut page_data = vec![0u8; psize];
+            self.kv_file.seek(SeekFrom::Start(offset))?;
+            self.kv_file.read_exact(&mut page_data)?;
+
+            let mut existing = deserialize_page(&page_data, hash_length)?;
+
+            for entry in new_entries {
+                if !upsert_in_page(&mut existing, entry.clone()) {
+                    overflow_entries.push(entry);
+                }
+            }
+
+            let serialized = serialize_page(&existing, hash_length);
+            self.kv_file.seek(SeekFrom::Start(offset))?;
+            self.kv_file.write_all(&serialized)?;
+        }
+
+        self.kv_file.sync_data()?;
+        self.write_buffer.clear();
+
+        if !overflow_entries.is_empty() {
+            // During bulk insert into a temp store, overflow shouldn't happen
+            // (the store was created at the right stage). If it does, just
+            // put them back in the buffer for the caller to handle.
+            for entry in overflow_entries {
+                self.write_buffer.insert(entry.hash.clone(), entry);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check if an entry exists on disk (without caching).
     fn entry_exists_on_disk(&mut self, hash: &[u8]) -> bool {
         let bucket_index = self.nvt.bucket_for_value(hash);
@@ -458,11 +525,9 @@ impl DiskKVStore {
             &temp_path, self.hash_algo, new_stage,
         )?;
 
-        // Insert all entries into the new store
-        for entry in &all_entries {
-            new_store.insert(entry.clone());
-        }
-        new_store.flush()?;
+        // Bulk insert all entries (no snapshot publishing, no hot file, no dedup checks)
+        new_store.bulk_insert(&all_entries);
+        new_store.flush_no_snapshot()?;
 
         // Drop the new store (closes its file handle) so the temp file
         // can be renamed on all platforms. Clear its write buffer first
