@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+autobenches = false
 
 [dependencies]
 # HTTP server
@@ -427,3 +428,7 @@ path = "spec/engine/wasm_query_e2e_spec.rs"
 [[test]]
 name = "stress_test_spec"
 path = "spec/engine/stress_test_spec.rs"
+
+[[bin]]
+name = "stress-benchmark"
+path = "benches/stress_benchmark.rs"
