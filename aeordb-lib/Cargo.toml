@@ -419,3 +419,7 @@ path = "spec/http/upload_commit_spec.rs"
 [[test]]
 name = "upload_e2e_spec"
 path = "spec/http/upload_e2e_spec.rs"
+
+[[test]]
+name = "wasm_query_e2e_spec"
+path = "spec/engine/wasm_query_e2e_spec.rs"

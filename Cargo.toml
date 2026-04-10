@@ -5,6 +5,9 @@ members = [
     "aeordb-plugin-sdk",
     "aeordb-parsers/plaintext",
 ]
+exclude = [
+    "aeordb-plugins/echo-plugin",
+]
 resolver = "2"
 
 [workspace.package]

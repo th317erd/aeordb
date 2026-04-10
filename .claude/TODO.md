@@ -37,6 +37,14 @@
 
 ---
 
+## In Progress: WASM Query Plugins (Phases 1+2)
+- [ ] Task 1: HostState with engine access + RequestContext
+- [ ] Task 2: 7 real host functions (CRUD + query + aggregate)
+- [ ] Task 3: SDK PluginContext + aeordb_query_plugin! macro
+- [ ] Task 4: SDK QueryBuilder + AggregateBuilder
+- [ ] Task 5: Fix _invoke HTTP endpoint (response propagation + request wrapping)
+- [ ] Task 6: Echo-plugin E2E tests
+
 ## Future Plans (Not Started)
 
 - [ ] Server-side compilation + in-database SDK + schema-as-code
