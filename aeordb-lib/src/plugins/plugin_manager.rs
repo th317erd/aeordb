@@ -189,6 +189,57 @@ impl PluginManager {
     result
   }
 
+  /// Instantiate and invoke a deployed WASM plugin with engine context.
+  ///
+  /// Same as `invoke_wasm_plugin` but provides the `StorageEngine` and
+  /// `RequestContext` to the WASM runtime, enabling the 7 database host
+  /// functions to perform real operations. Used for query plugins.
+  #[tracing::instrument(skip(self, request_bytes, engine, ctx), fields(path = %path, request_size = request_bytes.len()))]
+  pub fn invoke_wasm_plugin_with_context(
+    &self,
+    path: &str,
+    request_bytes: &[u8],
+    engine: std::sync::Arc<StorageEngine>,
+    ctx: RequestContext,
+  ) -> Result<Vec<u8>, PluginManagerError> {
+    let start = std::time::Instant::now();
+
+    let record = self
+      .get_plugin(path)?
+      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+
+    if record.plugin_type != PluginType::Wasm {
+      return Err(PluginManagerError::InvalidPlugin(format!(
+        "plugin at '{}' is not a WASM plugin",
+        path
+      )));
+    }
+
+    let runtime = WasmPluginRuntime::new(&record.wasm_bytes).map_err(|error| {
+      tracing::error!(path = %path, error = %error, "Failed to load WASM module");
+      metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "load_failed").increment(1);
+      PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
+    })?;
+
+    let result = runtime.call_handle_with_context(request_bytes, engine, ctx).map_err(|error| {
+      tracing::error!(path = %path, error = %error, "WASM execution failed");
+      metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
+      PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
+    });
+
+    let duration = start.elapsed().as_secs_f64();
+    metrics::counter!(crate::metrics::definitions::PLUGIN_INVOCATIONS_TOTAL).increment(1);
+    metrics::histogram!(crate::metrics::definitions::PLUGIN_DURATION).record(duration);
+
+    tracing::info!(
+      path = %path,
+      duration_ms = duration * 1000.0,
+      "Plugin invoked with context"
+    );
+
+    result
+  }
+
   /// Invoke a WASM plugin with custom memory limits (for parser plugins).
   pub fn invoke_wasm_plugin_with_limits(
     &self,
