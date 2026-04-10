@@ -37,17 +37,15 @@
 
 ---
 
-## In Progress: WASM Query Plugins (Phases 1+2)
-- [ ] Task 1: HostState with engine access + RequestContext
-- [ ] Task 2: 7 real host functions (CRUD + query + aggregate)
-- [ ] Task 3: SDK PluginContext + aeordb_query_plugin! macro
-- [ ] Task 4: SDK QueryBuilder + AggregateBuilder
-- [ ] Task 5: Fix _invoke HTTP endpoint (response propagation + request wrapping)
-- [ ] Task 6: Echo-plugin E2E tests
+## Completed: WASM Query Plugins (Phases 1+2) — ~130 new tests
+- [x] Task 1: HostState with engine access + RequestContext
+- [x] Task 2: 7 real host functions (CRUD + query + aggregate)
+- [x] Task 3: SDK PluginContext + aeordb_query_plugin! macro — 97 SDK tests
+- [x] Task 4: SDK QueryBuilder + AggregateBuilder (fluent API)
+- [x] Task 5: Fix _invoke HTTP endpoint — 5 tests
+- [x] Task 6: Echo-plugin E2E tests — 14 tests
 
 ## Future Plans (Not Started)
-
-- [ ] Server-side compilation + in-database SDK + schema-as-code
 - [ ] Cron/background task system
 - [ ] Fork merging (true merge with conflict detection, not just fast-forward)
 - [ ] File defragmentation (rewrite file to eliminate voids)
