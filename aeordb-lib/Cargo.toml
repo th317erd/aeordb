@@ -36,6 +36,7 @@ sha2 = "0.10"
 # Plugins
 wasmi = "0.42"
 libloading = "0.8"
+aeordb-plugin-sdk = { path = "../aeordb-plugin-sdk" }
 
 # Webhook delivery
 reqwest = { version = "0.12", features = ["json"] }

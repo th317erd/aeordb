@@ -87,29 +87,80 @@ pub async fn deploy_plugin(
 }
 
 /// POST /:database/:schema/:table/:function_name/_invoke — invoke a deployed plugin.
+///
+/// Wraps the raw request body in a `PluginRequest` envelope with metadata,
+/// passes it through the WASM runtime with engine context, then deserializes
+/// the `PluginResponse` to map status code, content type and headers back
+/// to the HTTP response. Falls back to raw bytes if the plugin returns a
+/// non-PluginResponse payload (backward compatibility).
 pub async fn invoke_plugin(
   State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
   Path((database, schema, table, function_name)): Path<(String, String, String, String)>,
   body: axum::body::Bytes,
 ) -> Response {
   let plugin_path = format!("{}/{}/{}", database, schema, table);
 
-  // For now we ignore function_name — in the future it could select a specific
-  // exported function within the plugin module.
-  let _ = function_name;
+  // Build a PluginRequest envelope with metadata about the invocation.
+  let plugin_request = aeordb_plugin_sdk::PluginRequest {
+    arguments: body.to_vec(),
+    metadata: {
+      let mut meta = std::collections::HashMap::new();
+      meta.insert("function_name".to_string(), function_name.clone());
+      meta.insert(
+        "path".to_string(),
+        format!("/{}/{}/{}/{}", database, schema, table, function_name),
+      );
+      meta.insert("plugin_path".to_string(), plugin_path.clone());
+      meta
+    },
+  };
+  let request_bytes = serde_json::to_vec(&plugin_request).unwrap_or_default();
 
-  match state
-    .plugin_manager
-    .invoke_wasm_plugin(&plugin_path, &body)
-  {
+  // Create a RequestContext from the authenticated caller's claims.
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+
+  match state.plugin_manager.invoke_wasm_plugin_with_context(
+    &plugin_path,
+    &request_bytes,
+    state.engine.clone(),
+    ctx,
+  ) {
     Ok(response_bytes) => {
-      let mut response_builder = axum::http::Response::builder().status(StatusCode::OK);
-      response_builder = response_builder.header("content-type", "application/octet-stream");
-      response_builder
-        .body(axum::body::Body::from(response_bytes))
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+      // Try to deserialize as a PluginResponse envelope.
+      match serde_json::from_slice::<aeordb_plugin_sdk::PluginResponse>(&response_bytes) {
+        Ok(plugin_response) => {
+          let status = StatusCode::from_u16(plugin_response.status_code)
+            .unwrap_or(StatusCode::OK);
+          let content_type = plugin_response
+            .content_type
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+          let mut response_builder = axum::http::Response::builder()
+            .status(status)
+            .header("content-type", content_type);
+
+          for (key, value) in &plugin_response.headers {
+            response_builder = response_builder.header(key.as_str(), value.as_str());
+          }
+
+          response_builder
+            .body(axum::body::Body::from(plugin_response.body))
+            .unwrap_or_else(|_| {
+              (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+            })
+        }
+        Err(_) => {
+          // Fallback: return raw bytes for backward compatibility with old plugins.
+          axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/octet-stream")
+            .body(axum::body::Body::from(response_bytes))
+            .unwrap_or_else(|_| {
+              (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+            })
+        }
+      }
     }
     Err(crate::plugins::plugin_manager::PluginManagerError::NotFound(path)) => {
       ErrorResponse::new(format!("Plugin not found: {}", path))
