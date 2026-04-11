@@ -28,10 +28,10 @@ const SHARD_COUNT: usize = 10_000;
 const FILES_PER_SHARD: usize = 100;
 /// Print a checkpoint every N files.
 const CHECKPOINT_INTERVAL: usize = 5_000;
-/// Maximum time for Phase 1 before moving on.
-const PHASE1_TIMEOUT: Duration = Duration::from_secs(600);
+/// No timeout — run until all files are stored.
+const PHASE1_TIMEOUT: Duration = Duration::from_secs(86400); // 24 hours
 
-const INDEXED_FILE_COUNT: usize = 1_000;
+const INDEXED_FILE_COUNT: usize = 10_000;
 const CONCURRENT_READER_THREADS: usize = 8;
 const VERIFY_COUNT: usize = 1_000;
 
