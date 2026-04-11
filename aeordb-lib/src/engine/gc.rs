@@ -279,6 +279,7 @@ fn min_void_size(engine: &StorageEngine) -> u32 {
 }
 
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.
+/// Uses nosync writes for batch performance — one sync at the end.
 pub fn gc_sweep(
   engine: &StorageEngine,
   live: &HashSet<Vec<u8>>,
@@ -291,6 +292,7 @@ pub fn gc_sweep(
 
   let mut garbage_count: usize = 0;
   let mut reclaimed_bytes: u64 = 0;
+  let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
 
   for entry in &all_entries {
     if live.contains(&entry.hash) {
@@ -307,17 +309,25 @@ pub fn gc_sweep(
       continue;
     }
 
-    // Best-effort in-place overwrite
+    // Best-effort in-place overwrite (nosync — batch all writes)
     if entry_size >= min_del {
-      let written = engine.write_deletion_at(entry.offset, "gc")?;
+      let written = engine.write_deletion_at_nosync(entry.offset, "gc")?;
       let remaining = entry_size - written;
       if remaining >= min_void {
         let void_offset = entry.offset + written as u64;
-        engine.write_void_at(void_offset, remaining)?;
+        engine.write_void_at_nosync(void_offset, remaining)?;
       }
     }
 
-    engine.remove_kv_entry(&entry.hash)?;
+    garbage_hashes.push(entry.hash.clone());
+  }
+
+  if !dry_run && !garbage_hashes.is_empty() {
+    // One sync for all in-place overwrites
+    engine.sync_writer()?;
+
+    // Batch remove from KV
+    engine.remove_kv_entries_batch(&garbage_hashes)?;
   }
 
   Ok((garbage_count, reclaimed_bytes))

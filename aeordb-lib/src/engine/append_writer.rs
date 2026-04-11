@@ -154,7 +154,23 @@ impl AppendWriter {
 
   /// Write an entry at a specific file offset (in-place overwrite).
   /// Does NOT update current_offset or entry_count — this overwrites existing space.
+  /// Calls sync_all after writing. For batch operations, use `write_entry_at_nosync`.
   pub fn write_entry_at(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+  ) -> EngineResult<u32> {
+    let total_length = self.write_entry_at_nosync(offset, entry_type, key, value)?;
+    self.file.sync_all()?;
+    Ok(total_length)
+  }
+
+  /// Write an entry at a specific offset WITHOUT syncing.
+  /// Caller is responsible for calling `sync()` after all writes are done.
+  /// Used by GC sweep for batch in-place overwrites.
+  pub fn write_entry_at_nosync(
     &mut self,
     offset: u64,
     entry_type: EntryType,
@@ -187,14 +203,26 @@ impl AppendWriter {
     self.file.write_all(&header_bytes)?;
     self.file.write_all(key)?;
     self.file.write_all(value)?;
-    self.file.sync_all()?;
 
     Ok(total_length)
+  }
+
+  /// Sync the file to disk. Call after batch nosync operations.
+  pub fn sync(&mut self) -> EngineResult<()> {
+    self.file.sync_all()?;
+    Ok(())
   }
 
   /// Write a void entry at a specific file offset (in-place overwrite).
   /// The void fills exactly `size` bytes starting at `offset`.
   pub fn write_void_at(&mut self, offset: u64, size: u32) -> EngineResult<()> {
+    self.write_void_at_nosync(offset, size)?;
+    self.file.sync_all()?;
+    Ok(())
+  }
+
+  /// Write a void at a specific offset WITHOUT syncing.
+  pub fn write_void_at_nosync(&mut self, offset: u64, size: u32) -> EngineResult<()> {
     let hash_algo = self.file_header.hash_algo;
     let header_size = 31 + hash_algo.hash_length();
 
@@ -212,7 +240,7 @@ impl AppendWriter {
     let value_length = size as usize - header_size;
     let value = vec![0u8; value_length];
 
-    self.write_entry_at(offset, EntryType::Void, key, &value)?;
+    self.write_entry_at_nosync(offset, EntryType::Void, key, &value)?;
     Ok(())
   }
 

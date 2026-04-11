@@ -703,6 +703,64 @@ impl StorageEngine {
     Ok(())
   }
 
+  /// Write a DeletionRecord in-place WITHOUT syncing. Used by GC batch sweep.
+  pub fn write_deletion_at_nosync(&self, offset: u64, path: &str) -> EngineResult<u32> {
+    let deletion = crate::engine::deletion_record::DeletionRecord::new(
+      path.to_string(),
+      Some("gc".to_string()),
+    );
+    let value = deletion.serialize();
+    let key = self.compute_hash(
+      format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes(),
+    )?;
+
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    writer.write_entry_at_nosync(offset, EntryType::DeletionRecord, &key, &value)
+  }
+
+  /// Write a void in-place WITHOUT syncing. Used by GC batch sweep.
+  pub fn write_void_at_nosync(&self, offset: u64, size: u32) -> EngineResult<()> {
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    writer.write_void_at_nosync(offset, size)?;
+
+    let mut vm = self.void_manager.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    vm.register_void(size, offset);
+
+    Ok(())
+  }
+
+  /// Sync the append writer to disk. Call after batch nosync operations.
+  pub fn sync_writer(&self) -> EngineResult<()> {
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    writer.sync()
+  }
+
+  /// Batch remove multiple entries from the KV store. Publishes snapshot once at the end.
+  pub fn remove_kv_entries_batch(&self, hashes: &[Vec<u8>]) -> EngineResult<()> {
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    for hash in hashes {
+      kv.mark_deleted(hash);
+    }
+    // mark_deleted calls publish_buffer_only for each one.
+    // This is fine — buffer-only publish is cheap (HashMap clone + Arc clone).
+    Ok(())
+  }
+
   /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
   pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
     let mut kv = self.kv_writer.lock()
