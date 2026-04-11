@@ -91,7 +91,7 @@ impl DiskKVStore {
 
         let shared_nvt = Arc::new(nvt.clone());
         let kv_path = path.to_path_buf();
-        let pages = vec![vec![0u8; page_size(hash_length)]; bucket_count];
+        let pages = Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count]);
         let initial_snapshot = ReadSnapshot::new(
             HashMap::new(),
             Arc::clone(&shared_nvt),
@@ -147,7 +147,7 @@ impl DiskKVStore {
 
         let shared_nvt = Arc::new(nvt.clone());
         let kv_path = path.to_path_buf();
-        let pages = vec![vec![0u8; page_size(hash_length)]; bucket_count];
+        let pages = Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count]);
         let initial_snapshot = ReadSnapshot::new(
             HashMap::new(),
             Arc::clone(&shared_nvt),
@@ -249,7 +249,7 @@ impl DiskKVStore {
                 file.read_exact(&mut page_data)?;
                 pages.push(page_data);
             }
-            pages
+            Arc::new(pages)
         };
         let initial_snapshot = ReadSnapshot::new(
             HashMap::new(),
@@ -338,7 +338,7 @@ impl DiskKVStore {
         };
 
         if !did_flush {
-            self.publish_snapshot();
+            self.publish_buffer_only();
         }
     }
 
@@ -453,6 +453,9 @@ impl DiskKVStore {
             by_bucket.entry(bucket).or_default().push(entry);
         }
 
+        // Track which buckets are modified for incremental snapshot publishing
+        let modified_buckets: Vec<usize> = by_bucket.keys().cloned().collect();
+
         // For each affected bucket: read page, merge, write back
         for (bucket_index, new_entries) in by_bucket {
             let offset = bucket_page_offset(bucket_index, hash_length);
@@ -487,11 +490,12 @@ impl DiskKVStore {
         self.flush_hot_buffer()?;
         self.truncate_hot_file()?;
 
-        // Publish snapshot with fresh NVT and empty buffer.
-        // Readers loading this snapshot will find entries on the now-stable disk pages.
-        self.publish_snapshot_with_new_nvt();
+        // Incremental snapshot publish — only re-read modified pages from disk.
+        // Unmodified pages are shared via Arc from the previous snapshot.
+        self.publish_snapshot_incremental(&modified_buckets);
 
         // Handle overflows: resize to next stage and retry
+        // resize_to_next_stage() does a full page re-read since ALL pages change.
         if !overflow_entries.is_empty() {
             self.resize_to_next_stage()?;
             for entry in overflow_entries {
@@ -552,8 +556,8 @@ impl DiskKVStore {
         );
         self.entry_count = all_entries.len();
 
-        // Publish snapshot with fresh NVT clone (bucket layout changed)
-        self.publish_snapshot_with_new_nvt();
+        // Publish full snapshot with fresh NVT clone (bucket layout changed — ALL pages differ)
+        self.publish_full_snapshot_with_new_nvt();
 
         Ok(())
     }
@@ -569,7 +573,7 @@ impl DiskKVStore {
             entry.type_flags |= KV_FLAG_DELETED;
             self.write_buffer.insert(hash.to_vec(), entry);
             self.entry_count = self.entry_count.saturating_sub(1);
-            self.publish_snapshot();
+            self.publish_buffer_only();
         }
     }
 
@@ -623,7 +627,7 @@ impl DiskKVStore {
             let entry_type = entry.type_flags & 0x0F;
             entry.type_flags = entry_type | (new_flags & 0xF0);
             self.write_buffer.insert(hash.to_vec(), entry);
-            self.publish_snapshot();
+            self.publish_buffer_only();
             true
         } else {
             false
@@ -636,7 +640,7 @@ impl DiskKVStore {
         if let Some(mut entry) = self.get(hash) {
             entry.offset = new_offset;
             self.write_buffer.insert(hash.to_vec(), entry);
-            self.publish_snapshot();
+            self.publish_buffer_only();
             true
         } else {
             false
@@ -668,8 +672,8 @@ impl DiskKVStore {
     // ========================================================================
 
     /// Read all KV pages into memory for a snapshot.
-    /// Returns a Vec of page data, one per bucket.
-    fn read_all_pages(&mut self) -> Vec<Vec<u8>> {
+    /// Returns an Arc-wrapped Vec of page data, one per bucket.
+    fn read_all_pages(&mut self) -> Arc<Vec<Vec<u8>>> {
         let hash_length = self.hash_algo.hash_length();
         let psize = page_size(hash_length);
         let mut pages = Vec::with_capacity(self.bucket_count);
@@ -687,12 +691,30 @@ impl DiskKVStore {
             pages.push(vec![0u8; psize]);
         }
 
-        pages
+        Arc::new(pages)
     }
 
-    /// Publish a new read snapshot from current state.
-    /// Reads all pages into memory so the snapshot serves reads without disk I/O.
-    fn publish_snapshot(&mut self) {
+    /// Cheap publish: clone buffer + reuse existing pages (Arc clone = atomic op).
+    /// Called on every insert/mutation. Does NOT read pages from disk.
+    fn publish_buffer_only(&mut self) {
+        let current_pages = {
+            let current = self.snapshot.load();
+            Arc::clone(current.pages())
+        };
+        let snapshot = ReadSnapshot::new(
+            self.write_buffer.clone(),
+            Arc::clone(&self.shared_nvt),
+            self.bucket_count,
+            self.hash_algo,
+            self.entry_count,
+            current_pages,
+        );
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
+    /// Publish a full snapshot by re-reading ALL pages from disk.
+    /// Used after resize_to_next_stage where all pages change.
+    fn publish_full_snapshot(&mut self) {
         let pages = self.read_all_pages();
         let snapshot = ReadSnapshot::new(
             self.write_buffer.clone(),
@@ -705,10 +727,47 @@ impl DiskKVStore {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// Publish a snapshot with a fresh NVT clone (called after flush/resize).
-    fn publish_snapshot_with_new_nvt(&mut self) {
+    /// Incremental snapshot publish: only re-read modified pages from disk.
+    /// Unmodified pages are shared via Arc from the previous snapshot.
+    fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) {
         self.shared_nvt = Arc::new(self.nvt.clone());
-        self.publish_snapshot();
+
+        // Get current pages from existing snapshot
+        let current = self.snapshot.load();
+        let old_pages = current.pages();
+
+        // Clone the outer Vec (just pointers), but share unmodified inner Vecs
+        let mut new_pages = (**old_pages).clone();
+
+        // Only read modified pages from disk
+        let hash_length = self.hash_algo.hash_length();
+        let psize = page_size(hash_length);
+        for &bucket in modified_buckets {
+            if bucket < new_pages.len() {
+                let offset = bucket_page_offset(bucket, hash_length);
+                let mut page_data = vec![0u8; psize];
+                if self.kv_file.seek(SeekFrom::Start(offset)).is_ok() {
+                    let _ = self.kv_file.read_exact(&mut page_data);
+                }
+                new_pages[bucket] = page_data;
+            }
+        }
+
+        let snapshot = ReadSnapshot::new(
+            self.write_buffer.clone(),
+            Arc::clone(&self.shared_nvt),
+            self.bucket_count,
+            self.hash_algo,
+            self.entry_count,
+            Arc::new(new_pages),
+        );
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
+    /// Publish a full snapshot with a fresh NVT clone (called after resize).
+    fn publish_full_snapshot_with_new_nvt(&mut self) {
+        self.shared_nvt = Arc::new(self.nvt.clone());
+        self.publish_full_snapshot();
     }
 
     /// Get a reference to the ArcSwap for readers to load snapshots from.

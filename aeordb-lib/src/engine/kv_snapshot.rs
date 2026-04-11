@@ -27,7 +27,9 @@ pub struct ReadSnapshot {
     entry_count: usize,
     /// In-memory copy of all KV pages at snapshot time.
     /// Each entry is a serialized page (page_size bytes).
-    pages: Vec<Vec<u8>>,
+    /// Arc-wrapped for cheap sharing between snapshots (buffer-only publishes
+    /// reuse existing pages via Arc::clone instead of re-reading from disk).
+    pages: Arc<Vec<Vec<u8>>>,
 }
 
 impl fmt::Debug for ReadSnapshot {
@@ -37,7 +39,7 @@ impl fmt::Debug for ReadSnapshot {
             .field("hash_algo", &self.hash_algo)
             .field("entry_count", &self.entry_count)
             .field("buffer_len", &self.buffer.len())
-            .field("pages", &format_args!("Vec<{} pages>", self.pages.len()))
+            .field("pages", &format_args!("Arc<Vec<{} pages>>", self.pages.len()))
             .finish_non_exhaustive()
     }
 }
@@ -51,7 +53,7 @@ impl ReadSnapshot {
         bucket_count: usize,
         hash_algo: HashAlgorithm,
         entry_count: usize,
-        pages: Vec<Vec<u8>>,
+        pages: Arc<Vec<Vec<u8>>>,
     ) -> Self {
         ReadSnapshot {
             buffer,
@@ -61,6 +63,11 @@ impl ReadSnapshot {
             entry_count,
             pages,
         }
+    }
+
+    /// Access the shared pages Arc (for cheap cloning in buffer-only publishes).
+    pub fn pages(&self) -> &Arc<Vec<Vec<u8>>> {
+        &self.pages
     }
 
     /// Look up an entry by hash. Checks the buffer first, then reads
@@ -116,7 +123,7 @@ impl ReadSnapshot {
         let mut all: HashMap<Vec<u8>, KVEntry> = HashMap::new();
 
         // Read all pages from in-memory cache
-        for page_data in &self.pages {
+        for page_data in self.pages.iter() {
             if let Ok(entries) = deserialize_page(page_data, hash_length) {
                 for entry in entries {
                     all.insert(entry.hash.clone(), entry);

@@ -57,7 +57,7 @@ fn read_pages_from_kv(kv_path: &std::path::Path, bucket_count: usize, hash_lengt
 fn create_flushed_store(
     dir: &std::path::Path,
     entries: &[KVEntry],
-) -> (usize, Vec<Vec<u8>>) {
+) -> (usize, Arc<Vec<Vec<u8>>>) {
     let kv_path = dir.join("test.kv");
     let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
     for entry in entries {
@@ -67,7 +67,7 @@ fn create_flushed_store(
     let bucket_count = store.bucket_count();
     let hash_length = HashAlgorithm::Blake3_256.hash_length();
     let pages = read_pages_from_kv(&kv_path, bucket_count, hash_length);
-    (bucket_count, pages)
+    (bucket_count, Arc::new(pages))
 }
 
 fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
@@ -78,8 +78,8 @@ fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
 }
 
 /// Create empty pages for a given bucket count and hash length.
-fn empty_pages(bucket_count: usize, hash_length: usize) -> Vec<Vec<u8>> {
-    vec![vec![0u8; page_size(hash_length)]; bucket_count]
+fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Vec<u8>>> {
+    Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count])
 }
 
 // ============================================================================

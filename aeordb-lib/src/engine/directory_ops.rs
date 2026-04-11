@@ -12,7 +12,7 @@ use crate::engine::index_store::IndexManager;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
-use crate::engine::storage_engine::StorageEngine;
+use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
@@ -193,9 +193,13 @@ impl<'a> DirectoryOps<'a> {
     let detected_content_type = crate::engine::content_type::detect_content_type(data, content_type);
     let hash_length = algo.hash_length();
 
-    // Split data into chunks and store each one
+    // Split data into chunks and accumulate in a WriteBatch.
+    // Compressed chunks are stored individually (store_entry_compressed doesn't
+    // support batching), but uncompressed chunks + FileRecords are batched for
+    // a single lock acquisition and one snapshot publish.
     let mut chunk_hashes = Vec::new();
     let chunk_size = DEFAULT_CHUNK_SIZE;
+    let mut batch = WriteBatch::new();
 
     if data.is_empty() {
       // Even empty files get zero chunks — that's fine
@@ -211,6 +215,7 @@ impl<'a> DirectoryOps<'a> {
         // Dedup: only store if not already present
         if !self.engine.has_entry(&chunk_key)? {
           if compression_algo != CompressionAlgorithm::None {
+            // Compressed chunks must use individual store_entry_compressed calls
             let compressed_data = compress(chunk_data, compression_algo)?;
             self.engine.store_entry_compressed(
               EntryType::Chunk,
@@ -219,11 +224,8 @@ impl<'a> DirectoryOps<'a> {
               compression_algo,
             )?;
           } else {
-            self.engine.store_entry(
-              EntryType::Chunk,
-              &chunk_key,
-              chunk_data,
-            )?;
+            // Uncompressed chunks go into the batch
+            batch.add(EntryType::Chunk, chunk_key.clone(), chunk_data.to_vec());
           }
         }
 
@@ -259,10 +261,14 @@ impl<'a> DirectoryOps<'a> {
 
     // Content-addressed key (immutable — for versioning via ChildEntry.hash)
     let file_content_key = file_content_hash(&file_value, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+    batch.add(EntryType::FileRecord, file_content_key.clone(), file_value.clone());
 
     // Path-based key (mutable — for reads, indexing, deletion)
-    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+    batch.add(EntryType::FileRecord, file_key.clone(), file_value);
+
+    // Flush batch: single writer lock + single KV lock acquisition
+    // for all uncompressed chunks + both FileRecord entries.
+    self.engine.flush_batch(batch)?;
 
     // Build child entry with content-addressed hash (not path hash)
     let child = ChildEntry {
