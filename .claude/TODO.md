@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: ~2,202 tests, all passing
+## Total: ~2,200+ tests, all passing
 
 ---
 
@@ -25,27 +25,39 @@
 - [x] Concurrent KV Readers (snapshot double-buffering, lock-free reads) — 20 tests
 - [x] Pre-Hashed Client Uploads (4-phase protocol, dedup, atomic commit) — 28 tests
 - [x] Content-Addressed FileRecords (dual-key storage, correct snapshot versioning) — 10 tests
+- [x] WASM Query Plugins (host functions, SDK, QueryBuilder, echo-plugin E2E) — ~130 tests
+- [x] Parser hardening (Contains/Similar on parser fields, content-type auto-routing) — 6 tests
 
 ---
 
-## Minor Loose Ends — Cleared
+## Performance Optimizations (Completed)
 
-- [x] Version Export Phase 7: E2E manual verification — passed (export, diff, import all work)
-- [x] WASM Parser E2E test — 11/11 tests pass (binary compiled, 167KB)
-- [x] Snapshot versioning bug — fixed via content-addressed FileRecord keys (10 tests)
-- [x] Hot file naming mismatch — fixed (derive db_name from .aeordb stem)
+- [x] Snapshot buffer-only publish on insert (Arc pages, no disk I/O per write)
+- [x] Incremental page updates on flush (only re-read modified buckets)
+- [x] bulk_insert for KV resize (skip snapshot publishing + dedup checks)
+- [x] GC batch nosync writes (one sync at end, not per-entry)
+- [x] GC mark_deleted_batch (fixed O(n²) buffer cloning — 13.5hrs → 3.8min)
+- [x] WASM converter stubs removed (dead code returning 0.5)
 
 ---
 
-## Completed: WASM Query Plugins (Phases 1+2) — ~130 new tests
-- [x] Task 1: HostState with engine access + RequestContext
-- [x] Task 2: 7 real host functions (CRUD + query + aggregate)
-- [x] Task 3: SDK PluginContext + aeordb_query_plugin! macro — 97 SDK tests
-- [x] Task 4: SDK QueryBuilder + AggregateBuilder (fluent API)
-- [x] Task 5: Fix _invoke HTTP endpoint — 5 tests
-- [x] Task 6: Echo-plugin E2E tests — 14 tests
+## Benchmark Results (Release Mode, 381K files)
+
+| Metric | Value |
+|--------|-------|
+| Write throughput | 1,477 files/sec |
+| Read throughput | 131,048 reads/sec |
+| Eq query | 0.2ms |
+| Between query | 0.5ms |
+| Contains query | 0.6ms |
+| Concurrent ops | 9,406 ops/sec |
+| GC (2.36M garbage) | 228 seconds |
+| Delete rate | 449/sec |
+
+---
 
 ## Future Plans (Not Started)
+
 - [ ] Cron/background task system
 - [ ] Fork merging (true merge with conflict detection, not just fast-forward)
 - [ ] File defragmentation (rewrite file to eliminate voids)
