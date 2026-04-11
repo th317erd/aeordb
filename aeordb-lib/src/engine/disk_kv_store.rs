@@ -577,6 +577,25 @@ impl DiskKVStore {
         }
     }
 
+    /// Batch mark entries as deleted. Publishes snapshot once at the end.
+    /// Used by GC sweep to avoid O(n²) buffer cloning.
+    pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) {
+        for hash in hashes {
+            if let Some(mut entry) = self.get(hash) {
+                entry.type_flags |= KV_FLAG_DELETED;
+                self.write_buffer.insert(hash.clone(), entry);
+                self.entry_count = self.entry_count.saturating_sub(1);
+            }
+
+            // Flush if buffer gets large to avoid unbounded memory growth
+            if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
+                let _ = self.flush();
+            }
+        }
+        // One publish at the end
+        self.publish_buffer_only();
+    }
+
     /// Iterate all entries: reads every page from disk and merges with write buffer.
     /// Excludes deleted entries.
     pub fn iter_all(&mut self) -> EngineResult<Vec<KVEntry>> {

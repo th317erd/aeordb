@@ -753,11 +753,7 @@ impl StorageEngine {
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    for hash in hashes {
-      kv.mark_deleted(hash);
-    }
-    // mark_deleted calls publish_buffer_only for each one.
-    // This is fine — buffer-only publish is cheap (HashMap clone + Arc clone).
+    kv.mark_deleted_batch(hashes);
     Ok(())
   }
 
