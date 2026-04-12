@@ -207,6 +207,13 @@ impl TaskQueue {
         self.update_status(id, TaskStatus::Cancelled, None)
     }
 
+    /// Mark a task as cancelled in memory only (without updating persisted status).
+    /// Useful for testing mid-execution cancellation detection.
+    pub fn mark_cancelled_in_memory(&self, id: &str) {
+        let mut cancelled = self.cancelled.write().unwrap();
+        cancelled.insert(id.to_string());
+    }
+
     /// Check if a task has been cancelled (in-memory check for speed).
     pub fn is_cancelled(&self, id: &str) -> bool {
         let cancelled = self.cancelled.read().unwrap();
