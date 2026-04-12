@@ -44,6 +44,7 @@ pub mod scalar_converter;
 pub mod source_resolver;
 pub mod storage_engine;
 pub mod system_tables;
+pub mod task_queue;
 pub mod user;
 pub mod tree_walker;
 pub mod version_manager;
@@ -100,6 +101,7 @@ pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, chunk_content_hash, DEFAULT_CHUNK_SIZE};
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
+pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
 pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
@@ -122,6 +124,8 @@ pub use engine_event::{
     EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
     EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
     EVENT_GC_COMPLETED, GcEventData,
+    EVENT_TASK_CREATED, EVENT_TASK_STARTED, EVENT_TASK_COMPLETED,
+    EVENT_TASK_FAILED, EVENT_TASK_CANCELLED,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

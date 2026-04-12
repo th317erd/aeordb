@@ -1,0 +1,336 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
+
+use crate::engine::entry_type::EntryType;
+use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::storage_engine::StorageEngine;
+
+const TASK_PREFIX: &str = "::aeordb:task:";
+const TASK_REGISTRY: &str = "::aeordb:task:_registry";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub id: String,
+    pub task_type: String,
+    pub args: serde_json::Value,
+    pub status: TaskStatus,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub error: Option<String>,
+    pub checkpoint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgressInfo {
+    pub task_id: String,
+    pub task_type: String,
+    pub args: serde_json::Value,
+    pub progress: f64,
+    pub eta_ms: Option<i64>,
+    pub indexed_count: usize,
+    pub total_count: usize,
+    pub stale_since: Option<i64>,
+    pub message: Option<String>,
+}
+
+pub struct TaskQueue {
+    engine: Arc<StorageEngine>,
+    progress: Arc<RwLock<HashMap<String, ProgressInfo>>>,
+    cancelled: Arc<RwLock<HashSet<String>>>,
+}
+
+impl TaskQueue {
+    pub fn new(engine: Arc<StorageEngine>) -> Self {
+        TaskQueue {
+            engine,
+            progress: Arc::new(RwLock::new(HashMap::new())),
+            cancelled: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Compute a deterministic hash for a system-table key string.
+    fn hash_key(&self, key_string: &str) -> Vec<u8> {
+        blake3::hash(key_string.as_bytes()).as_bytes().to_vec()
+    }
+
+    /// Create a new task with status=Pending, persist it, and add its ID to the registry.
+    pub fn enqueue(&self, task_type: &str, args: serde_json::Value) -> EngineResult<TaskRecord> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = TaskRecord {
+            id: id.clone(),
+            task_type: task_type.to_string(),
+            args,
+            status: TaskStatus::Pending,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            checkpoint: None,
+        };
+
+        let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+        let json_bytes = serde_json::to_vec(&record)
+            .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+        self.engine.store_entry(EntryType::FileRecord, &hash, &json_bytes)?;
+
+        // Update registry.
+        let mut registry = self.load_registry()?;
+        registry.push(id);
+        self.save_registry(&registry)?;
+
+        Ok(record)
+    }
+
+    /// Load all tasks and return the oldest pending one.
+    pub fn dequeue_next(&self) -> EngineResult<Option<TaskRecord>> {
+        let tasks = self.list_tasks()?;
+        let mut oldest: Option<TaskRecord> = None;
+        for task in tasks {
+            if task.status == TaskStatus::Pending {
+                match &oldest {
+                    None => oldest = Some(task),
+                    Some(current) => {
+                        if task.created_at < current.created_at {
+                            oldest = Some(task);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(oldest)
+    }
+
+    /// Update a task's status and set started_at/completed_at timestamps as appropriate.
+    pub fn update_status(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        error: Option<String>,
+    ) -> EngineResult<()> {
+        let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+        let entry = self.engine.get_entry(&hash)?;
+        let (_header, _key, value) = entry.ok_or_else(|| {
+            EngineError::NotFound(format!("task {id}"))
+        })?;
+
+        let mut record: TaskRecord = serde_json::from_slice(&value)
+            .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        match status {
+            TaskStatus::Running => {
+                record.started_at = Some(now);
+            }
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled => {
+                record.completed_at = Some(now);
+            }
+            TaskStatus::Pending => {}
+        }
+
+        record.status = status;
+        record.error = error;
+
+        let json_bytes = serde_json::to_vec(&record)
+            .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+        self.engine.store_entry(EntryType::FileRecord, &hash, &json_bytes)?;
+
+        Ok(())
+    }
+
+    /// Update the checkpoint field on a task.
+    pub fn update_checkpoint(&self, id: &str, checkpoint: &str) -> EngineResult<()> {
+        let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+        let entry = self.engine.get_entry(&hash)?;
+        let (_header, _key, value) = entry.ok_or_else(|| {
+            EngineError::NotFound(format!("task {id}"))
+        })?;
+
+        let mut record: TaskRecord = serde_json::from_slice(&value)
+            .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+
+        record.checkpoint = Some(checkpoint.to_string());
+
+        let json_bytes = serde_json::to_vec(&record)
+            .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+        self.engine.store_entry(EntryType::FileRecord, &hash, &json_bytes)?;
+
+        Ok(())
+    }
+
+    /// Load a single task by ID.
+    pub fn get_task(&self, id: &str) -> EngineResult<Option<TaskRecord>> {
+        let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+        match self.engine.get_entry(&hash)? {
+            Some((_header, _key, value)) => {
+                let record: TaskRecord = serde_json::from_slice(&value)
+                    .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load all tasks from the registry.
+    pub fn list_tasks(&self) -> EngineResult<Vec<TaskRecord>> {
+        let registry = self.load_registry()?;
+        let mut tasks = Vec::new();
+        for id in &registry {
+            let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+            if let Some((_header, _key, value)) = self.engine.get_entry(&hash)? {
+                let record: TaskRecord = serde_json::from_slice(&value)
+                    .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+                tasks.push(record);
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Cancel a task: add to in-memory cancelled set and persist Cancelled status.
+    pub fn cancel(&self, id: &str) -> EngineResult<()> {
+        {
+            let mut cancelled = self.cancelled.write().unwrap();
+            cancelled.insert(id.to_string());
+        }
+        self.update_status(id, TaskStatus::Cancelled, None)
+    }
+
+    /// Check if a task has been cancelled (in-memory check for speed).
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        let cancelled = self.cancelled.read().unwrap();
+        cancelled.contains(id)
+    }
+
+    /// Set in-memory progress info for a task.
+    pub fn set_progress(&self, id: &str, info: ProgressInfo) {
+        let mut progress = self.progress.write().unwrap();
+        progress.insert(id.to_string(), info);
+    }
+
+    /// Get in-memory progress info for a task.
+    pub fn get_progress(&self, id: &str) -> Option<ProgressInfo> {
+        let progress = self.progress.read().unwrap();
+        progress.get(id).cloned()
+    }
+
+    /// Find any running reindex task whose args.path is a prefix of the given path.
+    pub fn get_reindex_progress_for_path(&self, path: &str) -> Option<ProgressInfo> {
+        let progress = self.progress.read().unwrap();
+        for info in progress.values() {
+            if info.task_type == "reindex" {
+                if let Some(task_path) = info.args.get("path").and_then(|v| v.as_str()) {
+                    if path.starts_with(task_path) {
+                        return Some(info.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Remove in-memory progress info for a task.
+    pub fn clear_progress(&self, id: &str) {
+        let mut progress = self.progress.write().unwrap();
+        progress.remove(id);
+    }
+
+    /// Remove completed/failed/cancelled tasks exceeding age or count limits.
+    /// Returns the number of tasks pruned.
+    pub fn prune_completed(&self, max_age_ms: i64, max_count: usize) -> EngineResult<usize> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut registry = self.load_registry()?;
+        let mut tasks: Vec<TaskRecord> = Vec::new();
+
+        // Load all tasks.
+        for id in &registry {
+            let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+            if let Some((_header, _key, value)) = self.engine.get_entry(&hash)? {
+                let record: TaskRecord = serde_json::from_slice(&value)
+                    .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+                tasks.push(record);
+            }
+        }
+
+        // Identify terminal tasks (completed/failed/cancelled).
+        let mut terminal: Vec<&TaskRecord> = tasks.iter().filter(|t| {
+            matches!(t.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled)
+        }).collect();
+
+        // Sort by completed_at descending (newest first) so we keep the newest ones.
+        terminal.sort_by(|a, b| {
+            let a_time = a.completed_at.unwrap_or(a.created_at);
+            let b_time = b.completed_at.unwrap_or(b.created_at);
+            b_time.cmp(&a_time)
+        });
+
+        let mut to_remove: HashSet<String> = HashSet::new();
+
+        // Remove by age.
+        for task in &terminal {
+            let task_time = task.completed_at.unwrap_or(task.created_at);
+            if now - task_time > max_age_ms {
+                to_remove.insert(task.id.clone());
+            }
+        }
+
+        // Remove by count: if more than max_count terminal tasks remain after age pruning,
+        // remove the oldest ones.
+        let remaining: Vec<&&TaskRecord> = terminal.iter()
+            .filter(|t| !to_remove.contains(&t.id))
+            .collect();
+        if remaining.len() > max_count {
+            for task in remaining.iter().skip(max_count) {
+                to_remove.insert(task.id.clone());
+            }
+        }
+
+        // Delete the entries and update registry.
+        let pruned = to_remove.len();
+        for id in &to_remove {
+            let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
+            // Overwrite with empty to effectively delete (or just remove from registry).
+            let _ = self.engine.mark_entry_deleted(&hash);
+        }
+
+        registry.retain(|id| !to_remove.contains(id));
+        self.save_registry(&registry)?;
+
+        Ok(pruned)
+    }
+
+    // -------------------------------------------------------------------------
+    // Registry helpers
+    // -------------------------------------------------------------------------
+
+    fn load_registry(&self) -> EngineResult<Vec<String>> {
+        let hash = self.hash_key(TASK_REGISTRY);
+        match self.engine.get_entry(&hash)? {
+            Some((_header, _key, value)) => {
+                let registry: Vec<String> = serde_json::from_slice(&value)
+                    .map_err(|e| EngineError::InvalidInput(format!("deserialization error: {e}")))?;
+                Ok(registry)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn save_registry(&self, registry: &[String]) -> EngineResult<()> {
+        let hash = self.hash_key(TASK_REGISTRY);
+        let encoded = serde_json::to_vec(registry)
+            .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+        self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
+        Ok(())
+    }
+}

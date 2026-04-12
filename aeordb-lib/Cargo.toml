@@ -58,6 +58,9 @@ openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 # Content-type detection
 file-format = "0.29"
 
+# Task scheduling
+cron = "0.13"
+
 # Common
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -432,6 +435,22 @@ path = "spec/engine/stress_test_spec.rs"
 [[test]]
 name = "cors_spec"
 path = "spec/http/cors_spec.rs"
+
+[[test]]
+name = "task_queue_spec"
+path = "spec/engine/task_queue_spec.rs"
+
+[[test]]
+name = "reindex_spec"
+path = "spec/engine/reindex_spec.rs"
+
+[[test]]
+name = "cron_spec"
+path = "spec/engine/cron_spec.rs"
+
+[[test]]
+name = "task_http_spec"
+path = "spec/http/task_http_spec.rs"
 
 [[bin]]
 name = "stress-benchmark"
