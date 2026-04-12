@@ -145,8 +145,11 @@ impl FieldIndex {
     self.dirty = false;
   }
 
-  /// Find entries matching the scalar for this value (approximate match).
-  /// Uses NVT for bucket-level lookup, then scans within the bucket range.
+  /// Find entries matching the exact value.
+  /// Uses NVT for bucket-level lookup, then verifies using raw byte comparison
+  /// from the values map (falling back to scalar comparison for entries without
+  /// stored values). This avoids false positives when many distinct values map
+  /// to the same f64 scalar (e.g. small u64 values in a [0, u64::MAX] range).
   pub fn lookup_exact(&mut self, value: &[u8]) -> Vec<&IndexEntry> {
     self.ensure_nvt_current();
 
@@ -163,7 +166,23 @@ impl FieldIndex {
 
     self.entries[start..end]
       .iter()
-      .filter(|entry| (entry.scalar - target_scalar).abs() < f64::EPSILON)
+      .filter(|entry| {
+        // First check: scalar must be close (bucket-level filtering)
+        if (entry.scalar - target_scalar).abs() >= f64::EPSILON {
+          return false;
+        }
+        // Second check: if we have stored raw values, verify exact byte match.
+        // This prevents false positives when distinct values map to the same
+        // f64 scalar (e.g. u64 values 100 and 101 with a [0, u64::MAX] range
+        // both produce scalars indistinguishable at f64 precision).
+        if let Some(stored_value) = self.values.get(&entry.file_hash) {
+          stored_value.as_slice() == value
+        } else {
+          // No stored value — fall back to scalar-only match (legacy indexes
+          // without the values map, or indexes where values are not stored).
+          true
+        }
+      })
       .collect()
   }
 

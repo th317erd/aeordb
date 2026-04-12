@@ -1059,31 +1059,63 @@ impl<'a> QueryEngine<'a> {
           }
         };
 
-        // Use the same padded trigram extraction for all fuzzy ops.
-        // During indexing, expand_value calls extract_trigrams (padded,
-        // per-word). Contains candidate generation must use the same
-        // trigrams so lookups match.  The recheck phase verifies the
-        // actual substring / similarity against the stored value.
-        let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
         let converter = TrigramConverter;
-
         let mut candidates = HashSet::new();
 
         if matches!(&field_query.operation, QueryOp::Contains(_)) {
-          // AND: intersect all trigram lookups for substring matching
-          let mut first = true;
-          for trigram in &trigrams {
-            let scalar = converter.to_scalar(trigram);
-            let entries = index.lookup_by_scalar(scalar);
-            let hashes: HashSet<Vec<u8>> = entries.iter().map(|e| e.file_hash.clone()).collect();
-            if first {
-              candidates = hashes;
-              first = false;
-            } else {
-              candidates = candidates.intersection(&hashes).cloned().collect();
+          // For Contains (substring) queries, we need trigrams that will match
+          // regardless of word boundaries. The index stores padded per-word
+          // trigrams (e.g. "Item 20" → "  i"," it","ite","tem","em ","  2"," 20","20 ").
+          // If we use ALL padded trigrams from the query, boundary trigrams like
+          // " 2 " (suffix-padded) would exclude "Item 20" (which has " 20", not " 2 ").
+          //
+          // Fix: only intersect trigrams that don't contain spaces. These are the
+          // interior/core trigrams shared by any word regardless of boundaries.
+          // The recheck phase verifies the actual substring match.
+          let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
+          let interior_trigrams: Vec<&Vec<u8>> = trigrams.iter()
+            .filter(|t| !t.contains(&b' '))
+            .collect();
+
+          // AND: intersect interior trigram lookups for substring matching
+          let search_trigrams = if interior_trigrams.is_empty() {
+            // Very short query words (1-2 chars each) — no interior trigrams.
+            // Fall back to all trigrams for some filtering, even though
+            // boundary trigrams may be too restrictive. The recheck will
+            // correct any false negatives, but with padded trigrams we may
+            // miss some candidates. Use all trigrams with OR (union) to
+            // avoid excluding valid matches.
+            let mut all_candidates = HashSet::new();
+            for trigram in &trigrams {
+              let scalar = converter.to_scalar(trigram);
+              let entries = index.lookup_by_scalar(scalar);
+              for entry in entries {
+                all_candidates.insert(entry.file_hash.clone());
+              }
+            }
+            candidates = all_candidates;
+            Vec::new() // signal: already populated candidates
+          } else {
+            interior_trigrams.iter().map(|t| (*t).clone()).collect::<Vec<Vec<u8>>>()
+          };
+
+          if !search_trigrams.is_empty() {
+            let mut first = true;
+            for trigram in &search_trigrams {
+              let scalar = converter.to_scalar(trigram);
+              let entries = index.lookup_by_scalar(scalar);
+              let hashes: HashSet<Vec<u8>> = entries.iter().map(|e| e.file_hash.clone()).collect();
+              if first {
+                candidates = hashes;
+                first = false;
+              } else {
+                candidates = candidates.intersection(&hashes).cloned().collect();
+              }
             }
           }
         } else {
+          // Similar/Fuzzy: use padded trigrams with OR (union) for broader candidates
+          let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
           // OR: union all trigram lookups (broader candidates for similarity/fuzzy)
           for trigram in &trigrams {
             let scalar = converter.to_scalar(trigram);
