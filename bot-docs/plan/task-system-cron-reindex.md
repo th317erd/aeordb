@@ -33,7 +33,7 @@ Tasks are persisted in `/.system/tasks/` as JSON files via `SystemTables`. Each 
 }
 ```
 
-Statuses: `pending` → `running` → `completed` or `failed`.
+Statuses: `pending` → `running` → `completed` or `failed` or `cancelled`.
 
 ### In-Memory Progress
 
@@ -107,7 +107,9 @@ for batch in file_batches(50) {
    d. Update progress: `files_done / total_files`
 4. Compute ETA from elapsed time and progress rate
 
-**Auto-trigger:** When `store_file` detects that the path ends with `/.config/indexes.json`, it enqueues a reindex task for the parent directory. The task queue deduplicates — if a reindex for the same path is already pending/running, don't enqueue another.
+**Auto-trigger:** When `store_file` detects that the path ends with `/.config/indexes.json`, it enqueues a reindex task for the parent directory. If a reindex for the same path is already running, the running task is **cancelled** and a new one is enqueued. This ensures the reindex always uses the latest config. The worker checks for cancellation between batches and stops gracefully.
+
+**Cancellation:** Tasks can be cancelled via `DELETE /admin/tasks/{id}` or automatically when superseded by a new task for the same path. Cancelled status is `cancelled`. The worker checks a cancellation flag between batches — if set, it stops processing, sets status to `cancelled`, and moves on to the next task.
 
 **Recursive:** For v1, reindex is non-recursive (only files directly in the configured directory). Subdirectories with their own `indexes.json` would need separate reindex tasks.
 
@@ -262,6 +264,7 @@ EVENT_TASK_CREATED = "task_created"
 EVENT_TASK_STARTED = "task_started"
 EVENT_TASK_COMPLETED = "task_completed"
 EVENT_TASK_FAILED = "task_failed"
+EVENT_TASK_CANCELLED = "task_cancelled"
 ```
 
 Payload includes task_id, task_type, args, and for completed/failed: duration_ms, error.
@@ -327,3 +330,17 @@ On server start:
 - Recursive reindex (each subdirectory is a separate task)
 - Task result storage (beyond status + error message)
 - Plugin-defined custom task types (future — WASM plugins registering their own task types)
+
+---
+
+## 13. Task Logging
+
+Tasks write structured logs to `/.logs/system/tasks.log` via the existing logging system. Each task logs:
+
+- **Start:** task_id, task_type, args, timestamp
+- **Progress:** periodic updates (every batch for reindex, phase transitions for GC)
+- **Completion:** task_id, duration, result summary (files indexed, garbage collected, etc.)
+- **Failure:** task_id, error message, stack context
+- **Cancellation:** task_id, reason (superseded, manual), progress at cancellation
+
+The log is append-only — stored as a file in the database via `DirectoryOps::store_file`. This means task history is queryable, exportable, and survives GC (it's a real file, not metadata).
