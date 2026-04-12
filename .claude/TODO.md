@@ -56,12 +56,12 @@
 
 ---
 
-## In Progress: Task System, Cron & Reindex
-- [ ] Task 1: TaskQueue core (persistence + in-memory progress)
-- [ ] Task 2: Task worker + reindex/GC executors
-- [ ] Task 3: Auto-trigger + query meta
-- [ ] Task 4: Cron scheduler
-- [ ] Task 5: HTTP API + events
+## Completed: Task System, Cron & Reindex — 65 tests
+- [x] Task 1: TaskQueue core (persistence + in-memory progress) — 21 tests
+- [x] Task 2: Task worker + reindex/GC executors — 15 tests
+- [x] Task 3: Auto-trigger + query meta
+- [x] Task 4: Cron scheduler — 14 tests
+- [x] Task 5: HTTP API (tasks + cron) — 15 tests
 
 ## Future Plans (Not Started)
 
