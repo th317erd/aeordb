@@ -52,6 +52,16 @@ struct ProgressInfo {
 
 This is purely in-memory — not persisted. On restart, incomplete tasks are re-queued (status reset to `pending`).
 
+The persistent task record also stores a **checkpoint** field for crash resumption:
+
+```json
+{
+  "checkpoint": "/docs/file-04327.json"
+}
+```
+
+On restart, the reindex task resumes from the checkpoint path instead of starting over. The checkpoint is updated every batch (persisted to `/.system/tasks/`).
+
 ### Worker Loop
 
 A single background worker (`tokio::spawn`) processes tasks one at a time:
@@ -87,6 +97,27 @@ for batch in file_batches(50) {
 }
 ```
 
+### Task Retention
+
+Completed, failed, and cancelled tasks are automatically cleaned up to prevent unbounded growth in `/.system/tasks/`:
+
+- **Max retention:** 7 days after completion/failure/cancellation
+- **Max count:** 100 completed/failed/cancelled tasks (oldest removed first)
+- The worker checks retention after each task completes and prunes stale records
+
+Pending and running tasks are never pruned.
+
+### ETA Calculation
+
+ETA uses a **rolling average** of recent batch times rather than linear extrapolation from overall progress. This handles variable file sizes and parser costs more accurately:
+
+```
+rolling_window = last 10 batch durations
+avg_batch_time = mean(rolling_window)
+remaining_batches = (total_files - files_done) / batch_size
+eta_ms = now + (remaining_batches * avg_batch_time)
+```
+
 ---
 
 ## 3. Built-In Task Types
@@ -100,12 +131,17 @@ for batch in file_batches(50) {
 **Execution:**
 1. Read `{path}/.config/indexes.json` to get the current index config
 2. List all files in the directory (non-recursive — only direct children)
-3. For each file:
+3. If resuming from checkpoint, skip files alphabetically before the checkpoint path
+4. For each file (in batches of 50):
    a. Read file content via `DirectoryOps::read_file`
    b. Get metadata for content_type
    c. Run `IndexingPipeline::run` with the file data
-   d. Update progress: `files_done / total_files`
-4. Compute ETA from elapsed time and progress rate
+   d. If pipeline fails, increment consecutive failure counter
+   e. Update progress: `files_done / total_files`
+   f. Update checkpoint in persistent task record
+5. Compute ETA using rolling average of last 10 batch durations
+
+**Circuit breaker:** If 10 consecutive files fail to index (parser errors, corrupt data, etc.), the task pauses with status `failed` and error "circuit breaker: 10 consecutive indexing failures — possible parser bug." This prevents a broken parser from thrashing the server. The consecutive counter resets on any successful file.
 
 **Auto-trigger:** When `store_file` detects that the path ends with `/.config/indexes.json`, it enqueues a reindex task for the parent directory. If a reindex for the same path is already running, the running task is **cancelled** and a new one is enqueued. This ensures the reindex always uses the latest config. The worker checks for cancellation between batches and stops gracefully.
 
@@ -176,7 +212,7 @@ Uses the `cron` crate for parsing and matching.
 | `/admin/cron/{id}` | DELETE | Remove a schedule |
 | `/admin/cron/{id}` | PATCH | Update a schedule (enable/disable, change schedule) |
 
-Schedules created via API are stored in `/.config/cron.json` (merged with any existing config). Changes take effect on the next scheduler tick (within 60 seconds).
+Schedules created via API are **immediately persisted** to `/.config/cron.json` via `DirectoryOps::store_file` (merged with any existing config). The in-memory schedule list is also updated immediately. Changes take effect on the next scheduler tick (within 60 seconds). This means cron changes survive restart — the API modifies the same config file that the startup loader reads.
 
 All cron endpoints require admin auth (root user).
 
@@ -227,15 +263,25 @@ When a reindex task is running for a path, queries against that path (or a paren
   "total_count": 10,
   "meta": {
     "reindexing": 0.67,
-    "reindexing_eta": 1775968398803
+    "reindexing_eta": 1775968398803,
+    "reindexing_indexed": 6700,
+    "reindexing_total": 10000,
+    "reindexing_stale_since": 1775968000000
   }
 }
 ```
 
+Fields:
+- `reindexing` — progress as 0.0 to 1.0
+- `reindexing_eta` — estimated completion timestamp (ms since epoch)
+- `reindexing_indexed` — number of files indexed so far
+- `reindexing_total` — total files to index
+- `reindexing_stale_since` — timestamp when the index config changed (when the reindex was triggered)
+
 The query engine checks the shared progress state:
 1. Load all running reindex tasks from in-memory progress
 2. Check if any task's `args.path` is a prefix of the query path
-3. If yes, include the progress in `meta`
+3. If yes, include the progress fields in `meta`
 4. If no reindex is running, `meta` is absent or `{}`
 
 This is a read from shared state (no locks needed if using `Arc<RwLock>` with a read lock, or `ArcSwap` for lock-free reads).
