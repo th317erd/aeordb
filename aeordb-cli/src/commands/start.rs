@@ -3,7 +3,8 @@ use std::path::Path;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
-use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher};
+use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskQueue, TaskStatus};
+use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
 
@@ -74,6 +75,28 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   // Start the heartbeat task (emits DatabaseStats every 15 seconds).
   let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone());
 
+  // Create task queue and reset any tasks left in Running state from a previous crash.
+  let task_queue = std::sync::Arc::new(TaskQueue::new(engine.clone()));
+  if let Ok(tasks) = task_queue.list_tasks() {
+    for task in &tasks {
+      if task.status == TaskStatus::Running {
+        let _ = task_queue.update_status(&task.id, TaskStatus::Pending, None);
+      }
+    }
+  }
+
+  // Start the cron scheduler (enqueues tasks based on cron config every 60s).
+  let cron_handle = spawn_cron_scheduler(task_queue.clone(), engine.clone(), event_bus.clone());
+
+  // Start the task worker (dequeues and executes background tasks).
+  let plugin_manager = std::sync::Arc::new(PluginManager::new(engine.clone()));
+  let worker_handle = spawn_task_worker(
+    task_queue,
+    engine.clone(),
+    plugin_manager,
+    event_bus.clone(),
+  );
+
   // Start the webhook dispatcher (delivers matching events to registered URLs).
   let webhook_handle = spawn_webhook_dispatcher(event_bus, engine);
 
@@ -95,11 +118,15 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     eprintln!("Server error: {error}");
     heartbeat_handle.abort();
     webhook_handle.abort();
+    cron_handle.abort();
+    worker_handle.abort();
     std::process::exit(1);
   }
 
   heartbeat_handle.abort();
   webhook_handle.abort();
+  cron_handle.abort();
+  worker_handle.abort();
   println!("Server shut down gracefully.");
 }
 

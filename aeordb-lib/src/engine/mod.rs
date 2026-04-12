@@ -4,6 +4,7 @@ pub mod batch_commit;
 pub mod btree;
 pub mod compression;
 pub mod content_type;
+pub mod cron_scheduler;
 pub mod disk_kv_store;
 pub mod deletion_record;
 pub mod directory_entry;
@@ -45,6 +46,7 @@ pub mod source_resolver;
 pub mod storage_engine;
 pub mod system_tables;
 pub mod task_queue;
+pub mod task_worker;
 pub mod user;
 pub mod tree_walker;
 pub mod version_manager;
@@ -129,6 +131,8 @@ pub use engine_event::{
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;
+pub use task_worker::{spawn_task_worker, process_next_task};
+pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
 pub use request_context::RequestContext;
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};
 pub use btree::{
