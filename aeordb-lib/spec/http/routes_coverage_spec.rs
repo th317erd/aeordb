@@ -12,7 +12,7 @@ use aeordb::engine::{EventBus, StorageEngine, SystemTables};
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
-use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
+use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
   metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -34,6 +34,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
     make_prometheus_handle(),
     engine.clone(),
     Arc::new(EventBus::new()),
+    CorsState { default_origins: None, rules: vec![] },
   );
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
@@ -53,6 +54,7 @@ fn rebuild_app(
     make_prometheus_handle(),
     engine.clone(),
     Arc::new(EventBus::new()),
+    CorsState { default_origins: None, rules: vec![] },
   )
 }
 

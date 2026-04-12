@@ -10,7 +10,7 @@ use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{EventBus, StorageEngine};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
-use aeordb::server::{create_app_with_all, create_temp_engine_for_tests};
+use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 // ===========================================================================
 // Shared test infrastructure
@@ -56,6 +56,7 @@ impl TestHarness {
       make_prometheus_handle(),
       self.engine.clone(),
       Arc::new(EventBus::new()),
+      CorsState { default_origins: None, rules: vec![] },
     )
   }
 

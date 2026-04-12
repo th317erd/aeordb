@@ -1,5 +1,6 @@
 pub mod admin_routes;
 pub mod backup_routes;
+pub mod cors;
 pub mod engine_routes;
 pub mod gc_routes;
 pub mod portal_routes;
@@ -28,6 +29,8 @@ use crate::metrics::initialize_metrics;
 use crate::plugins::PluginManager;
 use state::AppState;
 
+pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_config, parse_cors_origins};
+
 /// Default cache TTL in seconds.
 const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
@@ -48,6 +51,7 @@ pub fn create_app_with_auth_mode(
   engine_path: &str,
   auth_mode: &AuthMode,
   hot_dir: Option<&std::path::Path>,
+  cors_flag: Option<&str>,
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>) {
   let engine = create_engine_with_hot_dir(engine_path, hot_dir);
   let event_bus = Arc::new(EventBus::new());
@@ -69,12 +73,13 @@ pub fn create_app_with_auth_mode(
   let prometheus_handle = initialize_metrics();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
-  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone());
+  let cors_state = build_cors_state(cors_flag, &engine);
+  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone(), cors_state);
   (router, bootstrap_key, engine, event_bus)
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
-/// Creates a FileAuthProvider backed by the given engine.
+/// Creates a FileAuthProvider backed by the given engine. No CORS.
 pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
   let prometheus_handle = try_initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
@@ -82,7 +87,7 @@ pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngi
 }
 
 /// Build the application router with a specific JwtManager and engine (useful
-/// for tests that need to reuse the same StorageEngine across rebuilds).
+/// for tests that need to reuse the same StorageEngine across rebuilds). No CORS.
 pub fn create_app_with_jwt_and_engine(
   jwt_manager: Arc<JwtManager>,
   engine: Arc<StorageEngine>,
@@ -92,8 +97,24 @@ pub fn create_app_with_jwt_and_engine(
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let event_bus = Arc::new(EventBus::new());
+  let cors_state = CorsState { default_origins: None, rules: vec![] };
 
-  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state)
+}
+
+/// Build the application router with a specific JwtManager, engine, and CORS state (for CORS tests).
+pub fn create_app_with_jwt_engine_and_cors(
+  jwt_manager: Arc<JwtManager>,
+  engine: Arc<StorageEngine>,
+  cors_state: CorsState,
+) -> Router {
+  let prometheus_handle = try_initialize_metrics();
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+  let event_bus = Arc::new(EventBus::new());
+
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state)
 }
 
 /// Build the application router with an explicit PrometheusHandle.
@@ -106,7 +127,7 @@ pub fn create_app_with_jwt_and_metrics(
   create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
 }
 
-/// Build the application router with an auth provider and metrics.
+/// Build the application router with an auth provider and metrics. No CORS.
 fn create_app_with_provider_and_metrics(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
@@ -116,8 +137,9 @@ fn create_app_with_provider_and_metrics(
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let event_bus = Arc::new(EventBus::new());
+  let cors_state = CorsState { default_origins: None, rules: vec![] };
 
-  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus)
+  create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state)
 }
 
 /// Build the application router with all dependencies injected (useful for tests
@@ -130,6 +152,7 @@ pub fn create_app_with_all(
   prometheus_handle: PrometheusHandle,
   engine: Arc<StorageEngine>,
   event_bus: Arc<EventBus>,
+  cors_state: CorsState,
 ) -> Router {
   let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
   let group_cache = Arc::new(GroupCache::new(cache_ttl));
@@ -234,13 +257,21 @@ pub fn create_app_with_all(
     // Upload config (public, no auth)
     .route("/upload/config", get(upload_routes::upload_config));
 
-  public_routes
+  let router = public_routes
     .merge(protected_routes)
     .with_state(app_state)
     .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10 GB
     .layer(HttpMetricsLayer)
     .layer(from_fn(request_id_middleware))
-    .layer(TraceLayer::new_for_http())
+    .layer(TraceLayer::new_for_http());
+
+  // CORS middleware is the OUTERMOST layer so it can handle OPTIONS preflight
+  // before auth middleware rejects for missing tokens.
+  if cors_state.default_origins.is_some() || !cors_state.rules.is_empty() {
+    router.layer(from_fn_with_state(cors_state, cors::cors_middleware))
+  } else {
+    router
+  }
 }
 
 
@@ -287,8 +318,9 @@ pub fn create_app_with_jwt_engine_and_event_bus(
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let event_bus = Arc::new(EventBus::new());
+  let cors_state = CorsState { default_origins: None, rules: vec![] };
 
-  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus.clone());
+  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus.clone(), cors_state);
   (router, event_bus)
 }
 

@@ -7,7 +7,7 @@ use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher};
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
 
-pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>, hot_dir_arg: Option<&str>) {
+pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>, hot_dir_arg: Option<&str>, cors_flag: Option<&str>) {
   let log_config = LogConfig {
     format: match log_format {
       "json" => LogFormat::Json,
@@ -40,6 +40,11 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   let hot_dir_ref = hot_dir.as_path();
 
   println!("Hot dir: {}", hot_dir_ref.display());
+  match cors_flag {
+    Some("*") => println!("CORS: allow all origins"),
+    Some(origins) => println!("CORS: {origins}"),
+    None => println!("CORS: disabled"),
+  }
   println!();
 
   // For SelfContained mode, bootstrap the root key using the engine before
@@ -56,7 +61,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     drop(engine);
   }
 
-  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref));
+  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
 
   if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");

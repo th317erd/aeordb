@@ -429,6 +429,14 @@ path = "spec/engine/wasm_query_e2e_spec.rs"
 name = "stress_test_spec"
 path = "spec/engine/stress_test_spec.rs"
 
+[[test]]
+name = "cors_spec"
+path = "spec/http/cors_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
+
+[[bin]]
+name = "gc-investigate"
+path = "benches/gc_investigate.rs"
