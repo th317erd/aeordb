@@ -104,7 +104,7 @@ pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, 
 pub use indexing_pipeline::IndexingPipeline;
 pub use system_tables::{SystemTables, SystemTableError};
 pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
-pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};
+pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, QueryMeta, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};

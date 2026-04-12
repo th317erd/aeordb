@@ -8,6 +8,7 @@ pub mod responses;
 pub mod routes;
 pub mod sse_routes;
 pub mod state;
+pub mod task_routes;
 pub mod upload_routes;
 
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine};
+use crate::engine::{DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -52,7 +53,7 @@ pub fn create_app_with_auth_mode(
   auth_mode: &AuthMode,
   hot_dir: Option<&std::path::Path>,
   cors_flag: Option<&str>,
-) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>) {
+) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
   let engine = create_engine_with_hot_dir(engine_path, hot_dir);
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
@@ -73,9 +74,10 @@ pub fn create_app_with_auth_mode(
   let prometheus_handle = initialize_metrics();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
+  let task_queue = Arc::new(TaskQueue::new(engine.clone()));
   let cors_state = build_cors_state(cors_flag, &engine);
-  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone(), cors_state);
-  (router, bootstrap_key, engine, event_bus)
+  let router = create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone(), cors_state, Some(task_queue.clone()));
+  (router, bootstrap_key, engine, event_bus, task_queue)
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
@@ -100,6 +102,22 @@ pub fn create_app_with_jwt_and_engine(
   let cors_state = CorsState { default_origins: None, rules: vec![] };
 
   create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state)
+}
+
+/// Build the application router with a specific JwtManager, engine, and TaskQueue (for task tests).
+pub fn create_app_with_jwt_engine_and_task_queue(
+  jwt_manager: Arc<JwtManager>,
+  engine: Arc<StorageEngine>,
+  task_queue: Arc<TaskQueue>,
+) -> Router {
+  let prometheus_handle = try_initialize_metrics();
+  let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+  let event_bus = Arc::new(EventBus::new());
+  let cors_state = CorsState { default_origins: None, rules: vec![] };
+
+  create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state, Some(task_queue))
 }
 
 /// Build the application router with a specific JwtManager, engine, and CORS state (for CORS tests).
@@ -154,6 +172,21 @@ pub fn create_app_with_all(
   event_bus: Arc<EventBus>,
   cors_state: CorsState,
 ) -> Router {
+  create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state, None)
+}
+
+/// Build the application router with all dependencies injected, including an optional TaskQueue.
+pub fn create_app_with_all_and_task_queue(
+  auth_provider: Arc<dyn AuthProvider>,
+  jwt_manager: Arc<JwtManager>,
+  plugin_manager: Arc<PluginManager>,
+  rate_limiter: Arc<RateLimiter>,
+  prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
+  event_bus: Arc<EventBus>,
+  cors_state: CorsState,
+  task_queue: Option<Arc<TaskQueue>>,
+) -> Router {
   let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
   let group_cache = Arc::new(GroupCache::new(cache_ttl));
   let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
@@ -168,6 +201,7 @@ pub fn create_app_with_all(
     event_bus,
     group_cache,
     permissions_cache,
+    task_queue,
   };
 
   // Routes that require authentication
@@ -197,6 +231,13 @@ pub fn create_app_with_all(
     .route("/admin/import", post(backup_routes::import_backup))
     .route("/admin/promote", post(backup_routes::promote_head))
     .route("/admin/gc", post(gc_routes::run_gc_endpoint))
+    // Task & cron routes
+    .route("/admin/tasks", get(task_routes::list_tasks))
+    .route("/admin/tasks/reindex", post(task_routes::trigger_reindex))
+    .route("/admin/tasks/gc", post(task_routes::trigger_gc))
+    .route("/admin/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
+    .route("/admin/cron", get(task_routes::list_cron).post(task_routes::create_cron))
+    .route("/admin/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
     // Engine routes (custom storage engine)
     .route(
       "/engine/{*path}",

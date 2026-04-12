@@ -828,6 +828,7 @@ fn test_crudlify_op_from_http_method() {
     event_bus: Arc::new(aeordb::engine::EventBus::new()),
     group_cache,
     permissions_cache,
+    task_queue: None,
   };
 
   // GET file -> Read

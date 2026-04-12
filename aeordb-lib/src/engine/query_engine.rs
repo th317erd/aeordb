@@ -86,6 +86,21 @@ pub struct SortField {
 /// Default limit applied when no explicit limit is provided.
 pub const DEFAULT_QUERY_LIMIT: usize = 20;
 
+/// Metadata about active reindexing that may affect query freshness.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindexing: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindexing_eta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindexing_indexed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindexing_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindexing_stale_since: Option<i64>,
+}
+
 /// Paginated query response wrapping results with metadata.
 #[derive(Debug)]
 pub struct PaginatedResult {
@@ -95,6 +110,7 @@ pub struct PaginatedResult {
     pub next_cursor: Option<String>,
     pub prev_cursor: Option<String>,
     pub default_limit_hit: bool,
+    pub meta: Option<QueryMeta>,
 }
 
 /// A query on a single field.
@@ -498,6 +514,7 @@ impl<'a> QueryEngine<'a> {
       next_cursor,
       prev_cursor,
       default_limit_hit,
+      meta: None,
     })
   }
 

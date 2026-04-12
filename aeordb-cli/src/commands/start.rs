@@ -3,7 +3,7 @@ use std::path::Path;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
-use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskQueue, TaskStatus};
+use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus};
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
@@ -62,7 +62,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     drop(engine);
   }
 
-  let (application, file_bootstrap_key, engine, event_bus) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
+  let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
 
   if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");
@@ -75,8 +75,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   // Start the heartbeat task (emits DatabaseStats every 15 seconds).
   let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone());
 
-  // Create task queue and reset any tasks left in Running state from a previous crash.
-  let task_queue = std::sync::Arc::new(TaskQueue::new(engine.clone()));
+  // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {
     for task in &tasks {
       if task.status == TaskStatus::Running {

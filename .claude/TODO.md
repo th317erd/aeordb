@@ -56,6 +56,13 @@
 
 ---
 
+## In Progress: Task System, Cron & Reindex
+- [ ] Task 1: TaskQueue core (persistence + in-memory progress)
+- [ ] Task 2: Task worker + reindex/GC executors
+- [ ] Task 3: Auto-trigger + query meta
+- [ ] Task 4: Cron scheduler
+- [ ] Task 5: HTTP API + events
+
 ## Future Plans (Not Started)
 
 - [ ] Cron/background task system

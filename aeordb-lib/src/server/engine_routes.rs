@@ -14,9 +14,9 @@ use serde::Deserialize;
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::{DirectoryOps, RequestContext, VersionManager};
+use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager};
 use crate::engine::errors::EngineError;
-use crate::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
+use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -49,6 +49,31 @@ pub async fn engine_store_file(
         .into_response();
     }
   };
+
+  // Auto-trigger reindex when indexes.json is stored
+  if path.ends_with("/.config/indexes.json") || path.ends_with(".config/indexes.json") {
+    if let Some(ref queue) = state.task_queue {
+      let parent = path.trim_end_matches("/.config/indexes.json")
+        .trim_end_matches(".config/indexes.json");
+      let parent = if parent.is_empty() { "/" } else { parent };
+      let reindex_path = format!("/{}", parent.trim_start_matches('/'));
+
+      // Cancel any existing reindex for this path
+      if let Ok(tasks) = queue.list_tasks() {
+        for task in &tasks {
+          if task.task_type == "reindex"
+            && task.args.get("path").and_then(|v| v.as_str()) == Some(&reindex_path)
+            && (task.status == TaskStatus::Pending || task.status == TaskStatus::Running)
+          {
+            let _ = queue.cancel(&task.id);
+          }
+        }
+      }
+
+      // Enqueue new reindex
+      let _ = queue.enqueue("reindex", serde_json::json!({"path": reindex_path}));
+    }
+  }
 
   let response_body = EngineFileResponse::from(&file_record);
   (StatusCode::CREATED, Json(response_body)).into_response()
@@ -933,6 +958,22 @@ pub async fn query_endpoint(
       if paginated.default_limit_hit {
         response["default_limit_hit"] = serde_json::json!(true);
         response["default_limit"] = serde_json::json!(DEFAULT_QUERY_LIMIT);
+      }
+
+      // Add reindex meta if a reindex is active for the query path
+      let meta = state.task_queue.as_ref().and_then(|queue| {
+        queue.get_reindex_progress_for_path(&body.path).map(|info| {
+          QueryMeta {
+            reindexing: Some(info.progress),
+            reindexing_eta: info.eta_ms,
+            reindexing_indexed: Some(info.indexed_count),
+            reindexing_total: Some(info.total_count),
+            reindexing_stale_since: info.stale_since,
+          }
+        })
+      });
+      if let Some(ref meta) = meta {
+        response["meta"] = serde_json::to_value(meta).unwrap();
       }
 
       // Apply projection if select is specified
