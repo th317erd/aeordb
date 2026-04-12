@@ -186,8 +186,12 @@ impl FieldIndex {
       .collect()
   }
 
-  /// Range query: find entries with scalars between min and max values.
-  /// Uses NVT for bucket-level lookup across the range, then scans within.
+  /// Range query: find entries with values between min and max.
+  /// Uses NVT for bucket-level lookup across the range, then verifies using
+  /// raw byte comparison from the values map (falling back to scalar comparison
+  /// for entries without stored values). This avoids false negatives when many
+  /// distinct values map to nearly identical f64 scalars (e.g. small u64 values
+  /// in a [0, u64::MAX] range where scalars are indistinguishable).
   pub fn lookup_range(&mut self, min_value: &[u8], max_value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
@@ -201,6 +205,12 @@ impl FieldIndex {
     let start_bucket = self.scalar_to_bucket(min_scalar);
     let end_bucket = self.scalar_to_bucket(max_scalar);
 
+    // Detect if we have stored raw values for byte-level comparison.
+    // When scalars are indistinguishable (e.g. small u64 with [0, u64::MAX] range),
+    // the scalar-based filter would reject valid entries. In that case, use raw
+    // byte comparison which preserves ordering for big-endian numeric types.
+    let has_values = !self.values.is_empty();
+
     let mut results = Vec::new();
     for bucket_index in start_bucket..=end_bucket {
       if bucket_index >= self.nvt.bucket_count() {
@@ -213,6 +223,16 @@ impl FieldIndex {
       let start = bucket.kv_block_offset as usize;
       let end = (start + bucket.entry_count as usize).min(self.entries.len());
       for entry in &self.entries[start..end] {
+        if has_values {
+          if let Some(stored_value) = self.values.get(&entry.file_hash) {
+            // Raw byte comparison: big-endian bytes preserve numeric ordering.
+            if stored_value.as_slice() >= min_value && stored_value.as_slice() <= max_value {
+              results.push(entry);
+            }
+            continue;
+          }
+        }
+        // Fallback: scalar comparison (for entries without stored values).
         if entry.scalar >= min_scalar && entry.scalar <= max_scalar {
           results.push(entry);
         }
@@ -223,6 +243,8 @@ impl FieldIndex {
   }
 
   /// Greater than query. Uses NVT to skip buckets below the threshold.
+  /// When raw values are available, uses byte comparison to avoid f64 precision
+  /// issues (same fix as lookup_exact and lookup_range).
   pub fn lookup_gt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
@@ -233,6 +255,7 @@ impl FieldIndex {
 
     let target_scalar = self.converter.to_scalar(value);
     let start_bucket = self.scalar_to_bucket(target_scalar);
+    let has_values = !self.values.is_empty();
 
     let mut results = Vec::new();
     for bucket_index in start_bucket..self.nvt.bucket_count() {
@@ -243,6 +266,14 @@ impl FieldIndex {
       let start = bucket.kv_block_offset as usize;
       let end = (start + bucket.entry_count as usize).min(self.entries.len());
       for entry in &self.entries[start..end] {
+        if has_values {
+          if let Some(stored_value) = self.values.get(&entry.file_hash) {
+            if stored_value.as_slice() > value {
+              results.push(entry);
+            }
+            continue;
+          }
+        }
         if entry.scalar > target_scalar {
           results.push(entry);
         }
@@ -253,6 +284,8 @@ impl FieldIndex {
   }
 
   /// Less than query. Uses NVT to skip buckets above the threshold.
+  /// When raw values are available, uses byte comparison to avoid f64 precision
+  /// issues (same fix as lookup_exact and lookup_range).
   pub fn lookup_lt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
       return Err(EngineError::RangeQueryNotSupported(
@@ -263,6 +296,7 @@ impl FieldIndex {
 
     let target_scalar = self.converter.to_scalar(value);
     let end_bucket = self.scalar_to_bucket(target_scalar);
+    let has_values = !self.values.is_empty();
 
     let mut results = Vec::new();
     for bucket_index in 0..=end_bucket {
@@ -276,6 +310,14 @@ impl FieldIndex {
       let start = bucket.kv_block_offset as usize;
       let end = (start + bucket.entry_count as usize).min(self.entries.len());
       for entry in &self.entries[start..end] {
+        if has_values {
+          if let Some(stored_value) = self.values.get(&entry.file_hash) {
+            if stored_value.as_slice() < value {
+              results.push(entry);
+            }
+            continue;
+          }
+        }
         if entry.scalar < target_scalar {
           results.push(entry);
         }

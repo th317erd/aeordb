@@ -445,6 +445,10 @@ name = "reindex_spec"
 path = "spec/engine/reindex_spec.rs"
 
 [[test]]
+name = "query_operator_audit_spec"
+path = "spec/engine/query_operator_audit_spec.rs"
+
+[[test]]
 name = "cron_spec"
 path = "spec/engine/cron_spec.rs"
 
