@@ -82,6 +82,12 @@ pub struct EngineFileStream {
 }
 
 impl EngineFileStream {
+  /// Build a stream from an explicit list of chunk hashes (public entry point
+  /// for hash-based retrieval where we already have the FileRecord).
+  pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+    Self::new(chunk_hashes, engine)
+  }
+
   fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
     let mut chunks = Vec::with_capacity(chunk_hashes.len());
 

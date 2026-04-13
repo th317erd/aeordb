@@ -15,7 +15,11 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
+use crate::engine::compression::{CompressionAlgorithm, decompress};
+use crate::engine::directory_ops::{EngineFileStream, file_content_hash};
+use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineError;
+use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 
 // ---------------------------------------------------------------------------
@@ -75,7 +79,16 @@ pub async fn engine_store_file(
     }
   }
 
-  let response_body = EngineFileResponse::from(&file_record);
+  let mut response_body = EngineFileResponse::from(&file_record);
+
+  // Compute the content-addressed hash so the caller can fetch by hash.
+  let algo = state.engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let file_value = file_record.serialize(hash_length);
+  if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
+    response_body.hash = Some(hex::encode(&content_hash));
+  }
+
   (StatusCode::CREATED, Json(response_body)).into_response()
 }
 
@@ -246,6 +259,145 @@ pub async fn engine_head(
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
       StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hash-based retrieval
+// ---------------------------------------------------------------------------
+
+/// GET /engine/_hash/{hex_hash} -- retrieve an entry by its content-addressed hash.
+///
+/// For FileRecords: streams the reconstructed file content (same as GET /engine/{path}).
+/// For Chunks: returns raw decompressed chunk data.
+/// For DirectoryIndex: returns the raw directory data.
+/// Other types: returns raw bytes.
+pub async fn engine_get_by_hash(
+  State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
+  Path(hex_hash): Path<String>,
+) -> Response {
+  let hash_bytes = match hex::decode(&hex_hash) {
+    Ok(bytes) => bytes,
+    Err(_) => {
+      return ErrorResponse::new("Invalid hex hash")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  let (header, _key, value) = match state.engine.get_entry(&hash_bytes) {
+    Ok(Some(entry)) => entry,
+    Ok(None) => {
+      return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+    Err(e) => {
+      tracing::error!("Engine: failed to retrieve entry by hash '{}': {}", hex_hash, e);
+      return ErrorResponse::new(format!("Failed to retrieve entry: {}", e))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  match header.entry_type {
+    EntryType::FileRecord => {
+      // Deserialize the FileRecord and stream its chunk data, just like engine_get.
+      let algo = state.engine.hash_algo();
+      let hash_length = algo.hash_length();
+
+      let file_record = match FileRecord::deserialize(&value, hash_length) {
+        Ok(r) => r,
+        Err(e) => {
+          tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);
+          return ErrorResponse::new(format!("Corrupt FileRecord: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+        }
+      };
+
+      let file_stream = match EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, &state.engine) {
+        Ok(s) => s,
+        Err(e) => {
+          tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
+          return ErrorResponse::new(format!("Failed to read file chunks: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+        }
+      };
+
+      let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
+        chunk_result
+          .map(axum::body::Bytes::from)
+          .map_err(|error| std::io::Error::other(error.to_string()))
+      }));
+
+      let body = Body::from_stream(chunk_stream);
+
+      let mut response_builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("x-entry-type", header.entry_type.to_u8().to_string())
+        .header("x-hash", &hex_hash)
+        .header("x-total-size", file_record.total_size.to_string());
+
+      if let Some(ref ct) = file_record.content_type {
+        response_builder = response_builder.header("content-type", ct.as_str());
+      }
+
+      response_builder
+        .body(body)
+        .unwrap_or_else(|_| {
+          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        })
+    }
+
+    EntryType::Chunk => {
+      // Decompress if needed and return raw chunk bytes.
+      let data = if header.compression_algo != CompressionAlgorithm::None {
+        match decompress(&value, header.compression_algo) {
+          Ok(decompressed) => decompressed,
+          Err(_) => value,
+        }
+      } else {
+        value
+      };
+
+      axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-entry-type", header.entry_type.to_u8().to_string())
+        .header("x-hash", &hex_hash)
+        .body(Body::from(data))
+        .unwrap_or_else(|_| {
+          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        })
+    }
+
+    EntryType::DirectoryIndex => {
+      axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-entry-type", header.entry_type.to_u8().to_string())
+        .header("x-hash", &hex_hash)
+        .body(Body::from(value))
+        .unwrap_or_else(|_| {
+          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        })
+    }
+
+    _ => {
+      // Other types: return raw value bytes.
+      axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-entry-type", header.entry_type.to_u8().to_string())
+        .header("x-hash", &hex_hash)
+        .body(Body::from(value))
+        .unwrap_or_else(|_| {
+          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        })
     }
   }
 }

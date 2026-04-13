@@ -1255,3 +1255,275 @@ async fn test_engine_store_empty_file() {
   let bytes = body_bytes(response.into_body()).await;
   assert!(bytes.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Fetch-by-hash routes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_by_hash_returns_file_content() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let content = "fetch me by hash!";
+
+  // Store a file
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/hashtest/file.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from(content))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  let hash = json["hash"].as_str().expect("response should include hash");
+  assert!(!hash.is_empty(), "hash should not be empty");
+
+  // Fetch by hash
+  let app = rebuild_app(&jwt_manager, &engine);
+  let uri = format!("/engine/_hash/{}", hash);
+  let request = Request::builder()
+    .method("GET")
+    .uri(&uri)
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  // Verify content-type header carried through from the FileRecord
+  assert_eq!(
+    response.headers().get("content-type").unwrap().to_str().unwrap(),
+    "text/plain"
+  );
+  // Verify x-hash echo header
+  assert_eq!(
+    response.headers().get("x-hash").unwrap().to_str().unwrap(),
+    hash
+  );
+  // Verify x-entry-type header (FileRecord = 0x02)
+  assert_eq!(
+    response.headers().get("x-entry-type").unwrap().to_str().unwrap(),
+    "2"
+  );
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(String::from_utf8(bytes).unwrap(), content);
+}
+
+#[tokio::test]
+async fn test_get_by_hash_not_found() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Fabricate a plausible but nonexistent 32-byte hex hash (64 hex chars)
+  let fake_hash = "aa".repeat(32);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri(&format!("/engine/_hash/{}", fake_hash))
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_by_hash_invalid_hex() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/_hash/not-valid-hex-string!")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(response.into_body()).await;
+  assert!(
+    json["error"].as_str().unwrap().contains("Invalid hex hash"),
+    "Error message should mention invalid hex hash"
+  );
+}
+
+#[tokio::test]
+async fn test_get_by_hash_requires_auth() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/engine/_hash/deadbeef")
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_get_by_hash_large_file_roundtrip() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Create data larger than one chunk (256 KB) to test multi-chunk streaming
+  let large_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/hashtest/large.bin")
+    .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
+    .body(Body::from(large_data.clone()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  let hash = json["hash"].as_str().expect("response should include hash");
+
+  // Fetch the large file by hash
+  let app = rebuild_app(&jwt_manager, &engine);
+  let uri = format!("/engine/_hash/{}", hash);
+  let request = Request::builder()
+    .method("GET")
+    .uri(&uri)
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert_eq!(bytes.len(), 300_000);
+  assert_eq!(bytes, large_data);
+}
+
+#[tokio::test]
+async fn test_get_by_hash_empty_file() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  // Store an empty file
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/hashtest/empty.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  let hash = json["hash"].as_str().expect("response should include hash");
+
+  // Fetch by hash — should return empty body
+  let app = rebuild_app(&jwt_manager, &engine);
+  let uri = format!("/engine/_hash/{}", hash);
+  let request = Request::builder()
+    .method("GET")
+    .uri(&uri)
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let bytes = body_bytes(response.into_body()).await;
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn test_put_response_includes_hash_field() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/hashfield/doc.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("check hash field"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let json = body_json(response.into_body()).await;
+  assert!(json["hash"].is_string(), "PUT response must include 'hash' field");
+  let hash = json["hash"].as_str().unwrap();
+  // Content hash should be a valid hex string of reasonable length
+  assert!(hash.len() >= 32, "hash should be at least 32 hex chars");
+  assert!(
+    hash.chars().all(|c| c.is_ascii_hexdigit()),
+    "hash should be valid hex"
+  );
+}
+
+#[tokio::test]
+async fn test_get_by_hash_same_content_different_paths() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let content = "identical content";
+
+  // Store same content at two different paths
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/dup/a.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from(content))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+  let json1 = body_json(response.into_body()).await;
+  let hash1 = json1["hash"].as_str().unwrap().to_string();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/engine/dup/b.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from(content))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+  let json2 = body_json(response.into_body()).await;
+  let hash2 = json2["hash"].as_str().unwrap().to_string();
+
+  // Different paths => different FileRecords => different content hashes
+  // (the filec: hash includes the serialized FileRecord which includes the path)
+  assert_ne!(hash1, hash2, "Different paths should produce different content hashes");
+
+  // Both should be fetchable by their respective hashes
+  for (hash, _expected_path) in [(&hash1, "/dup/a.txt"), (&hash2, "/dup/b.txt")] {
+    let app = rebuild_app(&jwt_manager, &engine);
+    let request = Request::builder()
+      .method("GET")
+      .uri(&format!("/engine/_hash/{}", hash))
+      .header("authorization", &auth)
+      .body(Body::empty())
+      .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = body_bytes(response.into_body()).await;
+    assert_eq!(String::from_utf8(bytes).unwrap(), content);
+  }
+}

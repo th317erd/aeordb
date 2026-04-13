@@ -213,6 +213,10 @@ pub fn create_app_with_all_and_task_queue(
   // Routes with large body limits (file uploads: 10 GB)
   let large_upload_routes = Router::new()
     .route(
+      "/engine/_hash/{hex_hash}",
+      get(engine_routes::engine_get_by_hash),
+    )
+    .route(
       "/engine/{*path}",
       put(engine_routes::engine_store_file)
         .get(engine_routes::engine_get)

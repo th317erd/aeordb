@@ -39,6 +39,9 @@ pub struct EngineFileResponse {
   pub total_size: u64,
   pub created_at: i64,
   pub updated_at: i64,
+  /// Content-addressed hash (hex-encoded) for fetch-by-hash lookups.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub hash: Option<String>,
 }
 
 impl From<&crate::engine::FileRecord> for EngineFileResponse {
@@ -49,6 +52,7 @@ impl From<&crate::engine::FileRecord> for EngineFileResponse {
       total_size: record.total_size,
       created_at: record.created_at,
       updated_at: record.updated_at,
+      hash: None,
     }
   }
 }
