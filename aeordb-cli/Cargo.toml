@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "aeordb"
+path = "src/main.rs"
+
 [dependencies]
 aeordb = { path = "../aeordb-lib" }
 axum = "0.8"

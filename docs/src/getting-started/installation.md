@@ -25,13 +25,13 @@ cargo build --release
 The binary is located at:
 
 ```
-target/release/aeordb-cli
+target/release/aeordb
 ```
 
 ## Verify the Build
 
 ```bash
-./target/release/aeordb-cli --help
+./target/release/aeordb --help
 ```
 
 You should see:
@@ -39,7 +39,7 @@ You should see:
 ```
 AeorDB command-line interface
 
-Usage: aeordb-cli <COMMAND>
+Usage: aeordb <COMMAND>
 
 Commands:
   start            Start the database server
@@ -57,10 +57,10 @@ Commands:
 
 ```bash
 # Copy to a location in your PATH
-sudo cp target/release/aeordb-cli /usr/local/bin/aeordb
+sudo cp target/release/aeordb /usr/local/bin/aeordb
 
 # Or symlink
-sudo ln -s "$(pwd)/target/release/aeordb-cli" /usr/local/bin/aeordb
+sudo ln -s "$(pwd)/target/release/aeordb" /usr/local/bin/aeordb
 ```
 
 ## No External Dependencies

@@ -14,7 +14,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 
 **Native HTTP API.** AeorDB exposes its full API over HTTP -- no separate proxy, no client library required. Store files with `PUT`, read them with `GET`, query with `POST /query`, and manage versions with the `/version/*` endpoints. Any HTTP client works.
 
-**Embeddable.** A single `aeordb-cli` binary with no external dependencies. Point it at a `.aeordb` file and you have a running database. Like SQLite, but for files with versioning and a built-in HTTP server.
+**Embeddable.** A single `aeordb` binary with no external dependencies. Point it at a `.aeordb` file and you have a running database. Like SQLite, but for files with versioning and a built-in HTTP server.
 
 **Lock-free concurrent reads.** The engine uses snapshot double-buffering via `ArcSwap` so readers never block writers and never see partial state. Queries routinely complete in under a millisecond.
 
