@@ -631,3 +631,367 @@ fn test_stress_fragmentation_create_delete_cycles() {
         total_created, total_deleted, stats_after_gc.file_count,
     );
 }
+
+// ─── 6. Deep directory nesting (100 levels) ─────────────────────────────────
+//
+// Verifies that writing a file 100 directories deep works correctly and that
+// directory propagation doesn't have catastrophic performance.
+
+#[test]
+fn test_stress_deep_directory_nesting() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+
+    // Build a 100-level deep path
+    let mut path = String::new();
+    for i in 0..100 {
+        path.push_str(&format!("/d{}", i));
+    }
+    path.push_str("/deep-file.txt");
+
+    // Time the store — this triggers 100 directory propagations
+    let start = std::time::Instant::now();
+    ops.store_file(&ctx, &path, b"deep content", Some("text/plain")).unwrap();
+    let elapsed = start.elapsed();
+    println!("100-level deep file store: {:.1}ms", elapsed.as_millis());
+
+    // Verify it's readable
+    let content = ops.read_file(&path).unwrap();
+    assert_eq!(content, b"deep content");
+
+    // Store a second file at the same depth (directories already exist)
+    let path2 = {
+        let mut p = String::new();
+        for i in 0..100 {
+            p.push_str(&format!("/d{}", i));
+        }
+        p.push_str("/another-file.txt");
+        p
+    };
+
+    let start2 = std::time::Instant::now();
+    ops.store_file(&ctx, &path2, b"another", Some("text/plain")).unwrap();
+    let elapsed2 = start2.elapsed();
+    println!("Second file at depth 100: {:.1}ms (dirs already exist)", elapsed2.as_millis());
+
+    // Store files at varying depths and measure
+    for depth in [10, 25, 50, 75, 100] {
+        let mut p = String::new();
+        for i in 0..depth {
+            p.push_str(&format!("/level{}", i));
+        }
+        p.push_str("/file.txt");
+        let start = std::time::Instant::now();
+        ops.store_file(&ctx, &p, b"data", Some("text/plain")).unwrap();
+        println!("Depth {}: {:.1}ms", depth, start.elapsed().as_millis());
+    }
+
+    // Verify tree walker can handle deep nesting
+    let head = engine.head_hash().unwrap();
+    let tree = aeordb::engine::tree_walker::walk_version_tree(&engine, &head).unwrap();
+    assert!(tree.files.len() >= 7, "should have at least 7 files, got {}", tree.files.len());
+    println!("Tree walker found {} files, {} directories", tree.files.len(), tree.directories.len());
+}
+
+// ─── 7. Large individual files ──────────────────────────────────────────────
+//
+// Tests storing and reading back large files (1MB, 10MB, 50MB). Exercises
+// chunking (256KB chunks), dedup, and the read-streaming path.
+
+#[test]
+fn test_stress_large_files() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+
+    // 1MB file
+    let data_1mb = vec![0x42u8; 1_000_000];
+    let start = std::time::Instant::now();
+    ops.store_file(&ctx, "/large/1mb.bin", &data_1mb, Some("application/octet-stream")).unwrap();
+    println!("1MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (1_000_000 + 262143) / 262144);
+
+    let start = std::time::Instant::now();
+    let read_back = ops.read_file("/large/1mb.bin").unwrap();
+    println!("1MB read: {:.1}ms", start.elapsed().as_millis());
+    assert_eq!(read_back.len(), 1_000_000);
+    assert!(read_back.iter().all(|&b| b == 0x42));
+
+    // 10MB file
+    let data_10mb = vec![0xAB; 10_000_000];
+    let start = std::time::Instant::now();
+    ops.store_file(&ctx, "/large/10mb.bin", &data_10mb, Some("application/octet-stream")).unwrap();
+    println!("10MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (10_000_000 + 262143) / 262144);
+
+    let start = std::time::Instant::now();
+    let read_back = ops.read_file("/large/10mb.bin").unwrap();
+    println!("10MB read: {:.1}ms", start.elapsed().as_millis());
+    assert_eq!(read_back.len(), 10_000_000);
+
+    // 50MB file
+    let data_50mb = vec![0xCD; 50_000_000];
+    let start = std::time::Instant::now();
+    ops.store_file(&ctx, "/large/50mb.bin", &data_50mb, Some("application/octet-stream")).unwrap();
+    println!("50MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (50_000_000 + 262143) / 262144);
+
+    let start = std::time::Instant::now();
+    let read_back = ops.read_file("/large/50mb.bin").unwrap();
+    println!("50MB read: {:.1}ms", start.elapsed().as_millis());
+    assert_eq!(read_back.len(), 50_000_000);
+
+    // Verify dedup: store another 1MB file with same content — should be fast (chunks already exist)
+    let start = std::time::Instant::now();
+    ops.store_file(&ctx, "/large/1mb-dup.bin", &data_1mb, Some("application/octet-stream")).unwrap();
+    let dedup_elapsed = start.elapsed();
+    println!("1MB dedup store: {:.1}ms (chunks already exist)", dedup_elapsed.as_millis());
+
+    let stats = engine.stats();
+    println!("DB stats: {} chunks, {:.1}MB on disk", stats.chunk_count, stats.db_file_size_bytes as f64 / 1_048_576.0);
+}
+
+// ─── 8. Index cardinality ───────────────────────────────────────────────────
+//
+// Tests query performance with high cardinality (every value unique) vs low
+// cardinality (5 possible values across 500 files).
+
+#[test]
+fn test_stress_index_cardinality() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+
+    // Store index config
+    let config = serde_json::json!({
+        "indexes": [
+            {"name": "unique_id", "type": "u64", "source": ["unique_id"]},
+            {"name": "category", "type": "string", "source": ["category"]}
+        ]
+    });
+    ops.store_file(&ctx, "/card/.config/indexes.json",
+        serde_json::to_string(&config).unwrap().as_bytes(),
+        Some("application/json")).unwrap();
+
+    // Store 500 files
+    let categories = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    let start = std::time::Instant::now();
+    for i in 0..500u64 {
+        let data = serde_json::json!({
+            "unique_id": i,
+            "category": categories[i as usize % 5],
+            "label": format!("Entry {}", i)
+        });
+        ops.store_file_with_indexing(&ctx, &format!("/card/entry-{:04}.json", i),
+            serde_json::to_string(&data).unwrap().as_bytes(),
+            Some("application/json")).unwrap();
+    }
+    println!("Stored 500 indexed files in {:.1}s", start.elapsed().as_secs_f64());
+
+    let qe = QueryEngine::new(&engine);
+
+    // High cardinality query: exact match on unique_id (1 result expected)
+    let start = std::time::Instant::now();
+    let query = make_query(
+        "/card",
+        QueryNode::Field(FieldQuery {
+            field_name: "unique_id".to_string(),
+            operation: QueryOp::Eq(250u64.to_be_bytes().to_vec()),
+        }),
+        Some(10),
+    );
+    let results = qe.execute(&query).unwrap();
+    let high_card_time = start.elapsed();
+    println!("High cardinality Eq (1/500): {} results in {:.3}ms", results.len(), high_card_time.as_secs_f64() * 1000.0);
+    assert_eq!(results.len(), 1, "should find exactly 1 result for unique_id=250");
+
+    // Low cardinality query: exact match on category (100 results expected)
+    let start = std::time::Instant::now();
+    let query = make_query(
+        "/card",
+        QueryNode::Field(FieldQuery {
+            field_name: "category".to_string(),
+            operation: QueryOp::Eq(b"alpha".to_vec()),
+        }),
+        Some(200),
+    );
+    let results = qe.execute(&query).unwrap();
+    let low_card_time = start.elapsed();
+    println!("Low cardinality Eq (100/500): {} results in {:.3}ms", results.len(), low_card_time.as_secs_f64() * 1000.0);
+    assert_eq!(results.len(), 100, "should find 100 results for category=alpha");
+
+    // Range query on high cardinality
+    let start = std::time::Instant::now();
+    let query = make_query(
+        "/card",
+        QueryNode::Field(FieldQuery {
+            field_name: "unique_id".to_string(),
+            operation: QueryOp::Between(
+                100u64.to_be_bytes().to_vec(),
+                200u64.to_be_bytes().to_vec(),
+            ),
+        }),
+        Some(200),
+    );
+    let results = qe.execute(&query).unwrap();
+    println!("Range query (100-200): {} results in {:.3}ms", results.len(), start.elapsed().as_secs_f64() * 1000.0);
+    assert_eq!(results.len(), 101, "should find 101 results for unique_id 100..200");
+}
+
+// ─── 9. Concurrent HTTP simulation ──────────────────────────────────────────
+//
+// Simulates 40 concurrent "HTTP clients" hitting the engine simultaneously:
+// 20 readers, 10 writers, 5 metadata checkers, 5 deleters.
+// Verifies no panics under mixed concurrent read+write+delete load.
+
+#[test]
+fn test_stress_concurrent_http_simulation() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+
+    // Seed with 200 files
+    for i in 0..200 {
+        let data = serde_json::json!({"id": i, "name": format!("file-{}", i)});
+        ops.store_file(
+            &ctx,
+            &format!("/http/file-{:04}.json", i),
+            serde_json::to_string(&data).unwrap().as_bytes(),
+            Some("application/json"),
+        )
+        .unwrap();
+    }
+    println!("Seeded 200 files");
+
+    let mut handles = vec![];
+
+    let start = std::time::Instant::now();
+
+    // 20 reader threads — each reads 100 random files
+    for t in 0..20 {
+        let eng = Arc::clone(&engine);
+        handles.push(std::thread::spawn(move || {
+            let ops = DirectoryOps::new(&eng);
+            let mut ok = 0usize;
+            let mut err = 0usize;
+            for i in 0..100 {
+                let idx = (t * 7 + i * 13) % 200; // pseudo-random spread
+                let path = format!("/http/file-{:04}.json", idx);
+                match ops.read_file(&path) {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
+            }
+            (ok, err)
+        }));
+    }
+
+    // 10 writer threads — each writes 20 new files
+    for t in 0..10 {
+        let eng = Arc::clone(&engine);
+        handles.push(std::thread::spawn(move || {
+            let ctx = RequestContext::system();
+            let ops = DirectoryOps::new(&eng);
+            let mut ok = 0usize;
+            let mut err = 0usize;
+            for i in 0..20 {
+                let idx = 200 + t * 20 + i;
+                let data = serde_json::json!({"id": idx, "name": format!("new-{}", idx)});
+                match ops.store_file(
+                    &ctx,
+                    &format!("/http/file-{:04}.json", idx),
+                    serde_json::to_string(&data).unwrap().as_bytes(),
+                    Some("application/json"),
+                ) {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
+            }
+            (ok, err)
+        }));
+    }
+
+    // 5 metadata threads — check file existence
+    for t in 0..5 {
+        let eng = Arc::clone(&engine);
+        handles.push(std::thread::spawn(move || {
+            let ops = DirectoryOps::new(&eng);
+            let mut ok = 0usize;
+            let mut err = 0usize;
+            for i in 0..50 {
+                let idx = (t * 11 + i * 3) % 200;
+                let path = format!("/http/file-{:04}.json", idx);
+                match ops.get_metadata(&path) {
+                    Ok(Some(_)) => ok += 1,
+                    Ok(None) => err += 1,
+                    Err(_) => err += 1,
+                }
+            }
+            (ok, err)
+        }));
+    }
+
+    // 5 delete threads — delete some files
+    for t in 0..5 {
+        let eng = Arc::clone(&engine);
+        handles.push(std::thread::spawn(move || {
+            let ctx = RequestContext::system();
+            let ops = DirectoryOps::new(&eng);
+            let mut ok = 0usize;
+            let mut err = 0usize;
+            for i in 0..10 {
+                let idx = t * 10 + i; // delete files 0-49
+                let path = format!("/http/file-{:04}.json", idx);
+                match ops.delete_file(&ctx, &path) {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
+            }
+            (ok, err)
+        }));
+    }
+
+    // Wait for all threads
+    let mut total_reads_ok = 0usize;
+    let mut total_reads_err = 0usize;
+    let mut total_writes_ok = 0usize;
+    let mut total_writes_err = 0usize;
+    let mut total_meta_ok = 0usize;
+    let mut total_meta_err = 0usize;
+    let mut total_del_ok = 0usize;
+    let mut total_del_err = 0usize;
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        let (ok, err) = handle.join().expect("thread panicked");
+        if i < 20 {
+            total_reads_ok += ok;
+            total_reads_err += err;
+        } else if i < 30 {
+            total_writes_ok += ok;
+            total_writes_err += err;
+        } else if i < 35 {
+            total_meta_ok += ok;
+            total_meta_err += err;
+        } else {
+            total_del_ok += ok;
+            total_del_err += err;
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let total_ops = total_reads_ok + total_reads_err + total_writes_ok + total_writes_err
+        + total_meta_ok + total_meta_err + total_del_ok + total_del_err;
+
+    println!(
+        "Concurrent HTTP simulation: {:.1}s, {} total ops ({:.0} ops/s)",
+        elapsed.as_secs_f64(),
+        total_ops,
+        total_ops as f64 / elapsed.as_secs_f64(),
+    );
+    println!("  Reads: {} ok, {} err", total_reads_ok, total_reads_err);
+    println!("  Writes: {} ok, {} err", total_writes_ok, total_writes_err);
+    println!("  Metadata: {} ok, {} err", total_meta_ok, total_meta_err);
+    println!("  Deletes: {} ok, {} err", total_del_ok, total_del_err);
+
+    // No panics = success. Some errors are expected (reads of deleted files, etc.)
+    assert!(total_reads_ok > 0, "should have successful reads");
+    assert!(total_writes_ok > 0, "should have successful writes");
+}

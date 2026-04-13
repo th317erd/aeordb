@@ -63,6 +63,16 @@
 - [x] Task 4: Cron scheduler — 14 tests
 - [x] Task 5: HTTP API (tasks + cron) — 15 tests
 
+## In Progress: Stress Tests
+- [ ] 1. Deep directory nesting (100 levels deep, propagation performance)
+- [ ] 2. Large individual files (100MB+, chunking + compression)
+- [ ] 3. Concurrent HTTP load (50 clients, real network pressure)
+- [ ] 4. Snapshot/fork at scale (50K files, version tree walking, export/diff)
+- [ ] 5. Query with many results (40K matches, pagination, sorting)
+- [ ] 6. Index cardinality (high cardinality vs low cardinality)
+- [ ] 7. WASM plugin under load (1000 invocations, memory leak check)
+- [ ] 8. Mixed workload (reads + writes + queries + deletes + GC + reindex simultaneously)
+
 ## Future Plans (Not Started)
 
 - [ ] Cron/background task system
