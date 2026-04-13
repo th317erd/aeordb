@@ -29,4 +29,21 @@ impl EntryType {
   pub fn to_u8(self) -> u8 {
     self as u8
   }
+
+  /// Map this entry type to the corresponding KV store type constant.
+  pub fn to_kv_type(self) -> u8 {
+    use crate::engine::kv_store::{
+      KV_TYPE_CHUNK, KV_TYPE_DELETION, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD,
+      KV_TYPE_FORK, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
+    };
+    match self {
+      EntryType::Chunk => KV_TYPE_CHUNK,
+      EntryType::FileRecord => KV_TYPE_FILE_RECORD,
+      EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
+      EntryType::DeletionRecord => KV_TYPE_DELETION,
+      EntryType::Snapshot => KV_TYPE_SNAPSHOT,
+      EntryType::Void => KV_TYPE_VOID,
+      EntryType::Fork => KV_TYPE_FORK,
+    }
+  }
 }

@@ -16,8 +16,8 @@ use serde::Serialize;
 use crate::engine::kv_store::{
   KVEntry,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
-  KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
-  KV_FLAG_DELETED, KV_TYPE_FORK,
+  KV_TYPE_SNAPSHOT, KV_TYPE_FORK,
+  KV_FLAG_DELETED,
 };
 use crate::engine::void_manager::VoidManager;
 
@@ -42,20 +42,11 @@ impl WriteBatch {
 
     /// Add an entry to the batch.
     pub fn add(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>) {
-        let kv_type = match entry_type {
-            EntryType::Chunk => KV_TYPE_CHUNK,
-            EntryType::FileRecord => KV_TYPE_FILE_RECORD,
-            EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-            EntryType::DeletionRecord => KV_TYPE_DELETION,
-            EntryType::Snapshot => KV_TYPE_SNAPSHOT,
-            EntryType::Void => KV_TYPE_VOID,
-            EntryType::Fork => KV_TYPE_FORK,
-        };
         self.entries.push(BatchEntry {
             entry_type,
             key,
             value,
-            kv_type,
+            kv_type: entry_type.to_kv_type(),
         });
     }
 
@@ -247,24 +238,15 @@ impl StorageEngine {
       let scanner = writer.scan_entries()?;
       for scanned_result in scanner {
         let scanned = scanned_result?;
-        let kv_type = match scanned.header.entry_type {
-          EntryType::Chunk => KV_TYPE_CHUNK,
-          EntryType::FileRecord => KV_TYPE_FILE_RECORD,
-          EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-          EntryType::DeletionRecord => {
-            // Collect deletion record paths for the post-scan pass.
-            if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
-              deletion_records.push((record.path, scanned.offset));
-            }
-            KV_TYPE_DELETION
+        // Collect deletion records and register void entries during the scan.
+        if scanned.header.entry_type == EntryType::DeletionRecord {
+          if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
+            deletion_records.push((record.path, scanned.offset));
           }
-          EntryType::Void => {
-            void_manager.register_void(scanned.header.total_length, scanned.offset);
-            KV_TYPE_VOID
-          }
-          EntryType::Snapshot => KV_TYPE_SNAPSHOT,
-          EntryType::Fork => KV_TYPE_FORK,
-        };
+        } else if scanned.header.entry_type == EntryType::Void {
+          void_manager.register_void(scanned.header.total_length, scanned.offset);
+        }
+        let kv_type = scanned.header.entry_type.to_kv_type();
 
         let entry = KVEntry {
           type_flags: kv_type,
@@ -336,7 +318,9 @@ impl StorageEngine {
     let engine = Self::open_internal(path, None)?;
 
     // Guard: refuse to open patch databases as normal databases
-    let header = engine.writer.read().expect("writer lock").file_header().clone();
+    let header = engine.writer.read()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?
+      .file_header().clone();
     if header.backup_type > 1 {
       let base = hex::encode(&header.base_hash);
       let target = hex::encode(&header.target_hash);
@@ -359,7 +343,9 @@ impl StorageEngine {
     let engine = Self::open_internal(path, hot_dir)?;
 
     // Guard: refuse to open patch databases as normal databases
-    let header = engine.writer.read().expect("writer lock").file_header().clone();
+    let header = engine.writer.read()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?
+      .file_header().clone();
     if header.backup_type > 1 {
       let base = hex::encode(&header.base_hash);
       let target = hex::encode(&header.target_hash);
@@ -397,18 +383,8 @@ impl StorageEngine {
       writer.append_entry(entry_type, key, value, 0)?
     };
 
-    let kv_type = match entry_type {
-      EntryType::Chunk => KV_TYPE_CHUNK,
-      EntryType::FileRecord => KV_TYPE_FILE_RECORD,
-      EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-      EntryType::DeletionRecord => KV_TYPE_DELETION,
-      EntryType::Snapshot => KV_TYPE_SNAPSHOT,
-      EntryType::Void => KV_TYPE_VOID,
-      EntryType::Fork => KV_TYPE_FORK,
-    };
-
     let kv_entry = KVEntry {
-      type_flags: kv_type,
+      type_flags: entry_type.to_kv_type(),
       hash: key.to_vec(),
       offset,
     };
@@ -447,18 +423,8 @@ impl StorageEngine {
       )?
     };
 
-    let kv_type = match entry_type {
-      EntryType::Chunk => KV_TYPE_CHUNK,
-      EntryType::FileRecord => KV_TYPE_FILE_RECORD,
-      EntryType::DirectoryIndex => KV_TYPE_DIRECTORY,
-      EntryType::DeletionRecord => KV_TYPE_DELETION,
-      EntryType::Snapshot => KV_TYPE_SNAPSHOT,
-      EntryType::Void => KV_TYPE_VOID,
-      EntryType::Fork => KV_TYPE_FORK,
-    };
-
     let kv_entry = KVEntry {
-      type_flags: kv_type,
+      type_flags: entry_type.to_kv_type(),
       hash: key.to_vec(),
       offset,
     };
@@ -484,11 +450,13 @@ impl StorageEngine {
       _ => return Ok(None),
     };
 
-    let mut writer = self.writer.write()
+    // Use a READ lock — read_entry_at_shared uses a cloned file handle
+    // so it doesn't disturb the writer's seek position.
+    let writer = self.writer.read()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    let (header, key, value) = writer.read_entry_at(kv_entry.offset)?;
+    let (header, key, value) = writer.read_entry_at_shared(kv_entry.offset)?;
 
     Ok(Some((header, key, value)))
   }
@@ -534,10 +502,11 @@ impl StorageEngine {
   }
 
   /// Get the backup metadata from the file header.
-  pub fn backup_info(&self) -> (u8, Vec<u8>, Vec<u8>) {
-    let writer = self.writer.read().expect("writer lock");
+  pub fn backup_info(&self) -> EngineResult<(u8, Vec<u8>, Vec<u8>)> {
+    let writer = self.writer.read()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?;
     let fh = writer.file_header();
-    (fh.backup_type, fh.base_hash.clone(), fh.target_hash.clone())
+    Ok((fh.backup_type, fh.base_hash.clone(), fh.target_hash.clone()))
   }
 
   /// Update the backup metadata in the file header.
@@ -659,11 +628,12 @@ impl StorageEngine {
   /// Read only the entry header at a given file offset.
   /// Used by GC to determine entry size without reading the full payload.
   pub fn read_entry_header_at(&self, offset: u64) -> EngineResult<EntryHeader> {
-    let mut writer = self.writer.write()
+    // Use a READ lock — read_entry_at_shared uses a cloned file handle.
+    let writer = self.writer.read()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    let (header, _key, _value) = writer.read_entry_at(offset)?;
+    let (header, _key, _value) = writer.read_entry_at_shared(offset)?;
     Ok(header)
   }
 
@@ -787,13 +757,14 @@ impl StorageEngine {
     };
 
     let mut results = Vec::with_capacity(hashes.len());
-    let mut writer = self.writer.write()
+    // Use a READ lock — read_entry_at_shared uses a cloned file handle.
+    let writer = self.writer.read()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
 
     for (hash, offset) in hashes {
-      let (_header, _key, value) = writer.read_entry_at(offset)?;
+      let (_header, _key, value) = writer.read_entry_at_shared(offset)?;
       results.push((hash, value));
     }
 
@@ -803,15 +774,15 @@ impl StorageEngine {
   /// Return aggregate statistics about the database.
   pub fn stats(&self) -> DatabaseStats {
     // 1. Lock writer for file header info and file size
-    let (entry_count, created_at, updated_at, db_file_size_bytes) = {
-      let writer = self.writer.read().expect("writer lock poisoned");
-      let fh = writer.file_header();
-      (
-        fh.entry_count,
-        fh.created_at,
-        fh.updated_at,
-        writer.file_size(),
-      )
+    let (entry_count, created_at, updated_at, db_file_size_bytes) = match self.writer.read() {
+      Ok(writer) => {
+        let fh = writer.file_header();
+        (fh.entry_count, fh.created_at, fh.updated_at, writer.file_size())
+      }
+      Err(e) => {
+        tracing::error!("writer lock poisoned in stats(): {}", e);
+        (0, 0, 0, 0)
+      }
     };
 
     // 2. Use snapshot for entry counts (lock-free)
@@ -819,9 +790,12 @@ impl StorageEngine {
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
 
-    let kv_size_bytes = {
-      let kv = self.kv_writer.lock().expect("kv_writer lock poisoned");
-      std::fs::metadata(kv.path()).map(|m| m.len()).unwrap_or(0)
+    let kv_size_bytes = match self.kv_writer.lock() {
+      Ok(kv) => std::fs::metadata(kv.path()).map(|m| m.len()).unwrap_or(0),
+      Err(e) => {
+        tracing::error!("kv_writer lock poisoned in stats(): {}", e);
+        0
+      }
     };
 
     let all_entries = snapshot.iter_all().unwrap_or_default();
@@ -844,9 +818,12 @@ impl StorageEngine {
     }
 
     // 3. Lock void_manager for void stats
-    let (void_count, void_space_bytes) = {
-      let vm = self.void_manager.read().expect("void_manager lock poisoned");
-      (vm.void_count(), vm.total_void_space())
+    let (void_count, void_space_bytes) = match self.void_manager.read() {
+      Ok(vm) => (vm.void_count(), vm.total_void_space()),
+      Err(e) => {
+        tracing::error!("void_manager lock poisoned in stats(): {}", e);
+        (0, 0)
+      }
     };
 
     DatabaseStats {

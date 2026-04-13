@@ -251,7 +251,7 @@ fn test_backup_info_returns_correct_values() {
   let engine = StorageEngine::create(&path).unwrap();
   engine.set_backup_info(1, &base_hash, &target_hash).unwrap();
 
-  let (bt, bh, th) = engine.backup_info();
+  let (bt, bh, th) = engine.backup_info().unwrap();
   assert_eq!(bt, 1);
   assert_eq!(bh, base_hash);
   assert_eq!(th, target_hash);
@@ -263,7 +263,7 @@ fn test_backup_info_defaults_on_new_db() {
   let path = db_path(&dir, "backup_defaults.aeor");
 
   let engine = StorageEngine::create(&path).unwrap();
-  let (bt, bh, th) = engine.backup_info();
+  let (bt, bh, th) = engine.backup_info().unwrap();
 
   assert_eq!(bt, 0);
   assert_eq!(bh, vec![0u8; 32]);
@@ -283,7 +283,7 @@ fn test_set_backup_info_persists_across_reopen() {
   drop(engine);
 
   let engine = StorageEngine::open(&path).unwrap();
-  let (bt, bh, th) = engine.backup_info();
+  let (bt, bh, th) = engine.backup_info().unwrap();
   assert_eq!(bt, 1);
   assert_eq!(bh, base_hash);
   assert_eq!(th, target_hash);
@@ -302,7 +302,7 @@ fn test_open_for_import_preserves_backup_info() {
   drop(engine);
 
   let engine = StorageEngine::open_for_import(&path).unwrap();
-  let (bt, bh, th) = engine.backup_info();
+  let (bt, bh, th) = engine.backup_info().unwrap();
   assert_eq!(bt, 2);
   assert_eq!(bh, base_hash);
   assert_eq!(th, target_hash);

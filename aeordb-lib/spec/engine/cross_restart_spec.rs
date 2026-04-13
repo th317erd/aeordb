@@ -579,7 +579,7 @@ fn test_backup_type_persists_across_restart() {
     let engine = create_engine(&dir);
     engine.set_backup_info(1, &base_hash, &target_hash).unwrap();
 
-    let (bt, bh, th) = engine.backup_info();
+    let (bt, bh, th) = engine.backup_info().unwrap();
     assert_eq!(bt, 1);
     assert_eq!(bh, base_hash);
     assert_eq!(th, target_hash);
@@ -587,7 +587,7 @@ fn test_backup_type_persists_across_restart() {
 
   // Session 2: backup info should survive
   let engine = reopen_engine(&dir);
-  let (bt, bh, th) = engine.backup_info();
+  let (bt, bh, th) = engine.backup_info().unwrap();
   assert_eq!(bt, 1, "backup_type should persist across restart");
   assert_eq!(bh, base_hash, "base_hash should persist across restart");
   assert_eq!(th, target_hash, "target_hash should persist across restart");

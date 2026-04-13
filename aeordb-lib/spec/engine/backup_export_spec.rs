@@ -76,7 +76,7 @@ fn test_export_snapshot() {
     assert_eq!(export_ops.read_file("/images/photo.jpg").unwrap(), b"fake jpg data");
 
     // Verify backup hashes match the snapshot
-    let (btype, base, target) = exported.backup_info();
+    let (btype, base, target) = exported.backup_info().unwrap();
     assert_eq!(btype, 1);
     assert_eq!(base, snap_hash);
     assert_eq!(target, snap_hash);
@@ -118,7 +118,7 @@ fn test_export_has_correct_backup_type() {
     export_version(&source, &head, &out).unwrap();
 
     let exported = StorageEngine::open(&out).unwrap();
-    let (backup_type, _base, _target) = exported.backup_info();
+    let (backup_type, _base, _target) = exported.backup_info().unwrap();
     assert_eq!(backup_type, 1, "backup_type should be 1 (full export)");
 }
 
@@ -134,7 +134,7 @@ fn test_export_has_correct_hashes() {
     let result = export_version(&source, &head, &out).unwrap();
 
     let exported = StorageEngine::open(&out).unwrap();
-    let (backup_type, base_hash, target_hash) = exported.backup_info();
+    let (backup_type, base_hash, target_hash) = exported.backup_info().unwrap();
 
     assert_eq!(backup_type, 1);
     assert_eq!(base_hash, head, "base_hash should equal version_hash");

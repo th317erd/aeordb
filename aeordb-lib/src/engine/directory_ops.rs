@@ -287,11 +287,7 @@ impl<'a> DirectoryOps<'a> {
     self.update_parent_directories(&normalized, child)?;
 
     // Emit entry event after successful store
-    let event_type = if existing_created_at.is_some() {
-      EVENT_ENTRIES_CREATED // overwrite — still entries_created for now
-    } else {
-      EVENT_ENTRIES_CREATED
-    };
+    let event_type = EVENT_ENTRIES_CREATED;
     let entry_data = EntryEventData {
       path: normalized,
       entry_type: "file".to_string(),

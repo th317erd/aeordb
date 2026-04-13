@@ -415,26 +415,13 @@ impl DiskKVStore {
         Ok(())
     }
 
-    /// Check if an entry exists on disk (without caching).
-    fn entry_exists_on_disk(&mut self, hash: &[u8]) -> bool {
-        let bucket_index = self.nvt.bucket_for_value(hash);
-        let hash_length = self.hash_algo.hash_length();
-        let offset = bucket_page_offset(bucket_index, hash_length);
-        let psize = page_size(hash_length);
-
-        let mut page_data = vec![0u8; psize];
-        if self.kv_file.seek(SeekFrom::Start(offset)).is_err() {
-            return false;
-        }
-        if self.kv_file.read_exact(&mut page_data).is_err() {
-            return false;
-        }
-
-        if let Ok(entries) = deserialize_page(&page_data, hash_length) {
-            entries.iter().any(|e| e.hash == hash)
-        } else {
-            false
-        }
+    /// Check if an entry exists on disk by consulting the in-memory snapshot
+    /// instead of performing direct disk I/O.
+    fn entry_exists_on_disk(&self, hash: &[u8]) -> bool {
+        let current = self.snapshot.load();
+        // get_raw includes deleted entries — fine for the dedup check
+        // (we want to know if the hash exists at all, regardless of deletion state).
+        current.get_raw(hash).is_some()
     }
 
     /// Flush the write buffer to disk.

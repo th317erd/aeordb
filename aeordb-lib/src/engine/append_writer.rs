@@ -257,6 +257,25 @@ impl AppendWriter {
     Ok((header, key, value))
   }
 
+  /// Read an entry at a given offset using a cloned file handle.
+  ///
+  /// Unlike `read_entry_at`, this takes `&self` and does not disturb the
+  /// writer's seek position — allowing callers to hold a READ lock instead
+  /// of a WRITE lock on the `RwLock<AppendWriter>`.
+  pub fn read_entry_at_shared(&self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
+    let mut file = self.file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    let header = EntryHeader::deserialize(&mut file)?;
+
+    let mut key = vec![0u8; header.key_length as usize];
+    file.read_exact(&mut key)?;
+
+    let mut value = vec![0u8; header.value_length as usize];
+    file.read_exact(&mut value)?;
+
+    Ok((header, key, value))
+  }
+
   pub fn scan_entries(&self) -> EngineResult<EntryScanner> {
     let file_copy = self.file.try_clone()?;
     EntryScanner::new(file_copy)

@@ -325,7 +325,7 @@ pub fn import_backup(
 ) -> EngineResult<ImportResult> {
     // Open backup for import (allows patches)
     let backup = StorageEngine::open_for_import(backup_path)?;
-    let (backup_type, base_hash, target_hash) = backup.backup_info();
+    let (backup_type, base_hash, target_hash) = backup.backup_info()?;
 
     // For patches, verify base version
     if backup_type == 2 && !force {

@@ -115,7 +115,7 @@ fn test_patch_backup_type() {
     create_patch(&engine, &bogus, &head, &output).unwrap();
 
     let patch = StorageEngine::open_for_import(&output).unwrap();
-    let (backup_type, _, _) = patch.backup_info();
+    let (backup_type, _, _) = patch.backup_info().unwrap();
     assert_eq!(backup_type, 2, "patch backup_type should be 2");
 }
 
@@ -136,7 +136,7 @@ fn test_patch_base_target_hashes() {
     create_patch(&engine, &bogus, &head, &output).unwrap();
 
     let patch = StorageEngine::open_for_import(&output).unwrap();
-    let (_, base_hash, target_hash) = patch.backup_info();
+    let (_, base_hash, target_hash) = patch.backup_info().unwrap();
     assert_eq!(base_hash, bogus, "base_hash should match from_hash");
     assert_eq!(target_hash, head, "target_hash should match to_hash");
 }
