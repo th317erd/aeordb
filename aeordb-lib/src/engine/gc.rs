@@ -14,14 +14,20 @@ use crate::engine::version_manager::VersionManager;
 
 use serde::Serialize;
 
-/// Result of a GC run.
+/// Result of a garbage collection run, returned by [`run_gc`].
 #[derive(Debug, Clone, Serialize)]
 pub struct GcResult {
+  /// Number of version roots scanned (HEAD + snapshots + forks).
   pub versions_scanned: usize,
+  /// Number of entries reachable from at least one version root.
   pub live_entries: usize,
+  /// Number of unreachable entries identified as garbage.
   pub garbage_entries: usize,
+  /// Total bytes freed (or that would be freed in a dry run).
   pub reclaimed_bytes: u64,
+  /// Wall-clock time of the GC cycle in milliseconds.
   pub duration_ms: u64,
+  /// True if this was a dry run (no entries were actually swept).
   pub dry_run: bool,
 }
 
@@ -422,7 +428,16 @@ pub fn gc_sweep(
   Ok((garbage_count, reclaimed_bytes))
 }
 
-/// Run a complete GC cycle: mark + sweep.
+/// Run a complete garbage collection cycle (mark + sweep).
+///
+/// The **mark** phase walks all version roots (HEAD, snapshots, forks)
+/// and collects the set of reachable entry hashes. The **sweep** phase
+/// overwrites unreachable entries in-place with deletion records and voids.
+///
+/// Pass `dry_run = true` to compute what would be collected without
+/// modifying the database.
+///
+/// GC should not be run concurrently with writes -- see [`gc_sweep`] for details.
 pub fn run_gc(
   engine: &StorageEngine,
   ctx: &RequestContext,

@@ -22,8 +22,10 @@ use crate::engine::kv_store::{
 use crate::engine::void_manager::VoidManager;
 
 /// A buffered batch of entries to write in one sequential operation.
-/// Accumulates entries in memory and flushes them all with a single
-/// lock acquisition on both the writer and KV store.
+///
+/// Accumulates entries in memory and flushes them all with a single lock
+/// acquisition via [`StorageEngine::flush_batch`]. This avoids per-entry
+/// lock overhead when writing many entries at once.
 pub struct WriteBatch {
     entries: Vec<BatchEntry>,
 }
@@ -63,30 +65,54 @@ impl WriteBatch {
 /// Result type for entry retrieval: (header, key, value).
 pub type EntryData = (EntryHeader, Vec<u8>, Vec<u8>);
 
+/// Aggregate statistics about the database, returned by [`StorageEngine::stats`].
 #[derive(Debug, Clone, Serialize)]
 pub struct DatabaseStats {
+  /// Total number of entries ever appended to the WAL (from the file header).
   pub entry_count: u64,
+  /// Number of live entries in the KV index.
   pub kv_entries: usize,
+  /// Size of the `.kv` sidecar file in bytes.
   pub kv_size_bytes: u64,
+  /// Number of NVT hash-table buckets.
   pub nvt_buckets: usize,
+  /// Reserved; currently always 0.
   pub nvt_size_bytes: u64,
+  /// Number of stored data chunks.
   pub chunk_count: usize,
+  /// Number of stored file records.
   pub file_count: usize,
+  /// Number of stored directory entries.
   pub directory_count: usize,
+  /// Number of named snapshots.
   pub snapshot_count: usize,
+  /// Number of named forks.
   pub fork_count: usize,
+  /// Number of reclaimable void entries.
   pub void_count: usize,
+  /// Total bytes occupied by void entries.
   pub void_space_bytes: u64,
+  /// Size of the main `.aeordb` file in bytes.
   pub db_file_size_bytes: u64,
+  /// Database creation timestamp (ms since epoch).
   pub created_at: i64,
+  /// Last-modified timestamp (ms since epoch).
   pub updated_at: i64,
+  /// Hash algorithm name (e.g. `"Blake3_256"`).
   pub hash_algorithm: String,
 }
 
-/// Top-level storage engine combining append writer, KV index, and void manager.
+/// Top-level storage engine combining an append-only WAL, a disk-backed KV index,
+/// and a void manager for reclaimable space tracking.
 ///
-/// Provides low-level entry storage and retrieval. Higher-level operations
-/// (directory ops, file ops) are built on top via `DirectoryOps`.
+/// `StorageEngine` is the foundation of AeorDB. It stores content-addressed
+/// entries on disk and indexes them in a memory-mapped KV store for O(1) lookups.
+/// Higher-level operations (file CRUD, directories, queries) are built on top
+/// via [`DirectoryOps`](crate::engine::directory_ops::DirectoryOps) and
+/// [`QueryEngine`](crate::engine::query_engine::QueryEngine).
+///
+/// Lock-free snapshot reads allow concurrent readers while a single writer
+/// appends new entries.
 pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
@@ -101,12 +127,16 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-  /// Create a new database file at the given path (no hot file — for tests/tools).
+  /// Create a new database file at the given path.
+  ///
+  /// Does not use a hot directory for crash recovery. Suitable for tests and
+  /// CLI tools; production servers should use [`create_with_hot_dir`](Self::create_with_hot_dir).
   pub fn create(path: &str) -> EngineResult<Self> {
     Self::create_with_hot_dir(path, None)
   }
 
-  /// Create a new database file at the given path with an optional hot directory.
+  /// Create a new database file at the given path with an optional hot directory
+  /// for crash-recovery write-ahead logging.
   pub fn create_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
     let writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
@@ -334,8 +364,11 @@ impl StorageEngine {
     })
   }
 
-  /// Open an existing database file, rebuilding the KV store from a file scan.
-  /// Refuses to open patch databases (backup_type > 1). No hot file (for tests/tools).
+  /// Open an existing database file.
+  ///
+  /// Rebuilds the KV index from a full file scan if the `.kv` sidecar is
+  /// missing or stale. Does not use a hot directory. Refuses to open patch
+  /// databases (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
     let engine = Self::open_internal(path, None)?;
 
@@ -360,7 +393,10 @@ impl StorageEngine {
   }
 
   /// Open an existing database with a hot directory for crash recovery.
-  /// Replays any existing hot files on startup, then initializes a new hot file.
+  ///
+  /// Replays any existing hot files on startup, then initializes a new hot
+  /// file for ongoing writes. This is the recommended open path for production
+  /// servers.
   pub fn open_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
     let engine = Self::open_internal(path, hot_dir)?;
 
@@ -468,8 +504,9 @@ impl StorageEngine {
     Ok(offset)
   }
 
-  /// Retrieve an entry by its hash key.
-  /// Returns (header, key, value) if found.
+  /// Retrieve an entry by its hash key via a lock-free snapshot read.
+  ///
+  /// Returns `(header, key, value)` if a non-deleted entry exists.
   pub fn get_entry(
     &self,
     hash: &[u8],
@@ -491,7 +528,7 @@ impl StorageEngine {
     Ok(Some((header, key, value)))
   }
 
-  /// Check if a non-deleted entry exists in the KV store.
+  /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();
     match snapshot.get(hash) {
@@ -510,7 +547,7 @@ impl StorageEngine {
     self.hash_algo.compute_hash(data)
   }
 
-  /// Update the HEAD hash in the file header.
+  /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
     let mut writer = self.writer.write()
       .map_err(|error| EngineError::IoError(
@@ -522,7 +559,8 @@ impl StorageEngine {
     Ok(())
   }
 
-  /// Read the current HEAD hash from the file header.
+  /// Read the current HEAD hash from the file header. HEAD points to the
+  /// content-addressed root directory and represents the latest version.
   pub fn head_hash(&self) -> EngineResult<Vec<u8>> {
     let writer = self.writer.read()
       .map_err(|error| EngineError::IoError(
@@ -804,7 +842,8 @@ impl StorageEngine {
     Ok(results)
   }
 
-  /// Return aggregate statistics about the database.
+  /// Return aggregate statistics about the database including entry counts
+  /// by type, file sizes, void space, and timestamps.
   pub fn stats(&self) -> DatabaseStats {
     // 1. Lock writer for file header info and file size
     let (entry_count, created_at, updated_at, db_file_size_bytes) = match self.writer.read() {

@@ -156,6 +156,7 @@ pub struct DirectoryOps<'a> {
 }
 
 impl<'a> DirectoryOps<'a> {
+  /// Create a new `DirectoryOps` handle wrapping the given storage engine.
   pub fn new(engine: &'a StorageEngine) -> Self {
     DirectoryOps { engine }
   }

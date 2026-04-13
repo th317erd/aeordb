@@ -1,3 +1,39 @@
+//! # AeorDB Plugin SDK
+//!
+//! SDK for building WASM plugins that run inside AeorDB.
+//!
+//! ## Plugin Types
+//!
+//! - **Parsers** — transform non-JSON files into queryable JSON on ingest
+//! - **Query Plugins** — server-side functions with full database access
+//!
+//! ## Parser Example
+//!
+//! ```rust,no_run
+//! use aeordb_plugin_sdk::aeordb_parser;
+//! use aeordb_plugin_sdk::parser::*;
+//!
+//! aeordb_parser!(parse);
+//!
+//! fn parse(input: ParserInput) -> Result<serde_json::Value, String> {
+//!     Ok(serde_json::json!({"text": std::str::from_utf8(&input.data).unwrap_or("")}))
+//! }
+//! ```
+//!
+//! ## Query Plugin Example
+//!
+//! ```rust,no_run
+//! use aeordb_plugin_sdk::prelude::*;
+//! use aeordb_plugin_sdk::aeordb_query_plugin;
+//!
+//! aeordb_query_plugin!(handle);
+//!
+//! fn handle(ctx: PluginContext, req: PluginRequest) -> Result<PluginResponse, PluginError> {
+//!     let results = ctx.query("/users").field("name").contains("Alice").execute()?;
+//!     PluginResponse::json(200, &results).map_err(|e| PluginError::SerializationFailed(e.to_string()))
+//! }
+//! ```
+
 pub mod context;
 pub mod parser;
 pub mod query_builder;
@@ -10,6 +46,9 @@ use serde::{Deserialize, Serialize};
 pub use serde_json;
 
 /// Request passed to a plugin when it is invoked.
+///
+/// Contains the raw argument bytes from the HTTP request body and
+/// key-value metadata about the invocation context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRequest {
   /// Raw argument bytes (e.g. the HTTP request body forwarded to the plugin).
@@ -19,6 +58,9 @@ pub struct PluginRequest {
 }
 
 /// Response returned by a plugin after handling a request.
+///
+/// Use the convenience constructors [`PluginResponse::json`],
+/// [`PluginResponse::text`], or [`PluginResponse::error`] to build responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginResponse {
   /// HTTP-style status code indicating the outcome.

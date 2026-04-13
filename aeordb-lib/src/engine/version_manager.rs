@@ -11,17 +11,24 @@ use crate::engine::storage_engine::StorageEngine;
 /// Information about a named snapshot (a saved point-in-time reference).
 #[derive(Debug, Clone)]
 pub struct SnapshotInfo {
+  /// Human-readable snapshot name.
   pub name: String,
+  /// Content-addressed root hash at the time of the snapshot.
   pub root_hash: Vec<u8>,
+  /// When the snapshot was created (ms since epoch).
   pub created_at: i64,
+  /// Arbitrary key-value metadata attached to the snapshot.
   pub metadata: HashMap<String, String>,
 }
 
 /// Information about a named fork (an isolated branch of writes).
 #[derive(Debug, Clone)]
 pub struct ForkInfo {
+  /// Human-readable fork name.
   pub name: String,
+  /// Current root hash of the fork.
   pub root_hash: Vec<u8>,
+  /// When the fork was created (ms since epoch).
   pub created_at: i64,
 }
 
@@ -296,7 +303,9 @@ impl<'a> VersionManager<'a> {
     }
   }
 
-  /// Create a named snapshot of the current HEAD state.
+  /// Create a named snapshot of the current HEAD state with optional metadata.
+  ///
+  /// Returns an error if a snapshot with the given name already exists.
   pub fn create_snapshot(
     &self,
     ctx: &RequestContext,
@@ -344,7 +353,7 @@ impl<'a> VersionManager<'a> {
     Ok(snapshot_info)
   }
 
-  /// Restore a named snapshot by setting HEAD to its root hash.
+  /// Restore a named snapshot by rewinding HEAD to its root hash.
   pub fn restore_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let root_hash = self.get_snapshot_hash(name)?;
     self.engine.update_head(&root_hash)?;
@@ -407,10 +416,12 @@ impl<'a> VersionManager<'a> {
     Ok(())
   }
 
-  /// Create a named fork.
+  /// Create a named fork for isolated writes.
   ///
-  /// - If `base` is None or Some("HEAD"), forks from current HEAD.
+  /// - If `base` is `None` or `Some("HEAD")`, forks from the current HEAD.
   /// - If `base` is a snapshot name, forks from that snapshot's root hash.
+  ///
+  /// Returns an error if a fork with the given name already exists.
   pub fn create_fork(
     &self,
     ctx: &RequestContext,
@@ -461,7 +472,9 @@ impl<'a> VersionManager<'a> {
     Ok(fork_info)
   }
 
-  /// Promote a fork: set HEAD to the fork's root hash, then delete the fork.
+  /// Promote a fork: advance HEAD to the fork's root hash, then delete the fork.
+  ///
+  /// After promotion, the fork's state becomes the new main-line version.
   pub fn promote_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let fork_hash = self.get_fork_hash(name)?
       .ok_or_else(|| EngineError::NotFound(

@@ -10,50 +10,79 @@ use crate::engine::storage_engine::StorageEngine;
 const TASK_PREFIX: &str = "::aeordb:task:";
 const TASK_REGISTRY: &str = "::aeordb:task:_registry";
 
+/// Lifecycle status of a background task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
+    /// Waiting to be picked up by the task runner.
     Pending,
+    /// Currently executing.
     Running,
+    /// Finished successfully.
     Completed,
+    /// Finished with an error.
     Failed,
+    /// Cancelled by the user.
     Cancelled,
 }
 
+/// A persisted background task record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
+    /// Unique task identifier (UUID v4).
     pub id: String,
+    /// Task type name (e.g. `"reindex"`, `"gc"`).
     pub task_type: String,
+    /// Arbitrary JSON arguments for the task.
     pub args: serde_json::Value,
+    /// Current lifecycle status.
     pub status: TaskStatus,
+    /// When the task was enqueued (ms since epoch).
     pub created_at: i64,
+    /// When the task began executing (ms since epoch).
     pub started_at: Option<i64>,
+    /// When the task finished (ms since epoch).
     pub completed_at: Option<i64>,
+    /// Error message if the task failed.
     pub error: Option<String>,
+    /// Opaque checkpoint string for resumable tasks.
     pub checkpoint: Option<String>,
 }
 
+/// In-memory progress information for a running task.
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
+    /// Task identifier.
     pub task_id: String,
+    /// Task type name.
     pub task_type: String,
+    /// Task arguments.
     pub args: serde_json::Value,
+    /// Progress as a fraction (0.0 to 1.0).
     pub progress: f64,
+    /// Estimated time remaining in milliseconds.
     pub eta_ms: Option<i64>,
+    /// Number of items processed so far.
     pub indexed_count: usize,
+    /// Total number of items to process.
     pub total_count: usize,
+    /// Timestamp (ms since epoch) when data became stale.
     pub stale_since: Option<i64>,
+    /// Human-readable status message.
     pub message: Option<String>,
 }
 
-// NOTE: Task records are stored using EntryType::FileRecord, which means
-// they are counted in stats().file_count and could theoretically be swept
-// by GC. Task records use deterministic hashes from "::aeordb:task:{id}"
-// which do NOT appear in the directory tree, so mark_system_entries does
-// not protect them. However, task records have short lifecycles (completed
-// tasks are pruned), and the task registry ("::aeordb:task:_registry") is
-// also unprotected. To fully protect tasks from GC, mark task hashes as
-// live in gc_mark (see mark_task_entries).
+/// Background task queue backed by the storage engine.
+///
+/// Tasks are persisted as JSON entries keyed by deterministic hashes and
+/// tracked via a registry entry. Supports enqueue, dequeue, cancel,
+/// in-memory progress tracking, and automatic pruning of completed tasks.
+///
+/// NOTE: Task records are stored using `EntryType::FileRecord`, which means
+/// they are counted in `stats().file_count` and could theoretically be swept
+/// by GC. Task records use deterministic hashes from `"::aeordb:task:{id}"`
+/// which do NOT appear in the directory tree. To protect tasks from GC,
+/// `gc_mark` explicitly marks task hashes as live (see `mark_task_entries`).
 pub struct TaskQueue {
     engine: Arc<StorageEngine>,
     progress: Arc<RwLock<HashMap<String, ProgressInfo>>>,
@@ -74,7 +103,9 @@ impl TaskQueue {
         blake3::hash(key_string.as_bytes()).as_bytes().to_vec()
     }
 
-    /// Create a new task with status=Pending, persist it, and add its ID to the registry.
+    /// Create a new task with `status = Pending`, persist it, and add its ID to the registry.
+    ///
+    /// Returns the created [`TaskRecord`] including the generated UUID.
     pub fn enqueue(&self, task_type: &str, args: serde_json::Value) -> EngineResult<TaskRecord> {
         let id = uuid::Uuid::new_v4().to_string();
         let record = TaskRecord {
@@ -102,7 +133,7 @@ impl TaskQueue {
         Ok(record)
     }
 
-    /// Load all tasks and return the oldest pending one.
+    /// Load all tasks and return the oldest pending one (FIFO order).
     pub fn dequeue_next(&self) -> EngineResult<Option<TaskRecord>> {
         let tasks = self.list_tasks()?;
         let mut oldest: Option<TaskRecord> = None;
@@ -206,7 +237,7 @@ impl TaskQueue {
         Ok(tasks)
     }
 
-    /// Cancel a task: add to in-memory cancelled set and persist Cancelled status.
+    /// Cancel a task: mark it as cancelled both in memory and on disk.
     pub fn cancel(&self, id: &str) -> EngineResult<()> {
         {
             let mut cancelled = self.cancelled.write().unwrap();

@@ -16,47 +16,60 @@ use crate::engine::scalar_converter::{
 };
 use crate::engine::storage_engine::StorageEngine;
 
-/// A query operation on a field.
+/// A query operation on a single indexed field.
+///
+/// Scalar operations (`Eq`, `Gt`, `Lt`, `Between`, `In`) compare against
+/// the field's NVT scalar values. Text operations (`Contains`, `Similar`,
+/// `Phonetic`, `Fuzzy`, `Match`) use trigram, phonetic, and edit-distance
+/// indexes with a recheck phase.
 #[derive(Debug, Clone)]
 pub enum QueryOp {
+  /// Exact equality match on a scalar value.
   Eq(Vec<u8>),
+  /// Greater-than comparison on a scalar value.
   Gt(Vec<u8>),
+  /// Less-than comparison on a scalar value.
   Lt(Vec<u8>),
+  /// Inclusive range match between two scalar values.
   Between(Vec<u8>, Vec<u8>),
+  /// Match any of the given scalar values (set membership).
   In(Vec<Vec<u8>>),
-  // Fuzzy search operations
-  /// Substring match via trigram AND + recheck
+  /// Substring match via trigram AND + recheck.
   Contains(String),
-  /// Trigram similarity with threshold (Dice coefficient)
+  /// Trigram similarity with threshold (Dice coefficient).
   Similar(String, f64),
-  /// Phonetic code match (soundex / double metaphone)
+  /// Phonetic code match (soundex / double metaphone).
   Phonetic(String),
-  /// Edit distance or Jaro-Winkler fuzzy match
+  /// Edit distance or Jaro-Winkler fuzzy match.
   Fuzzy(String, FuzzyOptions),
-  /// Composite: run all matching indexes, score-fuse
+  /// Composite: run all matching indexes and fuse scores.
   Match(String),
 }
 
-/// Options for the Fuzzy query operation.
+/// Options for the [`QueryOp::Fuzzy`] query operation.
 #[derive(Debug, Clone)]
 pub struct FuzzyOptions {
+  /// How many edits to allow.
   pub fuzziness: Fuzziness,
+  /// Which matching algorithm to use.
   pub algorithm: FuzzyAlgorithm,
 }
 
-/// How many edits to allow.
+/// Controls the allowed edit distance for fuzzy matching.
 #[derive(Debug, Clone)]
 pub enum Fuzziness {
-  /// Automatically determined by term length (0-2: 0, 3-5: 1, 6+: 2)
+  /// Automatically determined by term length (0-2 chars: 0, 3-5: 1, 6+: 2).
   Auto,
-  /// Fixed edit distance
+  /// Fixed edit distance.
   Fixed(usize),
 }
 
-/// Which fuzzy matching algorithm to use.
+/// Fuzzy matching algorithm selection.
 #[derive(Debug, Clone)]
 pub enum FuzzyAlgorithm {
+  /// Damerau-Levenshtein edit distance (transpositions count as one edit).
   DamerauLevenshtein,
+  /// Jaro-Winkler similarity (prefix-weighted).
   JaroWinkler,
 }
 
@@ -69,17 +82,21 @@ impl Default for FuzzyOptions {
   }
 }
 
-/// Sort direction for ORDER BY.
+/// Sort direction for ORDER BY clauses.
 #[derive(Debug, Clone)]
 pub enum SortDirection {
+    /// Ascending order (smallest first).
     Asc,
+    /// Descending order (largest first).
     Desc,
 }
 
 /// A single sort field in an ORDER BY clause.
 #[derive(Debug, Clone)]
 pub struct SortField {
+    /// Field name to sort by. Prefix with `@` for built-in fields (`@score`, `@path`, `@size`, `@created_at`, `@updated_at`).
     pub field: String,
+    /// Sort direction.
     pub direction: SortDirection,
 }
 
@@ -87,36 +104,53 @@ pub struct SortField {
 pub const DEFAULT_QUERY_LIMIT: usize = 20;
 
 /// Metadata about active reindexing that may affect query freshness.
+///
+/// Included in paginated responses when a reindex task is in progress
+/// for the queried path.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryMeta {
+    /// Reindexing progress as a fraction (0.0 to 1.0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindexing: Option<f64>,
+    /// Estimated time remaining in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindexing_eta: Option<i64>,
+    /// Number of files indexed so far.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindexing_indexed: Option<usize>,
+    /// Total number of files to index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindexing_total: Option<usize>,
+    /// Timestamp (ms since epoch) when the index became stale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindexing_stale_since: Option<i64>,
 }
 
-/// Paginated query response wrapping results with metadata.
+/// Paginated query response wrapping results with cursor-based pagination metadata.
 #[derive(Debug)]
 pub struct PaginatedResult {
+    /// Matching file results for this page.
     pub results: Vec<QueryResult>,
+    /// Total number of matches across all pages (if `include_total` was set).
     pub total_count: Option<u64>,
+    /// True if more results exist beyond this page.
     pub has_more: bool,
+    /// Opaque cursor to pass as `after` to fetch the next page.
     pub next_cursor: Option<String>,
+    /// Opaque cursor to pass as `before` to fetch the previous page.
     pub prev_cursor: Option<String>,
+    /// True if the default limit was applied because no explicit limit was provided.
     pub default_limit_hit: bool,
+    /// Reindexing status metadata, if applicable.
     pub meta: Option<QueryMeta>,
 }
 
-/// A query on a single field.
+/// A query condition on a single indexed field.
 #[derive(Debug, Clone)]
 pub struct FieldQuery {
+  /// Name of the indexed field to query.
   pub field_name: String,
+  /// The comparison or search operation to apply.
   pub operation: QueryOp,
 }
 
@@ -168,75 +202,114 @@ pub struct ExplainResult {
   pub results: Option<serde_json::Value>,
 }
 
-/// A complete query: path + query node tree + optional limit + strategy.
+/// A complete query against files stored under a given path.
+///
+/// Combines field-level conditions, boolean logic, pagination, sorting,
+/// aggregation, and query-planning hints into a single request object.
 #[derive(Debug, Clone)]
 pub struct Query {
+  /// Directory path to query (e.g. `"/users"`).
   pub path: String,
+  /// Flat list of field conditions (legacy; superseded by `node`).
   pub field_queries: Vec<FieldQuery>,
+  /// Boolean expression tree of field conditions (AND/OR/NOT).
   pub node: Option<QueryNode>,
+  /// Maximum number of results to return. Defaults to [`DEFAULT_QUERY_LIMIT`].
   pub limit: Option<usize>,
+  /// Number of results to skip before returning.
   pub offset: Option<usize>,
+  /// Sort order for results.
   pub order_by: Vec<SortField>,
+  /// Cursor-based pagination: start after this opaque cursor token.
   pub after: Option<String>,
+  /// Cursor-based pagination: end before this opaque cursor token.
   pub before: Option<String>,
+  /// When true, include the total matching count in the response.
   pub include_total: bool,
+  /// NVT mask evaluation strategy hint.
   pub strategy: QueryStrategy,
+  /// Optional aggregation to compute over the result set.
   pub aggregate: Option<AggregateQuery>,
+  /// EXPLAIN mode for query plan introspection.
   pub explain: ExplainMode,
 }
 
-/// Aggregation query -- what statistics to compute over the result set.
+/// Aggregation query specifying which statistics to compute over the result set.
 #[derive(Debug, Clone, Default)]
 pub struct AggregateQuery {
+    /// Whether to count matching entries.
     pub count: bool,
+    /// Fields to sum.
     pub sum: Vec<String>,
+    /// Fields to average.
     pub avg: Vec<String>,
+    /// Fields to find the minimum value of.
     pub min: Vec<String>,
+    /// Fields to find the maximum value of.
     pub max: Vec<String>,
+    /// Fields to group results by before aggregating.
     pub group_by: Vec<String>,
 }
 
-/// Result of an aggregation query.
+/// Result of an aggregation query, containing computed statistics and optional group-by results.
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregateResult {
+    /// Total count of matching entries (if `count` was requested).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
+    /// Sum of each requested field.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub sum: HashMap<String, f64>,
+    /// Average of each requested field.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub avg: HashMap<String, f64>,
+    /// Minimum value of each requested field.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub min: HashMap<String, serde_json::Value>,
+    /// Maximum value of each requested field.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub max: HashMap<String, serde_json::Value>,
+    /// Per-group aggregation results when `group_by` was specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<GroupResult>>,
+    /// True if more groups exist beyond the limit.
     pub has_more: bool,
+    /// True if the default limit was applied (no explicit limit provided).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub default_limit_hit: bool,
 }
 
-/// A single group in a GROUP BY result.
+/// A single group in a GROUP BY aggregation result.
 #[derive(Debug, Clone, Serialize)]
 pub struct GroupResult {
+    /// Group key values (one entry per `group_by` field).
     pub key: HashMap<String, serde_json::Value>,
+    /// Number of entries in this group.
     pub count: u64,
+    /// Sum of requested fields within this group.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub sum: HashMap<String, f64>,
+    /// Average of requested fields within this group.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub avg: HashMap<String, f64>,
+    /// Minimum values of requested fields within this group.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub min: HashMap<String, serde_json::Value>,
+    /// Maximum values of requested fields within this group.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub max: HashMap<String, serde_json::Value>,
 }
 
-/// A single query result.
+/// A single query result containing the matched file and relevance metadata.
 #[derive(Debug)]
 pub struct QueryResult {
+  /// Content-addressed hash of the matching file record.
   pub file_hash: Vec<u8>,
+  /// The full file record (path, size, timestamps, chunk hashes).
   pub file_record: FileRecord,
+  /// Relevance score (higher is better). Non-zero for fuzzy/text queries.
   pub score: f64,
+  /// Names of the indexes or operations that produced this match.
   pub matched_by: Vec<String>,
 }
 
@@ -402,6 +475,9 @@ fn decode_cursor(cursor: &str) -> EngineResult<serde_json::Value> {
 }
 
 /// Executes queries against the index system.
+///
+/// Supports scalar lookups, boolean compositing (AND/OR/NOT), text search
+/// (trigram, phonetic, fuzzy), cursor-based pagination, sorting, and aggregation.
 pub struct QueryEngine<'a> {
   engine: &'a StorageEngine,
 }
@@ -411,12 +487,14 @@ impl<'a> QueryEngine<'a> {
     QueryEngine { engine }
   }
 
-  /// Execute a query and return matching file records.
+  /// Execute a query and return matching file records, applying the default limit.
+  ///
   /// Uses a two-tier approach:
-  ///   Tier 1: flat AND of field queries → direct scalar lookups (HashSet intersection).
-  ///   Tier 2: complex boolean logic (OR, NOT) → NVTMask bitmap compositing.
-  /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use a separate path
-  /// with index-based candidate generation followed by a recheck phase.
+  ///   - **Tier 1**: flat AND of field queries via direct scalar lookups.
+  ///   - **Tier 2**: complex boolean logic (OR, NOT) via NVTMask bitmap compositing.
+  ///
+  /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use index-based candidate
+  /// generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
     let mut results = self.execute_internal(query)?;
 
@@ -427,8 +505,10 @@ impl<'a> QueryEngine<'a> {
     Ok(results)
   }
 
-  /// Execute a query with pagination support.
-  /// Applies default limit, sorting, cursor-based pagination, offset, and builds pagination metadata.
+  /// Execute a query with full pagination support.
+  ///
+  /// Applies default limit, sorting, cursor-based pagination, offset, and
+  /// builds pagination metadata including `next_cursor` and `prev_cursor`.
   ///
   /// PERF(M19): This fetches ALL matching results via execute_internal(), sorts them, then
   /// truncates to the requested page. For a query matching 100K files with limit=20, this
@@ -1448,7 +1528,8 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  /// Execute an aggregation query.
+  /// Execute an aggregation query, computing statistics (count, sum, avg, min, max)
+  /// over the matching result set, optionally grouped by one or more fields.
   pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
     let agg = query.aggregate.as_ref().ok_or_else(|| {
         EngineError::NotFound("No aggregate query specified".to_string())

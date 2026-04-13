@@ -1,3 +1,17 @@
+//! # AeorDB CLI
+//!
+//! Command-line interface for the AeorDB database.
+//!
+//! ## Commands
+//!
+//! - `aeordb start` — start the database server
+//! - `aeordb gc` — run garbage collection
+//! - `aeordb export` — export a version
+//! - `aeordb diff` — create a patch between versions
+//! - `aeordb import` — import a backup or patch
+//! - `aeordb promote` — promote a version hash to HEAD
+//! - `aeordb emergency-reset` — reset the root API key
+
 use aeordb_cli::commands;
 use clap::{Parser, Subcommand};
 use commands::stress::StressArgs;
