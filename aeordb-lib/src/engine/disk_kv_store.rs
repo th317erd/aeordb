@@ -83,7 +83,7 @@ impl DiskKVStore {
             let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
             let db_name = std::path::Path::new(kv_stem)
                 .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
-            let (f, p) = Self::init_hot_file(dir, db_name);
+            let (f, p) = Self::init_hot_file(dir, db_name)?;
             (Some(f), Some(p))
         } else {
             (None, None)
@@ -230,7 +230,7 @@ impl DiskKVStore {
             let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
             let db_name = std::path::Path::new(kv_stem)
                 .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
-            let (f, p) = Self::init_hot_file(dir, db_name);
+            let (f, p) = Self::init_hot_file(dir, db_name)?;
             (Some(f), Some(p))
         } else {
             (None, None)
@@ -326,12 +326,16 @@ impl DiskKVStore {
         if self.hot_file.is_some() {
             self.hot_buffer.push(entry);
             if self.hot_buffer.len() >= HOT_BUFFER_THRESHOLD {
-                let _ = self.flush_hot_buffer();
+                if let Err(e) = self.flush_hot_buffer() {
+                    tracing::warn!("Hot buffer flush failed during insert: {}", e);
+                }
             }
         }
 
         let did_flush = if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-            let _ = self.flush();
+            if let Err(e) = self.flush() {
+                tracing::warn!("Auto-flush failed during insert: {}", e);
+            }
             true
         } else {
             false
@@ -351,7 +355,9 @@ impl DiskKVStore {
             self.entry_count += 1;
 
             if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-                let _ = self.flush_no_snapshot();
+                if let Err(e) = self.flush_no_snapshot() {
+                    tracing::warn!("Flush failed during bulk_insert: {}", e);
+                }
             }
         }
     }
@@ -589,7 +595,9 @@ impl DiskKVStore {
 
             // Flush if buffer gets large to avoid unbounded memory growth
             if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-                let _ = self.flush();
+                if let Err(e) = self.flush() {
+                    tracing::warn!("Flush failed during mark_deleted_batch: {}", e);
+                }
             }
         }
         // One publish at the end
@@ -799,8 +807,7 @@ impl DiskKVStore {
     // ========================================================================
 
     /// Initialize the hot file. Called during create/open.
-    /// Panics (via process::exit) if the file cannot be opened.
-    fn init_hot_file(hot_dir: &Path, db_name: &str) -> (File, PathBuf) {
+    fn init_hot_file(hot_dir: &Path, db_name: &str) -> EngineResult<(File, PathBuf)> {
         let hot_name = format!("{}-hot001", db_name);
         let hot_path = hot_dir.join(hot_name);
 
@@ -808,14 +815,16 @@ impl DiskKVStore {
             .create(true)
             .append(true)
             .open(&hot_path)
-            .unwrap_or_else(|e| {
-                eprintln!("FATAL: Cannot open hot file at {}: {}", hot_path.display(), e);
-                eprintln!("The database cannot start without a hot file for crash recovery.");
-                eprintln!("Check permissions and disk space, or specify --hot-dir to use a different location.");
-                std::process::exit(1);
-            });
+            .map_err(|e| EngineError::IoError(std::io::Error::other(
+                format!(
+                    "Cannot open hot file at {}: {}. \
+                     The database cannot start without a hot file for crash recovery. \
+                     Check permissions and disk space, or specify --hot-dir to use a different location.",
+                    hot_path.display(), e
+                ),
+            )))?;
 
-        (file, hot_path)
+        Ok((file, hot_path))
     }
 
     /// Flush the hot buffer to the hot file on disk.
@@ -898,6 +907,8 @@ impl DiskKVStore {
 impl Drop for DiskKVStore {
     fn drop(&mut self) {
         // Best-effort flush of any remaining write buffer entries to disk.
-        let _ = self.flush();
+        if let Err(e) = self.flush() {
+            tracing::error!("DiskKVStore: flush failed during drop: {}", e);
+        }
     }
 }

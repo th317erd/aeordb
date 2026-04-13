@@ -7,6 +7,7 @@ use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
+use crate::engine::kv_store::KV_TYPE_DELETION;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::version_manager::VersionManager;
@@ -62,6 +63,15 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
 
   // Mark system table entries as live
   mark_system_entries(engine, hash_length, &mut live)?;
+
+  // Mark DeletionRecord entries as live — they are needed for KV rebuild
+  // from a full .aeordb scan (deletion replay) and must not be swept.
+  let all_entries = engine.iter_kv_entries()?;
+  for entry in &all_entries {
+    if entry.entry_type() == KV_TYPE_DELETION {
+      live.insert(entry.hash.clone());
+    }
+  }
 
   Ok(live)
 }
@@ -280,6 +290,15 @@ fn min_void_size(engine: &StorageEngine) -> u32 {
 
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.
 /// Uses nosync writes for batch performance — one sync at the end.
+///
+/// **Concurrency note**: GC should not be run concurrently with writes.
+/// The HTTP endpoint runs GC in `spawn_blocking`, which does NOT prevent
+/// concurrent writes from other requests. A concurrent write during the
+/// sweep phase could create an entry that the mark phase missed, causing
+/// it to be incorrectly swept. To mitigate this, each entry is re-verified
+/// against the current KV state before being overwritten — if a concurrent
+/// write has made an entry live since the mark phase, it is skipped.
+/// For full safety, callers should ensure exclusive access during GC.
 pub fn gc_sweep(
   engine: &StorageEngine,
   live: &HashSet<Vec<u8>>,
@@ -290,36 +309,67 @@ pub fn gc_sweep(
 
   let all_entries = engine.iter_kv_entries()?;
 
+  // First pass: identify garbage entries and compute sizes.
+  let mut garbage_candidates: Vec<(Vec<u8>, u64, u32)> = Vec::new(); // (hash, offset, entry_size)
   let mut garbage_count: usize = 0;
   let mut reclaimed_bytes: u64 = 0;
-  let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
 
   for entry in &all_entries {
     if live.contains(&entry.hash) {
       continue;
     }
 
-    garbage_count += 1;
-
     let header = engine.read_entry_header_at(entry.offset)?;
     let entry_size = header.total_length;
+
+    garbage_count += 1;
     reclaimed_bytes += entry_size as u64;
 
-    if dry_run {
-      continue;
+    if !dry_run {
+      garbage_candidates.push((entry.hash.clone(), entry.offset, entry_size));
     }
+  }
 
-    // Best-effort in-place overwrite (nosync — batch all writes)
-    if entry_size >= min_del {
-      let written = engine.write_deletion_at_nosync(entry.offset, "gc")?;
-      let remaining = entry_size - written;
-      if remaining >= min_void {
-        let void_offset = entry.offset + written as u64;
-        engine.write_void_at_nosync(void_offset, remaining)?;
+  // Second pass (non-dry-run): re-verify each candidate against the current KV
+  // state before overwriting. A concurrent write between mark and sweep could
+  // have made an entry live (new offset for the same hash = re-created entry).
+  let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
+
+  if !dry_run && !garbage_candidates.is_empty() {
+    // Re-read KV entries to detect concurrent writes since the mark phase.
+    let fresh_entries = engine.iter_kv_entries()?;
+    let fresh_map: std::collections::HashMap<Vec<u8>, u64> = fresh_entries
+      .into_iter()
+      .map(|e| (e.hash, e.offset))
+      .collect();
+
+    for (hash, offset, entry_size) in &garbage_candidates {
+      // If the entry no longer exists or now points to a different offset,
+      // a concurrent write occurred — skip this entry.
+      match fresh_map.get(hash) {
+        Some(&fresh_offset) if fresh_offset == *offset => {
+          // Still garbage at the same offset — safe to sweep
+        }
+        _ => {
+          // Entry was re-written or deleted since mark — skip
+          garbage_count -= 1;
+          reclaimed_bytes -= *entry_size as u64;
+          continue;
+        }
       }
-    }
 
-    garbage_hashes.push(entry.hash.clone());
+      // Best-effort in-place overwrite (nosync — batch all writes)
+      if *entry_size >= min_del {
+        let written = engine.write_deletion_at_nosync(*offset, "gc")?;
+        let remaining = *entry_size - written;
+        if remaining >= min_void {
+          let void_offset = *offset + written as u64;
+          engine.write_void_at_nosync(void_offset, remaining)?;
+        }
+      }
+
+      garbage_hashes.push(hash.clone());
+    }
   }
 
   if !dry_run && !garbage_hashes.is_empty() {

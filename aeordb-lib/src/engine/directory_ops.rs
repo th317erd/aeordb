@@ -71,27 +71,48 @@ fn deletion_record_hash(
   algo.compute_hash(format!("del:{}:{}", path, timestamp).as_bytes())
 }
 
-/// An iterator that yields chunk data by reading chunk hashes from the engine.
+/// An iterator that yields chunk data pre-read from the engine.
+///
+/// All chunks are eagerly loaded upfront to avoid storing a raw pointer
+/// or reference to the StorageEngine. Each chunk is yielded one at a time,
+/// which still allows the HTTP layer to stream chunk-by-chunk from the Vec.
 pub struct EngineFileStream {
-  chunk_hashes: Vec<Vec<u8>>,
+  chunks: Vec<Result<Vec<u8>, EngineError>>,
   current_index: usize,
-  engine: *const StorageEngine,
 }
 
-// SAFETY: StorageEngine uses RwLock internally and is thread-safe.
-// We store a raw pointer only because we can't store a reference with
-// a lifetime that satisfies Iterator. The caller must ensure the engine
-// outlives this stream.
-unsafe impl Send for EngineFileStream {}
-unsafe impl Sync for EngineFileStream {}
-
 impl EngineFileStream {
-  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> Self {
-    EngineFileStream {
-      chunk_hashes,
-      current_index: 0,
-      engine: engine as *const StorageEngine,
+  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+    let mut chunks = Vec::with_capacity(chunk_hashes.len());
+
+    for hash in &chunk_hashes {
+      match engine.get_entry(hash) {
+        Ok(Some((header, _key, value))) => {
+          // Decompress if the chunk was stored compressed
+          if header.compression_algo != CompressionAlgorithm::None {
+            match decompress(&value, header.compression_algo) {
+              Ok(decompressed) => chunks.push(Ok(decompressed)),
+              Err(error) => chunks.push(Err(error)),
+            }
+          } else {
+            chunks.push(Ok(value));
+          }
+        }
+        Ok(None) => {
+          chunks.push(Err(EngineError::NotFound(
+            format!("Chunk not found: {}", hex::encode(hash)),
+          )));
+        }
+        Err(error) => {
+          chunks.push(Err(error));
+        }
+      }
     }
+
+    Ok(EngineFileStream {
+      chunks,
+      current_index: 0,
+    })
   }
 
   /// Collect all chunks into a single Vec<u8>.
@@ -108,33 +129,21 @@ impl Iterator for EngineFileStream {
   type Item = EngineResult<Vec<u8>>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if self.current_index >= self.chunk_hashes.len() {
+    if self.current_index >= self.chunks.len() {
       return None;
     }
 
-    let hash = &self.chunk_hashes[self.current_index];
+    let index = self.current_index;
     self.current_index += 1;
 
-    // SAFETY: caller ensures engine outlives this stream
-    let engine = unsafe { &*self.engine };
+    // Take the pre-read result, replacing with a placeholder error
+    // (the index will never be visited again since current_index only moves forward)
+    let chunk = std::mem::replace(
+      &mut self.chunks[index],
+      Err(EngineError::NotFound("already consumed".to_string())),
+    );
 
-    match engine.get_entry(hash) {
-      Ok(Some((header, _key, value))) => {
-        // Decompress if the chunk was stored compressed
-        if header.compression_algo != CompressionAlgorithm::None {
-          match decompress(&value, header.compression_algo) {
-            Ok(decompressed) => Some(Ok(decompressed)),
-            Err(error) => Some(Err(error)),
-          }
-        } else {
-          Some(Ok(value))
-        }
-      }
-      Ok(None) => Some(Err(EngineError::NotFound(
-        format!("Chunk not found: {}", hex::encode(hash)),
-      ))),
-      Err(error) => Some(Err(error)),
-    }
+    Some(chunk)
   }
 }
 
@@ -311,7 +320,7 @@ impl<'a> DirectoryOps<'a> {
     let (_header, _key, value) = entry;
     let file_record = FileRecord::deserialize(&value, hash_length)?;
 
-    Ok(EngineFileStream::new(file_record.chunk_hashes, self.engine))
+    EngineFileStream::new(file_record.chunk_hashes, self.engine)
   }
 
   /// Read a file's full content into memory.
@@ -558,7 +567,9 @@ impl<'a> DirectoryOps<'a> {
     // Delegate to indexing pipeline using the detected content type from the file record
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
     let detected_ct = file_record.content_type.as_deref();
-    let _ = pipeline.run(ctx, path, data, detected_ct);
+    if let Err(e) = pipeline.run(ctx, path, data, detected_ct) {
+      tracing::warn!("Indexing pipeline failed for '{}': {}", path, e);
+    }
 
     Ok(file_record)
   }
@@ -608,7 +619,9 @@ impl<'a> DirectoryOps<'a> {
       None => crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine),
     };
     let detected_ct = file_record.content_type.as_deref();
-    let _ = pipeline.run(ctx, path, data, detected_ct);
+    if let Err(e) = pipeline.run(ctx, path, data, detected_ct) {
+      tracing::warn!("Indexing pipeline failed for '{}': {}", path, e);
+    }
 
     Ok(file_record)
   }
