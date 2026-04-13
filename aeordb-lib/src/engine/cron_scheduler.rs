@@ -38,7 +38,10 @@ pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
     match ops.read_file(CRON_CONFIG_PATH) {
         Ok(data) => match serde_json::from_slice::<CronConfig>(&data) {
             Ok(config) => config.schedules,
-            Err(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("Failed to parse /.config/cron.json: {} — schedules disabled", e);
+                Vec::new()
+            }
         },
         Err(_) => Vec::new(),
     }

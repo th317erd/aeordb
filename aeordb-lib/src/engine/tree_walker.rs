@@ -29,24 +29,38 @@ impl VersionTree {
 
 /// Walk a version's directory tree starting from a root hash.
 /// Collects all files, directories, and chunk hashes reachable from the root.
+///
+/// Uses a visited set for cycle detection: if corrupted data creates a
+/// circular reference (directory A contains directory B which contains A),
+/// the walk terminates that branch instead of recursing infinitely.
 pub fn walk_version_tree(
   engine: &StorageEngine,
   root_hash: &[u8],
 ) -> EngineResult<VersionTree> {
   let mut tree = VersionTree::new();
+  let mut visited = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
-  walk_directory(engine, root_hash, "/", hash_length, &mut tree)?;
+  walk_directory(engine, root_hash, "/", hash_length, &mut tree, &mut visited)?;
   Ok(tree)
 }
 
 /// Recursively walk a directory and its children.
+///
+/// The `visited` set tracks directory hashes already traversed to prevent
+/// infinite recursion on corrupted data that contains cycles.
 fn walk_directory(
   engine: &StorageEngine,
   dir_hash: &[u8],
   current_path: &str,
   hash_length: usize,
   tree: &mut VersionTree,
+  visited: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
+  // Cycle detection: if we've already visited this directory hash, bail out.
+  if !visited.insert(dir_hash.to_vec()) {
+    return Ok(());
+  }
+
   // Load the directory entry from the engine
   let dir_data = match engine.get_entry(dir_hash)? {
     Some((_header, _key, value)) => value,
@@ -83,7 +97,7 @@ fn walk_directory(
     match child_entry_type {
       EntryType::DirectoryIndex => {
         // Recurse into subdirectory using the hash stored in ChildEntry
-        walk_directory(engine, &child.hash, &child_path, hash_length, tree)?;
+        walk_directory(engine, &child.hash, &child_path, hash_length, tree, visited)?;
       }
       EntryType::FileRecord => {
         // Load the file record using the hash stored in ChildEntry

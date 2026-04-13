@@ -60,6 +60,6 @@ pub fn file_name(path: &str) -> Option<&str> {
 pub fn path_segments(path: &str) -> Vec<&str> {
   path.trim()
     .split('/')
-    .filter(|segment| !segment.is_empty())
+    .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
     .collect()
 }

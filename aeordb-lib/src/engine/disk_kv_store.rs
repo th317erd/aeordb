@@ -710,6 +710,10 @@ impl DiskKVStore {
 
     /// Cheap publish: clone buffer + reuse existing pages (Arc clone = atomic op).
     /// Called on every insert/mutation. Does NOT read pages from disk.
+    ///
+    /// PERF(M5): This clones the write_buffer HashMap on every mutation (~25KB at 512 entries).
+    /// For higher throughput, consider using a persistent/immutable HashMap (e.g., `im::HashMap`)
+    /// which would make snapshot publishing O(1) via structural sharing instead of O(n) cloning.
     fn publish_buffer_only(&mut self) {
         let current_pages = {
             let current = self.snapshot.load();
@@ -794,6 +798,11 @@ impl DiskKVStore {
     // ========================================================================
 
     /// Initialize the hot file. Called during create/open.
+    ///
+    /// The "001" suffix in the hot file name is a vestige of planned rotation
+    /// that was never implemented. All hot writes go to this single file, which
+    /// is truncated after each flush. Hot file rotation is not needed for
+    /// correctness -- the single file provides adequate crash recovery.
     fn init_hot_file(hot_dir: &Path, db_name: &str) -> EngineResult<(File, PathBuf)> {
         let hot_name = format!("{}-hot001", db_name);
         let hot_path = hot_dir.join(hot_name);

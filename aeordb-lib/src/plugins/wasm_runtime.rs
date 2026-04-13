@@ -21,6 +21,14 @@ const DEFAULT_FUEL_LIMIT: u64 = 1_000_000;
 
 /// Fixed offset in guest memory where host function responses are written.
 /// The guest SDK reads response data from this offset.
+///
+/// **Overlap constraint**: The request bytes are also written starting at
+/// offset 0 (see `call_handle` / `call_handle_with_context`). This means
+/// the host response overwrites the request region. Guests MUST finish
+/// reading and parsing the request before calling any host function,
+/// because the first host function response will clobber the request data
+/// at this offset. The guest SDK guarantees this by parsing the request
+/// JSON into owned structures before invoking any host calls.
 const HOST_RESPONSE_OFFSET: usize = 0;
 
 /// Error type for WASM plugin operations.
@@ -158,6 +166,10 @@ impl WasmPluginRuntime {
       .typed::<(i32, i32), i64>(&store)
       .map_err(|error| WasmRuntimeError::ExportNotFound(format!("handle type mismatch: {}", error)))?;
 
+    // NOTE: Fuel exhaustion is detected via string matching on the wasmi error
+    // message. This is brittle -- if wasmi changes the message format, fuel
+    // exhaustion would be reported as a generic trap. Consider checking for
+    // specific wasmi error variants when the wasmi API supports it.
     let result = handle_typed
       .call(&mut store, (0i32, request_length as i32))
       .map_err(|error| {
@@ -254,6 +266,10 @@ impl WasmPluginRuntime {
       .typed::<(i32, i32), i64>(&store)
       .map_err(|error| WasmRuntimeError::ExportNotFound(format!("handle type mismatch: {}", error)))?;
 
+    // NOTE: Fuel exhaustion is detected via string matching on the wasmi error
+    // message. This is brittle -- if wasmi changes the message format, fuel
+    // exhaustion would be reported as a generic trap. Consider checking for
+    // specific wasmi error variants when the wasmi API supports it.
     let result = handle_typed
       .call(&mut store, (0i32, request_length as i32))
       .map_err(|error| {
@@ -289,6 +305,14 @@ impl WasmPluginRuntime {
   /// Register host functions that the WASM module can import.
   ///
   /// Includes the 7 database host functions and the log_message function.
+  ///
+  /// **H4 — Permission gap**: These host functions currently do NOT enforce
+  /// per-operation permission checks beyond what `DirectoryOps` and the
+  /// `RequestContext` provide. Full permission enforcement requires threading
+  /// `PermissionResolver` (which depends on `GroupCache` + `PermissionsCache`)
+  /// into `HostState`. Until that refactor is done, WASM plugins operate
+  /// with the permissions of the request that invoked them, validated only
+  /// at the HTTP middleware level. See the TODO in `get_engine_and_context`.
   fn register_host_functions(
     &self,
     linker: &mut Linker<HostState>,
@@ -653,6 +677,19 @@ impl WasmPluginRuntime {
          level_len: i32,
          msg_ptr: i32,
          msg_len: i32| {
+          // M12: Reject negative pointer or length values.
+          if level_ptr < 0 || level_len < 0 || msg_ptr < 0 || msg_len < 0 {
+            tracing::warn!(
+              "log_message: negative ptr/len (level_ptr={}, level_len={}, msg_ptr={}, msg_len={})",
+              level_ptr, level_len, msg_ptr, msg_len
+            );
+            return;
+          }
+
+          // M13: Clamp lengths to prevent unbounded allocations from a buggy guest.
+          let level_len_clamped = (level_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
+          let msg_len_clamped = (msg_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
+
           let memory = match caller.data().memory {
             Some(mem) => mem,
             None => {
@@ -662,7 +699,7 @@ impl WasmPluginRuntime {
           };
 
           let level_str = {
-            let mut buf = vec![0u8; level_len as usize];
+            let mut buf = vec![0u8; level_len_clamped];
             if memory.read(&caller, level_ptr as usize, &mut buf).is_ok() {
               String::from_utf8_lossy(&buf).to_string()
             } else {
@@ -671,7 +708,7 @@ impl WasmPluginRuntime {
           };
 
           let msg_str = {
-            let mut buf = vec![0u8; msg_len as usize];
+            let mut buf = vec![0u8; msg_len_clamped];
             if memory.read(&caller, msg_ptr as usize, &mut buf).is_ok() {
               String::from_utf8_lossy(&buf).to_string()
             } else {
@@ -729,16 +766,42 @@ fn get_engine_and_context(
   Ok((Arc::clone(engine), ctx))
 }
 
+/// Maximum size for a single guest message read (16 MB).
+/// Prevents a malicious or buggy guest from causing a huge allocation.
+const MAX_GUEST_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 /// Read JSON arguments from guest memory at the given (ptr, len).
+///
+/// Validates that ptr and len are non-negative and that len does not exceed
+/// `MAX_GUEST_MESSAGE_SIZE` to prevent unbounded allocations from a buggy or
+/// malicious guest module.
 fn read_guest_json(
   caller: &Caller<'_, HostState>,
   ptr: i32,
   len: i32,
 ) -> Result<serde_json::Value, String> {
+  // M12: Reject negative pointer or length (i32 -> usize cast would wrap).
+  if ptr < 0 || len < 0 {
+    return Err(format!(
+      "Invalid guest memory access: ptr={}, len={} (negative values not allowed)",
+      ptr, len
+    ));
+  }
+
+  let len_usize = len as usize;
+
+  // M13: Reject unreasonably large allocations.
+  if len_usize > MAX_GUEST_MESSAGE_SIZE {
+    return Err(format!(
+      "Guest message too large: {} bytes (max {} bytes)",
+      len_usize, MAX_GUEST_MESSAGE_SIZE
+    ));
+  }
+
   let memory = caller.data().memory
     .ok_or_else(|| "Memory not available".to_string())?;
 
-  let mut buf = vec![0u8; len as usize];
+  let mut buf = vec![0u8; len_usize];
   memory
     .read(caller, ptr as usize, &mut buf)
     .map_err(|_| "Failed to read from guest memory".to_string())?;

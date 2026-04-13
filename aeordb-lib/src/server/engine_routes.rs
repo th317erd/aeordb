@@ -109,9 +109,10 @@ pub async fn engine_get(
 
       let body = Body::from_stream(chunk_stream);
 
+      let safe_path = file_record.path.replace('\n', "").replace('\r', "");
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
-        .header("X-Path", &file_record.path)
+        .header("X-Path", safe_path)
         .header("X-Total-Size", file_record.total_size.to_string())
         .header("X-Created-At", file_record.created_at.to_string())
         .header("X-Updated-At", file_record.updated_at.to_string());
@@ -210,10 +211,11 @@ pub async fn engine_head(
 
   match directory_ops.get_metadata(&path) {
     Ok(Some(file_record)) => {
+      let safe_path = file_record.path.replace('\n', "").replace('\r', "");
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("X-Entry-Type", "file")
-        .header("X-Path", &file_record.path)
+        .header("X-Path", safe_path)
         .header("X-Total-Size", file_record.total_size.to_string())
         .header("X-Created-At", file_record.created_at.to_string())
         .header("X-Updated-At", file_record.updated_at.to_string());
@@ -230,10 +232,11 @@ pub async fn engine_head(
       // Check if it is a directory
       match directory_ops.list_directory(&path) {
         Ok(_) => {
+          let safe_path = path.replace('\n', "").replace('\r', "");
           axum::http::Response::builder()
             .status(StatusCode::OK)
             .header("X-Entry-Type", "directory")
-            .header("X-Path", &path)
+            .header("X-Path", safe_path)
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }

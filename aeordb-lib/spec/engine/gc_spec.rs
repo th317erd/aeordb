@@ -198,7 +198,8 @@ fn test_gc_mark_structural_sharing_dedup() {
 fn test_gc_mark_empty_database() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let live = gc_mark(&engine).unwrap();
-  assert!(live.len() <= 2, "empty database should have 0-2 live entries, got {}", live.len());
+  // 0-2 base entries + 1 task registry key (always marked live by mark_task_entries)
+  assert!(live.len() <= 3, "empty database should have 0-3 live entries, got {}", live.len());
 }
 
 #[test]

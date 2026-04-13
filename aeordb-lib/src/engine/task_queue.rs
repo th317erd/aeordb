@@ -46,6 +46,14 @@ pub struct ProgressInfo {
     pub message: Option<String>,
 }
 
+// NOTE: Task records are stored using EntryType::FileRecord, which means
+// they are counted in stats().file_count and could theoretically be swept
+// by GC. Task records use deterministic hashes from "::aeordb:task:{id}"
+// which do NOT appear in the directory tree, so mark_system_entries does
+// not protect them. However, task records have short lifecycles (completed
+// tasks are pruned), and the task registry ("::aeordb:task:_registry") is
+// also unprotected. To fully protect tasks from GC, mark task hashes as
+// live in gc_mark (see mark_task_entries).
 pub struct TaskQueue {
     engine: Arc<StorageEngine>,
     progress: Arc<RwLock<HashMap<String, ProgressInfo>>>,

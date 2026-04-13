@@ -13,7 +13,12 @@ use crate::engine::nvt::NormalizedVectorTable;
 /// Holds a frozen snapshot of the write buffer, shared NVT state, and an
 /// in-memory copy of all KV pages at snapshot creation time. Each snapshot is
 /// fully self-contained: buffer + NVT + pages. Reads are served entirely from
-/// memory — no disk I/O, no race conditions with concurrent writers.
+/// memory -- no disk I/O, no race conditions with concurrent writers.
+///
+/// NOTE: At max KV stage (131K buckets x 1.3KB/page = ~164MB), the pages
+/// Vec uses significant memory. Old snapshots survive via Arc until all
+/// readers drop their references. Under sustained read load, multiple
+/// snapshot generations can coexist. Monitor memory usage at scale.
 pub struct ReadSnapshot {
     /// Frozen copy of the write buffer at snapshot creation time.
     buffer: HashMap<Vec<u8>, KVEntry>,

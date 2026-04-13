@@ -25,6 +25,10 @@ pub struct FieldIndex {
   pub nvt: NormalizedVectorTable,
   /// Raw field values keyed by file_hash. Used by fuzzy query recheck
   /// to avoid re-loading files from storage.
+  ///
+  /// NOTE: The values HashMap grows with every indexed file and is never
+  /// pruned. At 1M files with 100-byte values, this is ~100MB per index field.
+  /// Consider capping or implementing lazy loading from disk during recheck.
   pub values: HashMap<Vec<u8>, Vec<u8>>,
   dirty: bool,
 }

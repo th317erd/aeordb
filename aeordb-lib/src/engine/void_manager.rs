@@ -18,6 +18,11 @@ pub const MINIMUM_VOID_SIZE: u32 = 63;
 /// Voids are created when entries are relocated (e.g., during KV block growth)
 /// or when entries are logically deleted. The VoidManager maintains an in-memory
 /// index of void locations organized by size for best-fit allocation.
+///
+/// NOTE: The voids_by_size BTreeMap grows without bound as new void sizes
+/// are registered. With diverse entry sizes, this can accumulate many unique
+/// keys. Consider bucketing void sizes into size classes (powers of 2) or
+/// adding a maximum tracked void count with eviction.
 pub struct VoidManager {
   /// Maps void size to a list of file offsets where voids of that size exist.
   voids_by_size: BTreeMap<u32, Vec<u64>>,

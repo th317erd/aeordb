@@ -35,6 +35,12 @@ pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_conf
 /// Default cache TTL in seconds.
 const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
+// NOTE: The permission_middleware only checks /engine/ routes for path-level
+// CRUD permissions. The following routes are behind auth but have no path-level
+// checks: /query, /upload/*, /version/*, /{db}/{schema}/{table}/_deploy,
+// /{db}/{schema}/{table}/{fn}/_invoke, /events/stream.
+// Consider expanding permission checks to these routes in a future update.
+
 /// Build the full application router with all routes and middleware.
 /// Uses SelfContained auth mode (current default behavior).
 pub fn create_app(engine_path: &str) -> Router {

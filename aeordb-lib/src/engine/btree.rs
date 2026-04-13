@@ -578,6 +578,11 @@ pub fn btree_list_from_node(
 
 /// Delete a child from a B-tree directory.
 /// Returns the new root hash, or None if the tree is now empty.
+///
+/// NOTE: btree_delete does NOT rebalance after removal. After many deletions,
+/// the tree can have near-empty leaf nodes, degrading lookup from O(log N)
+/// toward O(N). For now, this is acceptable -- a full reindex rebuilds the tree.
+/// Future: implement sibling borrowing and node merging on underflow.
 pub fn btree_delete(
     engine: &StorageEngine,
     root_hash: &[u8],

@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use axum::{
     Extension,
     extract::State,
@@ -14,19 +12,16 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{RequestContext, is_root};
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 fn unique_temp_path(prefix: &str) -> String {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir();
-    let file = dir.join(format!(
-        "{}-{}-{}-{}.aeordb",
-        prefix,
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        counter,
-    ));
-    file.to_string_lossy().to_string()
+    let temp_file = tempfile::Builder::new()
+        .prefix(&format!("{}-", prefix))
+        .suffix(".aeordb")
+        .tempfile()
+        .expect("failed to create temp file");
+    let path = temp_file.path().to_string_lossy().to_string();
+    // Keep the path but drop the file handle so the caller can write to it
+    let _ = temp_file.into_temp_path();
+    path
 }
 
 /// POST /admin/export -- export a version as .aeordb

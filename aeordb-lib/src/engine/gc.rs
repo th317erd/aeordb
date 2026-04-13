@@ -64,6 +64,11 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   // Mark system table entries as live
   mark_system_entries(engine, hash_length, &mut live)?;
 
+  // Mark task queue entries as live -- task records use deterministic hashes
+  // ("::aeordb:task:{id}") that are NOT in the directory tree, so
+  // mark_system_entries does not cover them.
+  mark_task_entries(engine, &mut live)?;
+
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
   let all_entries = engine.iter_kv_entries()?;
@@ -274,6 +279,30 @@ fn mark_entry_recursive(
   Ok(())
 }
 
+/// Mark task queue entries (registry + individual task records) as live.
+/// Task records use deterministic blake3 hashes on "::aeordb:task:{id}" keys
+/// and are stored as EntryType::FileRecord, so they would be swept by GC
+/// unless explicitly marked.
+fn mark_task_entries(
+  engine: &StorageEngine,
+  live: &mut HashSet<Vec<u8>>,
+) -> EngineResult<()> {
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  live.insert(registry_key.clone());
+
+  // Load the registry to find all task IDs
+  if let Some((_header, _key, value)) = engine.get_entry(&registry_key)? {
+    if let Ok(ids) = serde_json::from_slice::<Vec<String>>(&value) {
+      for id in &ids {
+        let task_key = blake3::hash(format!("::aeordb:task:{}", id).as_bytes()).as_bytes().to_vec();
+        live.insert(task_key);
+      }
+    }
+  }
+
+  Ok(())
+}
+
 /// Minimum DeletionRecord entry size for the given engine's hash algorithm.
 fn min_deletion_size(engine: &StorageEngine) -> u32 {
   // DeletionRecord with path="gc", reason="gc":
@@ -299,6 +328,16 @@ fn min_void_size(engine: &StorageEngine) -> u32 {
 /// against the current KV state before being overwritten — if a concurrent
 /// write has made an entry live since the mark phase, it is skipped.
 /// For full safety, callers should ensure exclusive access during GC.
+///
+/// **Crash safety (M8)**: If the process crashes mid-sweep, the `.aeordb`
+/// file may contain partially overwritten entries (some garbage entries
+/// replaced with DeletionRecord/Void, others not yet swept), while the
+/// `.kv` index still references the old offsets. On restart the `.kv` file
+/// will be stale and must be deleted to trigger a full rebuild from the
+/// `.aeordb` file scan. The rebuild replays deletion records and
+/// reconstructs the index from the on-disk entry headers, so no committed
+/// data is lost — only the sweep progress is discarded and garbage entries
+/// that were not yet overwritten will persist until the next GC run.
 pub fn gc_sweep(
   engine: &StorageEngine,
   live: &HashSet<Vec<u8>>,

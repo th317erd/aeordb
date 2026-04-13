@@ -91,6 +91,10 @@ pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  // The VoidManager tracks reclaimable space for future void-reuse optimization.
+  // Currently, find_void is not called by any production code -- new entries always
+  // append. When void reuse is implemented, store_entry will check find_void
+  // before appending, writing into reclaimed space to reduce file growth.
   #[allow(dead_code)]
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
@@ -292,6 +296,24 @@ impl StorageEngine {
       kv
     };
 
+    // H13: Warn if the KV store looks significantly stale compared to the
+    // .aeordb file header's entry count. This can happen if the .kv file was
+    // copied from an older backup or the process crashed after writing entries
+    // but before flushing the KV. The hot file mechanism should recover recent
+    // writes, but a large gap suggests the .kv file should be deleted to force
+    // a full rebuild.
+    if aeordb_has_entries {
+      let file_entry_count = writer.file_header().entry_count;
+      if file_entry_count > 100 && kv_store.len() < (file_entry_count as usize / 4) {
+        tracing::warn!(
+          "KV store may be stale: {} entries vs ~{} in .aeordb file header. \
+           The hot file should recover recent writes, but consider deleting \
+           the .kv file to force a full rebuild if data appears missing.",
+          kv_store.len(), file_entry_count
+        );
+      }
+    }
+
     // Replay hot entries into the KV store, then flush
     let mut kv_store = kv_store;
     if !hot_entries_to_replay.is_empty() {
@@ -369,30 +391,34 @@ impl StorageEngine {
 
   /// Store an entry: append to file, register in KV store.
   /// Returns the file offset where the entry was written.
+  ///
+  /// Both the writer and KV locks are held simultaneously to prevent a
+  /// TOCTOU gap where a crash between the disk write and the KV insert
+  /// could leave the entry on disk but missing from the index.
+  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry(
     &self,
     entry_type: EntryType,
     key: &[u8],
     value: &[u8],
   ) -> EngineResult<u64> {
-    let offset = {
-      let mut writer = self.writer.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-      writer.append_entry(entry_type, key, value, 0)?
-    };
+    // Acquire BOTH locks before any work to close the TOCTOU gap.
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    let offset = writer.append_entry(entry_type, key, value, 0)?;
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
       hash: key.to_vec(),
       offset,
     };
-
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
     kv.insert(kv_entry);
 
     Ok(offset)
@@ -402,6 +428,11 @@ impl StorageEngine {
   /// The hash is computed on the UNCOMPRESSED value (for dedup).
   /// The compressed value is what gets written to disk.
   /// Returns the file offset where the entry was written.
+  ///
+  /// Both the writer and KV locks are held simultaneously to prevent a
+  /// TOCTOU gap where a crash between the disk write and the KV insert
+  /// could leave the entry on disk but missing from the index.
+  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_compressed(
     &self,
     entry_type: EntryType,
@@ -409,30 +440,29 @@ impl StorageEngine {
     value: &[u8],
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u64> {
-    let offset = {
-      let mut writer = self.writer.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-      writer.append_entry_with_compression(
-        entry_type,
-        key,
-        value,
-        0,
-        compression_algo,
-      )?
-    };
+    // Acquire BOTH locks before any work to close the TOCTOU gap.
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    let offset = writer.append_entry_with_compression(
+      entry_type,
+      key,
+      value,
+      0,
+      compression_algo,
+    )?;
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
       hash: key.to_vec(),
       offset,
     };
-
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
     kv.insert(kv_entry);
 
     Ok(offset)
@@ -523,6 +553,11 @@ impl StorageEngine {
 
   /// Store an entry with an explicit KV type (for versioning entries
   /// where the EntryType on disk doesn't map 1:1 to the KV type).
+  ///
+  /// Both the writer and KV locks are held simultaneously to prevent a
+  /// TOCTOU gap where a crash between the disk write and the KV insert
+  /// could leave the entry on disk but missing from the index.
+  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_typed(
     &self,
     entry_type: EntryType,
@@ -530,24 +565,23 @@ impl StorageEngine {
     value: &[u8],
     kv_type: u8,
   ) -> EngineResult<u64> {
-    let offset = {
-      let mut writer = self.writer.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-      writer.append_entry(entry_type, key, value, 0)?
-    };
+    // Acquire BOTH locks before any work to close the TOCTOU gap.
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    let offset = writer.append_entry(entry_type, key, value, 0)?;
 
     let kv_entry = KVEntry {
       type_flags: kv_type,
       hash: key.to_vec(),
       offset,
     };
-
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
     kv.insert(kv_entry);
 
     Ok(offset)
@@ -556,46 +590,45 @@ impl StorageEngine {
   /// Write all entries in a batch with a single lock acquisition.
   /// Each entry is appended sequentially, then all are registered in the KV store.
   /// Returns the file offsets where entries were written.
+  ///
+  /// Both the writer and KV locks are held simultaneously for the entire
+  /// batch to prevent a TOCTOU gap where a crash between disk writes and
+  /// KV inserts could leave entries on disk but missing from the index.
+  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn flush_batch(&self, batch: WriteBatch) -> EngineResult<Vec<u64>> {
     if batch.is_empty() {
       return Ok(Vec::new());
     }
 
+    // Acquire BOTH locks before any work to close the TOCTOU gap.
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
     let mut offsets = Vec::with_capacity(batch.entries.len());
 
-    // Single write lock acquisition for all entries
-    {
-      let mut writer = self.writer.write()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-
-      for entry in &batch.entries {
-        let offset = writer.append_entry(
-          entry.entry_type,
-          &entry.key,
-          &entry.value,
-          0, // flags
-        )?;
-        offsets.push(offset);
-      }
+    for entry in &batch.entries {
+      let offset = writer.append_entry(
+        entry.entry_type,
+        &entry.key,
+        &entry.value,
+        0, // flags
+      )?;
+      offsets.push(offset);
     }
 
-    // Single KV lock acquisition for all KV inserts
-    {
-      let mut kv = self.kv_writer.lock()
-        .map_err(|error| EngineError::IoError(
-          std::io::Error::other(error.to_string()),
-        ))?;
-
-      for (i, entry) in batch.entries.iter().enumerate() {
-        let kv_entry = KVEntry {
-          type_flags: entry.kv_type,
-          hash: entry.key.clone(),
-          offset: offsets[i],
-        };
-        kv.insert(kv_entry);
-      }
+    for (i, entry) in batch.entries.iter().enumerate() {
+      let kv_entry = KVEntry {
+        type_flags: entry.kv_type,
+        hash: entry.key.clone(),
+        offset: offsets[i],
+      };
+      kv.insert(kv_entry);
     }
 
     Ok(offsets)
@@ -798,6 +831,11 @@ impl StorageEngine {
       }
     };
 
+    // PERF(M4): This iter_all() + type counting is O(n) over all KV entries.
+    // For databases with millions of entries, consider maintaining atomic counters
+    // per entry type (updated on insert/delete) or caching this result with a
+    // short TTL (e.g., 1 second). Currently acceptable because the snapshot is
+    // fully in-memory and n is bounded by the number of stored objects.
     let all_entries = snapshot.iter_all().unwrap_or_default();
 
     let mut chunk_count = 0usize;

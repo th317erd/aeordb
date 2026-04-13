@@ -250,16 +250,12 @@ impl<'a> VersionManager<'a> {
   /// Look up a fork's current root hash by name.
   pub fn get_fork_hash(&self, name: &str) -> EngineResult<Option<Vec<u8>>> {
     let key = self.fork_key(name)?;
+    // get_entry already returns None for deleted entries (snapshot.get filters them)
     let entry = self.engine.get_entry(&key)?;
 
     let Some((_header, _key, value)) = entry else {
       return Ok(None);
     };
-
-    // Check if the KV entry is marked as deleted
-    if self.engine.is_entry_deleted(&key)? {
-      return Ok(None);
-    }
 
     let hash_length = self.engine.hash_algo().hash_length();
     let fork_info = ForkInfo::deserialize(&value, hash_length)?;
@@ -269,6 +265,7 @@ impl<'a> VersionManager<'a> {
   /// Look up a snapshot's root hash by name.
   pub fn get_snapshot_hash(&self, name: &str) -> EngineResult<Vec<u8>> {
     let key = self.snapshot_key(name)?;
+    // get_entry already returns None for deleted entries (snapshot.get filters them)
     let entry = self.engine.get_entry(&key)?;
 
     let Some((_header, _key, value)) = entry else {
@@ -276,12 +273,6 @@ impl<'a> VersionManager<'a> {
         format!("Snapshot not found: {}", name),
       ));
     };
-
-    if self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(
-        format!("Snapshot not found: {}", name),
-      ));
-    }
 
     let hash_length = self.engine.hash_algo().hash_length();
     let snapshot_info = SnapshotInfo::deserialize(&value, hash_length)?;

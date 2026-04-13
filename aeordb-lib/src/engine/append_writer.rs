@@ -111,18 +111,15 @@ impl AppendWriter {
     self.file.write_all(key)?;
     self.file.write_all(value)?;
 
-    // fsync for truth entities (chunks, file records, deletions, voids)
-    match entry_type {
-      EntryType::Chunk
-      | EntryType::FileRecord
-      | EntryType::DeletionRecord
-      | EntryType::Void => {
-        self.file.sync_all()?;
-      }
-      _ => {
-        self.file.sync_data()?;
-      }
-    }
+    // Flush data to disk. We use sync_data() instead of sync_all() because we only
+    // need data durability — not metadata (timestamps, file size). sync_data() skips
+    // the metadata fsync, saving one syscall per write. The metadata is non-critical
+    // for crash recovery since we rebuild state from entry contents, not file metadata.
+    //
+    // PERF(H14): For further throughput gains, consider group commit (batch fsync
+    // across multiple entries) or skipping per-entry fsync entirely when a hot file
+    // provides crash recovery journaling.
+    self.file.sync_data()?;
 
     self.current_offset = entry_offset + total_length as u64;
     self.file_header.entry_count += 1;

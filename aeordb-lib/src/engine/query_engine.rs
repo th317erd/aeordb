@@ -254,6 +254,8 @@ pub fn should_use_bitmap_compositing(node: &QueryNode) -> bool {
 
 /// Create an NVTMask from a FieldQuery by mapping the query operation
 /// onto the NVT bucket space.
+/// Currently unused -- retained for future bitmap pruning optimization.
+#[allow(dead_code)]
 fn field_query_to_mask(
   field_index: &mut FieldIndex,
   query: &FieldQuery,
@@ -306,6 +308,9 @@ fn field_query_to_mask(
 }
 
 /// Walk the QueryNode tree bottom-up, producing an NVTMask at each level.
+/// Currently unused -- retained for future bitmap pruning optimization in
+/// execute_tier2. See the execute_tier2 doc comment.
+#[allow(dead_code)]
 fn evaluate_node_as_mask(
   node: &QueryNode,
   path: &str,
@@ -424,6 +429,12 @@ impl<'a> QueryEngine<'a> {
 
   /// Execute a query with pagination support.
   /// Applies default limit, sorting, cursor-based pagination, offset, and builds pagination metadata.
+  ///
+  /// PERF(M19): This fetches ALL matching results via execute_internal(), sorts them, then
+  /// truncates to the requested page. For a query matching 100K files with limit=20, this
+  /// materializes all 100K results in memory. Pushing limit/offset into the NVT scan or
+  /// using a streaming/lazy iterator would avoid this, but requires significant refactoring
+  /// of the index evaluation pipeline.
   pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
     let explicit_limit = query.limit.is_some();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
@@ -808,23 +819,17 @@ impl<'a> QueryEngine<'a> {
     Ok(())
   }
 
-  /// Tier 2: NVTMask bitmap compositing for complex queries with OR/NOT.
-  /// Builds a bitmap mask via the QueryNode tree, then uses the precise
-  /// set-based evaluation for final result collection. The mask is computed
-  /// (and can be used for early pruning in future large-dataset optimizations),
-  /// but correctness is guaranteed by the set-based verify pass.
+  /// Tier 2: Complex queries with OR/NOT.
+  /// Uses the precise set-based evaluation for correctness (especially with
+  /// NOT, which requires the full universe). The bitmap mask computation was
+  /// removed as it was unused -- when bitmap pruning is needed for large
+  /// datasets, re-introduce evaluate_node_as_mask here as a pre-filter.
   fn execute_tier2(
     &self,
     node: &QueryNode,
     path: &str,
     index_manager: &IndexManager,
   ) -> EngineResult<HashSet<Vec<u8>>> {
-    // Build the bitmap mask for analysis / future optimization.
-    let bucket_count = 1024;
-    let _mask = evaluate_node_as_mask(node, path, index_manager, bucket_count)?;
-
-    // For correctness (especially with NOT, which requires the full universe),
-    // use the precise set-based evaluation.
     self.evaluate_node(node, path, index_manager)
   }
 
@@ -861,6 +866,13 @@ impl<'a> QueryEngine<'a> {
       }
       QueryNode::Not(child) => {
         // NOT requires knowing the universe of all file hashes.
+        //
+        // PERF(M20): collect_all_hashes materializes every file hash in the directory
+        // into a HashSet, then computes the set difference. For directories with many
+        // thousands of files, this is expensive. A bitmap-based approach (already used
+        // in the Tier 2 mask compositing path) avoids this allocation. The bitmap path
+        // handles NOT via bitwise negation — this fallback is only hit for Tier 3
+        // (non-indexed field queries).
         let child_set = self.evaluate_node(child, path, index_manager)?;
         let all_hashes = self.collect_all_hashes(path, index_manager)?;
         Ok(all_hashes.difference(&child_set).cloned().collect())

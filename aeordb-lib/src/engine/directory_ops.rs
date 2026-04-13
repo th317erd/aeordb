@@ -187,6 +187,16 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Internal file storage with optional compression.
+  ///
+  /// **Atomicity (M15)**: This method stores chunks, a FileRecord, and
+  /// updated directory entries as separate append-writer operations. If the
+  /// process crashes mid-way, some chunks or the FileRecord may be written
+  /// to disk without the directory tree pointing to them. These orphaned
+  /// entries are harmless — they consume space but are unreachable — and
+  /// will be reclaimed by the next GC sweep. The hot-file mechanism
+  /// ensures the KV index is recovered on restart, and since the directory
+  /// tree is only updated atomically at the end (single entry write),
+  /// readers will never see a partially-stored file.
   fn store_file_internal(
     &self,
     ctx: &RequestContext,
@@ -515,6 +525,40 @@ impl<'a> DirectoryOps<'a> {
     Ok(())
   }
 
+  /// Detect the compression algorithm for a file based on its parent's index config.
+  /// Reads `.config/indexes.json` under the parent path; returns Zstd if configured
+  /// and the content type/size pass the `should_compress` heuristic, else None.
+  fn detect_compression(
+    &self,
+    path: &str,
+    content_type: Option<&str>,
+    data_length: usize,
+  ) -> CompressionAlgorithm {
+    let normalized = normalize_path(path);
+    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+    let config_path = if parent.ends_with('/') {
+      format!("{}.config/indexes.json", parent)
+    } else {
+      format!("{}/.config/indexes.json", parent)
+    };
+
+    match self.read_file(&config_path) {
+      Ok(config_data) => {
+        match PathIndexConfig::deserialize_with_compression(&config_data) {
+          Ok(Some(algo_str)) if algo_str == "zstd" => {
+            if should_compress(content_type, data_length) {
+              CompressionAlgorithm::Zstd
+            } else {
+              CompressionAlgorithm::None
+            }
+          }
+          _ => CompressionAlgorithm::None,
+        }
+      }
+      Err(_) => CompressionAlgorithm::None,
+    }
+  }
+
   /// Store a file with automatic index updates and optional compression.
   /// After storing the file, checks for index config at `.config/indexes.json`
   /// under the parent path and updates relevant indexes.
@@ -526,33 +570,7 @@ impl<'a> DirectoryOps<'a> {
     data: &[u8],
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
-    let normalized_for_config = normalize_path(path);
-    let parent_for_config = parent_path(&normalized_for_config).unwrap_or_else(|| "/".to_string());
-
-    // Check for compression configuration
-    let config_path_for_compression = if parent_for_config.ends_with('/') {
-      format!("{}.config/indexes.json", parent_for_config)
-    } else {
-      format!("{}/.config/indexes.json", parent_for_config)
-    };
-
-    let compression_algo = match self.read_file(&config_path_for_compression) {
-      Ok(config_data) => {
-        match PathIndexConfig::deserialize_with_compression(&config_data) {
-          Ok(Some(algo_str)) if algo_str == "zstd" => {
-            if should_compress(content_type, data.len()) {
-              CompressionAlgorithm::Zstd
-            } else {
-              CompressionAlgorithm::None
-            }
-          }
-          _ => CompressionAlgorithm::None,
-        }
-      }
-      Err(EngineError::NotFound(_)) => CompressionAlgorithm::None,
-      Err(_) => CompressionAlgorithm::None,
-    };
-
+    let compression_algo = self.detect_compression(path, content_type, data.len());
     let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
 
     // Guard: skip indexing for system directories
@@ -579,29 +597,7 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
     plugin_manager: Option<&crate::plugins::PluginManager>,
   ) -> EngineResult<FileRecord> {
-    // Compression detection (same as store_file_with_indexing)
-    let normalized_for_config = normalize_path(path);
-    let parent_for_config = parent_path(&normalized_for_config).unwrap_or_else(|| "/".to_string());
-    let config_path_for_compression = if parent_for_config.ends_with('/') {
-      format!("{}.config/indexes.json", parent_for_config)
-    } else {
-      format!("{}/.config/indexes.json", parent_for_config)
-    };
-    let compression_algo = match self.read_file(&config_path_for_compression) {
-      Ok(config_data) => {
-        match PathIndexConfig::deserialize_with_compression(&config_data) {
-          Ok(Some(algo_str)) if algo_str == "zstd" => {
-            if should_compress(content_type, data.len()) {
-              CompressionAlgorithm::Zstd
-            } else {
-              CompressionAlgorithm::None
-            }
-          }
-          _ => CompressionAlgorithm::None,
-        }
-      }
-      Err(_) => CompressionAlgorithm::None,
-    };
+    let compression_algo = self.detect_compression(path, content_type, data.len());
 
     let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
 
@@ -644,10 +640,17 @@ impl<'a> DirectoryOps<'a> {
     self.delete_file(ctx, path)
   }
 
+  /// Maximum directory depth for update_parent_directories iteration.
+  /// Prevents unbounded looping on pathologically deep paths.
+  const MAX_DIRECTORY_DEPTH: usize = 1000;
+
   /// Update parent directories after a child is added or modified.
   /// Propagates from the immediate parent up to root, updating HEAD at the end.
   /// For directories with >= BTREE_CONVERSION_THRESHOLD children, uses B-tree
   /// storage for O(log N) insertions instead of rewriting the entire flat list.
+  ///
+  /// Iterative implementation: walks from the child's parent up to root,
+  /// bounded by MAX_DIRECTORY_DEPTH as a safety measure.
   fn update_parent_directories(
     &self,
     child_path: &str,
@@ -656,90 +659,97 @@ impl<'a> DirectoryOps<'a> {
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
 
-    let parent = match parent_path(child_path) {
-      Some(parent) => parent,
-      None => return Ok(()), // root has no parent
-    };
+    let mut current_child_path = child_path.to_string();
+    let mut current_child_entry = child_entry;
 
-    let dir_key = directory_path_hash(&parent, &algo)?;
+    for _depth in 0..Self::MAX_DIRECTORY_DEPTH {
+      let parent = match parent_path(&current_child_path) {
+        Some(parent) => parent,
+        None => return Ok(()), // root has no parent
+      };
 
-    // Read existing directory
-    let existing = self.engine.get_entry(&dir_key)?;
+      let dir_key = directory_path_hash(&parent, &algo)?;
 
-    let (dir_value, content_key) = match existing {
-      Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
-        // === B-TREE FORMAT ===
-        // Insert using already-loaded data (no redundant read/deserialize/hash)
-        let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_batched(
-          self.engine, &value, child_entry, hash_length, &algo
-        )?;
+      // Read existing directory
+      let existing = self.engine.get_entry(&dir_key)?;
 
-        (new_root_data, new_root_hash)
-      }
-      Some((_header, _key, value)) => {
-        // === FLAT FORMAT ===
-        let mut children = if value.is_empty() {
-          Vec::new()
-        } else {
-          deserialize_child_entries(&value, hash_length)?
-        };
-
-        // Add or update the child
-        let child_name = &child_entry.name;
-        if let Some(existing) = children.iter_mut().find(|c| c.name == *child_name) {
-          *existing = child_entry;
-        } else {
-          children.push(child_entry);
-        }
-
-        // Check if we should convert to B-tree
-        if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
-          // Convert flat -> B-tree
-          let root_hash = crate::engine::btree::btree_from_entries(
-            self.engine, children, hash_length, &algo
+      let (dir_value, content_key) = match existing {
+        Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+          // === B-TREE FORMAT ===
+          let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_batched(
+            self.engine, &value, current_child_entry, hash_length, &algo
           )?;
-          let root_entry = self.engine.get_entry(&root_hash)?
-            .ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
-          (root_entry.2, root_hash)
-        } else {
-          // Stay flat
+
+          (new_root_data, new_root_hash)
+        }
+        Some((_header, _key, value)) => {
+          // === FLAT FORMAT ===
+          let mut children = if value.is_empty() {
+            Vec::new()
+          } else {
+            deserialize_child_entries(&value, hash_length)?
+          };
+
+          // Add or update the child
+          let child_name = &current_child_entry.name;
+          if let Some(existing) = children.iter_mut().find(|c| c.name == *child_name) {
+            *existing = current_child_entry;
+          } else {
+            children.push(current_child_entry);
+          }
+
+          // Check if we should convert to B-tree
+          if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+            // Convert flat -> B-tree
+            let root_hash = crate::engine::btree::btree_from_entries(
+              self.engine, children, hash_length, &algo
+            )?;
+            let root_entry = self.engine.get_entry(&root_hash)?
+              .ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
+            (root_entry.2, root_hash)
+          } else {
+            // Stay flat
+            let dir_value = serialize_child_entries(&children, hash_length);
+            let content_key = directory_content_hash(&dir_value, &algo)?;
+            self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+            (dir_value, content_key)
+          }
+        }
+        None => {
+          // New directory
+          let children = vec![current_child_entry];
           let dir_value = serialize_child_entries(&children, hash_length);
           let content_key = directory_content_hash(&dir_value, &algo)?;
           self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
           (dir_value, content_key)
         }
-      }
-      None => {
-        // New directory
-        let children = vec![child_entry];
-        let dir_value = serialize_child_entries(&children, hash_length);
-        let content_key = directory_content_hash(&dir_value, &algo)?;
-        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
-        (dir_value, content_key)
-      }
-    };
+      };
 
-    // Store at path-based key
-    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
+      // Store at path-based key
+      self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
 
-    // If this is root "/", update HEAD to content hash
-    if parent == "/" {
-      self.engine.update_head(&content_key)?;
-      return Ok(());
+      // If this is root "/", update HEAD to content hash and we're done
+      if parent == "/" {
+        self.engine.update_head(&content_key)?;
+        return Ok(());
+      }
+
+      // Set up next iteration: update grandparent with this directory as child
+      current_child_entry = ChildEntry {
+        entry_type: EntryType::DirectoryIndex.to_u8(),
+        hash: content_key,  // content hash for tree walker
+        total_size: dir_value.len() as u64,
+        created_at: chrono::Utc::now().timestamp_millis(),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+        name: file_name(&parent).unwrap_or("").to_string(),
+        content_type: None,
+      };
+      current_child_path = parent;
     }
 
-    // Recurse: update grandparent with this directory as child (using content hash)
-    let parent_child = ChildEntry {
-      entry_type: EntryType::DirectoryIndex.to_u8(),
-      hash: content_key,  // content hash for tree walker
-      total_size: dir_value.len() as u64,
-      created_at: chrono::Utc::now().timestamp_millis(),
-      updated_at: chrono::Utc::now().timestamp_millis(),
-      name: file_name(&parent).unwrap_or("").to_string(),
-      content_type: None,
-    };
-
-    self.update_parent_directories(&parent, parent_child)
+    Err(EngineError::InvalidInput(
+      format!("Directory depth exceeds maximum of {} levels", Self::MAX_DIRECTORY_DEPTH),
+    ))
   }
 
   /// Remove a child entry from its parent directory and propagate up.
