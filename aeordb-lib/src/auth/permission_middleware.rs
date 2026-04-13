@@ -56,16 +56,21 @@ pub async fn permission_middleware(
   };
 
   // Parse user_id from claims.sub.
-  // If the sub is not a valid UUID, skip permission checking for backward
-  // compatibility with legacy tokens that predate the UUID-based user system.
+  // Non-UUID subjects are rejected — all valid users must have UUID identities.
   let user_id = match Uuid::parse_str(&claims.sub) {
     Ok(user_id) => user_id,
     Err(_) => {
-      tracing::debug!(
+      tracing::warn!(
         sub = %claims.sub,
-        "Skipping permission check: sub is not a valid UUID"
+        "Rejecting request: sub is not a valid UUID"
       );
-      return next.run(request).await;
+      return (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+          error: "Invalid user identity".to_string(),
+        }),
+      )
+        .into_response();
     }
   };
 

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::RequestContext;
+use crate::engine::{RequestContext, is_root};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -33,9 +33,23 @@ fn unique_temp_path(prefix: &str) -> String {
 /// Query params: snapshot=name, hash=hex (default: HEAD)
 pub async fn export_backup(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<ExportParams>,
 ) -> Response {
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "Invalid user ID"
+            }))).into_response();
+        }
+    };
+    if !is_root(&user_id) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Only root user can perform this operation"
+        }))).into_response();
+    }
+
     let output_path = unique_temp_path("aeordb-export");
 
     let result = if let Some(ref hash) = params.hash {
@@ -102,9 +116,23 @@ pub async fn export_backup(
 /// POST /admin/diff -- create a patch between two versions
 pub async fn diff_backup(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<DiffParams>,
 ) -> Response {
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "Invalid user ID"
+            }))).into_response();
+        }
+    };
+    if !is_root(&user_id) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Only root user can perform this operation"
+        }))).into_response();
+    }
+
     let output_path = unique_temp_path("aeordb-patch");
 
     let result = crate::engine::backup::create_patch_from_snapshots(
@@ -180,6 +208,20 @@ pub async fn import_backup(
     params: axum::extract::Query<ImportParams>,
     body: axum::body::Bytes,
 ) -> Response {
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "Invalid user ID"
+            }))).into_response();
+        }
+    };
+    if !is_root(&user_id) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Only root user can perform this operation"
+        }))).into_response();
+    }
+
     // Write body to temp file
     let temp_path = unique_temp_path("aeordb-import");
 
@@ -225,9 +267,23 @@ pub async fn import_backup(
 /// POST /admin/promote -- promote a version hash to HEAD
 pub async fn promote_head(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<PromoteParams>,
 ) -> Response {
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "Invalid user ID"
+            }))).into_response();
+        }
+    };
+    if !is_root(&user_id) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Only root user can perform this operation"
+        }))).into_response();
+    }
+
     let hash_bytes = match hex::decode(&params.hash) {
         Ok(b) => b,
         Err(e) => {

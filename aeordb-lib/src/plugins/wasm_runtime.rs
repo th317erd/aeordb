@@ -699,22 +699,33 @@ impl WasmPluginRuntime {
 // ---------------------------------------------------------------------------
 
 /// Get the engine and a RequestContext from the host state.
-/// Uses the stored request_context's user_id to build the context, falling
-/// back to "system" when no context is stored.
+/// Uses the stored request_context's user_id and event_bus to build a proper
+/// context that preserves the caller's identity for auditing and permissions.
 fn get_engine_and_context(
   caller: &Caller<'_, HostState>,
 ) -> Result<(Arc<StorageEngine>, RequestContext), String> {
   let engine = caller.data().engine.as_ref()
     .ok_or_else(|| "Database access not available in this plugin context".to_string())?;
 
-  // Build a RequestContext using the user_id from the stored context if available.
-  // We can't clone the stored context (it holds an Arc<EventBus>), so we create
-  // a system context. The user_id is preserved for auditing.
-  let _user_id = caller.data().request_context.as_ref()
-    .map(|ctx| ctx.user_id.as_str())
-    .unwrap_or("system");
-
-  let ctx = RequestContext::system();
+  // Build a RequestContext preserving the caller's user_id and event_bus.
+  // Falls back to a system context only when no request context is stored.
+  let ctx = match caller.data().request_context.as_ref() {
+    Some(stored_ctx) => {
+      match stored_ctx.event_bus() {
+        Some(bus) => RequestContext::from_claims(&stored_ctx.user_id, Arc::clone(bus)),
+        None => {
+          // Has user_id but no event bus — construct without bus.
+          // This preserves the user identity for auditing even without events.
+          RequestContext::from_claims(&stored_ctx.user_id, std::sync::Arc::new(crate::engine::EventBus::new()))
+        }
+      }
+    }
+    None => RequestContext::system(),
+  };
+  // TODO(H4): Integrate PermissionResolver to enforce per-operation permission
+  // checks inside WASM host functions, rather than relying solely on the
+  // request-level middleware. This requires threading the PermissionResolver
+  // (or at minimum group_cache + permissions_cache) into the HostState.
   Ok((Arc::clone(engine), ctx))
 }
 

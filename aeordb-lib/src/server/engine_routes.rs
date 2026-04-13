@@ -14,7 +14,7 @@ use serde::Deserialize;
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager};
+use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
 use crate::engine::errors::EngineError;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 
@@ -315,12 +315,26 @@ pub async fn snapshot_list(
   }
 }
 
-/// POST /version/restore -- restore a named snapshot.
+/// POST /version/restore -- restore a named snapshot (requires root).
 pub async fn snapshot_restore(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<RestoreSnapshotRequest>,
 ) -> Response {
+  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can restore snapshots"
+    }))).into_response();
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
@@ -346,12 +360,26 @@ pub async fn snapshot_restore(
   }
 }
 
-/// DELETE /version/snapshot/:name -- delete a named snapshot.
+/// DELETE /version/snapshot/:name -- delete a named snapshot (requires root).
 pub async fn snapshot_delete(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
+  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can delete snapshots"
+    }))).into_response();
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
@@ -439,12 +467,26 @@ pub async fn fork_list(
   }
 }
 
-/// POST /version/fork/:name/promote -- promote a fork to HEAD.
+/// POST /version/fork/:name/promote -- promote a fork to HEAD (requires root).
 pub async fn fork_promote(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
+  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can promote forks"
+    }))).into_response();
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
@@ -470,12 +512,26 @@ pub async fn fork_promote(
   }
 }
 
-/// DELETE /version/fork/:name -- abandon a fork.
+/// DELETE /version/fork/:name -- abandon a fork (requires root).
 pub async fn fork_abandon(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
+  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can abandon forks"
+    }))).into_response();
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 

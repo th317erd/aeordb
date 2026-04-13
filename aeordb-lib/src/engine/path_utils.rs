@@ -5,34 +5,22 @@ pub fn normalize_path(path: &str) -> String {
     return "/".to_string();
   }
 
-  // Ensure leading slash
-  let with_leading = if trimmed.starts_with('/') {
-    trimmed.to_string()
-  } else {
-    format!("/{}", trimmed)
-  };
-
-  // Collapse multiple consecutive slashes
-  let mut collapsed = String::with_capacity(with_leading.len());
-  let mut previous_was_slash = false;
-  for character in with_leading.chars() {
-    if character == '/' {
-      if !previous_was_slash {
-        collapsed.push('/');
-      }
-      previous_was_slash = true;
-    } else {
-      collapsed.push(character);
-      previous_was_slash = false;
+  // Split on '/', filter empties (handles multiple consecutive slashes),
+  // and resolve "." (current dir) and ".." (parent dir) segments.
+  let mut segments: Vec<&str> = Vec::new();
+  for segment in trimmed.split('/').filter(|s| !s.is_empty()) {
+    match segment {
+      "." => {} // skip current-dir references
+      ".." => { segments.pop(); } // go up one level (silently ignored at root)
+      s => segments.push(s),
     }
   }
 
-  // Remove trailing slash (except for root "/")
-  if collapsed.len() > 1 && collapsed.ends_with('/') {
-    collapsed.pop();
+  if segments.is_empty() {
+    "/".to_string()
+  } else {
+    format!("/{}", segments.join("/"))
   }
-
-  collapsed
 }
 
 pub fn parent_path(path: &str) -> Option<String> {

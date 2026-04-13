@@ -136,12 +136,24 @@ pub async fn invoke_plugin(
             .content_type
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
+          // Allowlist of safe header prefixes/names from plugins.
+          // Prevents plugins from setting security-sensitive headers like
+          // Set-Cookie, Authorization, Host, etc.
+          const SAFE_PLUGIN_HEADERS: &[&str] = &[
+            "x-", "cache-control", "etag", "last-modified", "content-disposition",
+            "content-language", "content-encoding", "vary",
+          ];
+
           let mut response_builder = axum::http::Response::builder()
             .status(status)
             .header("content-type", content_type);
 
           for (key, value) in &plugin_response.headers {
-            response_builder = response_builder.header(key.as_str(), value.as_str());
+            let key_lower = key.to_lowercase();
+            let is_safe = SAFE_PLUGIN_HEADERS.iter().any(|prefix| key_lower.starts_with(prefix));
+            if is_safe {
+              response_builder = response_builder.header(key.as_str(), value.as_str());
+            }
           }
 
           response_builder

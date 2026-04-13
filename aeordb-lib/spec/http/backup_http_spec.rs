@@ -24,11 +24,12 @@ fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> ax
     create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
-/// Create an admin Bearer token value (including "Bearer " prefix).
+/// Create a root-user Bearer token value (including "Bearer " prefix).
+/// Uses the nil UUID which matches ROOT_USER_ID for root authorization.
 fn bearer_token(jwt_manager: &JwtManager) -> String {
     let now = chrono::Utc::now().timestamp();
     let claims = TokenClaims {
-        sub: "test-admin".to_string(),
+        sub: uuid::Uuid::nil().to_string(),
         iss: "aeordb".to_string(),
         iat: now,
         exp: now + DEFAULT_EXPIRY_SECONDS,

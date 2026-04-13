@@ -204,7 +204,24 @@ pub fn create_app_with_all_and_task_queue(
     task_queue,
   };
 
-  // Routes that require authentication
+  // Routes with large body limits (file uploads: 10 GB)
+  let large_upload_routes = Router::new()
+    .route(
+      "/engine/{*path}",
+      put(engine_routes::engine_store_file)
+        .get(engine_routes::engine_get)
+        .delete(engine_routes::engine_delete_file)
+        .head(engine_routes::engine_head),
+    )
+    .route("/upload/chunks/{hash}", put(upload_routes::upload_chunk))
+    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10 GB
+
+  // Routes with medium body limits (backup import: 10 MB)
+  let medium_upload_routes = Router::new()
+    .route("/admin/import", post(backup_routes::import_backup))
+    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
+
+  // Routes that require authentication (default 1 MB limit)
   let protected_routes = Router::new()
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
@@ -225,10 +242,9 @@ pub fn create_app_with_all_and_task_queue(
         .patch(admin_routes::update_group)
         .delete(admin_routes::delete_group),
     )
-    // Backup routes (export, diff, import, promote)
+    // Backup routes (export, diff, promote — import handled above with 10MB limit)
     .route("/admin/export", post(backup_routes::export_backup))
     .route("/admin/diff", post(backup_routes::diff_backup))
-    .route("/admin/import", post(backup_routes::import_backup))
     .route("/admin/promote", post(backup_routes::promote_head))
     .route("/admin/gc", post(gc_routes::run_gc_endpoint))
     // Task & cron routes
@@ -238,17 +254,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/admin/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
     .route("/admin/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/admin/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
-    // Engine routes (custom storage engine)
-    .route(
-      "/engine/{*path}",
-      put(engine_routes::engine_store_file)
-        .get(engine_routes::engine_get)
-        .delete(engine_routes::engine_delete_file)
-        .head(engine_routes::engine_head),
-    )
-    // Upload check and chunk upload (pre-hashed uploads)
+    // Upload check and commit (small payloads)
     .route("/upload/check", post(upload_routes::upload_check))
-    .route("/upload/chunks/{hash}", put(upload_routes::upload_chunk))
     .route("/upload/commit", post(upload_routes::upload_commit))
     // SSE event stream
     .route("/events/stream", get(sse_routes::event_stream))
@@ -281,6 +288,9 @@ pub fn create_app_with_all_and_task_queue(
       "/{database}/{schema}/{table}/{function_name}/_remove",
       delete(routes::remove_plugin),
     )
+    // Merge the large-upload and medium-upload routes into the protected group
+    .merge(large_upload_routes)
+    .merge(medium_upload_routes)
     .route_layer(from_fn_with_state(app_state.clone(), permission_middleware))
     .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 
@@ -301,7 +311,7 @@ pub fn create_app_with_all_and_task_queue(
   let router = public_routes
     .merge(protected_routes)
     .with_state(app_state)
-    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10 GB
+    .layer(axum::extract::DefaultBodyLimit::max(1 * 1024 * 1024)) // 1 MB default for non-upload routes
     .layer(HttpMetricsLayer)
     .layer(from_fn(request_id_middleware))
     .layer(TraceLayer::new_for_http());
