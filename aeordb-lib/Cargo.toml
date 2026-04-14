@@ -456,6 +456,10 @@ path = "spec/engine/cron_spec.rs"
 name = "task_http_spec"
 path = "spec/http/task_http_spec.rs"
 
+[[test]]
+name = "version_access_spec"
+path = "spec/engine/version_access_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
