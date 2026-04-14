@@ -10,6 +10,7 @@ pub mod sse_routes;
 pub mod state;
 pub mod task_routes;
 pub mod upload_routes;
+pub mod version_file_routes;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,6 +282,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/version/forks", get(engine_routes::fork_list))
     .route("/version/fork/{name}/promote", post(engine_routes::fork_promote))
     .route("/version/fork/{name}", delete(engine_routes::fork_abandon))
+    // Version: file-level access routes
+    .route("/version/file-history/{*path}", get(version_file_routes::file_history))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
