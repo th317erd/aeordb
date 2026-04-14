@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::{
   Extension,
   body::Body,
-  extract::{Path, State},
+  extract::{Path, Query as AxumQuery, State},
   http::{HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   Json,
@@ -21,6 +21,13 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
+
+/// Query parameters for reading files at historical versions.
+#[derive(Deserialize, Default)]
+pub struct VersionQuery {
+  pub snapshot: Option<String>,
+  pub version: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Engine file routes
@@ -97,7 +104,13 @@ pub async fn engine_get(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
+  AxumQuery(version_query): AxumQuery<VersionQuery>,
 ) -> Response {
+  // If snapshot or version query param is present, read from historical version
+  if version_query.snapshot.is_some() || version_query.version.is_some() {
+    return engine_get_at_version(&state, &path, &version_query).await;
+  }
+
   let directory_ops = DirectoryOps::new(&state.engine);
 
   // Try as file first
@@ -181,6 +194,96 @@ pub async fn engine_get(
         .into_response()
     }
   }
+}
+
+/// Read a file at a historical version (snapshot or explicit root hash).
+async fn engine_get_at_version(
+  state: &AppState,
+  path: &str,
+  version_query: &VersionQuery,
+) -> Response {
+  let vm = VersionManager::new(&state.engine);
+
+  // Resolve root hash: snapshot takes precedence
+  let root_hash = if let Some(ref snapshot_name) = version_query.snapshot {
+    match vm.resolve_root_hash(Some(snapshot_name)) {
+      Ok(hash) => hash,
+      Err(_) => {
+        return ErrorResponse::new(format!("Snapshot '{}' not found", snapshot_name))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+    }
+  } else if let Some(ref version_hex) = version_query.version {
+    match hex::decode(version_hex) {
+      Ok(hash) => hash,
+      Err(_) => {
+        return ErrorResponse::new("Invalid version hash (not valid hex)")
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+    }
+  } else {
+    return ErrorResponse::new("No snapshot or version specified")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  };
+
+  // Resolve the file at this version
+  let (_file_hash, file_record) = match crate::engine::version_access::resolve_file_at_version(
+    &state.engine, &root_hash, path,
+  ) {
+    Ok(result) => result,
+    Err(crate::engine::errors::EngineError::NotFound(msg)) => {
+      return ErrorResponse::new(msg)
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Engine: failed to read file '{}' at version: {}", path, error);
+      return ErrorResponse::new(format!("Failed to read file at version: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  // Stream the file content from historical chunks
+  let file_stream = match EngineFileStream::from_chunk_hashes(
+    file_record.chunk_hashes.clone(), &state.engine,
+  ) {
+    Ok(stream) => stream,
+    Err(error) => {
+      tracing::error!("Engine: failed to stream file '{}' at version: {}", path, error);
+      return ErrorResponse::new(format!("Failed to stream file: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
+    chunk_result
+      .map(axum::body::Bytes::from)
+      .map_err(|error| std::io::Error::other(error.to_string()))
+  }));
+
+  let body = Body::from_stream(chunk_stream);
+
+  let mut response_builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-Path", path)
+    .header("X-Total-Size", file_record.total_size.to_string())
+    .header("X-Created-At", file_record.created_at.to_string())
+    .header("X-Updated-At", file_record.updated_at.to_string());
+
+  if let Some(ref content_type) = file_record.content_type {
+    response_builder = response_builder.header("content-type", content_type.as_str());
+  }
+
+  response_builder
+    .body(body)
+    .unwrap_or_else(|_| {
+      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+    })
 }
 
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
