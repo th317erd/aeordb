@@ -22,6 +22,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
+use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
 /// Query parameters for GET /engine/*path (version access + directory listing).
 #[derive(Deserialize, Default)]
@@ -30,6 +31,7 @@ pub struct EngineGetQuery {
   pub version: Option<String>,
   pub depth: Option<i32>,
   pub glob: Option<String>,
+  pub nofollow: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,118 @@ pub async fn engine_get(
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
+  // Check for symlink first
+  if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
+    // nofollow: return symlink metadata without resolving
+    if version_query.nofollow == Some(true) {
+      return (StatusCode::OK, Json(serde_json::json!({
+        "path": symlink_record.path,
+        "target": symlink_record.target,
+        "entry_type": 8,
+        "created_at": symlink_record.created_at,
+        "updated_at": symlink_record.updated_at,
+      }))).into_response();
+    }
+
+    // Follow the symlink
+    match resolve_symlink(&state.engine, &path) {
+      Ok(ResolvedTarget::File(file_record)) => {
+        // Stream the resolved file — reuse the same streaming pattern
+        let resolved_stream = match EngineFileStream::from_chunk_hashes(
+          file_record.chunk_hashes.clone(), &state.engine,
+        ) {
+          Ok(s) => s,
+          Err(error) => {
+            return ErrorResponse::new(format!("Failed to read resolved file: {}", error))
+              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+              .into_response();
+          }
+        };
+
+        let chunk_stream = stream::iter(resolved_stream.map(|chunk_result| {
+          chunk_result
+            .map(axum::body::Bytes::from)
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        }));
+
+        let body = Body::from_stream(chunk_stream);
+
+        let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+        let mut response_builder = axum::http::Response::builder()
+          .status(StatusCode::OK)
+          .header("X-Path", safe_path)
+          .header("X-Total-Size", file_record.total_size.to_string())
+          .header("X-Created-At", file_record.created_at.to_string())
+          .header("X-Updated-At", file_record.updated_at.to_string())
+          .header("X-Symlink-Target", &symlink_record.target);
+
+        if let Some(ref content_type) = file_record.content_type {
+          response_builder = response_builder.header("content-type", content_type.as_str());
+        }
+
+        return response_builder
+          .body(body)
+          .unwrap_or_else(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+          });
+      }
+      Ok(ResolvedTarget::Directory(dir_path)) => {
+        // List the resolved directory
+        match directory_ops.list_directory(&dir_path) {
+          Ok(entries) => {
+            let normalized = crate::engine::path_utils::normalize_path(&dir_path);
+            let listing: Vec<serde_json::Value> = entries
+              .iter()
+              .map(|child| {
+                let child_path = if normalized == "/" {
+                  format!("/{}", child.name)
+                } else {
+                  format!("{}/{}", normalized, child.name)
+                };
+                serde_json::json!({
+                  "path": child_path,
+                  "name": child.name,
+                  "entry_type": child.entry_type,
+                  "hash": hex::encode(&child.hash),
+                  "total_size": child.total_size,
+                  "created_at": child.created_at,
+                  "updated_at": child.updated_at,
+                  "content_type": child.content_type,
+                })
+              })
+              .collect();
+            return (StatusCode::OK, Json(listing)).into_response();
+          }
+          Err(error) => {
+            return ErrorResponse::new(format!("Failed to list resolved directory: {}", error))
+              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+              .into_response();
+          }
+        }
+      }
+      Err(EngineError::NotFound(msg)) => {
+        return ErrorResponse::new(format!("Dangling symlink: {}", msg))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+      Err(EngineError::CyclicSymlink(msg)) => {
+        return ErrorResponse::new(format!("Symlink cycle detected: {}", msg))
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+      Err(EngineError::SymlinkDepthExceeded(msg)) => {
+        return ErrorResponse::new(msg)
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+      Err(error) => {
+        return ErrorResponse::new(format!("Failed to resolve symlink: {}", error))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
+    }
+  }
+
   // Try as file first
   match directory_ops.get_metadata(&path) {
     Ok(Some(file_record)) => {
@@ -178,7 +292,7 @@ pub async fn engine_get(
         let listing: Vec<serde_json::Value> = entries
           .iter()
           .map(|entry| {
-            serde_json::json!({
+            let mut entry_json = serde_json::json!({
               "path": entry.path,
               "name": entry.name,
               "entry_type": entry.entry_type,
@@ -187,7 +301,16 @@ pub async fn engine_get(
               "created_at": entry.created_at,
               "updated_at": entry.updated_at,
               "content_type": entry.content_type,
-            })
+            });
+
+            // Include symlink target in listing
+            if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+              if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&entry.path) {
+                entry_json["target"] = serde_json::json!(symlink_record.target);
+              }
+            }
+
+            entry_json
           })
           .collect();
         return (StatusCode::OK, Json(listing)).into_response();
@@ -218,7 +341,7 @@ pub async fn engine_get(
           } else {
             format!("{}/{}", normalized, child.name)
           };
-          serde_json::json!({
+          let mut entry_json = serde_json::json!({
             "path": child_path,
             "name": child.name,
             "entry_type": child.entry_type,
@@ -227,7 +350,16 @@ pub async fn engine_get(
             "created_at": child.created_at,
             "updated_at": child.updated_at,
             "content_type": child.content_type,
-          })
+          });
+
+          // Include symlink target in listing
+          if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+            if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&child_path) {
+              entry_json["target"] = serde_json::json!(symlink_record.target);
+            }
+          }
+
+          entry_json
         })
         .collect();
       (StatusCode::OK, Json(listing)).into_response()
@@ -345,6 +477,22 @@ pub async fn engine_delete_file(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let directory_ops = DirectoryOps::new(&state.engine);
 
+  // Check if it's a symlink first
+  if directory_ops.get_symlink(&path).ok().flatten().is_some() {
+    return match directory_ops.delete_symlink(&ctx, &path) {
+      Ok(()) => {
+        (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "type": "symlink" })))
+          .into_response()
+      }
+      Err(error) => {
+        tracing::error!("Engine: failed to delete symlink '{}': {}", path, error);
+        ErrorResponse::new(format!("Failed to delete symlink: {}", error))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response()
+      }
+    };
+  }
+
   match directory_ops.delete_file_with_indexing(&ctx, &path) {
     Ok(()) => {
       (
@@ -374,6 +522,19 @@ pub async fn engine_head(
   Path(path): Path<String>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(&state.engine);
+
+  // Check symlink first
+  if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
+    return axum::http::Response::builder()
+      .status(StatusCode::OK)
+      .header("X-Entry-Type", "symlink")
+      .header("X-Symlink-Target", &symlink_record.target)
+      .header("X-Path", path.replace('\n', "").replace('\r', ""))
+      .header("X-Created-At", symlink_record.created_at.to_string())
+      .header("X-Updated-At", symlink_record.updated_at.to_string())
+      .body(Body::empty())
+      .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+  }
 
   match directory_ops.get_metadata(&path) {
     Ok(Some(file_record)) => {

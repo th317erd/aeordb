@@ -10,6 +10,7 @@ pub mod sse_routes;
 pub mod state;
 pub mod task_routes;
 pub mod upload_routes;
+pub mod symlink_routes;
 pub mod version_file_routes;
 
 use std::sync::Arc;
@@ -285,6 +286,8 @@ pub fn create_app_with_all_and_task_queue(
     // Version: file-level access routes
     .route("/version/file-history/{*path}", get(version_file_routes::file_history))
     .route("/version/file-restore/{*path}", post(version_file_routes::file_restore))
+    // Symlink routes
+    .route("/engine-symlink/{*path}", post(symlink_routes::create_symlink))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
