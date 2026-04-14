@@ -1,0 +1,237 @@
+title: Enhanced Directory Listing
+spec: bot-docs/plan/enhanced-directory-listing.md
+date: 2026-04-13
+
+phases:
+  - name: "Phase 1: Engine — directory_listing module"
+    description: >
+      New module with ListingEntry struct and list_directory_recursive function.
+      Add glob-match dependency. Unit tests.
+    tasks:
+      - name: Add glob-match dependency
+        file: aeordb-lib/Cargo.toml
+        details: |
+          Add `glob-match` to [dependencies] (not dev-dependencies — it's used in engine code):
+          ```toml
+          glob-match = "0.2"
+          ```
+          Verify the crate exists and check latest version before adding.
+
+      - name: Create directory_listing.rs module
+        file: aeordb-lib/src/engine/directory_listing.rs
+        details: |
+          New file with:
+
+          1. ListingEntry struct:
+             ```rust
+             pub struct ListingEntry {
+                 pub path: String,
+                 pub name: String,
+                 pub entry_type: u8,
+                 pub hash: Vec<u8>,
+                 pub total_size: u64,
+                 pub created_at: i64,
+                 pub updated_at: i64,
+                 pub content_type: Option<String>,
+             }
+             ```
+
+          2. list_directory_recursive function:
+             ```rust
+             pub fn list_directory_recursive(
+                 engine: &StorageEngine,
+                 base_path: &str,
+                 depth: i32,
+                 glob_pattern: Option<&str>,
+             ) -> EngineResult<Vec<ListingEntry>>
+             ```
+
+             Algorithm:
+             - Normalize base_path
+             - Resolve directory via directory_path_hash + engine.get_entry
+             - If not found: Err(EngineError::NotFound(...))
+             - Parse children (flat or btree format)
+             - For each child:
+               - If FileRecord: build full path, check glob match against name if pattern present,
+                 add ListingEntry to results if matches
+               - If DirectoryIndex and depth != 0: recurse with depth-1 (or -1 for unlimited)
+               - Skip other entry types
+             - Return flat vec
+
+             Internal recursive helper:
+             ```rust
+             fn walk_directory_recursive(
+                 engine: &StorageEngine,
+                 dir_hash: &[u8],
+                 current_path: &str,
+                 remaining_depth: i32,
+                 glob_pattern: Option<&glob_match::Pattern>, // or however the crate works
+                 hash_length: usize,
+                 results: &mut Vec<ListingEntry>,
+             ) -> EngineResult<()>
+             ```
+
+             Depth logic:
+             - remaining_depth == 0: process files at this level only, don't recurse into subdirs
+             - remaining_depth > 0: process files, recurse with remaining_depth - 1
+             - remaining_depth == -1: process files, recurse with -1 (unlimited)
+
+             Glob matching:
+             - Use glob_match::glob_match(pattern, filename) or equivalent API
+             - Only match against the file name (child.name), not the full path
+             - If no glob pattern: include all files
+
+          Imports needed:
+            - crate::engine::directory_entry::deserialize_child_entries
+            - crate::engine::directory_ops::directory_path_hash
+            - crate::engine::entry_type::EntryType
+            - crate::engine::errors::{EngineError, EngineResult}
+            - crate::engine::path_utils::normalize_path
+            - crate::engine::storage_engine::StorageEngine
+            - glob_match (or whichever crate)
+
+      - name: Register module in engine/mod.rs
+        file: aeordb-lib/src/engine/mod.rs
+        details: |
+          Add `pub mod directory_listing;` to module declarations.
+          Add `pub use directory_listing::{ListingEntry, list_directory_recursive};` to re-exports.
+
+      - name: Write unit tests
+        file: aeordb-lib/spec/engine/directory_listing_spec.rs
+        details: |
+          TDD: write tests first, then implement.
+
+          Test setup pattern (same as versioning_spec):
+          ```rust
+          fn create_engine(dir: &tempfile::TempDir) -> StorageEngine { ... }
+          ```
+
+          Store files using DirectoryOps::store_file, then call list_directory_recursive directly.
+
+          Tests:
+          - test_list_immediate_children: store /a.txt, /b.txt, /sub/c.txt. depth=0 at "/" -> returns a.txt, b.txt only
+          - test_list_depth_1: same setup. depth=1 at "/" -> returns a.txt, b.txt, sub/c.txt
+          - test_list_unlimited_depth: store files at /a.txt, /d1/b.txt, /d1/d2/c.txt, /d1/d2/d3/d.txt. depth=-1 -> returns all 4
+          - test_list_glob_filter: store /a.txt, /b.psd, /c.txt. depth=0, glob="*.txt" -> returns a.txt, c.txt
+          - test_list_glob_with_depth: store /a.txt, /sub/b.txt, /sub/c.psd. depth=-1, glob="*.txt" -> a.txt, sub/b.txt
+          - test_list_empty_directory: create empty dir, list -> empty vec
+          - test_list_nonexistent_directory: list /nonexistent -> EngineError::NotFound
+          - test_list_no_glob_matches: depth=0, glob="*.xyz" -> empty vec
+          - test_list_depth_boundary: files at depths 0,1,2,3. depth=2 -> returns depths 0,1,2 only
+          - test_list_files_only: depth=-1 -> no directory entries in output (all entry_type == FileRecord)
+          - test_list_includes_content_hash: every ListingEntry has non-empty hash
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+        details: |
+          Add:
+          ```toml
+          [[test]]
+          name = "directory_listing_spec"
+          path = "spec/engine/directory_listing_spec.rs"
+          ```
+
+    commit_message: "Add directory_listing module: recursive listing with depth control and glob filtering"
+
+  - name: "Phase 2: Server — enhance engine_get with depth, glob, hash"
+    description: >
+      Modify engine_get handler to use the new listing module when depth/glob params
+      are present. Always include hash and path in directory listing responses.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Rename VersionQuery and add fields
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          Rename VersionQuery to EngineGetQuery. Add depth and glob fields:
+
+          ```rust
+          #[derive(Deserialize, Default)]
+          pub struct EngineGetQuery {
+              pub snapshot: Option<String>,
+              pub version: Option<String>,
+              pub depth: Option<i32>,
+              pub glob: Option<String>,
+          }
+          ```
+
+          Update all references: the handler signature uses AxumQuery<EngineGetQuery>,
+          and the engine_get_at_version helper takes &EngineGetQuery.
+
+      - name: Modify directory listing branch in engine_get
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          In the directory listing branch (after "Try as directory"):
+
+          1. If depth or glob is present:
+             - Call list_directory_recursive(engine, path, depth.unwrap_or(0), glob.as_deref())
+             - Map results to JSON array with: path, name, entry_type, hash (hex), total_size,
+               created_at, updated_at, content_type
+
+          2. If no depth/glob (default case):
+             - Use existing list_directory call
+             - BUT add "hash" (hex::encode(&child.hash)) and "path" (full path) to the JSON output
+             - For depth=0 default, build full path as: if base_path is "/" then "/{name}" else "{base_path}/{name}"
+
+          Import list_directory_recursive from crate::engine::directory_listing.
+
+      - name: Write HTTP integration tests
+        file: aeordb-lib/spec/http/directory_listing_http_spec.rs
+        details: |
+          Follow existing HTTP test patterns from engine_http_spec.rs.
+
+          Use direct engine access for setup (store files via DirectoryOps).
+
+          Tests:
+          - test_default_listing_includes_hash_and_path: GET /engine/dir/ -> each entry has "hash" and "path"
+          - test_recursive_unlimited: GET /engine/dir/?depth=-1 -> flat list of all nested files
+          - test_recursive_depth_1: GET /engine/dir/?depth=1 -> files at depth 0 and 1 only
+          - test_glob_filter: GET /engine/dir/?glob=*.txt -> only .txt files
+          - test_glob_with_depth: GET /engine/dir/?depth=-1&glob=*.psd -> recursive psd filter
+          - test_directories_excluded_recursive: depth=-1 -> no directory entries in output
+          - test_nonexistent_directory_404: GET /engine/missing/?depth=-1 -> 404
+          - test_file_get_unaffected: GET /engine/file.txt (a file, not dir) still returns file content
+          - test_version_query_still_works: GET /engine/file.txt?snapshot=snap still returns versioned content
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+        details: |
+          Add:
+          ```toml
+          [[test]]
+          name = "directory_listing_http_spec"
+          path = "spec/http/directory_listing_http_spec.rs"
+          ```
+
+    commit_message: "Enhance directory listing: add depth, glob params and content hashes to GET /engine/{path}"
+
+  - name: "Phase 3: Verification & Documentation"
+    description: >
+      Run full test suite, E2E curl verification, update docs.
+    depends_on: ["Phase 2"]
+    tasks:
+      - name: Run full test suite
+        details: |
+          Run `cargo test` across the workspace.
+          All existing tests must pass (regression check).
+          All new tests must pass.
+
+      - name: End-to-end curl verification
+        details: |
+          Against a running instance:
+          1. Store files in nested directories
+          2. GET /engine/root/ -> verify hash and path fields present
+          3. GET /engine/root/?depth=-1 -> verify flat recursive list
+          4. GET /engine/root/?depth=1 -> verify depth boundary
+          5. GET /engine/root/?depth=-1&glob=*.txt -> verify glob filter
+          6. Verify normal file GET still works
+          7. Verify ?snapshot= still works on files
+
+      - name: Update API documentation
+        details: |
+          Update docs/src/api/files.md to document:
+          - New query params: depth, glob
+          - New response fields: hash, path
+          - Recursive listing behavior
+          - Examples
+
+    commit_message: "Document enhanced directory listing with depth, glob, and content hashes"
