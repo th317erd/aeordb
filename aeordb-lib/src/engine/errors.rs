@@ -17,6 +17,8 @@ pub enum EngineError {
   UnsafeQueryField(String),
   PatchDatabase(String),
   InvalidInput(String),
+  CyclicSymlink(String),
+  SymlinkDepthExceeded(String),
 }
 
 impl fmt::Display for EngineError {
@@ -47,6 +49,8 @@ impl fmt::Display for EngineError {
       EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
       EngineError::PatchDatabase(msg) => write!(formatter, "Patch database: {}", msg),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
+      EngineError::CyclicSymlink(message) => write!(formatter, "Cyclic symlink: {}", message),
+      EngineError::SymlinkDepthExceeded(message) => write!(formatter, "Symlink depth exceeded: {}", message),
     }
   }
 }

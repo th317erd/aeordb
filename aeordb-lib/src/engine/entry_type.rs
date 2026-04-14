@@ -10,6 +10,7 @@ pub enum EntryType {
   Snapshot       = 0x05,
   Void           = 0x06,
   Fork           = 0x07,
+  Symlink        = 0x08,
 }
 
 impl EntryType {
@@ -22,6 +23,7 @@ impl EntryType {
       0x05 => Ok(EntryType::Snapshot),
       0x06 => Ok(EntryType::Void),
       0x07 => Ok(EntryType::Fork),
+      0x08 => Ok(EntryType::Symlink),
       _    => Err(EngineError::InvalidEntryType(value)),
     }
   }
@@ -34,7 +36,7 @@ impl EntryType {
   pub fn to_kv_type(self) -> u8 {
     use crate::engine::kv_store::{
       KV_TYPE_CHUNK, KV_TYPE_DELETION, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD,
-      KV_TYPE_FORK, KV_TYPE_SNAPSHOT, KV_TYPE_VOID,
+      KV_TYPE_FORK, KV_TYPE_SNAPSHOT, KV_TYPE_SYMLINK, KV_TYPE_VOID,
     };
     match self {
       EntryType::Chunk => KV_TYPE_CHUNK,
@@ -44,6 +46,7 @@ impl EntryType {
       EntryType::Snapshot => KV_TYPE_SNAPSHOT,
       EntryType::Void => KV_TYPE_VOID,
       EntryType::Fork => KV_TYPE_FORK,
+      EntryType::Symlink => KV_TYPE_SYMLINK,
     }
   }
 }

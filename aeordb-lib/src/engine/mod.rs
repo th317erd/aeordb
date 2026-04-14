@@ -45,6 +45,7 @@ pub mod request_context;
 pub mod scalar_converter;
 pub mod source_resolver;
 pub mod storage_engine;
+pub mod symlink_record;
 pub mod system_tables;
 pub mod task_queue;
 pub mod task_worker;
@@ -79,7 +80,7 @@ pub use kv_snapshot::ReadSnapshot;
 pub use kv_store::{
   KVEntry, KVStore,
   KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION,
-  KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD, KV_TYPE_FORK, KV_TYPE_VERSION,
+  KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD, KV_TYPE_FORK, KV_TYPE_VERSION, KV_TYPE_SYMLINK,
   KV_FLAG_PENDING, KV_FLAG_DELETED,
 };
 pub use nvt::{NVTBucket, NormalizedVectorTable};
@@ -98,6 +99,7 @@ pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
 pub use json_parser::parse_json_fields;
 pub use source_resolver::{resolve_source, walk_path};
+pub use symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};

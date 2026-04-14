@@ -13,6 +13,7 @@ pub const KV_TYPE_VOID: u8        = 0x5;
 pub const KV_TYPE_HEAD: u8        = 0x6;
 pub const KV_TYPE_FORK: u8        = 0x7;
 pub const KV_TYPE_VERSION: u8     = 0x8;
+pub const KV_TYPE_SYMLINK: u8     = 0x9;
 
 // Upper 4 bits - flags
 pub const KV_FLAG_PENDING: u8     = 0x10;
