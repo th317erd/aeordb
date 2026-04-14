@@ -468,6 +468,10 @@ path = "spec/http/version_read_http_spec.rs"
 name = "version_file_history_spec"
 path = "spec/http/version_file_history_spec.rs"
 
+[[test]]
+name = "version_file_restore_spec"
+path = "spec/http/version_file_restore_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"

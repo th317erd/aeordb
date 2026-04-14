@@ -284,6 +284,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/version/fork/{name}", delete(engine_routes::fork_abandon))
     // Version: file-level access routes
     .route("/version/file-history/{*path}", get(version_file_routes::file_history))
+    .route("/version/file-restore/{*path}", post(version_file_routes::file_restore))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
