@@ -480,6 +480,10 @@ name = "symlink_record_spec"
 path = "spec/engine/symlink_record_spec.rs"
 
 [[test]]
+name = "symlink_ops_spec"
+path = "spec/engine/symlink_ops_spec.rs"
+
+[[test]]
 name = "directory_listing_spec"
 path = "spec/engine/directory_listing_spec.rs"
 

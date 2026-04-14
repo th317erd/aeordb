@@ -7,6 +7,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::index_store::IndexManager;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
@@ -839,5 +840,128 @@ impl<'a> DirectoryOps<'a> {
     };
 
     self.update_parent_directories(&parent, parent_child)
+  }
+
+  /// Store a symlink at the given path pointing to the target path.
+  /// If a symlink already exists at the path, updates its target (preserving created_at).
+  /// Does NOT validate that the target exists.
+  pub fn store_symlink(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    target: &str,
+  ) -> EngineResult<SymlinkRecord> {
+    let normalized = normalize_path(path);
+    let normalized_target = normalize_path(target);
+    let algo = self.engine.hash_algo();
+
+    // Check if symlink already exists (preserve created_at on update)
+    let symlink_key = symlink_path_hash(&normalized, &algo)?;
+    let existing_created_at = match self.engine.get_entry(&symlink_key)? {
+      Some((_header, _key, value)) => {
+        let existing = SymlinkRecord::deserialize(&value)?;
+        Some(existing.created_at)
+      }
+      None => None,
+    };
+
+    let mut record = SymlinkRecord::new(normalized.clone(), normalized_target);
+
+    // Preserve original created_at on update
+    if let Some(original_created_at) = existing_created_at {
+      record.created_at = original_created_at;
+    }
+
+    let serialized = record.serialize();
+
+    // Content-addressed key (immutable — for versioning via ChildEntry.hash)
+    let content_key = symlink_content_hash(&serialized, &algo)?;
+    self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
+
+    // Path-based key (mutable — for reads/deletion)
+    self.engine.store_entry(EntryType::Symlink, &symlink_key, &serialized)?;
+
+    // Build child entry for parent directory
+    let child = ChildEntry {
+      entry_type: EntryType::Symlink.to_u8(),
+      hash: content_key,
+      total_size: 0,
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      name: file_name(&normalized).unwrap_or("").to_string(),
+      content_type: None,
+    };
+
+    self.update_parent_directories(&normalized, child)?;
+
+    // Emit event
+    let entry_data = EntryEventData {
+      path: normalized,
+      entry_type: "symlink".to_string(),
+      content_type: None,
+      size: 0,
+      hash: hex::encode(&record.target),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
+
+    Ok(record)
+  }
+
+  /// Read a SymlinkRecord at the given path, or None if not found.
+  pub fn get_symlink(&self, path: &str) -> EngineResult<Option<SymlinkRecord>> {
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+
+    let symlink_key = symlink_path_hash(&normalized, &algo)?;
+    match self.engine.get_entry(&symlink_key)? {
+      Some((_header, _key, value)) => {
+        let record = SymlinkRecord::deserialize(&value)?;
+        Ok(Some(record))
+      }
+      None => Ok(None),
+    }
+  }
+
+  /// Delete a symlink at the given path.
+  pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+
+    // Verify symlink exists
+    let symlink_key = symlink_path_hash(&normalized, &algo)?;
+    let record = match self.engine.get_entry(&symlink_key)? {
+      Some((_header, _key, value)) => SymlinkRecord::deserialize(&value)?,
+      None => return Err(EngineError::NotFound(normalized)),
+    };
+
+    // Store a DeletionRecord
+    let deletion = DeletionRecord::new(normalized.clone(), None);
+    let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
+    let deletion_value = deletion.serialize();
+    self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+
+    // Mark as deleted in KV store
+    self.engine.mark_entry_deleted(&symlink_key)?;
+
+    // Remove from parent directory
+    self.remove_from_parent_directory(&normalized)?;
+
+    // Emit deletion event
+    let entry_data = EntryEventData {
+      path: normalized,
+      entry_type: "symlink".to_string(),
+      content_type: None,
+      size: 0,
+      hash: hex::encode(&record.target),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
+
+    Ok(())
   }
 }
