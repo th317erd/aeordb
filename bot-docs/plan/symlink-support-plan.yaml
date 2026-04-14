@@ -1,0 +1,438 @@
+title: Soft Symlink Support
+spec: bot-docs/plan/symlink-support.md
+date: 2026-04-14
+
+notes: |
+  AGIS map_territory: 7 new files, 12 modified files. Touches entry_type, kv_store,
+  errors, directory_ops, tree_walker, version_access, gc, backup, directory_listing,
+  engine_routes, and server/mod.rs. Careful phase ordering required — foundation first,
+  then CRUD, then resolution, then HTTP, then ecosystem integration.
+
+  AGIS test_check: Existing catch-all branches (_ => {}) in tree_walker and gc handle
+  unknown entry types safely — symlinks won't crash existing code but would be silently
+  skipped until we add explicit handling. Compiler will flag any exhaustive matches
+  missing the new variant.
+
+  AGIS test_protocol: 6 test categories — serialization, CRUD, resolution, HTTP,
+  ecosystem integration, E2E. Cycle detection and dangling links are the critical
+  error paths. GC mark correctness is a data-safety concern.
+
+  KV_TYPE note: KV_TYPE_VERSION is already 0x8. KV_TYPE_SYMLINK must be 0x9.
+
+phases:
+  - name: "Phase 1: Foundation — EntryType, KV type, errors, SymlinkRecord"
+    description: >
+      Add the Symlink entry type, KV constant, error variants, and SymlinkRecord
+      struct with serialization. This phase creates no symlinks — just the types.
+    tasks:
+      - name: Add Symlink to EntryType
+        file: aeordb-lib/src/engine/entry_type.rs
+        details: |
+          Add `Symlink = 0x08` to the enum.
+          Add `0x08 => Ok(EntryType::Symlink)` to from_u8.
+          Add `EntryType::Symlink => KV_TYPE_SYMLINK` to to_kv_type.
+          Import KV_TYPE_SYMLINK in the to_kv_type match.
+
+      - name: Add KV_TYPE_SYMLINK
+        file: aeordb-lib/src/engine/kv_store.rs
+        details: |
+          Add after KV_TYPE_VERSION:
+          `pub const KV_TYPE_SYMLINK: u8 = 0x9;`
+
+      - name: Add error variants
+        file: aeordb-lib/src/engine/errors.rs
+        details: |
+          Add to EngineError enum:
+          - CyclicSymlink(String)
+          - SymlinkDepthExceeded(String)
+
+          Add Display arms:
+          - CyclicSymlink(msg) => write!(formatter, "Cyclic symlink: {}", msg)
+          - SymlinkDepthExceeded(msg) => write!(formatter, "Symlink depth exceeded: {}", msg)
+
+      - name: Create symlink_record.rs
+        file: aeordb-lib/src/engine/symlink_record.rs
+        details: |
+          New file with SymlinkRecord struct and methods:
+
+          ```rust
+          pub struct SymlinkRecord {
+              pub path: String,
+              pub target: String,
+              pub created_at: i64,
+              pub updated_at: i64,
+          }
+          ```
+
+          Methods:
+          - `new(path, target) -> Self` — sets created_at and updated_at to now (chrono::Utc::now().timestamp_millis())
+          - `serialize() -> Vec<u8>` — binary format:
+            path_length: u16, path: bytes, target_length: u16, target: bytes, created_at: i64 LE, updated_at: i64 LE
+          - `deserialize(data: &[u8]) -> EngineResult<Self>` — reverse of serialize, with bounds checking
+
+          Hash functions (pub, same pattern as directory_ops):
+          - `symlink_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>>`
+            domain prefix: "symlink:{path}"
+          - `symlink_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>>`
+            domain prefix: "symlinkc:{data}"
+
+      - name: Register modules and re-exports
+        file: aeordb-lib/src/engine/mod.rs
+        details: |
+          Add `pub mod symlink_record;`
+          Add re-exports:
+          `pub use symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};`
+          Also re-export KV_TYPE_SYMLINK from kv_store.
+
+      - name: Write SymlinkRecord unit tests
+        file: aeordb-lib/spec/engine/symlink_record_spec.rs
+        details: |
+          Tests:
+          - test_serialize_deserialize_roundtrip: create record, serialize, deserialize, verify all fields match
+          - test_field_preservation: verify path, target, created_at, updated_at survive roundtrip
+          - test_empty_target: target is "" — should serialize/deserialize cleanly (dangling link case)
+          - test_unicode_paths: path and target with unicode characters
+          - test_hash_functions: symlink_path_hash and symlink_content_hash produce non-empty, different results
+
+      - name: Register tests in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+        details: |
+          Add [[test]] entry for symlink_record_spec.
+
+    commit_message: "Add symlink foundation: EntryType::Symlink, KV_TYPE_SYMLINK, SymlinkRecord, error variants"
+
+  - name: "Phase 2: Engine CRUD — store, read, delete symlinks"
+    description: >
+      Add symlink CRUD operations to directory_ops. Store symlinks in the KV store,
+      update parent directories, support deletion. Unit tests.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Add symlink operations to directory_ops.rs
+        file: aeordb-lib/src/engine/directory_ops.rs
+        details: |
+          Add three public methods to DirectoryOps:
+
+          1. store_symlink(ctx, path, target) -> EngineResult<SymlinkRecord>
+             - Normalize path and target
+             - Create SymlinkRecord::new(normalized_path, normalized_target)
+             - Check if symlink already exists at path (update updated_at if so, preserve created_at)
+             - Serialize the record
+             - Store at content-addressed key: symlink_content_hash(&serialized, &algo)
+             - Store at path-based key: symlink_path_hash(&path, &algo)
+             - Build ChildEntry with entry_type: EntryType::Symlink.to_u8(), hash: content key,
+               total_size: 0, content_type: None
+             - Update parent directory (same propagation pattern as store_file)
+             - Emit event if applicable
+             - Return the record
+
+          2. get_symlink(path) -> EngineResult<Option<SymlinkRecord>>
+             - Normalize path
+             - Compute symlink_path_hash
+             - get_entry, deserialize if found
+             - Return None if not found
+
+          3. delete_symlink(ctx, path) -> EngineResult<()>
+             - Normalize path
+             - Verify symlink exists (get_symlink)
+             - Store DeletionRecord
+             - Remove from parent directory
+             - Same propagation pattern as delete_file
+
+          Also: modify the existing `delete_file` method to handle the case where
+          the path is a symlink (or document that delete_symlink must be called instead).
+          Actually, the cleaner approach: the HTTP layer determines what the path is
+          (file vs symlink) and calls the appropriate delete method.
+
+          Imports needed: SymlinkRecord, symlink_path_hash, symlink_content_hash from symlink_record.
+
+      - name: Write symlink CRUD tests
+        file: aeordb-lib/spec/engine/symlink_ops_spec.rs
+        details: |
+          Tests:
+          - test_store_and_read_symlink: store symlink, get_symlink -> correct path, target, timestamps
+          - test_update_symlink_target: store symlink, store again with different target -> updated_at changes, target changes, created_at preserved
+          - test_delete_symlink: store symlink, delete, get_symlink -> None
+          - test_symlink_in_directory_listing: store symlink at /link.txt, list "/" -> ChildEntry with entry_type 0x08
+          - test_store_symlink_to_nonexistent: store symlink pointing to nonexistent path -> succeeds
+          - test_symlink_versioning: store symlink, snapshot, change target, snapshot, read at old snapshot -> old target
+          - test_store_symlink_creates_parent_dirs: store symlink at /a/b/link -> parent dirs created
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add symlink CRUD operations: store, read, delete with directory integration"
+
+  - name: "Phase 3: Resolution — symlink_resolver with cycle detection"
+    description: >
+      New module for resolving symlinks recursively with cycle detection
+      and max depth safety valve.
+    depends_on: ["Phase 2"]
+    tasks:
+      - name: Create symlink_resolver.rs
+        file: aeordb-lib/src/engine/symlink_resolver.rs
+        details: |
+          ```rust
+          use std::collections::HashSet;
+          use crate::engine::directory_ops::DirectoryOps;
+          use crate::engine::errors::{EngineError, EngineResult};
+          use crate::engine::file_record::FileRecord;
+          use crate::engine::storage_engine::StorageEngine;
+
+          pub const MAX_SYMLINK_DEPTH: usize = 32;
+
+          pub enum ResolvedTarget {
+              File(FileRecord),
+              Directory(String),  // the resolved directory path
+          }
+
+          pub fn resolve_symlink(
+              engine: &StorageEngine,
+              path: &str,
+          ) -> EngineResult<ResolvedTarget>
+          ```
+
+          Algorithm:
+          1. Create HashSet<String> visited, set depth = 0
+          2. let current_path = normalize(path)
+          3. Loop:
+             a. If current_path is in visited -> Err(CyclicSymlink with chain description)
+             b. If depth >= MAX_SYMLINK_DEPTH -> Err(SymlinkDepthExceeded)
+             c. Add current_path to visited
+             d. let ops = DirectoryOps::new(engine)
+             e. Check if it's a symlink: ops.get_symlink(&current_path)
+                - If Some(record): current_path = normalize(record.target), depth += 1, continue loop
+             f. Check if it's a file: ops.get_metadata(&current_path)
+                - If Some(file_record): return ResolvedTarget::File(file_record)
+             g. Check if it's a directory: ops.list_directory(&current_path)
+                - If Ok(_): return ResolvedTarget::Directory(current_path)
+             h. None found: Err(NotFound("Dangling symlink: target '{}' does not exist"))
+
+          For the cycle error message, build a chain string: "/a → /b → /c → /a"
+
+      - name: Register module in mod.rs
+        file: aeordb-lib/src/engine/mod.rs
+        details: |
+          Add `pub mod symlink_resolver;`
+          Add re-exports: `pub use symlink_resolver::{resolve_symlink, ResolvedTarget, MAX_SYMLINK_DEPTH};`
+
+      - name: Write resolver tests
+        file: aeordb-lib/spec/engine/symlink_resolver_spec.rs
+        details: |
+          Tests:
+          - test_resolve_symlink_to_file: symlink → file -> ResolvedTarget::File
+          - test_resolve_symlink_to_directory: symlink → directory -> ResolvedTarget::Directory
+          - test_resolve_chain_2: symlink → symlink → file
+          - test_resolve_chain_3: symlink → symlink → symlink → file
+          - test_resolve_dangling: symlink → nonexistent -> NotFound
+          - test_resolve_cycle_2: A → B → A -> CyclicSymlink error
+          - test_resolve_self_reference: A → A -> CyclicSymlink error
+          - test_resolve_max_depth: create chain of MAX_SYMLINK_DEPTH + 1 symlinks -> SymlinkDepthExceeded
+          - test_resolve_dangling_then_target_created: create dangling symlink, then create target file, resolve -> succeeds
+          - test_resolve_target_becomes_symlink: create symlink → file, then replace file path with another symlink → second target -> resolves through chain
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add symlink resolver: recursive resolution with cycle detection and max depth"
+
+  - name: "Phase 4: HTTP — create endpoint, transparent reads, nofollow, HEAD"
+    description: >
+      Server layer integration. New POST /engine-symlink/{*path} endpoint.
+      Modify engine_get, engine_head, engine_delete for symlink awareness.
+    depends_on: ["Phase 3"]
+    tasks:
+      - name: Create symlink_routes.rs
+        file: aeordb-lib/src/server/symlink_routes.rs
+        details: |
+          POST /engine-symlink/{*path} handler.
+
+          Request body: { "target": "/path/to/target" }
+          - Validate target field is present and non-empty -> 400 if missing
+          - Call directory_ops.store_symlink(ctx, path, target)
+          - Return 201 with SymlinkRecord as JSON
+
+      - name: Register route in server/mod.rs
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Add `pub mod symlink_routes;`
+          Add route in protected_routes:
+          `.route("/engine-symlink/{*path}", post(symlink_routes::create_symlink))`
+
+      - name: Modify engine_get for symlink resolution
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          Add `nofollow: Option<bool>` field to EngineGetQuery.
+
+          In engine_get, BEFORE the existing "try as file" logic, add a symlink check:
+
+          1. let ops = DirectoryOps::new(&state.engine);
+          2. if let Some(symlink_record) = ops.get_symlink(&path)?
+             a. If nofollow is Some(true):
+                Return JSON with symlink metadata (path, target, entry_type: 8, timestamps)
+             b. Else (follow the symlink):
+                Call resolve_symlink(&state.engine, &path)
+                Match on ResolvedTarget:
+                - File(record): stream the file content (same as existing file branch)
+                - Directory(dir_path): list the directory (same as existing dir branch)
+                Handle errors:
+                - NotFound -> 404 with "Dangling symlink" message
+                - CyclicSymlink -> 400
+                - SymlinkDepthExceeded -> 400
+
+          Also modify engine_head:
+          - If symlink: return X-Entry-Type: symlink and X-Symlink-Target headers
+
+          Also modify engine_delete (or the delete handler):
+          - Check if path is a symlink before checking file
+          - If symlink: call ops.delete_symlink
+
+          Modify directory listing serialization:
+          - For ChildEntry with entry_type Symlink (0x08), look up the SymlinkRecord
+            and include "target" field in the JSON output
+
+      - name: Write HTTP integration tests
+        file: aeordb-lib/spec/http/symlink_http_spec.rs
+        details: |
+          Tests:
+          - test_create_symlink: POST /engine-symlink/link.txt -> 201
+          - test_create_symlink_update: POST again with different target -> updates
+          - test_create_symlink_missing_target: POST with {} -> 400
+          - test_get_symlink_transparent: create file, create symlink to file, GET symlink -> file content
+          - test_get_symlink_nofollow: GET symlink?nofollow=true -> JSON metadata with target
+          - test_head_symlink: HEAD symlink -> X-Entry-Type and X-Symlink-Target headers
+          - test_delete_symlink: DELETE symlink, target file still exists
+          - test_get_dangling_symlink: create symlink to nonexistent -> 404 with dangling message
+          - test_get_symlink_to_directory: symlink pointing to directory -> returns dir listing
+          - test_get_symlink_chain: link1 → link2 → file -> returns file content
+          - test_get_cyclic_symlink: A → B → A -> error response
+          - test_symlink_in_listing: directory listing includes symlink with entry_type 8 and target
+          - test_symlink_versioning: snapshot, change target, restore, verify old target
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add symlink HTTP support: create endpoint, transparent resolution, nofollow, HEAD"
+
+  - name: "Phase 5: Ecosystem integration — tree walker, GC, backup, directory listing"
+    description: >
+      Update all systems that walk/process the entry tree to explicitly handle symlinks.
+    depends_on: ["Phase 4"]
+    tasks:
+      - name: Update tree_walker.rs
+        file: aeordb-lib/src/engine/tree_walker.rs
+        details: |
+          Add `symlinks: HashMap<String, (Vec<u8>, SymlinkRecord)>` field to VersionTree.
+          Initialize in VersionTree::new().
+
+          In walk_directory, add EntryType::Symlink case:
+          - Load the entry: engine.get_entry(&child.hash)
+          - Deserialize: SymlinkRecord::deserialize(&value)
+          - Store in tree.symlinks: (child_path, (child.hash, record))
+
+          In diff_trees:
+          - Add symlinks_added, symlinks_modified, symlinks_deleted to TreeDiff
+          - Compare symlinks between base and target trees (compare target paths for modification)
+
+      - name: Update gc.rs
+        file: aeordb-lib/src/engine/gc.rs
+        details: |
+          The existing catch-all `_ => { live.insert(child.hash.clone()); }` already
+          marks symlink hashes as live. Add an explicit EntryType::Symlink arm for clarity:
+
+          ```rust
+          EntryType::Symlink => {
+              live.insert(child.hash.clone());
+              // Symlinks are leaf entries — no child references to mark
+          }
+          ```
+
+          Do this in both walk_directory_tree and mark_entry_recursive.
+
+      - name: Update backup.rs
+        file: aeordb-lib/src/engine/backup.rs
+        details: |
+          In export_version: include tree.symlinks in the export.
+          In import_backup: restore symlink entries from the imported tree.
+          Pattern: same as how files are handled — write the SymlinkRecord entry,
+          then include in directory reconstruction.
+
+      - name: Update directory_listing.rs
+        file: aeordb-lib/src/engine/directory_listing.rs
+        details: |
+          Add `target: Option<String>` field to ListingEntry.
+          For non-symlink entries: target = None.
+          For symlink entries: load SymlinkRecord and set target = Some(record.target).
+
+          In walk_listing, add EntryType::Symlink case:
+          - Load SymlinkRecord from engine
+          - Apply glob filter against child.name if pattern present
+          - Add ListingEntry with entry_type, hash, target field
+
+      - name: Update version_access.rs
+        file: aeordb-lib/src/engine/version_access.rs
+        details: |
+          In resolve_file_at_version, when the final segment matches:
+          - If EntryType::FileRecord: existing behavior (return FileRecord)
+          - If EntryType::Symlink: load SymlinkRecord, return it
+            Need to decide return type. Options:
+            a) Return an enum (FileOrSymlink)
+            b) Keep returning (Vec<u8>, FileRecord) and handle symlinks in the caller
+
+            Recommendation: For now, if the final segment is a symlink, return
+            Err(EngineError::NotFound("Path is a symlink, not a file")) — the caller
+            (version history, version read) can handle this appropriately. Symlinks
+            at historical versions are handled by the tree_walker (VersionTree.symlinks).
+
+      - name: Write ecosystem integration tests
+        file: aeordb-lib/spec/engine/symlink_ecosystem_spec.rs
+        details: |
+          Tests:
+          - test_gc_preserves_symlinks: create symlink, run gc, symlink still readable
+          - test_tree_walker_includes_symlinks: store symlink, walk_version_tree -> symlinks map contains it
+          - test_tree_diff_symlink_added: snapshot without symlink, add symlink, diff -> shows added
+          - test_tree_diff_symlink_modified: snapshot with symlink target A, change to B, diff -> shows modified
+          - test_backup_export_import_symlinks: export version with symlinks, import to new engine, symlinks preserved
+          - test_listing_includes_symlink_target: directory listing entry for symlink has target field
+
+      - name: Register test in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Integrate symlinks into tree walker, GC, backup, directory listing, and version access"
+
+  - name: "Phase 6: E2E Verification"
+    description: >
+      Build release binary, start a real server, and test all symlink operations
+      with curl. This is the REAL WORLD test.
+    depends_on: ["Phase 5"]
+    tasks:
+      - name: Run full test suite
+        details: |
+          `cargo test` — all tests must pass, zero regressions.
+
+      - name: E2E curl verification
+        details: |
+          Against a running instance (--auth false --port 9876):
+
+          1. Store file: PUT /engine/assets/logo.psd
+          2. Create symlink: POST /engine-symlink/latest-logo {"target": "/assets/logo.psd"}
+          3. Verify transparent read: GET /engine/latest-logo -> logo content
+          4. Verify nofollow: GET /engine/latest-logo?nofollow=true -> symlink JSON
+          5. Verify HEAD: HEAD /engine/latest-logo -> X-Symlink-Target header
+          6. Create chain: POST /engine-symlink/alias {"target": "/latest-logo"}
+          7. Verify chain resolution: GET /engine/alias -> logo content
+          8. Create cycle: POST /engine-symlink/loop-a {"target": "/loop-b"}
+                          POST /engine-symlink/loop-b {"target": "/loop-a"}
+          9. Verify cycle detection: GET /engine/loop-a -> error
+          10. Snapshot: POST /version/snapshot {"name": "with-symlink"}
+          11. Change target: POST /engine-symlink/latest-logo {"target": "/assets/other.psd"}
+          12. Verify versioned read: GET /engine/latest-logo?snapshot=with-symlink&nofollow=true -> old target
+          13. Delete symlink: DELETE /engine/latest-logo
+          14. Verify target unaffected: GET /engine/assets/logo.psd -> still works
+          15. Verify listing: GET /engine/?depth=-1 -> symlinks show entry_type 8 + target
+
+      - name: Update DETAILS.md
+        file: .claude/DETAILS.md
+        details: |
+          Add symlink feature to recently completed, key files, update test count.
+
+    commit_message: "Verify symlink support end-to-end"
