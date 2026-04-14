@@ -1,0 +1,303 @@
+title: File-Level Version Access
+spec: bot-docs/plan/file-level-version-access.md
+date: 2026-04-13
+
+phases:
+  - name: "Phase 1: Engine — resolve_file_at_version"
+    description: >
+      New module version_access.rs with the core targeted path walk function.
+      This is the foundation everything else builds on.
+    tasks:
+      - name: Create version_access.rs module
+        file: aeordb-lib/src/engine/version_access.rs
+        details: |
+          New file with two public functions:
+
+          1. resolve_file_at_version(engine, root_hash, path) -> EngineResult<(Vec<u8>, FileRecord)>
+             - Split path into segments via path_utils::normalize_path, then split on '/'
+             - Starting from root_hash, load directory entry via engine.get_entry()
+             - For each segment except the last:
+               - Parse children: check is_btree_format() first, then btree_list_from_node() or deserialize_child_entries()
+               - Find child matching segment name with EntryType::DirectoryIndex
+               - If not found: Err(EngineError::NotFound("Directory segment '{}' not found at version"))
+               - Continue with child.hash
+             - For the final segment:
+               - Find child matching segment name with EntryType::FileRecord
+               - Load via engine.get_entry(&child.hash)
+               - Deserialize with FileRecord::deserialize(&value, hash_length)
+               - Return (child.hash, file_record)
+             - If final segment not found: Err(EngineError::NotFound("File '{}' not found at version"))
+
+          2. read_file_at_version(engine, root_hash, path) -> EngineResult<Vec<u8>>
+             - Call resolve_file_at_version to get FileRecord
+             - Use EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, engine)
+             - Call .collect_to_vec() and return
+             - This handles decompression automatically (EngineFileStream already does it)
+
+          Imports needed:
+            - crate::engine::directory_entry::deserialize_child_entries
+            - crate::engine::entry_type::EntryType
+            - crate::engine::errors::{EngineError, EngineResult}
+            - crate::engine::file_record::FileRecord
+            - crate::engine::storage_engine::StorageEngine
+            - crate::engine::directory_ops::EngineFileStream
+            - crate::engine::path_utils::normalize_path
+
+      - name: Register module in engine/mod.rs
+        file: aeordb-lib/src/engine/mod.rs
+        details: |
+          Add `pub mod version_access;` to the module declarations.
+          Add `pub use version_access::{resolve_file_at_version, read_file_at_version};` to the re-exports.
+
+      - name: Write unit tests for version_access
+        file: aeordb-lib/tests/version_access_spec.rs
+        details: |
+          TDD: Write tests FIRST, then implement.
+
+          Test setup pattern: create a StorageEngine, store some files via DirectoryOps,
+          create a snapshot, modify/delete files, create another snapshot. Then test
+          resolve_file_at_version against each snapshot's root_hash.
+
+          Tests:
+          - resolve_file_at_root_level: store /readme.txt, snapshot, resolve at snapshot -> correct content
+          - resolve_file_nested: store /a/b/c/file.txt, snapshot, resolve -> correct content
+          - resolve_file_not_found: resolve /nonexistent.txt at snapshot -> EngineError::NotFound
+          - resolve_directory_segment_missing: resolve /a/b/missing/file.txt -> EngineError::NotFound
+          - resolve_file_modified_between_snapshots: store file, snapshot1, modify file, snapshot2,
+            resolve at snapshot1 returns old content, resolve at snapshot2 returns new content
+          - resolve_file_deleted_between_snapshots: store file, snapshot1, delete file, snapshot2,
+            resolve at snapshot1 succeeds, resolve at snapshot2 -> NotFound
+          - read_file_at_version_content: verify read_file_at_version returns actual file bytes
+          - read_file_at_version_compressed: store compressed file, snapshot, read at version -> decompressed content
+          - resolve_empty_path: resolve "/" or "" -> appropriate error
+          - resolve_file_in_btree_directory: create >256 files in one dir (triggers btree conversion),
+            snapshot, resolve a specific file -> correct content
+
+    commit_message: "Add version_access module: resolve and read files at historical versions"
+
+  - name: "Phase 2: HTTP — Read file at version"
+    description: >
+      Modify existing GET /engine/{*path} handler to accept snapshot/version query params.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Add query param support to engine_get handler
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          Modify the engine_get handler signature to accept optional query params:
+
+          Add a query params struct:
+            #[derive(Deserialize)]
+            pub struct VersionQuery {
+              pub snapshot: Option<String>,
+              pub version: Option<String>,
+            }
+
+          Modify engine_get to accept Query<VersionQuery>.
+
+          Logic:
+          - If snapshot or version param is present:
+            1. Resolve root_hash:
+               - If snapshot: use version_manager.resolve_root_hash(Some(&snapshot))
+               - If version: hex::decode the hash string
+               - If both provided: snapshot takes precedence
+            2. Call resolve_file_at_version(engine, root_hash, path)
+            3. Build response from historical FileRecord (content_type, chunk streaming)
+            4. Use EngineFileStream::from_chunk_hashes for streaming response
+          - If no version params: existing behavior unchanged
+
+          Need access to VersionManager in this handler — check if AppState already
+          includes it or if it needs to be added. (VersionManager is constructed from
+          StorageEngine, so we can create it inline if needed.)
+
+      - name: Write HTTP integration tests for versioned reads
+        file: aeordb-lib/tests/version_read_http_spec.rs
+        details: |
+          TDD: Write tests FIRST.
+
+          Test setup: spin up test server, store files, create snapshots, modify files.
+
+          Tests:
+          - get_file_at_snapshot: PUT file, snapshot, modify file -> GET with ?snapshot= returns old content
+          - get_file_at_version_hash: same but using ?version={hex_hash}
+          - get_file_snapshot_not_found: ?snapshot=nonexistent -> 404
+          - get_file_not_at_version: file didn't exist at that snapshot -> 404
+          - get_file_snapshot_precedence: both ?snapshot and ?version provided -> snapshot wins
+          - get_file_invalid_version_hash: ?version=notahexstring -> 400
+          - get_file_no_version_params: normal GET still works (regression test)
+          - get_file_at_version_content_type: verify Content-Type header matches historical file's type
+          - get_file_at_version_compressed: compressed file returns decompressed content
+
+    commit_message: "Add versioned file reads: GET /engine/{path}?snapshot={name}"
+
+  - name: "Phase 3: HTTP — File history endpoint"
+    description: >
+      New GET /version/file/{*path}/history endpoint.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Create version_file_routes.rs
+        file: aeordb-lib/src/server/version_file_routes.rs
+        details: |
+          New route file with the file_history handler:
+
+          pub async fn file_history(
+            State(state): State<AppState>,
+            Extension(claims): Extension<TokenClaims>,
+            Path(path): Path<String>,
+          ) -> Response
+
+          Algorithm:
+          1. Check read permission on path (use existing permission checking pattern from engine_routes)
+          2. Create VersionManager from &state.engine
+          3. Call version_manager.list_snapshots() -> Vec<SnapshotInfo>
+          4. Sort by created_at ascending (oldest first) for comparison, then reverse for output
+          5. For each snapshot, call resolve_file_at_version(engine, root_hash, path)
+             - If Ok: record snapshot name, timestamp, file size (from FileRecord.total_size or
+               sum of chunk sizes), content_type, content_hash (hex of file_hash)
+             - If Err(NotFound): record as absent
+          6. Walk the results to compute change_type by comparing content_hash to previous:
+             - Previous absent, current present -> "added"
+             - Previous present, current present, different hash -> "modified"
+             - Previous present, current present, same hash -> "unchanged"
+             - Previous present, current absent -> "deleted"
+             - Previous absent, current absent -> omit
+          7. Return JSON response with path and history array (newest first)
+
+      - name: Register route in server/mod.rs
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Add: mod version_file_routes;
+          Add route: .route("/version/file/{*path}/history", get(version_file_routes::file_history))
+          Place it near the existing /version/ routes.
+
+      - name: Write HTTP integration tests for file history
+        file: aeordb-lib/tests/version_file_history_spec.rs
+        details: |
+          TDD: Write tests FIRST.
+
+          Tests:
+          - history_file_added: create file, snapshot -> history shows "added"
+          - history_file_modified: create file, snapshot, modify, snapshot -> shows "added" then "modified"
+          - history_file_unchanged: create file, snapshot, don't touch it, snapshot -> shows "added" then "unchanged"
+          - history_file_deleted: create file, snapshot, delete, snapshot -> shows "added" then "deleted"
+          - history_full_lifecycle: added -> modified -> unchanged -> deleted across 4 snapshots
+          - history_ordering: newest first
+          - history_never_existed: query history for path that never existed -> 200 with empty array
+          - history_includes_metadata: verify each entry has snapshot, timestamp, size, content_type, content_hash, change_type
+          - history_no_snapshots: no snapshots exist at all -> 200 with empty array
+
+    commit_message: "Add file history endpoint: GET /version/file/{path}/history"
+
+  - name: "Phase 4: HTTP — Restore file from version"
+    description: >
+      New POST /version/file/{*path}/restore endpoint with auto-snapshot safety.
+    depends_on: ["Phase 1", "Phase 2"]
+    tasks:
+      - name: Add file_restore handler to version_file_routes.rs
+        file: aeordb-lib/src/server/version_file_routes.rs
+        details: |
+          Add to the existing version_file_routes.rs:
+
+          #[derive(Deserialize)]
+          pub struct RestoreRequest {
+            pub snapshot: Option<String>,
+            pub version: Option<String>,
+          }
+
+          pub async fn file_restore(
+            State(state): State<AppState>,
+            Extension(claims): Extension<TokenClaims>,
+            Path(path): Path<String>,
+            Json(payload): Json<RestoreRequest>,
+          ) -> Response
+
+          Algorithm:
+          1. Check write permission on path AND snapshot permission
+             - If either missing: 403 with clear error message
+          2. Resolve root_hash from payload.snapshot or payload.version
+             - snapshot takes precedence if both provided
+             - If neither provided: 400
+          3. Call resolve_file_at_version to verify the file exists at that version
+             - If not found: 404
+          4. Create auto-snapshot:
+             - Name: "pre-restore-{ISO8601}" using chrono::Utc::now()
+             - Format timestamp: %Y-%m-%dT%H-%M-%SZ (hyphens instead of colons for snapshot name safety)
+             - If name collision (snapshot exists): append "-2", "-3", etc. (loop up to 10 attempts)
+             - Call version_manager.create_snapshot(ctx, name, metadata)
+               - metadata: { "reason": "auto-snapshot before file restore", "restored_path": path }
+          5. Read historical file content: read_file_at_version(engine, root_hash, path)
+          6. Write to HEAD: directory_ops.store_file(ctx, path, &content, content_type)
+             - content_type from the historical FileRecord
+          7. Return JSON:
+             {
+               "restored": true,
+               "path": "/assets/logo.psd",
+               "from_snapshot": "before-client-review",  // or "from_version" if hash was used
+               "auto_snapshot": "pre-restore-2026-04-13T17-30-00Z",
+               "size": 3210240
+             }
+
+      - name: Register restore route in server/mod.rs
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Add route: .route("/version/file/{*path}/restore", post(version_file_routes::file_restore))
+          Place it next to the history route.
+
+      - name: Write HTTP integration tests for file restore
+        file: aeordb-lib/tests/version_file_restore_spec.rs
+        details: |
+          TDD: Write tests FIRST.
+
+          Tests:
+          - restore_basic: store file, snapshot, modify file, restore from snapshot -> file content matches original
+          - restore_creates_auto_snapshot: after restore, a "pre-restore-*" snapshot exists
+          - restore_auto_snapshot_content: the auto-snapshot captures state BEFORE the restore (can read the modified version from it)
+          - restore_from_version_hash: restore using version hex hash instead of snapshot name
+          - restore_snapshot_precedence: both snapshot and version in body -> snapshot wins
+          - restore_file_not_at_version: file didn't exist at snapshot -> 404
+          - restore_snapshot_not_found: nonexistent snapshot -> 404
+          - restore_no_write_permission: user without write perm -> 403
+          - restore_no_snapshot_permission: user without snapshot perm -> 403 (even with write perm)
+          - restore_missing_both_params: neither snapshot nor version in body -> 400
+          - restore_auto_snapshot_name_collision: simulate same-second restore, verify counter appended
+          - restore_response_shape: verify all expected fields in response JSON
+          - restore_preserves_content_type: restored file has same content-type as historical version
+
+    commit_message: "Add file restore endpoint: POST /version/file/{path}/restore with auto-snapshot"
+
+  - name: "Phase 5: Documentation & Final Verification"
+    description: >
+      Update mdBook docs, run full test suite, verify end-to-end.
+    depends_on: ["Phase 2", "Phase 3", "Phase 4"]
+    tasks:
+      - name: Update API documentation
+        details: |
+          Update docs/src/api/versioning.md to document:
+          - GET /engine/{path}?snapshot={name} and ?version={hash}
+          - GET /version/file/{path}/history
+          - POST /version/file/{path}/restore
+          Include request/response examples for each.
+
+      - name: Update API files documentation
+        details: |
+          Update docs/src/api/files.md to mention the snapshot/version query params
+          on the GET endpoint.
+
+      - name: Run full test suite
+        details: |
+          Run `cargo test` across the entire workspace.
+          All existing tests must still pass (regression).
+          All new tests must pass.
+
+      - name: End-to-end manual verification
+        details: |
+          Using curl against a running instance:
+          1. Store a file, create snapshot
+          2. Modify the file, create another snapshot
+          3. GET the file with ?snapshot= for both snapshots -> verify different content
+          4. GET /version/file/{path}/history -> verify correct change_types
+          5. POST /version/file/{path}/restore from first snapshot
+          6. Verify file content matches first version
+          7. Verify auto-snapshot was created
+          8. Verify the auto-snapshot contains the modified version (safety net works)
+
+    commit_message: "Document file-level version access endpoints"
