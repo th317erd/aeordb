@@ -58,6 +58,9 @@ openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 # Content-type detection
 file-format = "0.29"
 
+# Glob matching
+glob-match = "0.2"
+
 # Task scheduling
 cron = "0.13"
 
@@ -471,6 +474,10 @@ path = "spec/http/version_file_history_spec.rs"
 [[test]]
 name = "version_file_restore_spec"
 path = "spec/http/version_file_restore_spec.rs"
+
+[[test]]
+name = "directory_listing_spec"
+path = "spec/engine/directory_listing_spec.rs"
 
 [[bin]]
 name = "stress-benchmark"

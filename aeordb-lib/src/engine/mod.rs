@@ -8,6 +8,7 @@ pub mod cron_scheduler;
 pub mod disk_kv_store;
 pub mod deletion_record;
 pub mod directory_entry;
+pub mod directory_listing;
 pub mod directory_ops;
 pub mod engine_chunk_storage;
 pub mod engine_event;
@@ -60,6 +61,7 @@ pub use compression::{CompressionAlgorithm, compress, decompress, should_compres
 pub use content_type::detect_content_type;
 pub use deletion_record::DeletionRecord;
 pub use directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries};
+pub use directory_listing::{ListingEntry, list_directory_recursive};
 pub use entry_header::{EntryHeader, ENTRY_MAGIC};
 pub use entry_scanner::{EntryScanner, ScannedEntry};
 pub use entry_type::EntryType;
