@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,192 (all passing)
+## Test Count: 2,235+ (all passing, +43 new version access tests)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -51,6 +51,7 @@
 - **NVT bitmap compositing query engine** — 78 tests
 - **Custom storage engine** — 273 tests
 - **Unified indexing (ScalarConverter + NVT)** — 136 tests
+- **File-level version access** — 43 tests. Read files at historical versions (GET ?snapshot=), file history across snapshots (GET /version/file-history/), restore from version with auto-snapshot safety (POST /version/file-restore/)
 
 ## Key Files
 - `bot-docs/plan/custom-storage-engine.md` — the full engine design
@@ -83,3 +84,6 @@
 - `aeordb-lib/src/engine/kv_snapshot.rs` — ReadSnapshot (lock-free immutable KV read view via ArcSwap)
 - `aeordb-lib/src/engine/batch_commit.rs` — commit_files (atomic multi-file commit from pre-uploaded chunks)
 - `aeordb-lib/src/server/upload_routes.rs` — /upload/config, /upload/check, /upload/chunks/{hash}, /upload/commit
+- `aeordb-lib/src/engine/version_access.rs` — resolve_file_at_version (O(depth) targeted path walk), read_file_at_version
+- `aeordb-lib/src/server/version_file_routes.rs` — file_history + file_restore HTTP handlers
+- `bot-docs/plan/file-level-version-access.md` — design spec for file-level version access
