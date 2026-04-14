@@ -15,6 +15,7 @@ use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, Snapshot
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
+use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::compression::{CompressionAlgorithm, decompress};
 use crate::engine::directory_ops::{EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
@@ -22,11 +23,13 @@ use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 
-/// Query parameters for reading files at historical versions.
+/// Query parameters for GET /engine/*path (version access + directory listing).
 #[derive(Deserialize, Default)]
-pub struct VersionQuery {
+pub struct EngineGetQuery {
   pub snapshot: Option<String>,
   pub version: Option<String>,
+  pub depth: Option<i32>,
+  pub glob: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +107,7 @@ pub async fn engine_get(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
-  AxumQuery(version_query): AxumQuery<VersionQuery>,
+  AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
   // If snapshot or version query param is present, read from historical version
   if version_query.snapshot.is_some() || version_query.version.is_some() {
@@ -165,14 +168,61 @@ pub async fn engine_get(
   }
 
   // Try as directory
+
+  // If depth or glob is specified, use recursive listing
+  if version_query.depth.is_some() || version_query.glob.is_some() {
+    let depth = version_query.depth.unwrap_or(0);
+    let glob = version_query.glob.as_deref();
+    match list_directory_recursive(&state.engine, &path, depth, glob) {
+      Ok(entries) => {
+        let listing: Vec<serde_json::Value> = entries
+          .iter()
+          .map(|entry| {
+            serde_json::json!({
+              "path": entry.path,
+              "name": entry.name,
+              "entry_type": entry.entry_type,
+              "hash": hex::encode(&entry.hash),
+              "total_size": entry.total_size,
+              "created_at": entry.created_at,
+              "updated_at": entry.updated_at,
+              "content_type": entry.content_type,
+            })
+          })
+          .collect();
+        return (StatusCode::OK, Json(listing)).into_response();
+      }
+      Err(EngineError::NotFound(_)) => {
+        return ErrorResponse::new(format!("Not found: {}", path))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+      Err(error) => {
+        tracing::error!("Engine: failed to list directory '{}': {}", path, error);
+        return ErrorResponse::new(format!("Failed to list directory: {}", error))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
+    }
+  }
+
+  // Default listing (no depth/glob params) - use existing list_directory
   match directory_ops.list_directory(&path) {
     Ok(entries) => {
+      let normalized = crate::engine::path_utils::normalize_path(&path);
       let listing: Vec<serde_json::Value> = entries
         .iter()
         .map(|child| {
+          let child_path = if normalized == "/" {
+            format!("/{}", child.name)
+          } else {
+            format!("{}/{}", normalized, child.name)
+          };
           serde_json::json!({
+            "path": child_path,
             "name": child.name,
             "entry_type": child.entry_type,
+            "hash": hex::encode(&child.hash),
             "total_size": child.total_size,
             "created_at": child.created_at,
             "updated_at": child.updated_at,
@@ -200,7 +250,7 @@ pub async fn engine_get(
 async fn engine_get_at_version(
   state: &AppState,
   path: &str,
-  version_query: &VersionQuery,
+  version_query: &EngineGetQuery,
 ) -> Response {
   let vm = VersionManager::new(&state.engine);
 
