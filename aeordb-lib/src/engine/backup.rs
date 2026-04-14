@@ -2,9 +2,10 @@ use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION};
+use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::symlink_record::symlink_path_hash;
 use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
 use crate::engine::entry_type::EntryType;
 use crate::engine::version_manager::VersionManager;
@@ -115,6 +116,20 @@ fn write_tree_to_engine(
         }
     }
 
+    // Write symlink entries at both content-hash and path-hash keys.
+    let symlink_algo = output.hash_algo();
+    for (path, (symlink_hash, _record)) in &tree.symlinks {
+        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+            // Write at content-hash key (for tree walking / snapshots)
+            output.store_entry(EntryType::Symlink, &key, &value)?;
+            // Also write at path-hash key (for get_symlink lookups)
+            let path_key = symlink_path_hash(path, &symlink_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::Symlink, &path_key, &value)?;
+            }
+        }
+    }
+
     Ok((chunks_written, files_written, dirs_written))
 }
 
@@ -219,6 +234,38 @@ pub fn create_patch(
         let deletion_key = file_path_hash(path, &algo)?;
         output.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_data)?;
         files_deleted += 1;
+    }
+
+    // Write added symlinks at both content-hash and path-hash keys
+    let symlink_algo = output.hash_algo();
+    for (path, (symlink_hash, _record)) in &diff.symlinks_added {
+        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+            output.store_entry(EntryType::Symlink, &key, &value)?;
+            let path_key = symlink_path_hash(path, &symlink_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::Symlink, &path_key, &value)?;
+            }
+        }
+    }
+
+    // Write modified symlinks at both content-hash and path-hash keys
+    for (path, (symlink_hash, _record)) in &diff.symlinks_modified {
+        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+            output.store_entry(EntryType::Symlink, &key, &value)?;
+            let path_key = symlink_path_hash(path, &symlink_algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::Symlink, &path_key, &value)?;
+            }
+        }
+    }
+
+    // Write DeletionRecords for deleted symlinks
+    for path in &diff.symlinks_deleted {
+        let algo = source.hash_algo();
+        let deletion_record = DeletionRecord::new(path.clone(), Some("patch-deletion".to_string()));
+        let deletion_data = deletion_record.serialize();
+        let deletion_key = symlink_path_hash(path, &algo)?;
+        output.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_data)?;
     }
 
     // Write changed DirectoryIndexes at both content-hash and path-hash keys
@@ -369,6 +416,13 @@ pub fn import_backup(
     for (hash, value) in &dir_entries {
         target.store_entry(EntryType::DirectoryIndex, hash, value)?;
         dirs_imported += 1;
+        entries_imported += 1;
+    }
+
+    // Import Symlinks
+    let symlink_entries = backup.entries_by_type(KV_TYPE_SYMLINK)?;
+    for (hash, value) in &symlink_entries {
+        target.store_entry(EntryType::Symlink, hash, value)?;
         entries_imported += 1;
     }
 

@@ -10,6 +10,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::KV_TYPE_DELETION;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::symlink_record::symlink_path_hash;
 use crate::engine::version_manager::VersionManager;
 
 use serde::Serialize;
@@ -143,6 +144,9 @@ fn walk_directory_tree(
           EntryType::FileRecord => {
             mark_file_entry(engine, &child.hash, hash_length, live)?;
           }
+          EntryType::Symlink => {
+            mark_symlink_entry(engine, &child.hash, &child_path, live)?;
+          }
           _ => {
             live.insert(child.hash.clone());
           }
@@ -177,6 +181,25 @@ fn mark_file_entry(
     let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
     live.insert(path_key);
   }
+
+  Ok(())
+}
+
+/// Mark a symlink entry and its path-based key as live.
+fn mark_symlink_entry(
+  engine: &StorageEngine,
+  symlink_hash: &[u8],
+  symlink_path: &str,
+  live: &mut HashSet<Vec<u8>>,
+) -> EngineResult<()> {
+  if !live.insert(symlink_hash.to_vec()) {
+    return Ok(());
+  }
+
+  // Also mark the path-based key as live (mutable index for reads)
+  let algo = engine.hash_algo();
+  let path_key = symlink_path_hash(symlink_path, &algo)?;
+  live.insert(path_key);
 
   Ok(())
 }
@@ -278,6 +301,9 @@ fn mark_entry_recursive(
       for chunk_hash in &file_record.chunk_hashes {
         live.insert(chunk_hash.clone());
       }
+    }
+    EntryType::Symlink => {
+      // Symlinks are leaf entries — already marked by the insert above
     }
     _ => {}
   }

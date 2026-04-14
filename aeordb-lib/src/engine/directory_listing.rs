@@ -15,6 +15,8 @@ pub struct ListingEntry {
     pub created_at: i64,
     pub updated_at: i64,
     pub content_type: Option<String>,
+    /// Symlink target path (only populated for symlink entries)
+    pub target: Option<String>,
 }
 
 /// List files in a directory with optional recursion and glob filtering.
@@ -103,6 +105,7 @@ fn walk_listing(
                     created_at: child.created_at,
                     updated_at: child.updated_at,
                     content_type: child.content_type.clone(),
+                    target: None,
                 });
             }
             EntryType::DirectoryIndex => {
@@ -122,6 +125,7 @@ fn walk_listing(
                         created_at: child.created_at,
                         updated_at: child.updated_at,
                         content_type: child.content_type.clone(),
+                        target: None,
                     });
                 } else if remaining_depth > 0 || remaining_depth == -1 {
                     // Recursive mode: traverse into subdirectory, do NOT include dir in output
@@ -158,6 +162,36 @@ fn walk_listing(
                     }
                 }
                 // remaining_depth == 0 in recursive mode: don't include dir, don't recurse
+            }
+            EntryType::Symlink => {
+                if let Some(pattern) = glob_pattern {
+                    if !glob_match::glob_match(pattern, &child.name) {
+                        continue;
+                    }
+                }
+
+                // Load the SymlinkRecord to get the target
+                let target = if let Ok(Some((_header, _key, value))) = engine.get_entry(&child.hash) {
+                    if let Ok(record) = crate::engine::symlink_record::SymlinkRecord::deserialize(&value) {
+                        Some(record.target)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                results.push(ListingEntry {
+                    path: child_path,
+                    name: child.name.clone(),
+                    entry_type: child.entry_type,
+                    hash: child.hash.clone(),
+                    total_size: child.total_size,
+                    created_at: child.created_at,
+                    updated_at: child.updated_at,
+                    content_type: child.content_type.clone(),
+                    target,
+                });
             }
             _ => {
                 // Skip other entry types

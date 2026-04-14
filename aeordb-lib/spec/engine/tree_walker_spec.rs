@@ -362,6 +362,9 @@ fn test_tree_diff_is_empty() {
     deleted: Vec::new(),
     new_chunks: std::collections::HashSet::new(),
     changed_directories: HashMap::new(),
+    symlinks_added: HashMap::new(),
+    symlinks_modified: HashMap::new(),
+    symlinks_deleted: Vec::new(),
   };
 
   assert!(diff.is_empty());
@@ -384,6 +387,9 @@ fn test_tree_diff_is_not_empty_with_added() {
     deleted: Vec::new(),
     new_chunks: std::collections::HashSet::new(),
     changed_directories: HashMap::new(),
+    symlinks_added: HashMap::new(),
+    symlinks_modified: HashMap::new(),
+    symlinks_deleted: Vec::new(),
   };
 
   assert!(!diff.is_empty());
@@ -400,6 +406,9 @@ use aeordb::engine::RequestContext;
     deleted: vec!["/gone.txt".to_string()],
     new_chunks: std::collections::HashSet::new(),
     changed_directories: HashMap::new(),
+    symlinks_added: HashMap::new(),
+    symlinks_modified: HashMap::new(),
+    symlinks_deleted: Vec::new(),
   };
 
   assert!(!diff.is_empty());

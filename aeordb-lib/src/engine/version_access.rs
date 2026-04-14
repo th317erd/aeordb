@@ -73,6 +73,21 @@ pub fn resolve_file_at_version(
         deserialize_child_entries(&dir_data, hash_length)?
     };
 
+    // Check if the final segment is a symlink — return a specific error if so
+    let is_symlink = children
+        .iter()
+        .any(|c| {
+            c.name == final_segment
+                && EntryType::from_u8(c.entry_type)
+                    .map(|t| t == EntryType::Symlink)
+                    .unwrap_or(false)
+        });
+    if is_symlink {
+        return Err(EngineError::NotFound(
+            format!("Path '{}' is a symlink at this version, not a file", path)
+        ));
+    }
+
     let child = children
         .iter()
         .find(|c| {

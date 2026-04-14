@@ -5,8 +5,9 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::symlink_record::SymlinkRecord;
 
-/// The complete tree state at a version: all files, directories, and chunk hashes.
+/// The complete tree state at a version: all files, directories, symlinks, and chunk hashes.
 #[derive(Debug, Clone)]
 pub struct VersionTree {
   /// All files: path -> (file_hash, FileRecord)
@@ -15,6 +16,8 @@ pub struct VersionTree {
   pub directories: HashMap<String, (Vec<u8>, Vec<u8>)>,
   /// All chunk hashes referenced by any file in the tree
   pub chunks: HashSet<Vec<u8>>,
+  /// All symlinks: path -> (symlink_hash, SymlinkRecord)
+  pub symlinks: HashMap<String, (Vec<u8>, SymlinkRecord)>,
 }
 
 impl VersionTree {
@@ -23,6 +26,7 @@ impl VersionTree {
       files: HashMap::new(),
       directories: HashMap::new(),
       chunks: HashSet::new(),
+      symlinks: HashMap::new(),
     }
   }
 }
@@ -115,6 +119,15 @@ fn walk_directory(
           );
         }
       }
+      EntryType::Symlink => {
+        if let Some((_header, _key, value)) = engine.get_entry(&child.hash)? {
+          let symlink_record = SymlinkRecord::deserialize(&value)?;
+          tree.symlinks.insert(
+            child_path.clone(),
+            (child.hash.clone(), symlink_record),
+          );
+        }
+      }
       _ => {
         // Skip other entry types (voids, deletions, etc.)
       }
@@ -137,11 +150,18 @@ pub struct TreeDiff {
   pub new_chunks: HashSet<Vec<u8>>,
   /// Directories that were added or changed
   pub changed_directories: HashMap<String, (Vec<u8>, Vec<u8>)>,
+  /// Symlinks added
+  pub symlinks_added: HashMap<String, (Vec<u8>, SymlinkRecord)>,
+  /// Symlinks modified (target changed)
+  pub symlinks_modified: HashMap<String, (Vec<u8>, SymlinkRecord)>,
+  /// Symlinks deleted
+  pub symlinks_deleted: Vec<String>,
 }
 
 impl TreeDiff {
   pub fn is_empty(&self) -> bool {
     self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+      && self.symlinks_added.is_empty() && self.symlinks_modified.is_empty() && self.symlinks_deleted.is_empty()
   }
 }
 
@@ -186,12 +206,39 @@ pub fn diff_trees(base: &VersionTree, target: &VersionTree) -> TreeDiff {
   // Changed directories
   let changed_directories = diff_directories(&base.directories, &target.directories);
 
+  // Symlink diffs
+  let mut symlinks_added = HashMap::new();
+  let mut symlinks_modified = HashMap::new();
+  let mut symlinks_deleted = Vec::new();
+
+  for (path, (target_hash, target_record)) in &target.symlinks {
+    match base.symlinks.get(path) {
+      None => {
+        symlinks_added.insert(path.clone(), (target_hash.clone(), target_record.clone()));
+      }
+      Some((_, base_record)) => {
+        if base_record.target != target_record.target {
+          symlinks_modified.insert(path.clone(), (target_hash.clone(), target_record.clone()));
+        }
+      }
+    }
+  }
+
+  for path in base.symlinks.keys() {
+    if !target.symlinks.contains_key(path) {
+      symlinks_deleted.push(path.clone());
+    }
+  }
+
   TreeDiff {
     added,
     modified,
     deleted,
     new_chunks,
     changed_directories,
+    symlinks_added,
+    symlinks_modified,
+    symlinks_deleted,
   }
 }
 
