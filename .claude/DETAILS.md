@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,235+ (all passing, +43 new version access tests)
+## Test Count: 2,335+ (all passing, +78 symlink tests, +20 directory listing tests)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -52,6 +52,8 @@
 - **Custom storage engine** — 273 tests
 - **Unified indexing (ScalarConverter + NVT)** — 136 tests
 - **File-level version access** — 43 tests. Read files at historical versions (GET ?snapshot=), file history across snapshots (GET /version/file-history/), restore from version with auto-snapshot safety (POST /version/file-restore/)
+- **Enhanced directory listing** — 20 tests. Recursive listing with depth control (?depth=), glob filtering (?glob=), content hashes in every entry
+- **Soft symlink support** — 78 tests. EntryType::Symlink (0x08), SymlinkRecord, POST /engine-symlink/ endpoint, transparent resolution with cycle detection (MAX_DEPTH=32), nofollow query param, HEAD headers, GC/backup/tree-walker integration
 
 ## Key Files
 - `bot-docs/plan/custom-storage-engine.md` — the full engine design
@@ -87,3 +89,8 @@
 - `aeordb-lib/src/engine/version_access.rs` — resolve_file_at_version (O(depth) targeted path walk), read_file_at_version
 - `aeordb-lib/src/server/version_file_routes.rs` — file_history + file_restore HTTP handlers
 - `bot-docs/plan/file-level-version-access.md` — design spec for file-level version access
+- `aeordb-lib/src/engine/symlink_record.rs` — SymlinkRecord struct, serialize/deserialize, hash functions
+- `aeordb-lib/src/engine/symlink_resolver.rs` — resolve_symlink with cycle detection, ResolvedTarget enum
+- `aeordb-lib/src/server/symlink_routes.rs` — POST /engine-symlink/{*path} handler
+- `aeordb-lib/src/engine/directory_listing.rs` — list_directory_recursive with depth, glob, target field
+- `bot-docs/plan/symlink-support.md` — design spec for symlink support
