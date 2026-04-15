@@ -8,6 +8,7 @@ use axum::{
 use uuid::Uuid;
 
 use crate::auth::jwt::TokenClaims;
+use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char};
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::server::responses::ErrorResponse;
 use crate::server::state::AppState;
@@ -74,8 +75,88 @@ pub async fn permission_middleware(
     }
   };
 
-  // Determine the crudlify operation.
+  // Determine the crudlify operation (needed for both key enforcement and permission check).
   let operation = http_to_crudlify(request.method(), engine_path, &state);
+
+  // --- API Key scope enforcement ---
+  // If the JWT was issued from a scoped API key, enforce the key's rules.
+  // Denied by key rules = 404 (not 403) — the resource doesn't exist for this key.
+  if let Some(ref key_id) = claims.key_id {
+    let key_record = match state.api_key_cache.get_key(key_id, &state.engine) {
+      Ok(Some(record)) => record,
+      Ok(None) => {
+        // Key not found in DB — token is stale
+        return (
+          StatusCode::UNAUTHORIZED,
+          Json(ErrorResponse {
+            error: "API key not found".to_string(),
+          }),
+        )
+          .into_response();
+      }
+      Err(error) => {
+        tracing::error!("Failed to load API key {}: {}", key_id, error);
+        return (
+          StatusCode::INTERNAL_SERVER_ERROR,
+          Json(ErrorResponse {
+            error: "Failed to verify API key".to_string(),
+          }),
+        )
+          .into_response();
+      }
+    };
+
+    // Check if key is revoked.
+    if key_record.is_revoked {
+      return (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+          error: "API key has been revoked".to_string(),
+        }),
+      )
+        .into_response();
+    }
+
+    // Check if key is expired.
+    let now_millis = chrono::Utc::now().timestamp_millis();
+    if key_record.expires_at <= now_millis {
+      return (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+          error: "API key expired".to_string(),
+        }),
+      )
+        .into_response();
+    }
+
+    // If key has rules, enforce them.
+    if !key_record.rules.is_empty() {
+      let flag_char = operation_to_flag_char(&operation);
+      let match_path = format!("/{}", engine_path);
+
+      match match_rules(&key_record.rules, &match_path) {
+        Some(rule) => {
+          if !check_operation_permitted(&rule.permitted, flag_char) {
+            // Operation not permitted by key — return 404 (not 403!).
+            return (
+              StatusCode::NOT_FOUND,
+              Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
+            )
+              .into_response();
+          }
+        }
+        None => {
+          // No rule matches — path doesn't exist for this key.
+          return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
+          )
+            .into_response();
+        }
+      }
+    }
+    // Empty rules = full pass-through, continue to normal permission check.
+  }
 
   // Check permission.
   let resolver = PermissionResolver::new(

@@ -1,3 +1,4 @@
+pub mod api_key_cache;
 pub mod api_key_rules;
 pub mod append_writer;
 pub mod backup;
@@ -58,6 +59,7 @@ pub mod version_manager;
 pub mod void_manager;
 pub mod webhook;
 
+pub use api_key_cache::ApiKeyCache;
 pub use api_key_rules::{KeyRule, match_rules, check_operation_permitted, validate_rules, parse_rules_from_json, operation_to_flag_char};
 pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
 pub use append_writer::AppendWriter;

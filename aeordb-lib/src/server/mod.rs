@@ -26,7 +26,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::{ApiKeyCache, DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -199,6 +199,7 @@ pub fn create_app_with_all_and_task_queue(
   let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
   let group_cache = Arc::new(GroupCache::new(cache_ttl));
   let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
+  let api_key_cache = Arc::new(ApiKeyCache::new(cache_ttl));
 
   let app_state = AppState {
     jwt_manager,
@@ -210,6 +211,7 @@ pub fn create_app_with_all_and_task_queue(
     event_bus,
     group_cache,
     permissions_cache,
+    api_key_cache,
     task_queue,
   };
 

@@ -5,6 +5,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use crate::auth::provider::AuthProvider;
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
+use crate::engine::ApiKeyCache;
 use crate::engine::GroupCache;
 use crate::engine::PermissionsCache;
 use crate::engine::StorageEngine;
@@ -23,5 +24,6 @@ pub struct AppState {
   pub event_bus: Arc<EventBus>,
   pub group_cache: Arc<GroupCache>,
   pub permissions_cache: Arc<PermissionsCache>,
+  pub api_key_cache: Arc<ApiKeyCache>,
   pub task_queue: Option<Arc<TaskQueue>>,
 }
