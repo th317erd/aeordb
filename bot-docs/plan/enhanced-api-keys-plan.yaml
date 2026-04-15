@@ -1,0 +1,460 @@
+title: Enhanced API Key System
+spec: bot-docs/plan/enhanced-api-keys.md
+date: 2026-04-14
+
+notes: |
+  AGIS map_territory: ~7 new files, ~12 modified files. Touches auth layer
+  (api_key, jwt, middleware, provider), server routes, system tables, directory
+  listing, symlink resolver, and CLI emergency-reset. This is the most security-
+  critical change in the project — zero tolerance for mistakes.
+
+  AGIS test_check: Existing api_key_spec tests (14) are about generation/parsing/
+  hashing — they won't break. system_tables serialization will need updating.
+  TokenClaims shape change affects auth_middleware_spec and jwt_spec. Old-format
+  key rejection is intentional (migration strategy).
+
+  AGIS test_protocol: 8 test categories. Permission middleware enforcement is
+  the critical path — it's the security boundary. 404-not-403 behavior must be
+  verified exhaustively. Symlink + scoped key interaction needs dedicated tests.
+
+phases:
+  - name: "Phase 1: Foundation — KeyRule, flag parsing, ApiKeyRecord changes"
+    description: >
+      Add KeyRule struct, rule matching logic, permission flag parsing,
+      and update ApiKeyRecord with new fields (expires_at, label, rules).
+      Update system_tables serialization. Unit tests.
+    tasks:
+      - name: Create api_key_rules.rs
+        file: aeordb-lib/src/engine/api_key_rules.rs
+        details: |
+          New module with:
+
+          ```rust
+          #[derive(Debug, Clone, Serialize, Deserialize)]
+          pub struct KeyRule {
+              pub glob: String,
+              pub permitted: String,  // "crudlify", "-r--l---", "--------", etc.
+          }
+          ```
+
+          Public functions:
+
+          1. parse_rules_from_json(value: &serde_json::Value) -> Result<Vec<KeyRule>, String>
+             - Input is a JSON array of objects, each with one key (glob) and one value (flags)
+             - Example: [{ "/assets/**": "-r--l---" }, { "**": "--------" }]
+             - Validates each flag string is exactly 8 chars, each char is the expected letter or '-'
+             - Flag positions: c-r-u-d-l-i-f-y (create, read, update, delete, list, invoke, functions, configure)
+             - Returns Vec<KeyRule> or descriptive error string
+
+          2. match_rules(rules: &[KeyRule], path: &str) -> Option<&KeyRule>
+             - Walk rules in order, return first where glob_match(rule.glob, path) is true
+             - Return None if no rule matches
+
+          3. check_operation_permitted(permitted: &str, operation: char) -> bool
+             - Given a permitted string like "-r--l---" and an operation char like 'r'
+             - Return true if the position for that operation is not '-'
+             - Flag positions: index 0='c', 1='r', 2='u', 3='d', 4='l', 5='i', 6='f', 7='y'
+
+          4. operation_to_flag_char(op: &CrudlifyOp) -> char
+             - Maps CrudlifyOp variants to flag chars: Create->'c', Read->'r', Update->'u',
+               Delete->'d', List->'l', Invoke->'i', Deploy->'f', Configure->'y'
+
+          5. validate_rules(rules: &[KeyRule]) -> Result<(), String>
+             - Validates all rules: non-empty globs, valid flag strings
+             - Called at key creation time
+
+          Uses glob_match crate (already a dependency from directory_listing).
+
+      - name: Update ApiKeyRecord
+        file: aeordb-lib/src/auth/api_key.rs
+        details: |
+          Add fields to ApiKeyRecord:
+          ```rust
+          pub expires_at: i64,            // ms since epoch, mandatory
+          pub label: Option<String>,      // human-friendly name
+          pub rules: Vec<KeyRule>,        // path→permission rules
+          ```
+
+          Import KeyRule from engine::api_key_rules.
+
+          Constants:
+          ```rust
+          pub const DEFAULT_EXPIRY_DAYS: i64 = 730;    // 2 years
+          pub const MAX_EXPIRY_DAYS: i64 = 3650;       // 10 years
+          ```
+
+      - name: Update system_tables serialization
+        file: aeordb-lib/src/engine/system_tables.rs
+        details: |
+          Update store_api_key and load_api_key to handle the new fields.
+
+          Read the current serialization format CAREFULLY before modifying.
+
+          The new format must include: expires_at (i64), label (Option<String>),
+          rules (JSON-serialized Vec<KeyRule>).
+
+          Old-format records (without these fields) MUST fail deserialization.
+          This is intentional — forces re-creation of old keys.
+
+      - name: Register module and re-exports
+        file: aeordb-lib/src/engine/mod.rs
+        details: |
+          Add `pub mod api_key_rules;`
+          Add re-exports for KeyRule, match_rules, check_operation_permitted, etc.
+
+      - name: Write rule matching unit tests
+        file: aeordb-lib/spec/engine/api_key_rules_spec.rs
+        details: |
+          Tests:
+          - test_first_match_wins: rules ["/a/**": "cr------", "**": "--------"], path "/a/b" -> first rule
+          - test_no_match_returns_none: rules ["/x/**": "crudlify"], path "/y/z" -> None
+          - test_glob_star_star: "**" matches everything
+          - test_glob_specific_path: "/assets/logo.psd" matches exactly
+          - test_glob_wildcard: "/assets/*.psd" matches .psd files
+          - test_check_operation_permitted: "crudlify" allows all, "-r------" allows only read
+          - test_check_operation_denied: "--------" denies all
+          - test_parse_rules_from_json: valid JSON array -> Vec<KeyRule>
+          - test_parse_rules_invalid_flags: wrong length or invalid chars -> error
+          - test_parse_rules_empty_glob: empty glob string -> error
+          - test_validate_rules_valid: well-formed rules pass
+          - test_validate_rules_invalid: malformed rules rejected
+          - test_empty_rules_list: empty vec is valid (full pass-through)
+          - test_operation_to_flag_char: all CrudlifyOp variants map correctly
+
+      - name: Register tests in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add API key rules: KeyRule struct, glob matching, flag parsing, ApiKeyRecord enhancement"
+
+  - name: "Phase 2: Self-service endpoints + token exchange"
+    description: >
+      New POST/GET/DELETE /api-keys endpoints for self-service.
+      Update token exchange to embed key_id in JWT. Update TokenClaims.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Update TokenClaims
+        file: aeordb-lib/src/auth/jwt.rs
+        details: |
+          Add to TokenClaims:
+          ```rust
+          #[serde(skip_serializing_if = "Option::is_none")]
+          pub key_id: Option<String>,
+          ```
+
+          Update ALL places where TokenClaims is constructed to include key_id.
+          Search for `TokenClaims {` across the codebase. Most will set key_id: None.
+          Tests that construct TokenClaims will need updating.
+
+      - name: Update token exchange
+        file: aeordb-lib/src/server/routes.rs
+        details: |
+          In the auth_token handler (POST /auth/token), when an API key is exchanged:
+
+          1. After verifying the key, check expires_at:
+             - If key.expires_at < now -> reject ("API key expired")
+          2. Set JWT exp = min(DEFAULT_EXPIRY_SECONDS from now, key.expires_at)
+          3. Include key_id in TokenClaims: key_id: Some(key_record.key_id.to_string())
+
+          Also update the admin create_api_key handler to accept the new fields
+          (expires_in_days, label, rules) and pass them through to the record.
+
+      - name: Create self-service routes
+        file: aeordb-lib/src/server/api_key_self_service_routes.rs
+        details: |
+          New route file with three handlers:
+
+          POST /api-keys — create_own_key
+          - Extract user_id from JWT claims.sub
+          - Accept: label (optional), expires_in_days (optional, default 730, max 3650), rules (optional)
+          - Validate rules via validate_rules()
+          - Clamp expires_in_days to max
+          - Generate key, hash, store with new-format record
+          - Return 201 with key_id, plaintext key, label, expires_at, rules
+
+          GET /api-keys — list_own_keys
+          - List all keys where user_id == claims.sub
+          - Filter: non-revoked only (or include revoked with a flag?)
+          - Return array of {key_id, label, expires_at, rules, created_at, is_revoked}
+          - Never return key_hash or plaintext
+
+          DELETE /api-keys/{key_id} — revoke_own_key
+          - Verify key exists and key.user_id == claims.sub (or caller is root)
+          - Set is_revoked = true
+          - Return 200
+
+      - name: Register routes
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Add `pub mod api_key_self_service_routes;`
+          Register in protected_routes:
+          .route("/api-keys", post(api_key_self_service_routes::create_own_key)
+                              .get(api_key_self_service_routes::list_own_keys))
+          .route("/api-keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
+
+      - name: Update existing tests for TokenClaims
+        details: |
+          Search all test files for `TokenClaims {` and add `key_id: None` field.
+          This is critical — compilation will break otherwise.
+
+          Files likely affected:
+          - spec/auth/jwt_spec.rs
+          - spec/auth/auth_middleware_spec.rs
+          - spec/http/*.rs (all HTTP test files that construct bearer tokens)
+
+      - name: Write self-service tests
+        file: aeordb-lib/spec/http/api_key_self_service_spec.rs
+        details: |
+          Tests:
+          - test_create_own_key: POST /api-keys -> 201 with key_id, key, label, expires_at
+          - test_create_key_with_rules: include rules -> stored correctly
+          - test_create_key_default_expiry: no expires_in_days -> ~730 days from now
+          - test_create_key_max_expiry_clamped: 9999 days -> clamped to 3650
+          - test_create_key_invalid_rules: bad flag string -> 400
+          - test_list_own_keys: create 2 keys -> GET returns both
+          - test_list_keys_only_own: user A can't see user B's keys (need two different JWTs)
+          - test_revoke_own_key: DELETE -> key revoked, subsequent exchange fails
+          - test_revoke_others_key_forbidden: non-root can't revoke other user's key -> 403
+          - test_root_creates_key_for_other: root includes user_id -> key bound to that user
+          - test_token_exchange_includes_key_id: exchange key -> JWT has key_id claim
+          - test_token_exchange_expired_key: expired key -> 401
+          - test_token_exchange_revoked_key: revoked key -> 401
+
+      - name: Register tests in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add self-service API key endpoints and key_id JWT claim"
+
+  - name: "Phase 3: Permission enforcement — middleware, key cache, 404 behavior"
+    description: >
+      Update permission middleware to load key records, enforce rules,
+      and return 404 (not 403) for key-denied paths. Add API key cache.
+    depends_on: ["Phase 2"]
+    tasks:
+      - name: Create api_key_cache.rs
+        file: aeordb-lib/src/engine/api_key_cache.rs
+        details: |
+          Same pattern as group_cache.rs — LRU + TTL cache.
+
+          ```rust
+          pub struct ApiKeyCache {
+              // key_id string -> ApiKeyRecord
+              // LRU eviction, TTL-based expiry
+          }
+          ```
+
+          Methods:
+          - get(key_id: &str) -> Option<ApiKeyRecord>
+          - insert(key_id: String, record: ApiKeyRecord)
+          - invalidate(key_id: &str)
+
+          Read group_cache.rs for the exact pattern to follow.
+
+      - name: Update permission middleware
+        file: aeordb-lib/src/auth/permission_middleware.rs
+        details: |
+          This is the CRITICAL change. Read the current middleware VERY carefully.
+
+          After extracting TokenClaims, before checking user permissions:
+
+          If claims.key_id is Some:
+            1. Load ApiKeyRecord from cache (or system_tables on miss)
+            2. If key not found / expired / revoked -> 401
+            3. Match request path against key.rules via match_rules()
+            4. If no rule matches -> 404 (path doesn't exist for this key)
+            5. Map the HTTP method to a CrudlifyOp (reuse existing http_to_crudlify)
+            6. Check operation against matched rule's permitted flags
+            7. If operation not permitted -> 404
+            8. If permitted -> continue to normal user permission check
+
+          The key cache and system_tables need to be accessible from the middleware.
+          Check how AppState is passed to the middleware (it's via from_fn_with_state).
+
+          IMPORTANT: The middleware currently only checks /engine/ routes.
+          The key rules should also apply to /engine/ routes only (same scope).
+          Other routes (/query, /version/*, etc.) don't have path-level key filtering.
+          EXCEPT: /query results should be filtered, but that's Phase 4.
+
+          AppState will need the ApiKeyCache added to it.
+
+      - name: Add ApiKeyCache to AppState
+        file: aeordb-lib/src/server/state.rs
+        details: |
+          Add `pub api_key_cache: Arc<ApiKeyCache>` to AppState.
+          Initialize in server/mod.rs alongside other caches.
+
+      - name: Write enforcement tests
+        file: aeordb-lib/spec/http/api_key_scoped_http_spec.rs
+        details: |
+          These are the CRITICAL security tests.
+
+          Setup: create a user, create a scoped key with rules, exchange for JWT.
+
+          Tests:
+          - test_scoped_key_allowed_path: GET allowed path -> 200 with content
+          - test_scoped_key_denied_path_404: GET denied path -> 404 (NOT 403)
+          - test_scoped_key_no_matching_rule_404: path doesn't match any rule -> 404
+          - test_scoped_key_read_only: key has "-r--l---", PUT -> 404, GET -> 200
+          - test_scoped_key_first_match_wins: specific rule before catch-all -> specific applies
+          - test_scoped_key_directory_listing_filters: list dir -> denied entries omitted
+          - test_scoped_key_recursive_listing_filters: depth=-1 -> denied entries pruned
+          - test_scoped_key_expired_key_401: expired key in JWT -> 401 from middleware
+          - test_scoped_key_revoked_key_401: revoked key in JWT -> 401
+          - test_no_key_id_full_permissions: JWT without key_id -> normal behavior
+          - test_full_passthrough_empty_rules: key with empty rules -> no restrictions
+          - test_crudlify_full_access: rule with "crudlify" -> all operations allowed
+          - test_deny_all: rule with "--------" -> all operations 404
+
+          For setting up scoped key tests, you'll need:
+          1. Create engine with auth enabled (use self-contained auth mode)
+          2. Bootstrap creates root key
+          3. Root creates a user
+          4. User (or root on behalf) creates a scoped key
+          5. Exchange scoped key for JWT
+          6. Use JWT for scoped requests
+
+          OR: simpler approach — manually construct a JWT with key_id, and
+          directly insert an ApiKeyRecord into system_tables. This avoids
+          the full auth flow in tests while still testing the middleware.
+
+      - name: Register tests in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add API key permission enforcement: middleware rules checking, key cache, 404 behavior"
+
+  - name: "Phase 4: Listing filtering + query filtering + symlink checks"
+    description: >
+      Directory listings, recursive listings, query results, and symlink
+      resolution all filter based on the active key's rules.
+    depends_on: ["Phase 3"]
+    tasks:
+      - name: Add key context to request flow
+        details: |
+          The listing/query handlers need access to the resolved key rules.
+          Options:
+          a) Pass rules via request extension (set by permission_middleware)
+          b) Re-load key record in each handler
+
+          Recommendation: (a) — middleware already loads the key, insert the
+          rules into request extensions as `Option<Vec<KeyRule>>`. Handlers
+          check if rules are present and filter accordingly.
+
+          Add a new extension type:
+          ```rust
+          pub struct ActiveKeyRules(pub Option<Vec<KeyRule>>);
+          ```
+
+          Middleware inserts this after loading the key. Handlers extract it.
+
+      - name: Update directory listing handlers
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          In both the default and recursive directory listing branches:
+          - Extract ActiveKeyRules from request extensions
+          - If rules present, for each entry:
+            - Match entry path against rules
+            - If denied (no match or operation not permitted) -> omit from response
+          - The operation to check is 'l' (list) for listing visibility
+
+      - name: Update query endpoint
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          In the query handler:
+          - Extract ActiveKeyRules
+          - After getting query results, filter out any result paths the key can't read
+          - Check 'r' (read) permission for each result path
+
+      - name: Update symlink resolution for key checks
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          In the symlink resolution branch of engine_get:
+          - After resolving the target path, check the target against key rules
+          - If target is denied -> 404 (looks like dangling symlink)
+          - The symlink's own path was already checked by the middleware
+
+      - name: Write filtering tests
+        file: aeordb-lib/spec/http/api_key_filtering_spec.rs
+        details: |
+          Tests:
+          - test_listing_filters_denied_entries: dir with 3 files, key allows 2 -> only 2 returned
+          - test_recursive_listing_prunes: deep tree, key allows /a/** but not /b/** -> /b/ entries absent
+          - test_query_filters_denied_results: query returns files, denied ones excluded
+          - test_symlink_allowed_to_denied_target: symlink OK, target denied -> 404
+          - test_symlink_denied_path: symlink at denied path -> 404 (middleware catches it)
+          - test_symlink_chain_denied_intermediate: chain with denied hop -> 404
+          - test_nofollow_allowed_symlink_to_denied: nofollow -> metadata visible
+          - test_file_history_denied_path: empty history, not 404
+
+      - name: Register tests in Cargo.toml
+        file: aeordb-lib/Cargo.toml
+
+    commit_message: "Add key-scoped filtering for directory listings, queries, and symlink resolution"
+
+  - name: "Phase 5: Migration + E2E verification"
+    description: >
+      Update bootstrap and emergency-reset for new key format.
+      Fix any broken existing tests. Full E2E verification.
+    depends_on: ["Phase 4"]
+    tasks:
+      - name: Update bootstrap_root_key
+        file: aeordb-lib/src/auth/mod.rs
+        details: |
+          Bootstrap creates keys with new format:
+          - expires_at: 10 years from now (max)
+          - label: Some("root-bootstrap")
+          - rules: vec![] (empty = full pass-through)
+
+      - name: Update emergency-reset
+        file: aeordb-cli/src/commands/emergency_reset.rs
+        details: |
+          Generate new-format root key:
+          - expires_at: 10 years
+          - label: Some("emergency-reset")
+          - rules: vec![]
+
+      - name: Fix broken existing tests
+        details: |
+          Run `cargo test` and fix any failures caused by:
+          - TokenClaims shape change (add key_id: None)
+          - ApiKeyRecord format change (add expires_at, label, rules)
+          - system_tables serialization changes
+          - Permission middleware behavior changes
+
+          This is critical — every existing test must pass.
+
+      - name: Run full test suite
+        details: |
+          `cargo test` — ALL tests must pass.
+
+      - name: E2E curl verification
+        details: |
+          Against a running instance (--auth self --port 9876):
+
+          1. Bootstrap outputs root key (new format)
+          2. Exchange root key for JWT at /auth/token
+          3. Create a user: POST /admin/users
+          4. Create API key for user (root): POST /admin/api-keys with rules
+          5. User exchanges key for JWT -> JWT has key_id
+          6. User accesses allowed path -> 200
+          7. User accesses denied path -> 404 (not 403!)
+          8. User lists directory -> denied entries filtered
+          9. Create symlink at allowed path -> denied target -> follow returns 404
+          10. User creates own key via POST /api-keys (self-service)
+          11. User lists own keys via GET /api-keys
+          12. User revokes own key via DELETE /api-keys/{key_id}
+          13. Verify revoked key rejected at /auth/token
+          14. Root lists all keys via /admin/api-keys
+          15. Emergency-reset: aeordb emergency-reset -> old keys dead, new key works
+
+      - name: Update DETAILS.md
+        file: .claude/DETAILS.md
+
+      - name: Update documentation
+        details: |
+          Update docs/src/api/authentication.md with:
+          - Self-service endpoints (POST/GET/DELETE /api-keys)
+          - Key rules (path globs + permission flags)
+          - Expiration (mandatory, 2yr default, 10yr max)
+          - Security posture (404 not 403)
+          - Scoped key examples
+
+    commit_message: "Complete API key enhancement: migration, E2E verification, documentation"
