@@ -13,7 +13,7 @@ pub use auth_uri::{AuthMode, parse_auth_uri, resolve_auth_mode, expand_tilde};
 pub use jwt::{JwtManager, TokenClaims};
 pub use magic_link::{MagicLinkRecord, generate_magic_link_code, hash_magic_link_code};
 pub use middleware::auth_middleware;
-pub use permission_middleware::permission_middleware;
+pub use permission_middleware::{permission_middleware, ActiveKeyRules};
 pub use provider::{AuthProvider, AuthProviderError, FileAuthProvider, NoAuthProvider};
 pub use rate_limiter::RateLimiter;
 pub use refresh::{RefreshTokenRecord, generate_refresh_token, hash_refresh_token};

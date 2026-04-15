@@ -8,10 +8,16 @@ use axum::{
 use uuid::Uuid;
 
 use crate::auth::jwt::TokenClaims;
-use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char};
+use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char, KeyRule};
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::server::responses::ErrorResponse;
 use crate::server::state::AppState;
+
+/// Extension type for passing active API key rules to downstream handlers.
+/// When present, handlers should filter listings and query results to exclude
+/// entries the key cannot access.
+#[derive(Clone, Debug)]
+pub struct ActiveKeyRules(pub Vec<KeyRule>);
 
 /// Special file names that map to Configure or Deploy operations.
 const CONFIGURE_FILES: &[&str] = &[".config", ".permissions"];
@@ -29,12 +35,26 @@ const DEPLOY_FILES: &[&str] = &[".functions"];
 /// 4. If denied, return 403 Forbidden. Otherwise, continue.
 pub async fn permission_middleware(
   State(state): State<AppState>,
-  request: Request,
+  mut request: Request,
   next: Next,
 ) -> Response {
-  // Only apply to /engine/ routes.
   let request_path = request.uri().path().to_string();
-  if !request_path.starts_with("/engine/") {
+  let is_engine_route = request_path.starts_with("/engine/");
+
+  // For non-engine routes, we still need to load key rules for downstream filtering
+  // (e.g. /query endpoint filters results by key rules). But we skip the path-level
+  // permission checks that are engine-specific.
+  if !is_engine_route {
+    // Load and insert key rules for downstream handlers if a scoped key is present.
+    if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
+      if let Ok(Some(key_record)) = state.api_key_cache.get_key(key_id, &state.engine) {
+        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis() {
+          if !key_record.rules.is_empty() {
+            request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
+          }
+        }
+      }
+    }
     return next.run(request).await;
   }
 
@@ -155,7 +175,12 @@ pub async fn permission_middleware(
         }
       }
     }
-    // Empty rules = full pass-through, continue to normal permission check.
+    // Insert key rules into request extensions for downstream handler filtering.
+    // Handlers use Option<Extension<ActiveKeyRules>> to detect and filter listings/queries.
+    if !key_record.rules.is_empty() {
+      request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
+    }
+    // Empty rules = full pass-through, no extension inserted.
   }
 
   // Check permission.

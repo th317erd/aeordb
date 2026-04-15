@@ -14,6 +14,8 @@ use serde::Deserialize;
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
+use crate::auth::permission_middleware::ActiveKeyRules;
+use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::compression::{CompressionAlgorithm, decompress};
@@ -32,6 +34,19 @@ pub struct EngineGetQuery {
   pub depth: Option<i32>,
   pub glob: Option<String>,
   pub nofollow: Option<bool>,
+}
+
+/// Filter a listing of JSON entries based on active API key rules.
+/// Entries whose "path" field is denied (no matching rule, or matched rule
+/// forbids the given operation) are silently removed.
+fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
+    entries.retain(|entry| {
+        let path = entry["path"].as_str().unwrap_or("");
+        match match_rules(rules, path) {
+            Some(rule) => check_operation_permitted(&rule.permitted, operation),
+            None => false, // no matching rule = denied
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +123,7 @@ pub async fn engine_store_file(
 pub async fn engine_get(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<ActiveKeyRules>>,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
@@ -133,7 +149,33 @@ pub async fn engine_get(
 
     // Follow the symlink
     match resolve_symlink(&state.engine, &path) {
-      Ok(ResolvedTarget::File(file_record)) => {
+      Ok(ResolvedTarget::File(ref file_record)) => {
+        // Check if the resolved target path is allowed by API key rules
+        if let Some(Extension(ref rules)) = active_key_rules {
+          if !rules.0.is_empty() {
+            let target_path = &file_record.path;
+            let normalized_target = if target_path.starts_with('/') {
+              target_path.to_string()
+            } else {
+              format!("/{}", target_path)
+            };
+            match match_rules(&rules.0, &normalized_target) {
+              Some(rule) => {
+                if !check_operation_permitted(&rule.permitted, 'r') {
+                  return ErrorResponse::new(format!("Not found: {}", path))
+                    .with_status(StatusCode::NOT_FOUND)
+                    .into_response();
+                }
+              }
+              None => {
+                return ErrorResponse::new(format!("Not found: {}", path))
+                  .with_status(StatusCode::NOT_FOUND)
+                  .into_response();
+              }
+            }
+          }
+        }
+
         // Stream the resolved file — reuse the same streaming pattern
         let resolved_stream = match EngineFileStream::from_chunk_hashes(
           file_record.chunk_hashes.clone(), &state.engine,
@@ -198,6 +240,12 @@ pub async fn engine_get(
                 })
               })
               .collect();
+            let mut listing = listing;
+            if let Some(Extension(ref rules)) = active_key_rules {
+              if !rules.0.is_empty() {
+                filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
+              }
+            }
             return (StatusCode::OK, Json(listing)).into_response();
           }
           Err(error) => {
@@ -313,6 +361,12 @@ pub async fn engine_get(
             entry_json
           })
           .collect();
+        let mut listing = listing;
+        if let Some(Extension(ref rules)) = active_key_rules {
+          if !rules.0.is_empty() {
+            filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
+          }
+        }
         return (StatusCode::OK, Json(listing)).into_response();
       }
       Err(EngineError::NotFound(_)) => {
@@ -362,6 +416,12 @@ pub async fn engine_get(
           entry_json
         })
         .collect();
+      let mut listing = listing;
+      if let Some(Extension(ref rules)) = active_key_rules {
+        if !rules.0.is_empty() {
+          filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
+        }
+      }
       (StatusCode::OK, Json(listing)).into_response()
     }
     Err(EngineError::NotFound(_)) => {
@@ -1313,6 +1373,7 @@ fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::Hash
 pub async fn query_endpoint(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
   // Parse the where clause into a QueryNode tree.
@@ -1465,6 +1526,30 @@ pub async fn query_endpoint(
           })
         })
         .collect();
+
+      // Filter query results by API key rules — denied paths are silently omitted
+      let response_items = if let Some(Extension(ref rules)) = active_key_rules {
+        if !rules.0.is_empty() {
+          let mut items = response_items;
+          items.retain(|item| {
+            let path = item["path"].as_str().unwrap_or("");
+            let normalized = if path.starts_with('/') {
+              path.to_string()
+            } else {
+              format!("/{}", path)
+            };
+            match match_rules(&rules.0, &normalized) {
+              Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
+              None => false,
+            }
+          });
+          items
+        } else {
+          response_items
+        }
+      } else {
+        response_items
+      };
 
       let mut response = serde_json::json!({
         "results": response_items,
