@@ -13,7 +13,7 @@ use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::engine::RequestContext;
 use crate::auth::{
-  TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord,
+  TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord, DEFAULT_EXPIRY_DAYS,
   generate_magic_link_code, hash_magic_link_code,
   generate_refresh_token, hash_refresh_token,
 };
@@ -407,6 +407,10 @@ pub async fn create_api_key(
     user_id: target_user_id,
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: chrono::Utc::now().timestamp_millis()
+      + (DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
+    label: None,
+    rules: vec![],
   };
 
   if let Err(error) = state.auth_provider.store_api_key(&record) {

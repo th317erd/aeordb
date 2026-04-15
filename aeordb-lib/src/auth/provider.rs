@@ -76,6 +76,9 @@ impl AuthProvider for NoAuthProvider {
       user_id: ROOT_USER_ID,
       created_at: chrono::Utc::now(),
       is_revoked: false,
+      expires_at: i64::MAX,
+      label: None,
+      rules: vec![],
     }))
   }
 

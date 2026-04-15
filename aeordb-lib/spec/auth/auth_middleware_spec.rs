@@ -189,6 +189,9 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   let system_tables = SystemTables::new(&engine);
   system_tables.store_api_key(&ctx, &record).unwrap();
@@ -279,6 +282,9 @@ async fn test_list_api_keys_returns_metadata() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   let system_tables = SystemTables::new(&engine);
   system_tables.store_api_key(&ctx, &record).unwrap();
@@ -318,6 +324,9 @@ async fn test_revoke_api_key_succeeds() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   let system_tables = SystemTables::new(&engine);
   system_tables.store_api_key(&ctx, &record).unwrap();
@@ -354,6 +363,9 @@ async fn test_revoked_api_key_cannot_get_token() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   let system_tables = SystemTables::new(&engine);
   system_tables.store_api_key(&ctx, &record).unwrap();

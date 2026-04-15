@@ -547,6 +547,9 @@ fn test_api_keys_persist_across_restart() {
       user_id: user.user_id,
       created_at: Utc::now(),
       is_revoked: false,
+      expires_at: i64::MAX,
+      label: None,
+      rules: vec![],
     };
     st.store_api_key(&ctx, &record).unwrap();
   }

@@ -7,8 +7,15 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::engine::api_key_rules::KeyRule;
+
 /// Prefix for all aeordb API keys.
 const API_KEY_PREFIX: &str = "aeor_k_";
+
+/// Default expiry for API keys: 2 years (in days).
+pub const DEFAULT_EXPIRY_DAYS: i64 = 730;
+/// Maximum expiry for API keys: 10 years (in days).
+pub const MAX_EXPIRY_DAYS: i64 = 3650;
 
 /// Metadata record for a stored API key (never contains the plaintext key).
 /// The `user_id` field links this key to its owning user. For the root
@@ -20,6 +27,15 @@ pub struct ApiKeyRecord {
   pub user_id: Uuid,
   pub created_at: DateTime<Utc>,
   pub is_revoked: bool,
+  /// Milliseconds since epoch. Mandatory — old records without this field
+  /// will fail deserialization intentionally.
+  pub expires_at: i64,
+  /// Human-friendly label for the key.
+  #[serde(default)]
+  pub label: Option<String>,
+  /// Path-to-permission rules. Empty vec means no path-level restrictions.
+  #[serde(default)]
+  pub rules: Vec<KeyRule>,
 }
 
 /// Generate a new API key with the format `aeor_k_{key_id_prefix}_{random_hex}`

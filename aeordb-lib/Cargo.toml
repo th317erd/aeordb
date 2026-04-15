@@ -500,6 +500,10 @@ name = "directory_listing_spec"
 path = "spec/engine/directory_listing_spec.rs"
 
 [[test]]
+name = "api_key_rules_spec"
+path = "spec/engine/api_key_rules_spec.rs"
+
+[[test]]
 name = "directory_listing_http_spec"
 path = "spec/http/directory_listing_http_spec.rs"
 

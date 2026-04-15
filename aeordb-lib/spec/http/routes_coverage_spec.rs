@@ -117,6 +117,9 @@ fn seed_api_key(engine: &StorageEngine) -> String {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   system_tables.store_api_key(&ctx, &record).unwrap();
   plaintext_key
@@ -134,6 +137,9 @@ fn seed_revoked_api_key(engine: &StorageEngine) -> String {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: true,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   system_tables.store_api_key(&ctx, &record).unwrap();
   plaintext_key

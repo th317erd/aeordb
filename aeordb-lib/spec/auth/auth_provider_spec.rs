@@ -214,6 +214,9 @@ fn test_no_auth_provider_store_is_noop() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   assert!(provider.store_api_key(&record).is_ok());
   assert!(provider.store_api_key_for_bootstrap(&record).is_ok());
@@ -276,6 +279,9 @@ fn test_file_auth_provider_validates_key() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   provider.store_api_key(&record).unwrap();
 
@@ -315,6 +321,9 @@ fn test_file_auth_provider_list_and_revoke() {
     user_id: uuid::Uuid::new_v4(),
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
   };
   provider.store_api_key(&record).unwrap();
 
