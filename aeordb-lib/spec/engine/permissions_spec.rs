@@ -874,6 +874,7 @@ async fn test_permission_middleware_allows_root() {
     exp: now + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
   let token = jwt_manager.create_token(&claims).unwrap();
   let auth = format!("Bearer {}", token);
@@ -915,6 +916,7 @@ async fn test_permission_middleware_denies_without_permission() {
     exp: now + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
   let token = jwt_manager.create_token(&claims).unwrap();
   let auth = format!("Bearer {}", token);
@@ -966,6 +968,7 @@ async fn test_permission_middleware_allows_with_permission() {
     exp: now + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
   let token = jwt_manager.create_token(&claims).unwrap();
   let auth = format!("Bearer {}", token);

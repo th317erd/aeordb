@@ -31,6 +31,7 @@ pub async fn auth_middleware(
       exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
       scope: None,
       permissions: None,
+      key_id: None,
     };
     request.extensions_mut().insert(root_claims);
     return next.run(request).await;

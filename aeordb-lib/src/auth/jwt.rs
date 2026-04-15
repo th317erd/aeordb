@@ -26,6 +26,8 @@ pub struct TokenClaims {
   pub scope: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub permissions: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub key_id: Option<String>,
 }
 
 /// Manages JWT signing and verification using Ed25519 (EdDSA).

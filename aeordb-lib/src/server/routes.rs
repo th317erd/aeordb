@@ -301,14 +301,27 @@ pub async fn auth_token(
       .into_response();
   }
 
+  // Check API key expiry.
+  let now_millis = chrono::Utc::now().timestamp_millis();
+  if record.expires_at <= now_millis {
+    metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "expired").increment(1);
+    return ErrorResponse::new("API key expired".to_string())
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+  }
+
   let now = chrono::Utc::now().timestamp();
+  // Cap JWT expiry to the lesser of DEFAULT_EXPIRY_SECONDS and the key's remaining lifetime.
+  let key_expires_seconds = (record.expires_at / 1000) - now;
+  let jwt_expiry = std::cmp::min(crate::auth::jwt::DEFAULT_EXPIRY_SECONDS, key_expires_seconds.max(0));
   let claims = TokenClaims {
     sub: record.user_id.to_string(),
     iss: "aeordb".to_string(),
     iat: now,
-    exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+    exp: now + jwt_expiry,
     scope: None,
     permissions: None,
+    key_id: Some(record.key_id.to_string()),
   };
 
   let token = match state.jwt_manager.create_token(&claims) {
@@ -347,7 +360,7 @@ pub async fn auth_token(
     StatusCode::OK,
     Json(serde_json::json!({
       "token": token,
-      "expires_in": crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
+      "expires_in": jwt_expiry,
       "refresh_token": refresh_token_plaintext,
     })),
   )
@@ -626,6 +639,7 @@ pub async fn verify_magic_link(
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
     scope: None,
     permissions: None,
+    key_id: None,
   };
 
   match state.jwt_manager.create_token(&claims) {
@@ -710,6 +724,7 @@ pub async fn refresh_token(
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
     scope: None,
     permissions: None,
+    key_id: None,
   };
 
   let token = match state.jwt_manager.create_token(&claims) {

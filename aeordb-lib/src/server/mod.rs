@@ -1,4 +1,5 @@
 pub mod admin_routes;
+pub mod api_key_self_service_routes;
 pub mod backup_routes;
 pub mod cors;
 pub mod engine_routes;
@@ -235,6 +236,9 @@ pub fn create_app_with_all_and_task_queue(
 
   // Routes that require authentication (default 1 MB limit)
   let protected_routes = Router::new()
+    .route("/api-keys", post(api_key_self_service_routes::create_own_key)
+                       .get(api_key_self_service_routes::list_own_keys))
+    .route("/api-keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
     .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
     .route("/admin/metrics", get(routes::metrics_endpoint))

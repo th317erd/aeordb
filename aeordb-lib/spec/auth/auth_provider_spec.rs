@@ -247,6 +247,7 @@ fn test_no_auth_provider_has_jwt_manager() {
     exp: chrono::Utc::now().timestamp() + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
   let token = provider.jwt_manager().create_token(&claims);
   assert!(token.is_ok());

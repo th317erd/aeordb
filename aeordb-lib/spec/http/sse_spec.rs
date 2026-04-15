@@ -56,6 +56,7 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
         exp: now + DEFAULT_EXPIRY_SECONDS,
         scope: None,
         permissions: None,
+    key_id: None,
     };
     let token = jwt_manager.create_token(&claims).expect("create token");
     format!("Bearer {}", token)
@@ -70,6 +71,7 @@ fn expired_bearer_token(jwt_manager: &JwtManager) -> String {
         exp: now - 3600, // expired 1 hour ago
         scope: None,
         permissions: None,
+    key_id: None,
     };
     let token = jwt_manager.create_token(&claims).expect("create token");
     format!("Bearer {}", token)

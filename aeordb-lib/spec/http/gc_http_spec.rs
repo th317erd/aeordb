@@ -34,6 +34,7 @@ fn root_bearer_token(jwt_manager: &JwtManager) -> String {
         exp: now + DEFAULT_EXPIRY_SECONDS,
         scope: None,
         permissions: None,
+    key_id: None,
     };
     let token = jwt_manager.create_token(&claims).expect("create token");
     format!("Bearer {}", token)
@@ -49,6 +50,7 @@ fn non_root_bearer_token(jwt_manager: &JwtManager) -> String {
         exp: now + DEFAULT_EXPIRY_SECONDS,
         scope: None,
         permissions: None,
+    key_id: None,
     };
     let token = jwt_manager.create_token(&claims).expect("create token");
     format!("Bearer {}", token)
@@ -328,6 +330,7 @@ async fn test_gc_expired_token_returns_401() {
         exp: now - 3600, // expired 1 hour ago
         scope: None,
         permissions: None,
+    key_id: None,
     };
     let token = jwt_manager.create_token(&claims).expect("create token");
     let auth = format!("Bearer {}", token);

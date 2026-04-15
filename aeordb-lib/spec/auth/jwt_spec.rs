@@ -9,6 +9,7 @@ fn make_claims(expiry_offset: i64) -> TokenClaims {
     exp: now + expiry_offset,
     scope: None,
     permissions: None,
+    key_id: None,
   }
 }
 
@@ -71,6 +72,7 @@ fn test_wrong_issuer_rejected() {
     exp: now + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
 
   let token = manager.create_token(&claims).expect("should create token");
@@ -90,6 +92,7 @@ fn test_jwt_contains_correct_claims() {
     exp: now + 3600,
     scope: None,
     permissions: None,
+    key_id: None,
   };
 
   let token = manager.create_token(&claims).expect("should create token");
@@ -165,6 +168,7 @@ fn test_scope_and_permissions_serialized_when_present() {
     exp: now + 3600,
     scope: Some("read write".to_string()),
     permissions: Some(vec!["docs:read".to_string(), "docs:write".to_string()]),
+    key_id: None,
   };
 
   let token = manager.create_token(&claims).expect("should create token");
