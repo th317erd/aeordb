@@ -502,14 +502,17 @@ pub async fn revoke_api_key(
   };
 
   match state.auth_provider.revoke_api_key(parsed_key_id) {
-    Ok(true) => (
-      StatusCode::OK,
-      Json(serde_json::json!({
-        "revoked": true,
-        "key_id": parsed_key_id,
-      })),
-    )
-      .into_response(),
+    Ok(true) => {
+      state.api_key_cache.invalidate(&parsed_key_id.to_string());
+      (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "revoked": true,
+          "key_id": parsed_key_id,
+        })),
+      )
+        .into_response()
+    }
     Ok(false) => {
       ErrorResponse::new(format!("API key not found: {}", parsed_key_id))
         .with_status(StatusCode::NOT_FOUND)
