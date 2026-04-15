@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,335+ (all passing, +78 symlink tests, +20 directory listing tests)
+## Test Count: 2,430+ (all passing, +92 API key enhancement tests)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -54,6 +54,7 @@
 - **File-level version access** — 43 tests. Read files at historical versions (GET ?snapshot=), file history across snapshots (GET /version/file-history/), restore from version with auto-snapshot safety (POST /version/file-restore/)
 - **Enhanced directory listing** — 20 tests. Recursive listing with depth control (?depth=), glob filtering (?glob=), content hashes in every entry
 - **Soft symlink support** — 78 tests. EntryType::Symlink (0x08), SymlinkRecord, POST /engine-symlink/ endpoint, transparent resolution with cycle detection (MAX_DEPTH=32), nofollow query param, HEAD headers, GC/backup/tree-walker integration
+- **Enhanced API keys** — 92 tests. Self-service POST/GET/DELETE /api-keys, scoped permissions via path-glob rules (first-match-wins), mandatory expiration (2yr default, 10yr max), key_id in JWT, permission middleware enforcement (denied=404 not 403), directory listing/query/symlink filtering, ApiKeyCache (LRU+TTL)
 
 ## Key Files
 - `bot-docs/plan/custom-storage-engine.md` — the full engine design
@@ -94,3 +95,7 @@
 - `aeordb-lib/src/server/symlink_routes.rs` — POST /engine-symlink/{*path} handler
 - `aeordb-lib/src/engine/directory_listing.rs` — list_directory_recursive with depth, glob, target field
 - `bot-docs/plan/symlink-support.md` — design spec for symlink support
+- `aeordb-lib/src/engine/api_key_rules.rs` — KeyRule, match_rules, flag parsing, operation mapping
+- `aeordb-lib/src/engine/api_key_cache.rs` — ApiKeyCache (LRU+TTL for scoped key records)
+- `aeordb-lib/src/server/api_key_self_service_routes.rs` — POST/GET/DELETE /api-keys handlers
+- `bot-docs/plan/enhanced-api-keys.md` — design spec for enhanced API key system
