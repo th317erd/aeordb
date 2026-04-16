@@ -585,11 +585,11 @@ fn test_local_sync_modify_vs_delete_conflict() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Remote HTTP sync returns proper error (not yet implemented)
+// Test: Remote HTTP sync returns connection error for unreachable peer
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_remote_sync_returns_not_implemented() {
+async fn test_remote_sync_returns_connection_error() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let (sync_engine, peer_manager) = make_sync_engine(engine);
 
@@ -597,9 +597,11 @@ async fn test_remote_sync_returns_not_implemented() {
 
     let result = sync_engine.sync_with_peer(10).await;
     assert!(result.is_err());
+    let err = result.unwrap_err();
     assert!(
-        result.unwrap_err().contains("not yet implemented"),
-        "Should indicate remote sync is not yet implemented"
+        err.contains("Failed to contact peer"),
+        "Should indicate connection failure, got: {}",
+        err
     );
 }
 

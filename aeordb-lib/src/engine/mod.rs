@@ -123,7 +123,7 @@ pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, Que
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use merge::{three_way_merge, MergeResult, MergeOp, ConflictEntry, ConflictType, ConflictVersion};
 pub use sync_apply::apply_merge_operations;
-pub use sync_engine::{SyncEngine, SyncConfig, PeerSyncState, SyncCycleResult};
+pub use sync_engine::{SyncEngine, SyncConfig, PeerSyncState, SyncCycleResult, spawn_sync_loop};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};

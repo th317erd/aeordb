@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use tokio::sync::Mutex;
 
+use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::conflict_store::store_conflict;
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::merge::three_way_merge;
 use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManager};
 use crate::engine::request_context::RequestContext;
@@ -331,30 +334,326 @@ impl SyncEngine {
         &self.clock_tracker
     }
 
+    /// Trigger a manual sync with all active peers.
+    ///
+    /// This is the public entry point for on-demand sync (e.g. from an
+    /// admin endpoint or CLI command).
+    pub async fn trigger_sync_all(&self) -> Vec<(u64, Result<SyncCycleResult, String>)> {
+        self.sync_all_peers().await
+    }
+
     // -------------------------------------------------------------------------
-    // Remote sync (HTTP-based) — placeholder for Phase 8
+    // Remote sync (HTTP-based)
     // -------------------------------------------------------------------------
 
     /// Perform a sync cycle with a remote peer over HTTP.
     ///
-    /// This is a placeholder that returns an error. The actual HTTP
-    /// implementation will be wired up in Phase 8 when we have real
-    /// multi-node infrastructure.
+    /// Protocol:
+    /// 1. POST `{peer}/sync/diff` with our current HEAD and last-synced hash
+    /// 2. Parse the diff response (files added/modified/deleted, symlinks, chunk hashes)
+    /// 3. POST `{peer}/sync/chunks` to fetch any chunks we're missing
+    /// 4. Reassemble files from chunks and apply changes via DirectoryOps
+    /// 5. Persist sync state so the next cycle is incremental
     async fn do_sync_cycle_remote(
         &self,
         peer: &PeerConnection,
     ) -> Result<SyncCycleResult, String> {
-        // TODO(Phase 8): Implement HTTP-based sync cycle.
-        // Steps:
-        // 1. POST /sync/diff to get remote changes
-        // 2. POST /sync/chunks to fetch missing chunks
-        // 3. Three-way merge
-        // 4. Apply merge operations
-        // 5. Update sync state
-        Err(format!(
-            "Remote HTTP sync not yet implemented for peer {} ({}). \
-             Use sync_with_local_engine() for in-process sync.",
-            peer.node_id, peer.address
-        ))
+        let client = reqwest::Client::new();
+        let vm = VersionManager::new(&self.engine);
+
+        let our_head = vm.get_head_hash()
+            .map_err(|e| format!("Failed to get HEAD: {}", e))?;
+
+        // Load last synced state for this peer
+        let sync_state = system_store::get_peer_sync_state(&self.engine, peer.node_id)
+            .map_err(|e| format!("Failed to load peer sync state: {}", e))?;
+        let since_hash = sync_state.and_then(|s| s.last_synced_root_hash);
+
+        // Step 1: Request diff from peer
+        let mut diff_body = serde_json::json!({
+            "current_root_hash": hex::encode(&our_head),
+        });
+        if let Some(ref since) = since_hash {
+            diff_body["since_root_hash"] = serde_json::json!(since);
+        }
+
+        let mut request = client
+            .post(format!("{}/sync/diff", peer.address))
+            .json(&diff_body);
+        if let Some(ref secret) = self.config.cluster_secret {
+            request = request.header("X-Cluster-Secret", secret);
+        }
+
+        let response = request.send().await
+            .map_err(|e| format!("Failed to contact peer {}: {}", peer.node_id, e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Peer {} returned {}: {}", peer.node_id, status, body));
+        }
+
+        let diff_resp: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse diff response from peer {}: {}", peer.node_id, e))?;
+
+        let peer_root_hex = diff_resp["root_hash"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        // Check if there are any changes to apply
+        let changes = &diff_resp["changes"];
+        let has_file_changes = ["files_added", "files_modified", "files_deleted"]
+            .iter()
+            .any(|k| {
+                changes[k]
+                    .as_array()
+                    .map_or(false, |a| !a.is_empty())
+            });
+        let has_symlink_changes = ["symlinks_added", "symlinks_modified", "symlinks_deleted"]
+            .iter()
+            .any(|k| {
+                changes[k]
+                    .as_array()
+                    .map_or(false, |a| !a.is_empty())
+            });
+
+        if !has_file_changes && !has_symlink_changes {
+            // No remote changes — update sync state and return
+            self.save_sync_state_hex(peer.node_id, &peer_root_hex);
+            self.peer_manager.update_sync_state(
+                peer.node_id,
+                hex::decode(&peer_root_hex).unwrap_or_default(),
+                chrono::Utc::now().timestamp_millis() as u64,
+            );
+            return Ok(SyncCycleResult {
+                changes_applied: false,
+                conflicts_detected: 0,
+                operations_applied: 0,
+            });
+        }
+
+        // Step 2: Fetch needed chunks from the peer
+        let chunk_hashes: Vec<String> = diff_resp["chunk_hashes_needed"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !chunk_hashes.is_empty() {
+            let mut chunks_req = client
+                .post(format!("{}/sync/chunks", peer.address))
+                .json(&serde_json::json!({ "hashes": chunk_hashes }));
+            if let Some(ref secret) = self.config.cluster_secret {
+                chunks_req = chunks_req.header("X-Cluster-Secret", secret);
+            }
+
+            let chunks_resp = chunks_req.send().await
+                .map_err(|e| format!("Failed to fetch chunks from peer {}: {}", peer.node_id, e))?;
+
+            if !chunks_resp.status().is_success() {
+                let status = chunks_resp.status();
+                let body = chunks_resp.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Peer {} chunks endpoint returned {}: {}",
+                    peer.node_id, status, body
+                ));
+            }
+
+            let chunks_data: serde_json::Value = chunks_resp.json().await
+                .map_err(|e| format!("Failed to parse chunks response from peer {}: {}", peer.node_id, e))?;
+
+            // Store each received chunk in our local engine
+            if let Some(chunks) = chunks_data["chunks"].as_array() {
+                for chunk in chunks {
+                    let hash_hex = chunk["hash"].as_str().unwrap_or("");
+                    let data_b64 = chunk["data"].as_str().unwrap_or("");
+                    if let (Ok(hash), Ok(data)) = (
+                        hex::decode(hash_hex),
+                        base64::engine::general_purpose::STANDARD.decode(data_b64),
+                    ) {
+                        if !self.engine.has_entry(&hash).unwrap_or(false) {
+                            let _ = self.engine.store_entry(
+                                crate::engine::entry_type::EntryType::Chunk,
+                                &hash,
+                                &data,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 3: Apply changes from the diff response via DirectoryOps
+        let ctx = RequestContext::system();
+        let ops = DirectoryOps::new(&self.engine);
+        let mut operations_count: usize = 0;
+        let conflicts_count: usize = 0;
+
+        // Process file additions and modifications
+        for category in ["files_added", "files_modified"] {
+            if let Some(entries) = changes[category].as_array() {
+                for entry in entries {
+                    let path = entry["path"].as_str().unwrap_or("");
+                    if path.is_empty() {
+                        continue;
+                    }
+
+                    // Reconstruct file data from chunk hashes
+                    let entry_chunk_hashes: Vec<Vec<u8>> = entry["chunk_hashes"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|h| h.as_str().and_then(|s| hex::decode(s).ok()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Read chunks and assemble file content
+                    let mut file_data = Vec::new();
+                    let mut all_chunks_available = true;
+                    for ch in &entry_chunk_hashes {
+                        match self.engine.get_entry(ch) {
+                            Ok(Some((header, _key, value))) => {
+                                let data =
+                                    if header.compression_algo != CompressionAlgorithm::None {
+                                        decompress(&value, header.compression_algo)
+                                            .unwrap_or(value)
+                                    } else {
+                                        value
+                                    };
+                                file_data.extend_from_slice(&data);
+                            }
+                            _ => {
+                                all_chunks_available = false;
+                                tracing::warn!(
+                                    "Missing chunk {} for file {} during sync with peer {}",
+                                    hex::encode(ch),
+                                    path,
+                                    peer.node_id
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_chunks_available {
+                        let content_type = entry["content_type"].as_str();
+                        let _ = ops.store_file(&ctx, path, &file_data, content_type);
+                        operations_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Process file deletions
+        if let Some(deleted) = changes["files_deleted"].as_array() {
+            for entry in deleted {
+                let path = entry["path"].as_str().unwrap_or("");
+                if !path.is_empty() {
+                    let _ = ops.delete_file(&ctx, path);
+                    operations_count += 1;
+                }
+            }
+        }
+
+        // Process symlink additions and modifications
+        for category in ["symlinks_added", "symlinks_modified"] {
+            if let Some(entries) = changes[category].as_array() {
+                for entry in entries {
+                    let path = entry["path"].as_str().unwrap_or("");
+                    let target = entry["target"].as_str().unwrap_or("");
+                    if !path.is_empty() && !target.is_empty() {
+                        let _ = ops.store_symlink(&ctx, path, target);
+                        operations_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Process symlink deletions
+        if let Some(deleted) = changes["symlinks_deleted"].as_array() {
+            for entry in deleted {
+                let path = entry["path"].as_str().unwrap_or("");
+                if !path.is_empty() {
+                    let _ = ops.delete_symlink(&ctx, path);
+                    operations_count += 1;
+                }
+            }
+        }
+
+        // Update sync state
+        self.save_sync_state_hex(peer.node_id, &peer_root_hex);
+        self.peer_manager.update_sync_state(
+            peer.node_id,
+            hex::decode(&peer_root_hex).unwrap_or_default(),
+            chrono::Utc::now().timestamp_millis() as u64,
+        );
+
+        Ok(SyncCycleResult {
+            changes_applied: operations_count > 0,
+            conflicts_detected: conflicts_count,
+            operations_applied: operations_count,
+        })
     }
+
+    /// Save sync state from a hex-encoded root hash string.
+    fn save_sync_state_hex(&self, peer_node_id: u64, root_hash_hex: &str) {
+        let state = PeerSyncState {
+            last_synced_root_hash: Some(root_hash_hex.to_string()),
+            last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
+        };
+        let ctx = RequestContext::system();
+        let _ = system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background sync loop
+// ---------------------------------------------------------------------------
+
+/// Spawn a background sync task that periodically syncs with all active peers.
+///
+/// The task runs indefinitely, ticking every `interval_secs` seconds. On each
+/// tick it calls `sync_all_peers()` and logs the results. Missed ticks (e.g.
+/// when a sync cycle takes longer than the interval) are skipped rather than
+/// queued.
+///
+/// Returns a `JoinHandle` that can be used to abort the task on shutdown.
+pub fn spawn_sync_loop(
+    sync_engine: Arc<SyncEngine>,
+    interval_secs: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            tokio::time::Duration::from_secs(interval_secs),
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            let results = sync_engine.sync_all_peers().await;
+            for (peer_id, result) in &results {
+                match result {
+                    Ok(r) if r.changes_applied => {
+                        tracing::info!(
+                            "Sync with peer {}: {} operations applied, {} conflicts",
+                            peer_id,
+                            r.operations_applied,
+                            r.conflicts_detected
+                        );
+                    }
+                    Ok(_) => {
+                        // No changes — stay quiet to avoid log spam
+                    }
+                    Err(e) => {
+                        tracing::warn!("Sync with peer {} failed: {}", peer_id, e);
+                    }
+                }
+            }
+        }
+    })
 }
