@@ -539,6 +539,10 @@ path = "spec/engine/sync_apply_spec.rs"
 name = "sync_engine_spec"
 path = "spec/engine/sync_engine_spec.rs"
 
+[[test]]
+name = "cluster_join_spec"
+path = "spec/engine/cluster_join_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"

@@ -1,6 +1,7 @@
 pub mod api_key_cache;
 pub mod api_key_rules;
 pub mod append_writer;
+pub mod cluster_join;
 pub mod backup;
 pub mod batch_commit;
 pub mod btree;
@@ -128,6 +129,7 @@ pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
+pub use cluster_join::{has_signing_key, is_ready_for_traffic, get_cluster_mode};
 pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionState};
 pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
