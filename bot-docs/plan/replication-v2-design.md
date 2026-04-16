@@ -415,7 +415,36 @@ A joining node MUST NOT accept client HTTP traffic until its first sync complete
 
 ## Implementation Phases
 
-### Prerequisite: Hash and Timestamp Refactor (MUST complete before replication)
+### Prerequisite 0: Legacy Cleanup (FIRST step)
+
+Remove all openraft scaffolding and legacy storage code. This is purely subtractive — no new code, just deletion.
+
+**Remove:**
+- `src/replication/` — all 6 files (mod.rs, types.rs, raft_node.rs, network.rs, log_store.rs, state_machine.rs)
+- `spec/replication/raft_spec.rs` — openraft test file
+- `src/storage/` — all 4 files (mod.rs, chunk.rs, chunk_config.rs, chunk_header.rs, chunk_storage.rs) — legacy chunk storage trait, only consumed by replication
+- `src/engine/engine_chunk_storage.rs` — bridge from new engine to legacy ChunkStorage trait, only consumed by replication
+- `pub mod replication;` from `lib.rs`
+- `pub mod storage;` from `lib.rs`
+- `pub mod engine_chunk_storage;` and `pub use engine_chunk_storage::EngineChunkStorage;` from `engine/mod.rs`
+- `openraft` from both `[dependencies]` and `[dev-dependencies]` in `aeordb-lib/Cargo.toml`
+- `[[test]]` entry for `raft_spec` in Cargo.toml
+- Check `futures-util` — if only used by the replication state_machine, remove it too
+
+**Verify:** `cargo check` compiles cleanly. `cargo test` has no regressions (existing raft_spec tests are gone, everything else passes).
+
+### Prerequisite 1: Entry Versioning Foundation
+
+Fix the entry versioning system so it's ready for format changes.
+
+**Changes:**
+- Change `entry_version` from starting at `1` to starting at `0` (remove the version 0 rejection in entry_header.rs)
+- Add `pub const CURRENT_ENTRY_VERSION: u8 = 0;` constant
+- Replace hardcoded `entry_version: 1` in append_writer.rs with `CURRENT_ENTRY_VERSION`
+- Add version-based dispatch stubs in all deserializers (FileRecord, SymlinkRecord, ChildEntry, SnapshotInfo, ForkInfo) — currently they assume a single format; add a match on version that routes to `deserialize_v0`
+- No format changes yet — just the routing infrastructure
+
+### Prerequisite 2: Hash and Timestamp Refactor (MUST complete before replication)
 
 **Problem:** FileRecord and SymlinkRecord content hashes currently include timestamps (`created_at`, `updated_at`) in the hashed data. This means identical content stored at different times produces different hashes, breaking dedup and causing false conflicts during replication.
 
@@ -431,9 +460,9 @@ A joining node MUST NOT accept client HTTP traffic until its first sync complete
 
 5. **Persisted clock state for fast honeymoon** — each peer's last known clock offset, wire time, jitter, and the timestamp of that measurement are persisted in system tables alongside the peer config. On reconnect, the honeymoon uses this as a seed estimate instead of starting from zero, allowing much faster settling when system clocks haven't drifted significantly. Confidence in the seed decays with time since last measurement.
 
-4. **Entry ordering metadata** — each entry gets `(virtual_time, node_id)` as ordering metadata, stored separately from user-visible timestamps. This is the conflict resolution key.
+6. **Entry ordering metadata** — each entry gets `(virtual_time, node_id)` as ordering metadata, stored separately from user-visible timestamps. This is the conflict resolution key.
 
-5. **Migration** — existing entries retain their current hashes. New writes use the identity hash. The tree walker and diff engine must handle both formats during the transition period.
+7. **No migration** — we are pre-production. Existing test databases are disposable. Just change the format. No dual-format support needed.
 
 This is a foundational change that affects: `file_record.rs`, `symlink_record.rs`, `directory_ops.rs`, `directory_entry.rs` (ChildEntry.hash semantics), `tree_walker.rs`, `version_access.rs`, `heartbeat.rs`, and all tests that verify content hashes.
 
