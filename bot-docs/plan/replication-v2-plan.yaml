@@ -1,0 +1,809 @@
+title: "AeorDB Replication v2: Content-Addressed Sync"
+spec: bot-docs/plan/replication-v2-design.md
+date: 2026-04-15
+
+notes: |
+  Multi-writer eventually-consistent replication using content-addressed sync.
+  Replaces the openraft approach. Any node can write, nodes sync by comparing
+  directory tree hashes and exchanging chunks, conflicts are first-class entities.
+
+  Critical safety requirements:
+  - Sync MUST be atomic (no partial HEAD updates)
+  - Clock bounds checking prevents malicious timestamps
+  - Modify beats delete in conflict resolution
+  - Honeymoon phase is mandatory on every connect/reconnect
+  - Merge MUST be deterministic and commutative
+
+  Dependency chain:
+  Prereq 0 → Prereq 1 → Prereq 2 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7 → Phase 8
+  (Phases 4+5 could potentially be developed in parallel)
+
+phases:
+  - name: "Prerequisite 0: Legacy Cleanup"
+    description: >
+      Remove all openraft scaffolding and legacy storage code. Purely subtractive.
+    tasks:
+      - name: Remove replication module
+        details: |
+          Delete entire directory: src/replication/ (6 files: mod.rs, types.rs,
+          raft_node.rs, network.rs, log_store.rs, state_machine.rs)
+          Remove `pub mod replication;` from lib.rs
+
+      - name: Remove legacy storage module
+        details: |
+          Delete entire directory: src/storage/ (mod.rs, chunk.rs, chunk_config.rs,
+          chunk_header.rs, chunk_storage.rs)
+          Remove `pub mod storage;` from lib.rs
+
+      - name: Remove engine_chunk_storage bridge
+        details: |
+          Delete: src/engine/engine_chunk_storage.rs
+          Remove `pub mod engine_chunk_storage;` from engine/mod.rs
+          Remove `pub use engine_chunk_storage::EngineChunkStorage;` from engine/mod.rs
+
+      - name: Remove raft test file
+        details: |
+          Delete: spec/replication/raft_spec.rs (and the spec/replication/ directory)
+          Remove [[test]] entry for raft_spec from Cargo.toml
+
+      - name: Remove openraft dependency
+        details: |
+          Remove `openraft` from both [dependencies] and [dev-dependencies] in
+          aeordb-lib/Cargo.toml.
+          Check if `futures-util` is still used elsewhere — if only by the
+          replication state_machine, remove it too.
+
+      - name: Verify clean build
+        details: |
+          Run `cargo check` — must compile cleanly.
+          Run `cargo test` — all remaining tests must pass.
+          The only test count change should be the removal of raft_spec tests.
+
+    commit_message: "Remove openraft scaffold and legacy storage module"
+
+  - name: "Prerequisite 1: Entry Versioning Foundation"
+    description: >
+      Fix the entry versioning system to start at v0 and add version-based
+      dispatch infrastructure to all deserializers.
+    depends_on: ["Prerequisite 0"]
+    tasks:
+      - name: Fix entry_version to start at 0
+        file: aeordb-lib/src/engine/entry_header.rs
+        details: |
+          Remove the version 0 rejection (lines 100-102):
+          ```rust
+          if entry_version == 0 {
+              return Err(EngineError::InvalidEntryVersion(entry_version));
+          }
+          ```
+
+      - name: Add CURRENT_ENTRY_VERSION constant
+        file: aeordb-lib/src/engine/entry_header.rs
+        details: |
+          Add: `pub const CURRENT_ENTRY_VERSION: u8 = 0;`
+          This is the version written to new entries.
+
+      - name: Update append_writer to use constant
+        file: aeordb-lib/src/engine/append_writer.rs
+        details: |
+          Replace both `entry_version: 1` with `entry_version: CURRENT_ENTRY_VERSION`.
+          Import the constant from entry_header.
+
+      - name: Add version dispatch to FileRecord::deserialize
+        file: aeordb-lib/src/engine/file_record.rs
+        details: |
+          Current deserialize assumes one format. Refactor to:
+          ```rust
+          pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+              // For now, all versions use the same format (v0)
+              Self::deserialize_v0(data, hash_length)
+          }
+
+          fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+              // existing deserialization code moves here
+          }
+          ```
+          The version dispatch will be used later when format changes happen.
+          Note: FileRecord::deserialize doesn't currently receive the version — it
+          may need a version parameter added, or the version can be passed through context.
+
+      - name: Add version dispatch to SymlinkRecord::deserialize
+        file: aeordb-lib/src/engine/symlink_record.rs
+        details: |
+          Same pattern as FileRecord. Refactor existing code into deserialize_v0.
+
+      - name: Add version dispatch to ChildEntry deserialization
+        file: aeordb-lib/src/engine/directory_entry.rs
+        details: |
+          Refactor deserialize_child_entries into deserialize_child_entries_v0.
+          Add version-dispatching wrapper.
+
+      - name: Add version dispatch to SnapshotInfo and ForkInfo
+        file: aeordb-lib/src/engine/version_manager.rs
+        details: |
+          Same pattern for SnapshotInfo::deserialize and ForkInfo (if it has deserialization).
+
+      - name: Verify all tests pass
+        details: |
+          Run full test suite. The version change from 1→0 means existing .aeordb
+          files are incompatible — but we don't care (pre-production).
+          All tests create fresh databases, so they'll write v0 entries and read v0 entries.
+
+    commit_message: "Fix entry versioning: start at v0, add version dispatch stubs to all deserializers"
+
+  - name: "Prerequisite 2: Identity Hashes + Entry Ordering Metadata"
+    description: >
+      Remove timestamps from content hashes. Add (virtual_time, node_id) ordering
+      metadata to entries. This is the foundation for conflict-free replication.
+    depends_on: ["Prerequisite 1"]
+    tasks:
+      - name: Create identity hash functions
+        file: aeordb-lib/src/engine/directory_ops.rs
+        details: |
+          New function:
+          ```rust
+          pub fn file_identity_hash(
+              path: &str,
+              content_type: Option<&str>,
+              chunk_hashes: &[Vec<u8>],
+              algo: &HashAlgorithm,
+          ) -> EngineResult<Vec<u8>>
+          ```
+          Domain prefix: "fileid:"
+          Hashes: path bytes + content_type bytes + concatenated chunk hashes
+          Deliberately EXCLUDES: timestamps, metadata, total_size
+
+          Similar function for symlinks:
+          ```rust
+          pub fn symlink_identity_hash(
+              path: &str,
+              target: &str,
+              algo: &HashAlgorithm,
+          ) -> EngineResult<Vec<u8>>
+          ```
+          Domain prefix: "symlinkid:"
+          Hashes: path bytes + target bytes
+          Excludes: timestamps
+
+      - name: Update store_file to use identity hash for ChildEntry
+        file: aeordb-lib/src/engine/directory_ops.rs
+        details: |
+          In store_file_internal, replace `file_content_hash(&file_value, &algo)?`
+          with `file_identity_hash(&normalized, content_type, &chunk_hashes, &algo)?`
+          for the ChildEntry.hash field.
+
+          Keep the old content_hash for the immutable KV entry key (the full
+          serialized record is still stored at a content-addressed key for
+          the WAL append model). The IDENTITY hash goes in ChildEntry.hash only.
+
+          IMPORTANT: The content-addressed key for the KV store entry can continue
+          to use the full serialized data hash (it's an internal storage key).
+          The identity hash is specifically for the directory tree (ChildEntry.hash)
+          where it's used for diff/merge/versioning comparisons.
+
+      - name: Update store_symlink similarly
+        file: aeordb-lib/src/engine/directory_ops.rs
+        details: |
+          Use symlink_identity_hash for ChildEntry.hash in store_symlink.
+
+      - name: Add ordering metadata to EntryHeader or ChildEntry
+        details: |
+          Decision needed: where to store (virtual_time, node_id)?
+          Options:
+          a) In EntryHeader — every WAL entry carries it
+          b) In ChildEntry — directory entries carry it
+          c) In FileRecord/SymlinkRecord — the records themselves carry it
+
+          Recommendation: (b) — add virtual_time and node_id to ChildEntry.
+          This is where the ordering matters (directory merge compares ChildEntries).
+          ChildEntry already has created_at/updated_at; add virtual_time and node_id
+          alongside them.
+
+          Also add to EntryHeader timestamp field — rename it to virtual_time
+          or keep it as timestamp but populate it from the virtual clock.
+
+      - name: Update ChildEntry serialization
+        file: aeordb-lib/src/engine/directory_entry.rs
+        details: |
+          Add `virtual_time: u64` and `node_id: u64` fields to ChildEntry struct.
+          Update serialize/deserialize to include these fields.
+          Update all places that construct ChildEntry to provide these values.
+
+      - name: Update tree_walker and diff_trees
+        file: aeordb-lib/src/engine/tree_walker.rs
+        details: |
+          diff_trees currently compares file hashes to detect modifications.
+          With identity hashes, same content → same hash regardless of timestamp.
+          This should "just work" — but verify the comparison logic is still correct.
+
+      - name: Update all tests
+        details: |
+          Many tests verify specific hash values or hash behavior.
+          Update tests that construct ChildEntry (add virtual_time/node_id fields).
+          Run full test suite — fix all failures.
+
+    commit_message: "Implement identity hashes and entry ordering metadata for replication"
+
+  - name: "Phase 1: Virtual Clock + Heartbeat Sync"
+    description: >
+      Pluggable virtual clock, enhanced heartbeat with clock sync protocol,
+      adaptive timing, per-peer stats, and clock bounds checking.
+    depends_on: ["Prerequisite 2"]
+    tasks:
+      - name: Create VirtualClock trait
+        file: aeordb-lib/src/engine/virtual_clock.rs
+        details: |
+          ```rust
+          pub trait VirtualClock: Send + Sync {
+              fn now(&self) -> u64;  // current virtual time in ms
+              fn node_id(&self) -> u64;
+          }
+
+          pub struct SystemClock { node_id: u64 }
+          impl VirtualClock for SystemClock {
+              fn now(&self) -> u64 { chrono::Utc::now().timestamp_millis() as u64 }
+              fn node_id(&self) -> u64 { self.node_id }
+          }
+
+          pub struct MockClock { time: AtomicU64, node_id: u64 }
+          // Injectable for tests — set_time(), advance(), etc.
+          ```
+
+      - name: Create PeerClockTracker
+        file: aeordb-lib/src/engine/virtual_clock.rs
+        details: |
+          Tracks per-peer clock stats:
+          ```rust
+          pub struct PeerClockStats {
+              pub clock_offset_ms: f64,
+              pub wire_time_ms: f64,
+              pub jitter_ms: f64,
+              pub samples: u32,
+              pub last_updated: u64,
+          }
+
+          pub struct PeerClockTracker {
+              peers: RwLock<HashMap<u64, PeerClockStats>>,
+              bounds_threshold_ms: u64,  // reject heartbeats > this offset
+          }
+          ```
+          Methods:
+          - record_heartbeat(node_id, intent_time, construct_time, receive_time)
+          - get_corrected_time() -> u64 (local time adjusted by average peer offset)
+          - get_peer_stats(node_id) -> Option<PeerClockStats>
+          - is_settled(node_id) -> bool (variance below threshold + min samples)
+
+      - name: Enhance heartbeat message
+        file: aeordb-lib/src/engine/heartbeat.rs
+        details: |
+          Add to the heartbeat payload:
+          - intent_time: u64 (the aligned target time this heartbeat aimed for)
+          - construct_time: u64 (actual wall clock when the message was built)
+          - node_id: u64
+
+          Existing heartbeat fields (DatabaseStats) remain.
+
+      - name: Adaptive heartbeat timing
+        file: aeordb-lib/src/engine/heartbeat.rs
+        details: |
+          The heartbeat timer monitors its own fire accuracy:
+          - Record actual fire time vs target
+          - Compute drift correction
+          - Adjust next fire time to compensate
+          - Converge to sub-ms alignment over several cycles
+
+      - name: Replace Utc::now() with virtual clock
+        details: |
+          Search for all `chrono::Utc::now()` calls used for entry timestamps.
+          Replace with virtual clock calls.
+          Files affected: directory_ops.rs, symlink_record.rs, file_record.rs,
+          version_manager.rs, and anywhere else timestamps are generated for entries.
+
+          The virtual clock should be accessible via AppState or a global/Arc.
+
+      - name: Persist clock state per peer
+        details: |
+          Store last known PeerClockStats in system tables:
+          ::aeordb:cluster:clock:{node_id} → serialized PeerClockStats
+          Loaded on startup to seed the PeerClockTracker.
+
+      - name: Write virtual clock tests
+        file: aeordb-lib/spec/engine/virtual_clock_spec.rs
+        details: |
+          Tests:
+          - MockClock: set_time, advance, now() returns correct value
+          - PeerClockTracker: record heartbeats, compute offset
+          - Clock bounds: reject heartbeat with unreasonable offset
+          - Corrected time: verify adjustment from peer data
+          - is_settled: needs N samples with low variance
+          - Adaptive timing: verify fire time converges
+
+    commit_message: "Implement virtual clock with heartbeat sync, adaptive timing, and injectable mock"
+
+  - name: "Phase 2: Peer Management + Honeymoon"
+    description: >
+      Node identity, peer list management, connection state machine with
+      mandatory honeymoon phase, and dashboard integration.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Node ID generation and persistence
+        details: |
+          On first startup, generate a random u64 node_id.
+          Store in system tables: ::aeordb:cluster:node_id
+          Load on subsequent startups.
+          Expose via GET /admin/cluster.
+
+      - name: Peer list in system tables
+        details: |
+          Store peer configs as JSON array in ::aeordb:cluster:peers.
+          Each peer: { node_id, address, label, sync_paths, last_clock_state }
+
+      - name: Cluster admin API
+        file: aeordb-lib/src/server/cluster_routes.rs
+        details: |
+          New route file:
+          GET /admin/cluster — status (mode, node_id, peers with connection state)
+          POST /admin/cluster/peers — add peer
+          DELETE /admin/cluster/peers/{id} — remove peer
+          POST /admin/cluster/sync — trigger immediate sync
+          POST /admin/cluster/sync/{id} — sync with specific peer
+
+      - name: CLI flags
+        file: aeordb-cli/src/main.rs
+        details: |
+          Add to start command:
+          --peers "addr1,addr2,..." — initial peer list
+          --cluster-secret "secret" — shared secret (dev)
+          --cluster-secret-file /path — shared secret from file (production)
+          --cluster-tls true|false — TLS for inter-node (default: true)
+          --cluster-tls-cert /path — custom TLS cert
+          --cluster-tls-key /path — custom TLS key
+
+      - name: Connection state machine
+        file: aeordb-lib/src/engine/peer_connection.rs
+        details: |
+          ```rust
+          pub enum ConnectionState {
+              Disconnected,
+              Honeymoon { started_at: u64, heartbeats_received: u32 },
+              Active,
+          }
+
+          pub struct PeerConnection {
+              pub node_id: u64,
+              pub address: String,
+              pub state: ConnectionState,
+              pub clock_stats: PeerClockStats,
+              pub last_synced_root_hash: Option<Vec<u8>>,
+              pub last_sync_at: Option<u64>,
+          }
+          ```
+          Methods:
+          - on_heartbeat(heartbeat) — update clock stats, check if settled
+          - transition_to_active() — called when honeymoon settles
+          - on_disconnect() — reset to Disconnected
+          - on_reconnect() — enter Honeymoon with persisted clock seed
+
+      - name: Honeymoon logic
+        details: |
+          On every connect/reconnect:
+          1. Enter Honeymoon state
+          2. Subscribe to peer's /events/stream for heartbeats
+          3. Load persisted clock state as seed (if available)
+          4. Exchange heartbeats only — no sync
+          5. After each heartbeat, check: is_settled()?
+             - Minimum heartbeat count (e.g. 5 with seed, 10 without)
+             - Clock offset variance < threshold (e.g. 5ms stddev)
+          6. When settled: transition to Active, trigger first sync
+
+      - name: SSE subscription to peers
+        details: |
+          Each Active peer connection subscribes to /events/stream.
+          On write events: trigger a sync cycle.
+          On connection drop: transition to Disconnected, attempt reconnect.
+
+      - name: Dashboard Nodes section
+        details: |
+          Update portal dashboard to show a Nodes section:
+          - Each peer: connection state, clock offset, wire time, jitter
+          - Last sync time, last synced hash
+          - Honeymoon progress (heartbeats received / threshold)
+
+      - name: Write peer management tests
+        details: |
+          Tests:
+          - Node ID generated once, persisted across restarts
+          - Peer CRUD via API
+          - Connection state transitions (Disconnected → Honeymoon → Active)
+          - Honeymoon settles after enough heartbeats
+          - Reconnect re-enters honeymoon
+          - Persisted clock state seeds honeymoon
+
+    commit_message: "Add peer management with connection state machine and mandatory honeymoon phase"
+
+  - name: "Phase 3: Sync Endpoints"
+    description: >
+      HTTP endpoints for tree diff and batch chunk transfer. Cluster secret
+      authentication. TLS configuration.
+    depends_on: ["Phase 2"]
+    tasks:
+      - name: Cluster secret authentication middleware
+        details: |
+          New middleware for /sync/* routes.
+          Checks X-Cluster-Secret header against stored hash.
+          Rejects with 401 if missing or invalid.
+          The cluster secret hash is stored in system tables:
+          ::aeordb:cluster:secret_hash (BLAKE3 hash of the plaintext secret)
+
+      - name: POST /sync/diff endpoint
+        file: aeordb-lib/src/server/sync_routes.rs
+        details: |
+          Accepts: { since_root_hash, current_root_hash, paths, node_id, virtual_time }
+          Computes diff using diff_trees (existing tree_walker).
+          Filters by paths if provided (selective sync).
+          Returns: { root_hash, changes: { files_added, files_modified, files_deleted,
+          symlinks_added, symlinks_modified, symlinks_deleted }, chunk_hashes_needed }
+
+          The chunk_hashes_needed field lists all chunk hashes that appear in
+          added/modified entries, so the caller knows what to fetch.
+
+      - name: POST /sync/chunks endpoint
+        file: aeordb-lib/src/server/sync_routes.rs
+        details: |
+          Accepts: { hashes: ["aaa...", "bbb..."] }
+          Returns: streaming binary response with each chunk's data.
+          Format: for each chunk: [4-byte length][hash_length bytes hash][chunk data]
+          This allows the receiver to stream and process chunks incrementally.
+
+      - name: TLS configuration
+        details: |
+          Add TLS support for inter-node communication.
+          --cluster-tls=true (default): require TLS on /sync/* endpoints
+          --cluster-tls=false: allow plaintext
+          --cluster-tls-cert / --cluster-tls-key: custom certs (self-signed OK)
+
+      - name: Register sync routes
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Register /sync/diff and /sync/chunks routes.
+          Apply cluster secret middleware to /sync/* routes.
+          These routes are NOT behind the regular JWT auth middleware.
+
+      - name: Write sync endpoint tests
+        details: |
+          Tests:
+          - POST /sync/diff returns correct changes
+          - Selective sync filters by paths
+          - POST /sync/chunks returns requested chunks
+          - Missing cluster secret → 401
+          - Invalid cluster secret → 401
+          - Diff with no since_root_hash → full tree
+
+    commit_message: "Add sync endpoints: POST /sync/diff and /sync/chunks with cluster secret auth"
+
+  - name: "Phase 4: Directory Merge + Atomic Sync"
+    description: >
+      Three-way merge algorithm with deterministic conflict resolution.
+      Atomic HEAD swap — no partial sync states visible to users.
+    depends_on: ["Phase 3"]
+    tasks:
+      - name: Create merge module
+        file: aeordb-lib/src/engine/merge.rs
+        details: |
+          ```rust
+          pub struct MergeResult {
+              pub merged_entries: Vec<MergeEntry>,
+              pub conflicts: Vec<ConflictEntry>,
+          }
+
+          pub enum MergeEntry {
+              Add { path, entry_data, source_node_id },
+              Delete { path },
+          }
+
+          pub struct ConflictEntry {
+              pub path: String,
+              pub conflict_type: ConflictType,
+              pub winner: EntryVersion,
+              pub loser: EntryVersion,
+          }
+
+          pub enum ConflictType {
+              ConcurrentModify,
+              ModifyDelete,
+              ConcurrentCreate,
+          }
+
+          pub fn three_way_merge(
+              engine: &StorageEngine,
+              base_root_hash: &[u8],
+              local_root_hash: &[u8],
+              remote_changes: &TreeDiff,
+          ) -> EngineResult<MergeResult>
+          ```
+
+          Algorithm:
+          1. Compute local_diff = diff_trees(base, local)
+          2. Use remote_changes (already computed by peer via /sync/diff)
+          3. For each path in union of diffs:
+             - Only local → keep local change
+             - Only remote → apply remote change
+             - Both, same hash → no conflict
+             - Both, different hash → LWW by (virtual_time, node_id)
+             - Modify vs delete → modify wins
+             - Both delete → no conflict
+          4. Return MergeResult with entries to apply + conflicts to store
+
+      - name: Atomic sync application
+        file: aeordb-lib/src/engine/sync_apply.rs
+        details: |
+          ```rust
+          pub fn apply_sync_atomically(
+              engine: &StorageEngine,
+              merge_result: &MergeResult,
+              chunks: &HashMap<Vec<u8>, Vec<u8>>,  // fetched chunks
+          ) -> EngineResult<Vec<u8>>  // returns new HEAD hash
+          ```
+
+          Steps:
+          1. Verify ALL chunks referenced by merge_result are in `chunks` map
+          2. Store all new chunks in the engine
+          3. Store all new FileRecords/SymlinkRecords
+          4. Build new directory tree with merged entries
+          5. Atomically update HEAD to the new root hash
+          6. Return new HEAD
+
+          If any step fails, no HEAD update occurs. Caller retries next cycle.
+
+      - name: Adds-before-deletes ordering
+        details: |
+          Within the merge application, process in this order:
+          1. Create directories (ensure parents exist)
+          2. Add/modify files and symlinks
+          3. Process deletions
+          This prevents "file added to nonexistent directory" errors.
+
+      - name: Property-based merge testing
+        details: |
+          Add `proptest` to dev-dependencies.
+          Generate random tree pairs, merge both directions, verify:
+          - merge(A, B) == merge(B, A) (commutativity)
+          - merge result produces valid directory tree
+          - all conflicts are detected (same path, different hash)
+          - modify-beats-delete rule applied correctly
+
+      - name: Write merge unit tests
+        details: |
+          Tests:
+          - Non-conflicting changes merge cleanly
+          - Same path, same hash → no conflict
+          - Same path, different hash → LWW winner, conflict stored
+          - Modify vs delete → modify wins
+          - Both delete → no conflict
+          - Both create → LWW
+          - Adds-before-deletes ordering
+          - Atomic: verify HEAD unchanged on partial failure
+
+    commit_message: "Implement three-way merge with atomic sync and property-based testing"
+
+  - name: "Phase 5: Conflict System"
+    description: >
+      First-class conflict storage, detection, resolution API.
+      Conflicts sync as regular entries. GC-aware.
+    depends_on: ["Phase 4"]
+    tasks:
+      - name: Conflict storage in /.conflicts/
+        details: |
+          Store conflicts as regular database entries:
+          /.conflicts/{path}/node-{id} → FileRecord/SymlinkRecord of loser
+          /.conflicts/{path}/.meta → JSON conflict metadata
+
+          Since these are regular files, they sync automatically.
+          GC must treat /.conflicts/ entries as live roots.
+
+      - name: Conflict detection in merge
+        details: |
+          When three_way_merge detects a conflict, it returns ConflictEntry.
+          The sync_apply function stores the conflict entries in /.conflicts/
+          as part of the atomic application.
+
+      - name: Conflict resolution API
+        file: aeordb-lib/src/server/conflict_routes.rs
+        details: |
+          GET /admin/conflicts — list all unresolved conflicts
+          GET /admin/conflicts/{*path} — details for a specific path
+          POST /admin/conflicts/{*path}/resolve — { "pick": "node-1" }
+          POST /admin/conflicts/{*path}/dismiss — accept auto-winner, cleanup
+
+          Resolution: write chosen version to real path, delete /.conflicts/ entries.
+          This is a normal write, so it syncs to all nodes.
+
+      - name: GC conflict awareness
+        file: aeordb-lib/src/engine/gc.rs
+        details: |
+          Update gc_mark to treat entries under /.conflicts/ as live roots.
+          Any chunk referenced by a conflict entry must not be collected.
+
+      - name: Write conflict tests
+        details: |
+          Tests:
+          - Conflict detected and stored in /.conflicts/
+          - Conflict metadata includes both versions
+          - Auto-winner is LWW winner
+          - Resolution writes chosen version, cleans up conflict
+          - Dismiss accepts auto-winner
+          - Conflicts sync as regular entries
+          - GC doesn't sweep conflict-referenced chunks
+          - API lists, details, resolve, dismiss
+
+    commit_message: "Add first-class conflict system with /.conflicts/ storage and resolution API"
+
+  - name: "Phase 6: Sync Engine"
+    description: >
+      Background sync loop, bidirectional sync, selective sync, HEAD-first
+      initial sync for new nodes.
+    depends_on: ["Phase 5"]
+    tasks:
+      - name: Background sync loop
+        file: aeordb-lib/src/engine/sync_engine.rs
+        details: |
+          The sync engine manages sync cycles for all Active peers:
+          - SSE-triggered: when a peer emits a write event, queue a sync
+          - Periodic fallback: every N seconds, sync all Active peers
+          - On-demand: POST /admin/cluster/sync triggers immediate sync
+          - Debounce: don't sync the same peer more than once per second
+
+      - name: Bidirectional sync implementation
+        details: |
+          For each sync cycle with a peer:
+          1. POST /sync/diff to peer (our HEAD, their last known hash)
+          2. Receive their changes + chunk list
+          3. Fetch missing chunks via POST /sync/chunks
+          4. Three-way merge with conflict detection
+          5. Atomic HEAD swap
+          6. POST /sync/diff again (our NEW HEAD) — peer sees our changes
+          7. Update last_synced_root_hash for this peer
+
+      - name: Selective sync
+        details: |
+          If the peer config has sync_paths, include them in /sync/diff request.
+          The diff endpoint filters to matching paths.
+          The merge only touches the specified subtrees.
+
+      - name: HEAD-first initial sync
+        details: |
+          When a new node joins (no last_synced_root_hash):
+          1. POST /sync/diff with empty since_root_hash → full HEAD tree
+          2. Fetch all chunks for HEAD
+          3. Apply atomically
+          4. Node is now usable with current state
+          5. Background: request historical versions gradually
+
+      - name: Sync state tracking
+        details: |
+          Per peer, persist: last_synced_root_hash, last_sync_at.
+          Stored in system tables: ::aeordb:cluster:sync:{node_id}
+          Loaded on startup for resume.
+
+      - name: Write sync engine tests
+        details: |
+          Tests:
+          - Two nodes sync bidirectionally, both arrive at same HEAD
+          - Selective sync only transfers matching paths
+          - New node gets full sync
+          - SSE event triggers sync
+          - Periodic fallback triggers sync
+          - Network failure mid-sync → no partial state, retry works
+          - Concurrent syncs with different peers
+
+    commit_message: "Implement sync engine with bidirectional sync, selective paths, and HEAD-first join"
+
+  - name: "Phase 7: Auth & Join"
+    description: >
+      JWT signing key synchronization, join flow with honeymoon,
+      no client traffic until signing key present.
+    depends_on: ["Phase 6"]
+    tasks:
+      - name: Signing key sync
+        details: |
+          The JWT signing key is stored in system tables (::aeordb:config:jwt_signing_key).
+          It syncs as part of the normal HEAD sync — system table entries are regular
+          KV entries in the engine.
+
+          On join, the new node receives the signing key as part of the first sync.
+
+      - name: Join flow
+        details: |
+          1. New node starts with --peers "existing:3000"
+          2. Registers with existing node via POST /admin/cluster/peers
+          3. Enters Honeymoon with existing node
+          4. Exchanges heartbeats, settles clock
+          5. Transitions to Active, triggers first sync
+          6. First sync delivers signing key (as part of system tables)
+          7. Node verifies signing key is present
+          8. THEN opens HTTP port for client traffic
+
+          CRITICAL: client HTTP port is NOT bound until step 8.
+
+      - name: Client traffic gate
+        details: |
+          Add a startup flag / state check that prevents the HTTP server from
+          accepting client requests until the node has:
+          a) A valid JWT signing key in system tables
+          b) Completed at least one successful sync (if in cluster mode)
+
+          In standalone mode, this gate doesn't apply (signing key generated locally).
+
+      - name: Write auth/join tests
+        details: |
+          Tests:
+          - New node gets signing key from first sync
+          - Client requests rejected before sync completes
+          - JWT signed by node A validates on node B (shared key)
+          - Standalone node works without cluster setup
+
+    commit_message: "Implement auth sync and join flow with signing key delivery"
+
+  - name: "Phase 8: Testing & Hardening"
+    description: >
+      Comprehensive multi-node testing, property-based verification,
+      failure simulation, and E2E real-world tests.
+    depends_on: ["Phase 7"]
+    tasks:
+      - name: Multi-node test harness
+        details: |
+          Build a test harness that can:
+          - Spin up N in-process AeorDB nodes (separate engines, shared network)
+          - Use MockClock for deterministic time
+          - Simulate network partitions (block specific peer pairs)
+          - Simulate latency (delay specific connections)
+          - Verify convergence (all nodes have same HEAD after sync)
+
+      - name: Convergence tests
+        details: |
+          - 3 nodes, writes to different paths on each, sync → all converge
+          - 3 nodes, write to same path on 2 nodes → conflict detected, resolved
+          - Network partition: 2 groups write independently, heal → merge correctly
+          - New node joins, gets full state, continues syncing
+
+      - name: Failure tests
+        details: |
+          - Kill connection mid-sync → no partial state (atomic verification)
+          - Node crashes and restarts → resumes from last synced hash
+          - All nodes restart simultaneously → re-honeymoon, re-sync, converge
+          - Honeymoon never settles (malicious clock) → node quarantined
+
+      - name: Clock tests
+        details: |
+          - MockClock: set specific times, verify ordering decisions
+          - Clock drift simulation: offset accumulates, heartbeat corrects it
+          - Clock bounds: node with unreasonable offset is quarantined
+          - Adaptive heartbeat: fire timing converges over cycles
+
+      - name: Large file tests
+        details: |
+          - Sync a 100MB file between 2 nodes
+          - Selective sync: 100MB file at /big/data, peer only syncs /small/ → no transfer
+
+      - name: Conflict system tests
+        details: |
+          - Concurrent modify → conflict created, auto-winner via LWW
+          - Modify vs delete → modify wins
+          - Conflict resolved on node A → resolution syncs to node B
+          - GC doesn't touch conflict-referenced chunks
+
+      - name: E2E real-world verification
+        details: |
+          Build release binary, start 3 real nodes (separate ports, --auth self):
+          1. Node 1 starts standalone, writes files
+          2. Node 2 joins with --peers node1, honeymoon settles, syncs
+          3. Verify node 2 has same files
+          4. Write on node 2, sync → node 1 gets the changes
+          5. Write same file on both nodes simultaneously → conflict
+          6. Resolve conflict on node 1 → node 2 sees resolution
+          7. Node 3 joins → gets full state from either node
+          8. Kill node 1, write on nodes 2+3, restart node 1 → all converge
+          9. Verify JWT from node 1 works on node 2
+          10. Selective sync: node 3 only syncs /subset/
+
+    commit_message: "Comprehensive replication testing: multi-node, property-based, failure, E2E"
