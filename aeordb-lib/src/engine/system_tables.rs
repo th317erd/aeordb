@@ -747,4 +747,28 @@ impl<'a> SystemTables<'a> {
       None => Ok(None),
     }
   }
+
+  /// Persist sync state for a specific peer.
+  pub fn store_peer_sync_state(&self, peer_node_id: u64, state: &crate::engine::sync_engine::PeerSyncState) -> Result<()> {
+    let key = format!("{PREFIX_CLUSTER}sync:{peer_node_id}");
+    let hash = self.hash_key(&key);
+    let value = serde_json::to_vec(state)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &hash, &value)?;
+    Ok(())
+  }
+
+  /// Load sync state for a specific peer.
+  pub fn get_peer_sync_state(&self, peer_node_id: u64) -> Result<Option<crate::engine::sync_engine::PeerSyncState>> {
+    let key = format!("{PREFIX_CLUSTER}sync:{peer_node_id}");
+    let hash = self.hash_key(&key);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        let state: crate::engine::sync_engine::PeerSyncState = serde_json::from_slice(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(Some(state))
+      }
+      None => Ok(None),
+    }
+  }
 }

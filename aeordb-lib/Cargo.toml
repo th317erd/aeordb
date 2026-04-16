@@ -535,6 +535,10 @@ path = "spec/engine/merge_spec.rs"
 name = "sync_apply_spec"
 path = "spec/engine/sync_apply_spec.rs"
 
+[[test]]
+name = "sync_engine_spec"
+path = "spec/engine/sync_engine_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
