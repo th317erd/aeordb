@@ -49,6 +49,7 @@ pub mod source_resolver;
 pub mod storage_engine;
 pub mod symlink_record;
 pub mod symlink_resolver;
+pub mod system_store;
 pub mod system_tables;
 pub mod task_queue;
 pub mod task_worker;
