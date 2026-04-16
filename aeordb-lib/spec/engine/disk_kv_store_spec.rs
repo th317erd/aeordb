@@ -1386,8 +1386,13 @@ fn test_hot_file_replay_on_open() {
     // Open with hot_dir — should replay the hot file entries
     let engine = StorageEngine::open_with_hot_dir(db_str, Some(hot_dir)).unwrap();
 
-    // Hot file should be deleted after replay
-    assert!(!hot_file_path.exists(), "Hot file should be deleted after replay");
+    // After replay, the old hot file is deleted but a new empty hot file is
+    // created at the same path for the new session. Verify the file is empty
+    // (replayed data was consumed) and entries are in the KV store.
+    let hot_file_size = std::fs::metadata(&hot_file_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert_eq!(hot_file_size, 0, "Hot file should be empty after replay (old data consumed, new empty file created)");
 
     // Verify replay entries are in the KV store
     for entry in &replay_entries {
@@ -1432,7 +1437,12 @@ fn test_hot_file_deleted_after_replay() {
     // Open — should replay and delete
     let _engine = StorageEngine::open_with_hot_dir(db_str, Some(hot_dir)).unwrap();
 
-    assert!(!hot_file_path.exists(), "Hot file should be removed after replay");
+    // After replay, the old hot file is deleted but a new empty hot file is
+    // created at the same path for the new session.
+    let hot_file_size = std::fs::metadata(&hot_file_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert_eq!(hot_file_size, 0, "Hot file should be empty after replay");
 }
 
 #[test]
