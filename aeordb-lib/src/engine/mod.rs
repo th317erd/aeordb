@@ -56,6 +56,7 @@ pub mod user;
 pub mod conflict_store;
 pub mod merge;
 pub mod sync_apply;
+pub mod sync_api;
 pub mod sync_engine;
 pub mod tree_walker;
 pub mod version_access;
@@ -123,6 +124,12 @@ pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, Que
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use merge::{three_way_merge, MergeResult, MergeOp, ConflictEntry, ConflictType, ConflictVersion};
 pub use sync_apply::apply_merge_operations;
+pub use sync_api::{
+    compute_sync_diff, get_needed_chunks, apply_sync_chunks,
+    list_conflicts_typed, file_history, file_restore_from_version,
+    SyncDiff, SyncFileEntry, SyncSymlinkEntry, SyncDeletedEntry,
+    ChunkData, ConflictRecord, ConflictVersionInfo, FileHistoryEntry,
+};
 pub use sync_engine::{SyncEngine, SyncConfig, PeerSyncState, SyncCycleResult, spawn_sync_loop};
 pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
