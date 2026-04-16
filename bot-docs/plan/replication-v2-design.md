@@ -168,6 +168,41 @@ Node A                           Node B
 
 Bidirectional sync is two rounds: A pulls from B, then B pulls from A (or A pushes its changes to B in the response).
 
+### Atomic Sync (CRITICAL SAFETY REQUIREMENT)
+
+Sync MUST be atomic. A partial diff application — where HEAD references entries whose chunks haven't been fetched yet — is a user-visible data corruption state (reads return "chunk not found").
+
+The sync flow must be:
+
+1. Receive the diff (list of changes + chunk hashes needed)
+2. Fetch ALL required chunks
+3. Verify all chunks are present locally
+4. Build the merged HEAD in memory
+5. Atomically swap HEAD to the merged state
+
+If the connection drops during step 2, no changes are applied. HEAD is untouched. The next sync cycle retries from the same `since_root_hash`. Users never see partially-synced state.
+
+### Ordering Key (Not Timestamps)
+
+The `virtual_time` stored with entries is treated as an **ordering key**, not a timestamp with real-world semantics. The value happens to correlate with wall-clock time (via the virtual clock), but its purpose is deterministic conflict ordering, not timekeeping. This distinction matters because:
+
+- A malicious node cannot gain ordering advantage by manipulating its clock — peers reject heartbeats with unreasonable time claims (> N seconds from local time)
+- The ordering key is opaque for conflict resolution: higher value wins, `node_id` breaks ties
+- Clients can supply their own ordering key for operations where write order matters
+
+### Clock Bounds Checking
+
+Peers MUST reject heartbeats where the reported time deviates from local time by more than a configurable threshold (e.g. 30 seconds). Nodes with unreasonable clock claims are quarantined — they remain in Honeymoon indefinitely and never transition to Active. This prevents a compromised node from winning all conflicts by claiming a far-future timestamp.
+
+### TLS Configuration
+
+Inter-node communication should use TLS by default, but it's configurable:
+
+- `--cluster-tls=true` (default) — require TLS for all `/sync/*` and `/raft/*` endpoints
+- `--cluster-tls=false` — allow plaintext (private network deployments)
+- `--cluster-tls-cert` / `--cluster-tls-key` — custom certificate (supports self-signed)
+- When TLS is enabled, the cluster secret is protected in transit. When disabled, operators accept the risk.
+
 ---
 
 ## Directory Merge Algorithm
@@ -444,74 +479,91 @@ Fix the entry versioning system so it's ready for format changes.
 - Add version-based dispatch stubs in all deserializers (FileRecord, SymlinkRecord, ChildEntry, SnapshotInfo, ForkInfo) — currently they assume a single format; add a match on version that routes to `deserialize_v0`
 - No format changes yet — just the routing infrastructure
 
-### Prerequisite 2: Hash and Timestamp Refactor (MUST complete before replication)
+### Prerequisite 2: Identity Hashes + Entry Ordering Metadata
 
-**Problem:** FileRecord and SymlinkRecord content hashes currently include timestamps (`created_at`, `updated_at`) in the hashed data. This means identical content stored at different times produces different hashes, breaking dedup and causing false conflicts during replication.
+**Problem:** FileRecord and SymlinkRecord content hashes currently include timestamps in the hashed data. Identical content stored at different times produces different hashes, breaking dedup and causing false conflicts during replication.
 
-**Changes required:**
+**Changes:**
 
-1. **Introduce identity hashes** — new hash functions (`file_identity_hash`, `symlink_identity_hash`) that hash only content-defining fields (path, content_type, chunk_hashes) and deliberately EXCLUDE timestamps, metadata, and total_size. These identity hashes are used in `ChildEntry.hash` for directory trees and versioning.
+1. **Identity hashes** — new hash functions (`file_identity_hash`, `symlink_identity_hash`) that hash only content-defining fields (path, content_type, chunk_hashes) and deliberately EXCLUDE timestamps, metadata, and total_size. Used in `ChildEntry.hash` for directory trees and versioning.
 
-2. **Virtual clock for all timestamps** — replace all uses of `chrono::Utc::now()` for entry timestamps with the heartbeat-synced virtual clock. This ensures `created_at` and `updated_at` are consistent across nodes. The virtual clock uses peer heartbeats to compute clock offsets, wire times, and corrected timestamps to near-ms precision.
+2. **Entry ordering metadata** — each entry gets `(virtual_time: u64, node_id: u64)` stored separately from user-visible timestamps. This is the ordering key for conflict resolution. In standalone mode, `virtual_time` is `Utc::now()` until peers provide clock correction.
 
-3. **Heartbeat clock sync protocol** — enhance the existing heartbeat to include `(intent_time, construct_time, sender_node_id)`. Receiving nodes compute clock offset and wire time from each heartbeat, building a per-peer stats table (offset, latency, jitter). The corrected virtual time is used for all entry timestamps and conflict ordering. The heartbeat timing is self-correcting: it monitors its own fire accuracy and compensates for OS scheduling drift, converging to sub-ms alignment with the target interval.
+3. **No migration** — we are pre-production. Existing test databases are disposable. Just change the format.
 
-4. **Honeymoon phase** — mandatory settling period on every peer connect/reconnect. During honeymoon, nodes exchange heartbeats only — no data sync, no chunk exchange, no merges. The honeymoon ends when clock offset variance stabilizes below a threshold (e.g. < 5ms stddev) and a minimum heartbeat count is reached. This ensures the virtual clock is calibrated before any ordering decisions are made. The dashboard shows per-connection state (Disconnected / Honeymoon / Active) in a dedicated Nodes section with live clock stats.
+**Affects:** `file_record.rs`, `symlink_record.rs`, `directory_ops.rs`, `directory_entry.rs`, `tree_walker.rs`, `version_access.rs`, and all tests that verify content hashes.
 
-5. **Persisted clock state for fast honeymoon** — each peer's last known clock offset, wire time, jitter, and the timestamp of that measurement are persisted in system tables alongside the peer config. On reconnect, the honeymoon uses this as a seed estimate instead of starting from zero, allowing much faster settling when system clocks haven't drifted significantly. Confidence in the seed decays with time since last measurement.
+### Phase 1: Virtual Clock + Heartbeat Sync
 
-6. **Entry ordering metadata** — each entry gets `(virtual_time, node_id)` as ordering metadata, stored separately from user-visible timestamps. This is the conflict resolution key.
+- **Virtual clock trait** — pluggable clock interface (real clock for production, injectable mock for tests)
+- **Heartbeat enhancement** — include `(intent_time, construct_time, sender_node_id)` in heartbeat messages
+- **Adaptive heartbeat** — self-correcting timer that monitors its own fire accuracy and compensates for OS scheduling drift
+- **Per-peer clock stats** — compute clock offset, wire time, jitter from each heartbeat
+- **Clock bounds checking** — reject heartbeats with unreasonable time claims (> configurable threshold from local time)
+- Replace all `Utc::now()` for entry timestamps with virtual clock
+- In standalone mode (no peers), virtual clock = local system time
+- **Persisted clock state** — last known offset/wire-time/jitter per peer stored in system tables for fast reconnect
 
-7. **No migration** — we are pre-production. Existing test databases are disposable. Just change the format. No dual-format support needed.
+### Phase 2: Peer Management + Honeymoon
 
-This is a foundational change that affects: `file_record.rs`, `symlink_record.rs`, `directory_ops.rs`, `directory_entry.rs` (ChildEntry.hash semantics), `tree_walker.rs`, `version_access.rs`, `heartbeat.rs`, and all tests that verify content hashes.
+- Node ID generation and persistence in system tables
+- Peer list storage and admin API (`GET/POST/DELETE /admin/cluster/peers`)
+- CLI flags (`--peers`, `--cluster-secret`, `--cluster-secret-file`, `--cluster-tls`)
+- **Connection state machine**: Disconnected → Honeymoon → Active
+- **Honeymoon phase** — mandatory settling on every connect/reconnect; heartbeats only, no data sync; settles when clock offset variance < threshold and minimum heartbeat count reached; persisted clock state seeds the estimates for fast settling
+- SSE subscription to peers for sync triggers
+- **Dashboard Nodes section** — per-connection state, clock stats, sync status
 
-### Phase 0: Entry Metadata
-- Add `virtual_time: u64` and `node_id: u64` to entry metadata
-- Node ID generation and persistence
-- Virtual clock sync via heartbeat (enhanced with clock offset / wire time computation)
+### Phase 3: Sync Endpoints
 
-### Phase 1: Sync Endpoint
 - `POST /sync/diff` — compute and return tree diff with path filtering
 - `POST /sync/chunks` — batch chunk transfer
 - Cluster secret authentication on sync endpoints
+- TLS configuration (default on, configurable off, self-signed support)
 
-### Phase 2: Directory Merge
-- Three-way merge algorithm (base, local, remote)
-- Deterministic conflict resolution (LWW + modify-beats-delete)
-- Merge produces new HEAD
+### Phase 4: Directory Merge + Atomic Sync
 
-### Phase 3: Conflict System
-- `/.conflicts/` storage structure
+- **Three-way merge algorithm** (base, local, remote) — deterministic, commutative
+- Conflict resolution: LWW by `(virtual_time, node_id)`, modify beats delete
+- **Atomic sync** — fetch ALL chunks, verify, build merged HEAD in memory, atomic HEAD swap. Partial sync = no changes applied.
+- Adds-before-deletes ordering within a sync batch
+- **Property-based merge testing** — proptest/quickcheck to verify `merge(A, B) == merge(B, A)` on random tree pairs
+
+### Phase 5: Conflict System
+
+- `/.conflicts/` storage structure (conflicts are regular entries, sync automatically)
 - Conflict detection during merge
 - Conflict resolution API (`GET/POST /admin/conflicts`)
-- Conflicts sync as regular entries
+- GC conflict-awareness (conflict entries are live roots)
 
-### Phase 4: Peer Management
-- System table storage for peers
-- Admin API for peer CRUD
-- CLI flags (--peers, --cluster-secret-file)
-- SSE subscription to peers for sync triggers
+### Phase 6: Sync Engine
 
-### Phase 5: Sync Engine
 - Background sync loop (SSE-triggered + periodic fallback)
 - Bidirectional sync between all peers
 - Selective sync with path filtering
 - Sync state tracking (last synced hash per peer)
+- Honeymoon → Active transition triggers first sync
+- HEAD-first initial sync for new nodes, background backfill for history
 
-### Phase 6: Auth & Join
-- Signing key sync
-- Join flow (first sync before accepting traffic)
-- Cluster secret validation
+### Phase 7: Auth & Join
 
-### Phase 7: Testing & Hardening
-- Multi-node integration tests
+- JWT signing key syncs as regular system table data
+- Join flow: node connects, honeymoon settles, first sync delivers signing key
+- Node MUST NOT accept client traffic until signing key is present
+- Cluster secret validation on all sync endpoints
+
+### Phase 8: Testing & Hardening
+
+- **Injectable clock** for deterministic time-sensitive tests
+- Multi-node integration tests (in-process, 3+ nodes)
 - Conflict detection and resolution tests
 - Selective sync tests
-- Network failure / reconnection tests
+- Network failure / reconnection / honeymoon re-entry tests
 - Large file sync tests
-- Clock drift simulation
-- Deterministic merge verification (both nodes arrive at same HEAD)
+- Clock drift simulation and bounds checking tests
+- **Property-based merge testing** (commutativity, associativity)
+- Atomic sync verification (kill connection mid-transfer, verify no corruption)
+- GC + conflicts interaction tests
 - E2E: real multi-node cluster with curl
 
 ---
@@ -562,6 +614,6 @@ This is a foundational change that affects: `file_record.rs`, `symlink_record.rs
 
 8. **Auth bootstrap** — JWT signing key is stored in system tables. New node receives it during initial sync (HEAD-first). Node MUST NOT accept client traffic until signing key is present. Honeymoon phase naturally enforces this — no data sync (and thus no signing key) until clocks settle.
 
-## Remaining Open Question
+## Remaining Open Questions
 
-1. **Migration strategy for identity hashes** — existing databases have FileRecord content hashes that include timestamps. On upgrade, do we: (a) rewrite all hashes (expensive, breaks snapshots), (b) support both hash formats indefinitely (complexity), or (c) only use identity hashes for new writes and let old entries age out through GC? Need to decide before the prerequisite phase.
+None. All questions resolved. Design is ready for implementation planning.
