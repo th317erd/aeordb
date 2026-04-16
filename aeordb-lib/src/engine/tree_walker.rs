@@ -86,7 +86,7 @@ fn walk_directory(
   let children = if crate::engine::btree::is_btree_format(&dir_data) {
     crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
   } else {
-    deserialize_child_entries(&dir_data, hash_length)?
+    deserialize_child_entries(&dir_data, hash_length, 0)?
   };
 
   for child in &children {
@@ -105,8 +105,8 @@ fn walk_directory(
       }
       EntryType::FileRecord => {
         // Load the file record using the hash stored in ChildEntry
-        if let Some((_header, _key, value)) = engine.get_entry(&child.hash)? {
-          let file_record = FileRecord::deserialize(&value, hash_length)?;
+        if let Some((header, _key, value)) = engine.get_entry(&child.hash)? {
+          let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
           // Collect all chunk hashes from this file
           for chunk_hash in &file_record.chunk_hashes {
@@ -120,8 +120,8 @@ fn walk_directory(
         }
       }
       EntryType::Symlink => {
-        if let Some((_header, _key, value)) = engine.get_entry(&child.hash)? {
-          let symlink_record = SymlinkRecord::deserialize(&value)?;
+        if let Some((header, _key, value)) = engine.get_entry(&child.hash)? {
+          let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)?;
           tree.symlinks.insert(
             child_path.clone(),
             (child.hash.clone(), symlink_record),

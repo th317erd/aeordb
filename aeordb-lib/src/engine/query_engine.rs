@@ -801,8 +801,8 @@ impl<'a> QueryEngine<'a> {
 
     for file_hash in result_hashes {
       match self.engine.get_entry(&file_hash) {
-        Ok(Some((_header, _key, value))) => {
-          let file_record = FileRecord::deserialize(&value, hash_length)?;
+        Ok(Some((header, _key, value))) => {
+          let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
           results.push(QueryResult { file_hash, file_record, score: 1.0, matched_by: vec![] });
         }
         Ok(None) => continue, // stale index entry, skip
@@ -1104,8 +1104,8 @@ impl<'a> QueryEngine<'a> {
 
       // Load the FileRecord for the result
       let file_record = match self.engine.get_entry(&file_hash) {
-        Ok(Some((_header, _key, value))) => {
-          FileRecord::deserialize(&value, hash_length)?
+        Ok(Some((header, _key, value))) => {
+          FileRecord::deserialize(&value, hash_length, header.entry_version)?
         }
         _ => continue,
       };
@@ -1341,8 +1341,8 @@ impl<'a> QueryEngine<'a> {
     ops: &DirectoryOps,
   ) -> EngineResult<Option<(FileRecord, Vec<u8>)>> {
     match self.engine.get_entry(file_hash) {
-      Ok(Some((_header, _key, value))) => {
-        let file_record = FileRecord::deserialize(&value, hash_length)?;
+      Ok(Some((header, _key, value))) => {
+        let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
         match ops.read_file(&file_record.path) {
           Ok(data) => Ok(Some((file_record, data))),

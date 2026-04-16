@@ -5,7 +5,7 @@ use aeordb::engine::hash_algorithm::HashAlgorithm;
 fn test_serialize_deserialize_roundtrip() {
     let record = SymlinkRecord::new("/link".to_string(), "/target/file.txt".to_string());
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, record.path);
     assert_eq!(restored.target, record.target);
     assert_eq!(restored.created_at, record.created_at);
@@ -18,7 +18,7 @@ fn test_field_preservation() {
     record.created_at = 1000;
     record.updated_at = 2000;
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "/my/link");
     assert_eq!(restored.target, "/some/deep/target");
     assert_eq!(restored.created_at, 1000);
@@ -29,7 +29,7 @@ fn test_field_preservation() {
 fn test_empty_target() {
     let record = SymlinkRecord::new("/link".to_string(), "".to_string());
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.target, "");
 }
 
@@ -37,7 +37,7 @@ fn test_empty_target() {
 fn test_unicode_paths() {
     let record = SymlinkRecord::new("/\u{30EA}\u{30F3}\u{30AF}".to_string(), "/\u{76EE}\u{6A19}/\u{30D5}\u{30A1}\u{30A4}\u{30EB}.txt".to_string());
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "/\u{30EA}\u{30F3}\u{30AF}");
     assert_eq!(restored.target, "/\u{76EE}\u{6A19}/\u{30D5}\u{30A1}\u{30A4}\u{30EB}.txt");
 }
@@ -55,7 +55,7 @@ fn test_hash_functions() {
 #[test]
 fn test_deserialize_too_short() {
     // Less than 4 bytes should fail
-    let result = SymlinkRecord::deserialize(&[0x00, 0x01]);
+    let result = SymlinkRecord::deserialize(&[0x00, 0x01], 0);
     assert!(result.is_err());
 }
 
@@ -63,7 +63,7 @@ fn test_deserialize_too_short() {
 fn test_deserialize_truncated_path() {
     // Claim path is 10 bytes but only provide 2
     let data = vec![0x0A, 0x00, 0x41, 0x42];
-    let result = SymlinkRecord::deserialize(&data);
+    let result = SymlinkRecord::deserialize(&data, 0);
     assert!(result.is_err());
 }
 
@@ -75,7 +75,7 @@ fn test_deserialize_truncated_target_and_timestamps() {
         0x01, 0x00, b'B',       // target: "B"
         // missing 16 bytes of timestamps
     ];
-    let result = SymlinkRecord::deserialize(&data);
+    let result = SymlinkRecord::deserialize(&data, 0);
     assert!(result.is_err());
 }
 
@@ -115,7 +115,7 @@ fn test_content_hash_differs_for_different_data() {
 fn test_empty_path() {
     let record = SymlinkRecord::new("".to_string(), "/target".to_string());
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "");
     assert_eq!(restored.target, "/target");
 }
@@ -126,6 +126,6 @@ fn test_max_u16_boundary_path() {
     let long_path = "/".to_string() + &"a".repeat(1000);
     let record = SymlinkRecord::new(long_path.clone(), "/t".to_string());
     let data = record.serialize();
-    let restored = SymlinkRecord::deserialize(&data).unwrap();
+    let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, long_path);
 }

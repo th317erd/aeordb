@@ -139,8 +139,8 @@ pub fn commit_files(
         // Check if file already exists (preserve created_at on overwrite)
         let file_key = file_path_hash(&normalized, &algo)?;
         let existing_created_at = match engine.get_entry(&file_key)? {
-            Some((_header, _key, value)) => {
-                let existing = FileRecord::deserialize(&value, hash_length)?;
+            Some((header, _key, value)) => {
+                let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
                 Some(existing.created_at)
             }
             None => None,
@@ -394,12 +394,12 @@ fn update_directory(
 
             (current_data, current_hash)
         }
-        Some((_header, _key, value)) => {
+        Some((header, _key, value)) => {
             // Flat format
             let mut children = if value.is_empty() {
                 Vec::new()
             } else {
-                deserialize_child_entries(&value, hash_length)?
+                deserialize_child_entries(&value, hash_length, header.entry_version)?
             };
 
             // Merge new children: update existing by name or append

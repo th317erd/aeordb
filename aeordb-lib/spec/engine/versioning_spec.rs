@@ -563,7 +563,7 @@ fn test_snapshot_serialization_roundtrip() {
   };
 
   let serialized = original.serialize(32);
-  let deserialized = aeordb::engine::version_manager::SnapshotInfo::deserialize(&serialized, 32).unwrap();
+  let deserialized = aeordb::engine::version_manager::SnapshotInfo::deserialize(&serialized, 32, 0).unwrap();
 
   assert_eq!(deserialized.name, original.name);
   assert_eq!(deserialized.root_hash, original.root_hash);
@@ -580,7 +580,7 @@ fn test_fork_serialization_roundtrip() {
   };
 
   let serialized = original.serialize(32);
-  let deserialized = aeordb::engine::version_manager::ForkInfo::deserialize(&serialized, 32).unwrap();
+  let deserialized = aeordb::engine::version_manager::ForkInfo::deserialize(&serialized, 32, 0).unwrap();
 
   assert_eq!(deserialized.name, original.name);
   assert_eq!(deserialized.root_hash, original.root_hash);
@@ -590,20 +590,20 @@ fn test_fork_serialization_roundtrip() {
 #[test]
 fn test_snapshot_deserialize_corrupt_data() {
   // Too short
-  let result = aeordb::engine::version_manager::SnapshotInfo::deserialize(&[0], 32);
+  let result = aeordb::engine::version_manager::SnapshotInfo::deserialize(&[0], 32, 0);
   assert!(result.is_err());
 
   // Empty
-  let result = aeordb::engine::version_manager::SnapshotInfo::deserialize(&[], 32);
+  let result = aeordb::engine::version_manager::SnapshotInfo::deserialize(&[], 32, 0);
   assert!(result.is_err());
 }
 
 #[test]
 fn test_fork_deserialize_corrupt_data() {
-  let result = aeordb::engine::version_manager::ForkInfo::deserialize(&[0], 32);
+  let result = aeordb::engine::version_manager::ForkInfo::deserialize(&[0], 32, 0);
   assert!(result.is_err());
 
-  let result = aeordb::engine::version_manager::ForkInfo::deserialize(&[], 32);
+  let result = aeordb::engine::version_manager::ForkInfo::deserialize(&[], 32, 0);
   assert!(result.is_err());
 }
 

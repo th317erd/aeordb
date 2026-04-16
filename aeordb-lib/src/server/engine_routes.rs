@@ -682,7 +682,7 @@ pub async fn engine_get_by_hash(
       let algo = state.engine.hash_algo();
       let hash_length = algo.hash_length();
 
-      let file_record = match FileRecord::deserialize(&value, hash_length) {
+      let file_record = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
         Ok(r) => r,
         Err(e) => {
           tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);

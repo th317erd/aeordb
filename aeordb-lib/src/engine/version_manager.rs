@@ -68,9 +68,11 @@ impl SnapshotInfo {
     buffer
   }
 
-  pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
-    // Currently only v0 format exists — dispatch directly
-    Self::deserialize_v0(data, hash_length)
+  pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
+    match version {
+      0 => Self::deserialize_v0(data, hash_length),
+      _ => Self::deserialize_v0(data, hash_length), // future versions will have their own methods
+    }
   }
 
   fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
@@ -169,9 +171,11 @@ impl ForkInfo {
     buffer
   }
 
-  pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
-    // Currently only v0 format exists — dispatch directly
-    Self::deserialize_v0(data, hash_length)
+  pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
+    match version {
+      0 => Self::deserialize_v0(data, hash_length),
+      _ => Self::deserialize_v0(data, hash_length), // future versions will have their own methods
+    }
   }
 
   fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
@@ -270,12 +274,12 @@ impl<'a> VersionManager<'a> {
     // get_entry already returns None for deleted entries (snapshot.get filters them)
     let entry = self.engine.get_entry(&key)?;
 
-    let Some((_header, _key, value)) = entry else {
+    let Some((header, _key, value)) = entry else {
       return Ok(None);
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
-    let fork_info = ForkInfo::deserialize(&value, hash_length)?;
+    let fork_info = ForkInfo::deserialize(&value, hash_length, header.entry_version)?;
     Ok(Some(fork_info.root_hash))
   }
 
@@ -285,14 +289,14 @@ impl<'a> VersionManager<'a> {
     // get_entry already returns None for deleted entries (snapshot.get filters them)
     let entry = self.engine.get_entry(&key)?;
 
-    let Some((_header, _key, value)) = entry else {
+    let Some((header, _key, value)) = entry else {
       return Err(EngineError::NotFound(
         format!("Snapshot not found: {}", name),
       ));
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
-    let snapshot_info = SnapshotInfo::deserialize(&value, hash_length)?;
+    let snapshot_info = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
     Ok(snapshot_info.root_hash)
   }
 
@@ -390,7 +394,7 @@ impl<'a> VersionManager<'a> {
       if self.engine.is_entry_deleted(&key)? {
         continue;
       }
-      let snapshot = SnapshotInfo::deserialize(&value, hash_length)?;
+      let snapshot = SnapshotInfo::deserialize(&value, hash_length, 0)?;
       snapshots.push(snapshot);
     }
 
@@ -542,7 +546,7 @@ impl<'a> VersionManager<'a> {
       if self.engine.is_entry_deleted(&key)? {
         continue;
       }
-      let fork = ForkInfo::deserialize(&value, hash_length)?;
+      let fork = ForkInfo::deserialize(&value, hash_length, 0)?;
       forks.push(fork);
     }
 
@@ -571,7 +575,7 @@ impl<'a> VersionManager<'a> {
       ))?;
 
     let hash_length = self.engine.hash_algo().hash_length();
-    let existing = ForkInfo::deserialize(&entry.2, hash_length)?;
+    let existing = ForkInfo::deserialize(&entry.2, hash_length, entry.0.entry_version)?;
 
     let updated = ForkInfo {
       name: name.to_string(),

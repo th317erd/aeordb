@@ -38,7 +38,7 @@ pub fn resolve_file_at_version(
         let children = if crate::engine::btree::is_btree_format(&dir_data) {
             crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
         } else {
-            deserialize_child_entries(&dir_data, hash_length)?
+            deserialize_child_entries(&dir_data, hash_length, 0)?
         };
 
         let child = children
@@ -70,7 +70,7 @@ pub fn resolve_file_at_version(
     let children = if crate::engine::btree::is_btree_format(&dir_data) {
         crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
     } else {
-        deserialize_child_entries(&dir_data, hash_length)?
+        deserialize_child_entries(&dir_data, hash_length, 0)?
     };
 
     // Check if the final segment is a symlink — return a specific error if so
@@ -100,8 +100,8 @@ pub fn resolve_file_at_version(
             EngineError::NotFound(format!("File '{}' not found at version", path))
         })?;
 
-    let value = match engine.get_entry(&child.hash)? {
-        Some((_header, _key, value)) => value,
+    let (header, _key, value) = match engine.get_entry(&child.hash)? {
+        Some(entry) => entry,
         None => {
             return Err(EngineError::NotFound(format!(
                 "File '{}' not found at version",
@@ -110,7 +110,7 @@ pub fn resolve_file_at_version(
         }
     };
 
-    let file_record = FileRecord::deserialize(&value, hash_length)?;
+    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
     Ok((child.hash.clone(), file_record))
 }
 

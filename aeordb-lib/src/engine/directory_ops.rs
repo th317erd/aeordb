@@ -298,8 +298,8 @@ impl<'a> DirectoryOps<'a> {
     // Check if file already exists (for preserving created_at on overwrite)
     let file_key = file_path_hash(&normalized, &algo)?;
     let existing_created_at = match self.engine.get_entry(&file_key)? {
-      Some((_header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length)?;
+      Some((header, _key, value)) => {
+        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
         Some(existing.created_at)
       }
       None => None,
@@ -375,8 +375,8 @@ impl<'a> DirectoryOps<'a> {
     let entry = self.engine.get_entry(&file_key)?
       .ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
 
-    let (_header, _key, value) = entry;
-    let file_record = FileRecord::deserialize(&value, hash_length)?;
+    let (header, _key, value) = entry;
+    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
     EngineFileStream::new(file_record.chunk_hashes, self.engine)
   }
@@ -395,8 +395,8 @@ impl<'a> DirectoryOps<'a> {
     // Verify the file exists and capture metadata for event
     let file_key = file_path_hash(&normalized, &algo)?;
     let file_record_opt = match self.engine.get_entry(&file_key)? {
-      Some((_header, _key, value)) => {
-        Some(FileRecord::deserialize(&value, hash_length)?)
+      Some((header, _key, value)) => {
+        Some(FileRecord::deserialize(&value, hash_length, header.entry_version)?)
       }
       None => {
         return Err(EngineError::NotFound(normalized));
@@ -449,7 +449,7 @@ impl<'a> DirectoryOps<'a> {
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
     match self.engine.get_entry(&dir_key)? {
-      Some((_header, _key, value)) => {
+      Some((header, _key, value)) => {
         if value.is_empty() {
           return Ok(Vec::new());
         }
@@ -458,7 +458,7 @@ impl<'a> DirectoryOps<'a> {
           crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length)
         } else {
           // Flat format
-          deserialize_child_entries(&value, hash_length)
+          deserialize_child_entries(&value, hash_length, header.entry_version)
         }
       }
       None => Err(EngineError::NotFound(normalized)),
@@ -528,8 +528,8 @@ impl<'a> DirectoryOps<'a> {
 
     let file_key = file_path_hash(&normalized, &algo)?;
     match self.engine.get_entry(&file_key)? {
-      Some((_header, _key, value)) => {
-        let record = FileRecord::deserialize(&value, hash_length)?;
+      Some((header, _key, value)) => {
+        let record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
         Ok(Some(record))
       }
       None => Ok(None),
@@ -736,12 +736,12 @@ impl<'a> DirectoryOps<'a> {
 
           (new_root_data, new_root_hash)
         }
-        Some((_header, _key, value)) => {
+        Some((header, _key, value)) => {
           // === FLAT FORMAT ===
           let mut children = if value.is_empty() {
             Vec::new()
           } else {
-            deserialize_child_entries(&value, hash_length)?
+            deserialize_child_entries(&value, hash_length, header.entry_version)?
           };
 
           // Add or update the child
@@ -846,12 +846,12 @@ impl<'a> DirectoryOps<'a> {
           }
         }
       }
-      Some((_header, _key, value)) => {
+      Some((header, _key, value)) => {
         // Flat format
         let mut children = if value.is_empty() {
           Vec::new()
         } else {
-          deserialize_child_entries(&value, hash_length)?
+          deserialize_child_entries(&value, hash_length, header.entry_version)?
         };
 
         children.retain(|c| c.name != child_name);
@@ -910,8 +910,8 @@ impl<'a> DirectoryOps<'a> {
     // Check if symlink already exists (preserve created_at on update)
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
     let existing_created_at = match self.engine.get_entry(&symlink_key)? {
-      Some((_header, _key, value)) => {
-        let existing = SymlinkRecord::deserialize(&value)?;
+      Some((header, _key, value)) => {
+        let existing = SymlinkRecord::deserialize(&value, header.entry_version)?;
         Some(existing.created_at)
       }
       None => None,
@@ -976,8 +976,8 @@ impl<'a> DirectoryOps<'a> {
 
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
     match self.engine.get_entry(&symlink_key)? {
-      Some((_header, _key, value)) => {
-        let record = SymlinkRecord::deserialize(&value)?;
+      Some((header, _key, value)) => {
+        let record = SymlinkRecord::deserialize(&value, header.entry_version)?;
         Ok(Some(record))
       }
       None => Ok(None),
@@ -992,7 +992,7 @@ impl<'a> DirectoryOps<'a> {
     // Verify symlink exists
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
     let record = match self.engine.get_entry(&symlink_key)? {
-      Some((_header, _key, value)) => SymlinkRecord::deserialize(&value)?,
+      Some((header, _key, value)) => SymlinkRecord::deserialize(&value, header.entry_version)?,
       None => return Err(EngineError::NotFound(normalized)),
     };
 

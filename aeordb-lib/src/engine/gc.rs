@@ -125,7 +125,7 @@ fn walk_directory_tree(
       let children = if is_btree_format(&value) {
         collect_btree_children(engine, &value, hash_length, live)?
       } else {
-        deserialize_child_entries(&value, hash_length)?
+        deserialize_child_entries(&value, hash_length, 0)?
       };
 
       for child in &children {
@@ -170,8 +170,8 @@ fn mark_file_entry(
     return Ok(());
   }
 
-  if let Some((_header, _key, value)) = engine.get_entry(file_hash)? {
-    let file_record = FileRecord::deserialize(&value, hash_length)?;
+  if let Some((header, _key, value)) = engine.get_entry(file_hash)? {
+    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
     for chunk_hash in &file_record.chunk_hashes {
       live.insert(chunk_hash.clone());
     }
@@ -263,7 +263,7 @@ fn mark_system_entries(
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
         } else {
-          let children = deserialize_child_entries(&value, hash_length)?;
+          let children = deserialize_child_entries(&value, hash_length, 0)?;
           for child in &children {
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
@@ -301,7 +301,7 @@ fn mark_entry_recursive(
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
         } else {
-          let children = deserialize_child_entries(&value, hash_length)?;
+          let children = deserialize_child_entries(&value, hash_length, header.entry_version)?;
           for child in &children {
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
@@ -309,7 +309,7 @@ fn mark_entry_recursive(
       }
     }
     EntryType::FileRecord => {
-      let file_record = FileRecord::deserialize(&value, hash_length)?;
+      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
       for chunk_hash in &file_record.chunk_hashes {
         live.insert(chunk_hash.clone());
       }

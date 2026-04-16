@@ -96,7 +96,7 @@ impl BTreeNode {
                 let entries = if entry_count == 0 {
                     Vec::new()
                 } else {
-                    deserialize_child_entries(&data[3..], hash_length)?
+                    deserialize_child_entries(&data[3..], hash_length, 0)?
                 };
                 Ok(BTreeNode::Leaf(LeafNode { entries }))
             }

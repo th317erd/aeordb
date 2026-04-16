@@ -21,7 +21,7 @@ fn test_file_record_serialize_deserialize_roundtrip() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(record, deserialized);
 }
@@ -44,7 +44,7 @@ fn test_file_record_with_chunks() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 5);
   assert_eq!(deserialized.chunk_hashes, chunks);
@@ -64,7 +64,7 @@ fn test_file_record_without_content_type() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.content_type, None);
   assert_eq!(deserialized.path, "/data/blob");
@@ -85,7 +85,7 @@ fn test_file_record_with_metadata() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.metadata, metadata);
 }
@@ -104,7 +104,7 @@ fn test_file_record_empty_chunks() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert!(deserialized.chunk_hashes.is_empty());
   assert_eq!(deserialized.total_size, 0);
@@ -133,7 +133,7 @@ fn test_file_record_many_chunks() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 150);
   assert_eq!(deserialized.chunk_hashes, chunks);
@@ -168,7 +168,7 @@ fn test_file_record_with_64_byte_hash() {
   };
 
   let serialized = record.serialize(hash_length);
-  let deserialized = FileRecord::deserialize(&serialized, hash_length).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes[0].len(), 64);
   assert_eq!(deserialized.chunk_hashes[0], chunk_hash);
@@ -176,13 +176,13 @@ fn test_file_record_with_64_byte_hash() {
 
 #[test]
 fn test_file_record_deserialize_truncated_data() {
-  let result = FileRecord::deserialize(&[0x00], 32);
+  let result = FileRecord::deserialize(&[0x00], 32, 0);
   assert!(result.is_err());
 }
 
 #[test]
 fn test_file_record_deserialize_empty_data() {
-  let result = FileRecord::deserialize(&[], 32);
+  let result = FileRecord::deserialize(&[], 32, 0);
   assert!(result.is_err());
 }
 
@@ -276,7 +276,7 @@ fn test_child_entry_serialize_deserialize_roundtrip() {
 
   let serialized = entry.serialize(hash_length);
   let (deserialized, bytes_consumed) =
-    ChildEntry::deserialize(&serialized, hash_length).unwrap();
+    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(entry, deserialized);
   assert_eq!(bytes_consumed, serialized.len());
@@ -299,7 +299,7 @@ fn test_child_entry_file_type() {
 
   let serialized = entry.serialize(hash_length);
   let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length).unwrap();
+    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.entry_type, 1);
   assert_eq!(deserialized.name, "readme.md");
@@ -322,7 +322,7 @@ fn test_child_entry_directory_type() {
 
   let serialized = entry.serialize(hash_length);
   let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length).unwrap();
+    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.entry_type, 2);
   assert_eq!(deserialized.content_type, None);
@@ -368,7 +368,7 @@ fn test_multiple_child_entries_roundtrip() {
   ];
 
   let serialized = serialize_child_entries(&entries, hash_length);
-  let deserialized = deserialize_child_entries(&serialized, hash_length).unwrap();
+  let deserialized = deserialize_child_entries(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(entries, deserialized);
 }
@@ -390,7 +390,7 @@ fn test_child_entry_with_64_byte_hash() {
 
   let serialized = entry.serialize(hash_length);
   let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length).unwrap();
+    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.hash.len(), 64);
   assert_eq!(deserialized, entry);
@@ -399,13 +399,13 @@ fn test_child_entry_with_64_byte_hash() {
 #[test]
 fn test_child_entry_empty_list_roundtrip() {
   let serialized = serialize_child_entries(&[], 32);
-  let deserialized = deserialize_child_entries(&serialized, 32).unwrap();
+  let deserialized = deserialize_child_entries(&serialized, 32, 0).unwrap();
   assert!(deserialized.is_empty());
 }
 
 #[test]
 fn test_child_entry_deserialize_truncated_data() {
-  let result = ChildEntry::deserialize(&[0x01], 32);
+  let result = ChildEntry::deserialize(&[0x01], 32, 0);
   assert!(result.is_err());
 }
 

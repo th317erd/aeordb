@@ -44,7 +44,14 @@ impl ChildEntry {
     buffer
   }
 
-  pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<(ChildEntry, usize)> {
+  pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<(ChildEntry, usize)> {
+    match version {
+      0 => Self::deserialize_v0(data, hash_length),
+      _ => Self::deserialize_v0(data, hash_length), // future versions will have their own methods
+    }
+  }
+
+  fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<(ChildEntry, usize)> {
     let mut offset = 0;
 
     if offset >= data.len() {
@@ -108,9 +115,12 @@ pub fn serialize_child_entries(entries: &[ChildEntry], hash_length: usize) -> Ve
 pub fn deserialize_child_entries(
   data: &[u8],
   hash_length: usize,
+  version: u8,
 ) -> EngineResult<Vec<ChildEntry>> {
-  // Currently only v0 format exists — dispatch directly
-  deserialize_child_entries_v0(data, hash_length)
+  match version {
+    0 => deserialize_child_entries_v0(data, hash_length),
+    _ => deserialize_child_entries_v0(data, hash_length), // future versions will have their own methods
+  }
 }
 
 fn deserialize_child_entries_v0(
@@ -121,7 +131,7 @@ fn deserialize_child_entries_v0(
   let mut offset = 0;
 
   while offset < data.len() {
-    let (entry, bytes_consumed) = ChildEntry::deserialize(&data[offset..], hash_length)?;
+    let (entry, bytes_consumed) = ChildEntry::deserialize(&data[offset..], hash_length, 0)?;
     entries.push(entry);
     offset += bytes_consumed;
   }

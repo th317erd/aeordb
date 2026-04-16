@@ -37,9 +37,11 @@ impl SymlinkRecord {
         buffer
     }
 
-    pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
-        // Currently only v0 format exists — dispatch directly
-        Self::deserialize_v0(data)
+    pub fn deserialize(data: &[u8], version: u8) -> EngineResult<Self> {
+        match version {
+            0 => Self::deserialize_v0(data),
+            _ => Self::deserialize_v0(data), // future versions will have their own methods
+        }
     }
 
     fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {

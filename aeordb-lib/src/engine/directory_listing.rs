@@ -49,7 +49,7 @@ pub fn list_directory_recursive(
     let children = if crate::engine::btree::is_btree_format(&value) {
         crate::engine::btree::btree_list_from_node(&value, engine, hash_length)?
     } else {
-        deserialize_child_entries(&value, hash_length)?
+        deserialize_child_entries(&value, hash_length, 0)?
     };
 
     // recursive_mode: when depth > 0 or depth == -1, we only return files
@@ -139,7 +139,7 @@ fn walk_listing(
                                         hash_length,
                                     )?
                                 } else {
-                                    deserialize_child_entries(&sub_value, hash_length)?
+                                    deserialize_child_entries(&sub_value, hash_length, 0)?
                                 };
 
                             let next_depth = if remaining_depth == -1 {
@@ -172,7 +172,7 @@ fn walk_listing(
 
                 // Load the SymlinkRecord to get the target
                 let target = if let Ok(Some((_header, _key, value))) = engine.get_entry(&child.hash) {
-                    if let Ok(record) = crate::engine::symlink_record::SymlinkRecord::deserialize(&value) {
+                    if let Ok(record) = crate::engine::symlink_record::SymlinkRecord::deserialize(&value, 0) {
                         Some(record.target)
                     } else {
                         None

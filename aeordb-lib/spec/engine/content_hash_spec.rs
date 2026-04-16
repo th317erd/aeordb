@@ -148,7 +148,7 @@ fn test_child_entry_uses_content_hash() {
   // Read the root directory to get ChildEntry for "subdir"
   let root_path_key = algo.compute_hash(b"dir:/").unwrap();
   let (_header, _key, root_value) = engine.get_entry(&root_path_key).unwrap().unwrap();
-  let children = deserialize_child_entries(&root_value, hash_length).unwrap();
+  let children = deserialize_child_entries(&root_value, hash_length, 0).unwrap();
 
   let subdir_child = children.iter().find(|c| c.name == "subdir").expect("must find subdir child");
   assert_eq!(subdir_child.entry_type, EntryType::DirectoryIndex.to_u8());
@@ -199,7 +199,7 @@ fn test_snapshot_directory_tree_immutable_after_delete() {
   // The snapshot directory still references alpha in its directory entries
   let root_dir = snapshot_tree.directories.get("/").unwrap();
   let hash_length = engine.hash_algo().hash_length();
-  let children = deserialize_child_entries(&root_dir.1, hash_length).unwrap();
+  let children = deserialize_child_entries(&root_dir.1, hash_length, 0).unwrap();
   let has_alpha = children.iter().any(|c| c.name == "alpha.txt");
   assert!(has_alpha, "snapshot directory must still list alpha.txt as a child entry");
 }
