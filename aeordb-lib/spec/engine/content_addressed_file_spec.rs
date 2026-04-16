@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use aeordb::engine::{
   DirectoryOps, RequestContext, VersionManager,
-  file_path_hash, file_content_hash,
+  file_path_hash, file_content_hash, file_identity_hash,
 };
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::gc::run_gc;
@@ -37,7 +37,7 @@ fn test_file_stored_at_both_path_and_content_keys() {
 }
 
 #[test]
-fn test_child_entry_uses_content_hash_not_path_hash() {
+fn test_child_entry_uses_identity_hash_not_path_hash() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
@@ -45,6 +45,7 @@ fn test_child_entry_uses_content_hash_not_path_hash() {
   ops.store_file(&ctx, "/check.txt", b"check content", Some("text/plain")).unwrap();
 
   let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
 
   // Get the path hash
   let path_key = file_path_hash("/check.txt", &algo).unwrap();
@@ -53,17 +54,24 @@ fn test_child_entry_uses_content_hash_not_path_hash() {
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
 
-  let (file_hash, _record) = tree.files.get("/check.txt")
+  let (file_hash, record) = tree.files.get("/check.txt")
     .expect("file should appear in version tree");
 
   // The ChildEntry hash (stored in tree.files) should NOT equal the path hash
-  assert_ne!(file_hash, &path_key, "ChildEntry.hash should be content hash, not path hash");
+  assert_ne!(file_hash, &path_key, "ChildEntry.hash should be identity hash, not path hash");
 
-  // It should be the content hash
-  let _hash_length = algo.hash_length();
+  // It should NOT be the content hash (which includes timestamps)
   let (_header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
-  let expected_content_key = file_content_hash(&value, &algo).unwrap();
-  assert_eq!(file_hash, &expected_content_key, "ChildEntry.hash should equal computed content hash");
+  let content_key = file_content_hash(&value, &algo).unwrap();
+  assert_ne!(file_hash, &content_key, "ChildEntry.hash should be identity hash, not content hash");
+
+  // It should be the identity hash (excludes timestamps)
+  let expected_identity_key = file_identity_hash("/check.txt", Some("text/plain"), &record.chunk_hashes, &algo).unwrap();
+  assert_eq!(file_hash, &expected_identity_key, "ChildEntry.hash should equal computed identity hash");
+
+  // The identity key should also resolve in the KV store (stored for tree walker lookups)
+  assert!(engine.get_entry(&expected_identity_key).unwrap().is_some(),
+    "identity hash should be stored in KV store for tree walker access");
 }
 
 #[test]

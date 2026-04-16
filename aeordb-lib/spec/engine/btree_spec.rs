@@ -23,6 +23,8 @@ fn make_entry(name: &str) -> ChildEntry {
         updated_at: 1000,
         name: name.to_string(),
         content_type: Some("application/json".to_string()),
+        virtual_time: 0,
+        node_id: 0,
     }
 }
 
@@ -35,6 +37,8 @@ fn make_entry_with_hash(name: &str, hash_byte: u8) -> ChildEntry {
         updated_at: 2000,
         name: name.to_string(),
         content_type: Some("text/plain".to_string()),
+        virtual_time: 0,
+        node_id: 0,
     }
 }
 

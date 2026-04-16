@@ -270,6 +270,8 @@ fn test_child_entry_serialize_deserialize_roundtrip() {
     updated_at: 1700000001000,
     name: "data.json".to_string(),
     content_type: Some("application/json".to_string()),
+    virtual_time: 0,
+    node_id: 0,
   };
 
   let serialized = entry.serialize(hash_length);
@@ -291,6 +293,8 @@ fn test_child_entry_file_type() {
     updated_at: 1700000000000,
     name: "readme.md".to_string(),
     content_type: Some("text/markdown".to_string()),
+    virtual_time: 0,
+    node_id: 0,
   };
 
   let serialized = entry.serialize(hash_length);
@@ -312,6 +316,8 @@ fn test_child_entry_directory_type() {
     updated_at: 1700000000000,
     name: "subdir".to_string(),
     content_type: None,
+    virtual_time: 0,
+    node_id: 0,
   };
 
   let serialized = entry.serialize(hash_length);
@@ -334,6 +340,8 @@ fn test_multiple_child_entries_roundtrip() {
       updated_at: 1700000000000,
       name: "file1.txt".to_string(),
       content_type: Some("text/plain".to_string()),
+      virtual_time: 0,
+      node_id: 0,
     },
     ChildEntry {
       entry_type: 2,
@@ -343,6 +351,8 @@ fn test_multiple_child_entries_roundtrip() {
       updated_at: 1700000001000,
       name: "subdir".to_string(),
       content_type: None,
+      virtual_time: 0,
+      node_id: 0,
     },
     ChildEntry {
       entry_type: 1,
@@ -352,6 +362,8 @@ fn test_multiple_child_entries_roundtrip() {
       updated_at: 1700000003000,
       name: "image.png".to_string(),
       content_type: Some("image/png".to_string()),
+      virtual_time: 0,
+      node_id: 0,
     },
   ];
 
@@ -372,6 +384,8 @@ fn test_child_entry_with_64_byte_hash() {
     updated_at: 1700000000000,
     name: "sha512-file.bin".to_string(),
     content_type: None,
+    virtual_time: 0,
+    node_id: 0,
   };
 
   let serialized = entry.serialize(hash_length);

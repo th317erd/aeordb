@@ -8,7 +8,7 @@ use crate::engine::directory_entry::{
     ChildEntry, deserialize_child_entries, serialize_child_entries,
 };
 use crate::engine::directory_ops::{
-    directory_content_hash, directory_path_hash, file_content_hash, file_path_hash,
+    directory_content_hash, directory_path_hash, file_content_hash, file_identity_hash, file_path_hash,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_type::EntryType;
@@ -167,14 +167,20 @@ pub fn commit_files(
         // Path-based key (mutable — for reads, indexing, deletion)
         engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
 
+        let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
+        // Store at identity key so tree walker can look up entries by ChildEntry.hash
+        engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+
         let child = ChildEntry {
             entry_type: EntryType::FileRecord.to_u8(),
-            hash: file_content_key.clone(),
+            hash: identity_key,
             total_size,
             created_at: file_record.created_at,
             updated_at: file_record.updated_at,
             name: file_name(&normalized).unwrap_or("").to_string(),
             content_type: Some(detected_content_type.clone()),
+            virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+            node_id: 0,
         };
 
         event_entries.push(EntryEventData {
@@ -250,14 +256,17 @@ pub fn commit_files(
 
         // If not root, propagate this directory as a child of its parent
         if dir_path != "/" {
+            let bc_now = chrono::Utc::now().timestamp_millis();
             let dir_child = ChildEntry {
                 entry_type: EntryType::DirectoryIndex.to_u8(),
                 hash: content_key.clone(),
                 total_size: dir_data_len,
-                created_at: chrono::Utc::now().timestamp_millis(),
-                updated_at: chrono::Utc::now().timestamp_millis(),
+                created_at: bc_now,
+                updated_at: bc_now,
                 name: file_name(dir_path).unwrap_or("").to_string(),
                 content_type: None,
+                virtual_time: bc_now as u64,
+                node_id: 0,
             };
 
             let grandparent = parent_path(dir_path).unwrap_or_else(|| "/".to_string());
@@ -462,14 +471,17 @@ fn propagate_up(
 
     let grandparent = parent_path(dir_path).unwrap_or_else(|| "/".to_string());
 
+    let prop_now = chrono::Utc::now().timestamp_millis();
     let dir_child = ChildEntry {
         entry_type: EntryType::DirectoryIndex.to_u8(),
         hash: content_key.to_vec(),
         total_size: data_len,
-        created_at: chrono::Utc::now().timestamp_millis(),
-        updated_at: chrono::Utc::now().timestamp_millis(),
+        created_at: prop_now,
+        updated_at: prop_now,
         name: file_name(dir_path).unwrap_or("").to_string(),
         content_type: None,
+        virtual_time: prop_now as u64,
+        node_id: 0,
     };
 
     let (new_content_key, new_len) =

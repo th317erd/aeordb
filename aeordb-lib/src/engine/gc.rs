@@ -10,7 +10,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::KV_TYPE_DELETION;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::symlink_record::symlink_path_hash;
+use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
 use crate::engine::version_manager::VersionManager;
 
 use serde::Serialize;
@@ -176,10 +176,15 @@ fn mark_file_entry(
       live.insert(chunk_hash.clone());
     }
 
-    // Also mark the path-based key as live (mutable index for reads/indexing)
     let algo = engine.hash_algo();
+
+    // Also mark the path-based key as live (mutable index for reads/indexing)
     let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
     live.insert(path_key);
+
+    // Also mark the content-addressed key as live (immutable KV store entry)
+    let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+    live.insert(content_key);
   }
 
   Ok(())
@@ -196,10 +201,17 @@ fn mark_symlink_entry(
     return Ok(());
   }
 
-  // Also mark the path-based key as live (mutable index for reads)
   let algo = engine.hash_algo();
+
+  // Also mark the path-based key as live (mutable index for reads)
   let path_key = symlink_path_hash(symlink_path, &algo)?;
   live.insert(path_key);
+
+  // Also mark the content-addressed key as live (immutable KV store entry)
+  if let Some((_header, _key, value)) = engine.get_entry(symlink_hash)? {
+    let content_key = symlink_content_hash(&value, &algo)?;
+    live.insert(content_key);
+  }
 
   Ok(())
 }

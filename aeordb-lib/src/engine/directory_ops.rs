@@ -55,6 +55,42 @@ pub fn file_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<
   algo.compute_hash(&input)
 }
 
+/// Identity hash for a file — based on content-defining fields only.
+/// Excludes timestamps, metadata, and total_size.
+/// Two identical files stored at different times produce the SAME identity hash.
+pub fn file_identity_hash(
+    path: &str,
+    content_type: Option<&str>,
+    chunk_hashes: &[Vec<u8>],
+    algo: &HashAlgorithm,
+) -> EngineResult<Vec<u8>> {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"fileid:");
+    input.extend_from_slice(path.as_bytes());
+    input.push(0); // separator
+    input.extend_from_slice(content_type.unwrap_or("").as_bytes());
+    input.push(0); // separator
+    for hash in chunk_hashes {
+        input.extend_from_slice(hash);
+    }
+    algo.compute_hash(&input)
+}
+
+/// Identity hash for a symlink — based on path and target only.
+/// Excludes timestamps.
+pub fn symlink_identity_hash(
+    path: &str,
+    target: &str,
+    algo: &HashAlgorithm,
+) -> EngineResult<Vec<u8>> {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"symlinkid:");
+    input.extend_from_slice(path.as_bytes());
+    input.push(0); // separator
+    input.extend_from_slice(target.as_bytes());
+    algo.compute_hash(&input)
+}
+
 /// Compute the domain-prefixed hash for a chunk.
 pub fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   let mut input = Vec::with_capacity(6 + data.len());
@@ -284,22 +320,30 @@ impl<'a> DirectoryOps<'a> {
 
     let file_value = file_record.serialize(hash_length);
 
-    // Content-addressed key (immutable — for versioning via ChildEntry.hash)
+    // Content-addressed key (immutable — for KV store entry)
     let file_content_key = file_content_hash(&file_value, &algo)?;
     self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+
+    // Identity hash (for ChildEntry.hash — excludes timestamps)
+    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
+    // Store at identity key so tree walker can look up entries by ChildEntry.hash
+    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
 
     // Path-based key (mutable — for reads, indexing, deletion)
     self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
 
-    // Build child entry with content-addressed hash (not path hash)
+    // Build child entry with identity hash (not content hash)
+    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
     let child = ChildEntry {
       entry_type: EntryType::FileRecord.to_u8(),
-      hash: file_content_key.clone(),
+      hash: identity_key,
       total_size: data.len() as u64,
       created_at: file_record.created_at,
       updated_at: file_record.updated_at,
       name: file_name(&normalized).unwrap_or("").to_string(),
       content_type: Some(detected_content_type.clone()),
+      virtual_time: now_vt,
+      node_id: 0,
     };
 
     self.update_parent_directories(&normalized, child)?;
@@ -454,6 +498,8 @@ impl<'a> DirectoryOps<'a> {
         updated_at: now,
         name: file_name(&normalized).unwrap_or("").to_string(),
         content_type: None,
+        virtual_time: now as u64,
+        node_id: 0,
       };
       self.update_parent_directories(&normalized, child)?;
     }
@@ -743,14 +789,17 @@ impl<'a> DirectoryOps<'a> {
       }
 
       // Set up next iteration: update grandparent with this directory as child
+      let now_ms = chrono::Utc::now().timestamp_millis();
       current_child_entry = ChildEntry {
         entry_type: EntryType::DirectoryIndex.to_u8(),
         hash: content_key,  // content hash for tree walker
         total_size: dir_value.len() as u64,
-        created_at: chrono::Utc::now().timestamp_millis(),
-        updated_at: chrono::Utc::now().timestamp_millis(),
+        created_at: now_ms,
+        updated_at: now_ms,
         name: file_name(&parent).unwrap_or("").to_string(),
         content_type: None,
+        virtual_time: now_ms as u64,
+        node_id: 0,
       };
       current_child_path = parent;
     }
@@ -829,14 +878,17 @@ impl<'a> DirectoryOps<'a> {
       return Ok(());
     }
 
+    let del_now = chrono::Utc::now().timestamp_millis();
     let parent_child = ChildEntry {
       entry_type: EntryType::DirectoryIndex.to_u8(),
       hash: content_key,  // content hash for tree walker
       total_size: dir_value.len() as u64,
-      created_at: chrono::Utc::now().timestamp_millis(),
-      updated_at: chrono::Utc::now().timestamp_millis(),
+      created_at: del_now,
+      updated_at: del_now,
       name: file_name(&parent).unwrap_or("").to_string(),
       content_type: None,
+      virtual_time: del_now as u64,
+      node_id: 0,
     };
 
     self.update_parent_directories(&parent, parent_child)
@@ -874,9 +926,14 @@ impl<'a> DirectoryOps<'a> {
 
     let serialized = record.serialize();
 
-    // Content-addressed key (immutable — for versioning via ChildEntry.hash)
+    // Content-addressed key (immutable — for KV store entry)
     let content_key = symlink_content_hash(&serialized, &algo)?;
     self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
+
+    // Identity hash (for ChildEntry.hash — excludes timestamps)
+    let identity_key = symlink_identity_hash(&normalized, &record.target, &algo)?;
+    // Store at identity key so tree walker can look up entries by ChildEntry.hash
+    self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
 
     // Path-based key (mutable — for reads/deletion)
     self.engine.store_entry(EntryType::Symlink, &symlink_key, &serialized)?;
@@ -884,12 +941,14 @@ impl<'a> DirectoryOps<'a> {
     // Build child entry for parent directory
     let child = ChildEntry {
       entry_type: EntryType::Symlink.to_u8(),
-      hash: content_key,
+      hash: identity_key,
       total_size: 0,
       created_at: record.created_at,
       updated_at: record.updated_at,
       name: file_name(&normalized).unwrap_or("").to_string(),
       content_type: None,
+      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+      node_id: 0,
     };
 
     self.update_parent_directories(&normalized, child)?;

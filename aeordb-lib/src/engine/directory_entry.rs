@@ -9,6 +9,8 @@ pub struct ChildEntry {
   pub updated_at: i64,
   pub name: String,
   pub content_type: Option<String>,
+  pub virtual_time: u64,  // ordering key for conflict resolution
+  pub node_id: u64,       // tiebreaker for deterministic ordering
 }
 
 impl ChildEntry {
@@ -18,7 +20,8 @@ impl ChildEntry {
 
     let capacity = 1 + hash_length + 8 + 8 + 8
       + 2 + name_bytes.len()
-      + 2 + content_type_bytes.len();
+      + 2 + content_type_bytes.len()
+      + 8 + 8;
 
     let mut buffer = Vec::with_capacity(capacity);
 
@@ -34,6 +37,9 @@ impl ChildEntry {
 
     buffer.extend_from_slice(&(content_type_bytes.len() as u16).to_le_bytes());
     buffer.extend_from_slice(content_type_bytes);
+
+    buffer.extend_from_slice(&self.virtual_time.to_le_bytes());
+    buffer.extend_from_slice(&self.node_id.to_le_bytes());
 
     buffer
   }
@@ -63,6 +69,18 @@ impl ChildEntry {
       Some(read_string(data, &mut offset, content_type_length)?)
     };
 
+    let virtual_time = if offset + 8 <= data.len() {
+      read_u64(data, &mut offset)?
+    } else {
+      0 // default for old entries without this field
+    };
+
+    let node_id = if offset + 8 <= data.len() {
+      read_u64(data, &mut offset)?
+    } else {
+      0 // default for old entries without this field
+    };
+
     let entry = ChildEntry {
       entry_type,
       hash,
@@ -71,6 +89,8 @@ impl ChildEntry {
       updated_at,
       name,
       content_type,
+      virtual_time,
+      node_id,
     };
 
     Ok((entry, offset))
