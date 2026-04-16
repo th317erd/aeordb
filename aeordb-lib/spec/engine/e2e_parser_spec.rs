@@ -19,7 +19,7 @@ fn create_test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
     (Arc::new(engine), dir)
 }
 
-fn load_plaintext_parser_wasm() -> Vec<u8> {
+fn load_plaintext_parser_wasm() -> Option<Vec<u8>> {
     let release_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../target/wasm32-unknown-unknown/release/aeordb_parser_plaintext.wasm"
@@ -30,20 +30,32 @@ fn load_plaintext_parser_wasm() -> Vec<u8> {
     );
 
     if let Ok(bytes) = std::fs::read(release_path) {
-        return bytes;
+        return Some(bytes);
     }
     if let Ok(bytes) = std::fs::read(debug_path) {
-        return bytes;
+        return Some(bytes);
     }
-    panic!(
-        "Plaintext parser WASM not found. Build it first:\n\
-         cd aeordb-parsers/plaintext && cargo build --target wasm32-unknown-unknown --release"
-    );
+    None
 }
 
-fn deploy_plaintext_parser(engine: &Arc<StorageEngine>) -> PluginManager {
+/// Helper macro: skip the test if the WASM parser binary is not available.
+macro_rules! require_wasm_parser {
+    () => {
+        match load_plaintext_parser_wasm() {
+            Some(bytes) => bytes,
+            None => {
+                eprintln!(
+                    "SKIPPED: Plaintext parser WASM not built. Run:\n  \
+                     cd aeordb-parsers/plaintext && cargo build --target wasm32-unknown-unknown --release"
+                );
+                return;
+            }
+        }
+    };
+}
+
+fn deploy_plaintext_parser(engine: &Arc<StorageEngine>, wasm_bytes: Vec<u8>) -> PluginManager {
     let pm = PluginManager::new(engine.clone());
-    let wasm_bytes = load_plaintext_parser_wasm();
     pm.deploy_plugin(
         "plaintext-parser",
         "plaintext-parser",
@@ -62,7 +74,8 @@ fn deploy_plaintext_parser(engine: &Arc<StorageEngine>) -> PluginManager {
 fn test_e2e_parser_deploy_and_store() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -127,7 +140,8 @@ fn test_e2e_parser_deploy_and_store() {
 fn test_e2e_parser_query_u64_after_store() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
     // Index word_count as u64 — Eq queries on u64 use the scalar path (no recheck)
@@ -263,7 +277,8 @@ fn test_e2e_non_json_without_parser_skips() {
 fn test_e2e_parser_with_source_path_resolution() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
     // Use nested source path: metadata.line_count
@@ -342,7 +357,8 @@ fn test_e2e_parser_logging_on_failure() {
 fn test_e2e_parser_multiple_files_distinct_queries() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
@@ -469,7 +485,8 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
 fn test_e2e_parser_file_data_preserved() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
@@ -501,7 +518,8 @@ fn test_e2e_parser_file_data_preserved() {
 fn test_e2e_parser_empty_file() {
   let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
@@ -527,7 +545,7 @@ fn test_e2e_parser_empty_file() {
 
 #[test]
 fn test_e2e_wasm_binary_is_valid() {
-    let wasm_bytes = load_plaintext_parser_wasm();
+    let wasm_bytes = require_wasm_parser!();
     assert!(wasm_bytes.len() > 0, "WASM binary should not be empty");
     // WASM magic bytes: \0asm
     assert_eq!(&wasm_bytes[0..4], b"\0asm", "should start with WASM magic bytes");
@@ -593,7 +611,8 @@ fn test_e2e_deploy_invalid_wasm_fails() {
 fn test_e2e_parser_contains_on_trigram_field() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -656,7 +675,8 @@ fn test_e2e_parser_contains_on_trigram_field() {
 fn test_e2e_parser_similar_on_trigram_field() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -733,7 +753,8 @@ fn test_e2e_parser_similar_on_trigram_field() {
 fn test_e2e_parser_contains_no_match() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -794,7 +815,8 @@ fn test_e2e_parser_contains_no_match() {
 fn test_e2e_parser_string_eq_on_title() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -857,7 +879,8 @@ fn test_e2e_parser_string_eq_on_title() {
 fn test_e2e_parser_content_type_auto_routing() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 
@@ -924,7 +947,8 @@ fn test_e2e_parser_content_type_auto_routing() {
 fn test_e2e_parser_multiple_files_trigram_contains() {
     let ctx = RequestContext::system();
     let (engine, _temp) = create_test_engine();
-    let pm = deploy_plaintext_parser(&engine);
+    let wasm_bytes = require_wasm_parser!();
+    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
 
     let ops = DirectoryOps::new(&engine);
 

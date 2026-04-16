@@ -156,7 +156,7 @@ fn test_entry_type_roundtrip() {
 #[test]
 fn test_entry_type_invalid_value() {
   assert!(EntryType::from_u8(0x00).is_err());
-  assert!(EntryType::from_u8(0x08).is_err());
+  assert!(EntryType::from_u8(0x09).is_err());  // 0x08 is Symlink (valid)
   assert!(EntryType::from_u8(0xFF).is_err());
 }
 
