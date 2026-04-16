@@ -464,6 +464,14 @@ name = "virtual_clock_spec"
 path = "spec/engine/virtual_clock_spec.rs"
 
 [[test]]
+name = "peer_connection_spec"
+path = "spec/engine/peer_connection_spec.rs"
+
+[[test]]
+name = "cluster_http_spec"
+path = "spec/http/cluster_http_spec.rs"
+
+[[test]]
 name = "symlink_record_spec"
 path = "spec/engine/symlink_record_spec.rs"
 

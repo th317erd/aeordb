@@ -6,6 +6,7 @@ use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::refresh::RefreshTokenRecord;
 use crate::engine::entry_type::EntryType;
 use crate::engine::group::Group;
+use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{User, validate_user_id};
@@ -51,6 +52,7 @@ const PREFIX_USER_REGISTRY: &str = "::aeordb:user:_registry";
 const PREFIX_USER_BY_USERNAME: &str = "::aeordb:user:_by_username:";
 const PREFIX_GROUP: &str = "::aeordb:group:";
 const PREFIX_GROUP_REGISTRY: &str = "::aeordb:group:_registry";
+const PREFIX_CLUSTER: &str = "::aeordb:cluster:";
 
 impl<'a> SystemTables<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
@@ -677,5 +679,72 @@ impl<'a> SystemTables<'a> {
       .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
     self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
     Ok(())
+  }
+
+  // -------------------------------------------------------------------------
+  // Cluster / Replication
+  // -------------------------------------------------------------------------
+
+  /// Persist this node's unique identifier.
+  pub fn store_node_id(&self, node_id: u64) -> Result<()> {
+    let key = format!("{PREFIX_CLUSTER}node_id");
+    let hash = self.hash_key(&key);
+    let value = node_id.to_le_bytes().to_vec();
+    self.engine.store_entry(EntryType::FileRecord, &hash, &value)?;
+    Ok(())
+  }
+
+  /// Load the persisted node identifier, if any.
+  pub fn get_node_id(&self) -> Result<Option<u64>> {
+    let key = format!("{PREFIX_CLUSTER}node_id");
+    let hash = self.hash_key(&key);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) if value.len() == 8 => {
+        Ok(Some(u64::from_le_bytes(value[..8].try_into().unwrap())))
+      }
+      _ => Ok(None),
+    }
+  }
+
+  /// Persist the full set of peer configurations.
+  pub fn store_peer_configs(&self, peers: &[PeerConfig]) -> Result<()> {
+    let key = format!("{PREFIX_CLUSTER}peers");
+    let hash = self.hash_key(&key);
+    let value = serde_json::to_vec(peers)
+      .map_err(|error| SystemTableError::Serialization(error.to_string()))?;
+    self.engine.store_entry(EntryType::FileRecord, &hash, &value)?;
+    Ok(())
+  }
+
+  /// Load persisted peer configurations.
+  pub fn get_peer_configs(&self) -> Result<Vec<PeerConfig>> {
+    let key = format!("{PREFIX_CLUSTER}peers");
+    let hash = self.hash_key(&key);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => {
+        let peers: Vec<PeerConfig> = serde_json::from_slice(&value)
+          .map_err(|_| SystemTableError::CorruptData)?;
+        Ok(peers)
+      }
+      None => Ok(Vec::new()),
+    }
+  }
+
+  /// Persist a hashed cluster secret for peer authentication.
+  pub fn store_cluster_secret_hash(&self, secret_hash: &[u8]) -> Result<()> {
+    let key = format!("{PREFIX_CLUSTER}secret_hash");
+    let hash = self.hash_key(&key);
+    self.engine.store_entry(EntryType::FileRecord, &hash, secret_hash)?;
+    Ok(())
+  }
+
+  /// Load the persisted cluster secret hash, if any.
+  pub fn get_cluster_secret_hash(&self) -> Result<Option<Vec<u8>>> {
+    let key = format!("{PREFIX_CLUSTER}secret_hash");
+    let hash = self.hash_key(&key);
+    match self.engine.get_entry(&hash)? {
+      Some((_header, _key, value)) => Ok(Some(value)),
+      None => Ok(None),
+    }
   }
 }

@@ -1,6 +1,7 @@
 pub mod admin_routes;
 pub mod api_key_self_service_routes;
 pub mod backup_routes;
+pub mod cluster_routes;
 pub mod cors;
 pub mod engine_routes;
 pub mod gc_routes;
@@ -26,7 +27,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{ApiKeyCache, DirectoryOps, EventBus, GroupCache, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::{ApiKeyCache, DirectoryOps, EventBus, GroupCache, PeerManager, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -200,6 +201,7 @@ pub fn create_app_with_all_and_task_queue(
   let group_cache = Arc::new(GroupCache::new(cache_ttl));
   let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
   let api_key_cache = Arc::new(ApiKeyCache::new(cache_ttl));
+  let peer_manager = Arc::new(PeerManager::new());
 
   let app_state = AppState {
     jwt_manager,
@@ -213,6 +215,7 @@ pub fn create_app_with_all_and_task_queue(
     permissions_cache,
     api_key_cache,
     task_queue,
+    peer_manager,
   };
 
   // Routes with large body limits (file uploads: 10 GB)
@@ -292,6 +295,11 @@ pub fn create_app_with_all_and_task_queue(
     // Version: file-level access routes
     .route("/version/file-history/{*path}", get(version_file_routes::file_history))
     .route("/version/file-restore/{*path}", post(version_file_routes::file_restore))
+    // Cluster / replication admin routes
+    .route("/admin/cluster", get(cluster_routes::cluster_status))
+    .route("/admin/cluster/peers", post(cluster_routes::add_peer).get(cluster_routes::list_peers))
+    .route("/admin/cluster/peers/{node_id}", delete(cluster_routes::remove_peer))
+    .route("/admin/cluster/sync", post(cluster_routes::trigger_sync))
     // Symlink routes
     .route("/engine-symlink/{*path}", post(symlink_routes::create_symlink))
     // Plugin routes

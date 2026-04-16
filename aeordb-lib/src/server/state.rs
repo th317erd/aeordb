@@ -7,6 +7,7 @@ use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
 use crate::engine::ApiKeyCache;
 use crate::engine::GroupCache;
+use crate::engine::PeerManager;
 use crate::engine::PermissionsCache;
 use crate::engine::StorageEngine;
 use crate::engine::EventBus;
@@ -26,4 +27,5 @@ pub struct AppState {
   pub permissions_cache: Arc<PermissionsCache>,
   pub api_key_cache: Arc<ApiKeyCache>,
   pub task_queue: Option<Arc<TaskQueue>>,
+  pub peer_manager: Arc<PeerManager>,
 }
