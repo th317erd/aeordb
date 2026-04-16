@@ -12,6 +12,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
   file: File,
+  file_path: std::path::PathBuf,
   file_header: FileHeader,
   current_offset: u64,
 }
@@ -33,6 +34,7 @@ impl AppendWriter {
 
     Ok(AppendWriter {
       file,
+      file_path: path.to_path_buf(),
       file_header,
       current_offset,
     })
@@ -52,6 +54,7 @@ impl AppendWriter {
 
     Ok(AppendWriter {
       file,
+      file_path: path.to_path_buf(),
       file_header,
       current_offset,
     })
@@ -260,7 +263,10 @@ impl AppendWriter {
   /// writer's seek position — allowing callers to hold a READ lock instead
   /// of a WRITE lock on the `RwLock<AppendWriter>`.
   pub fn read_entry_at_shared(&self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
-    let mut file = self.file.try_clone()?;
+    // Open a FRESH file handle instead of try_clone(). On POSIX, dup() (used by
+    // try_clone) shares the seek position between the original and the clone,
+    // causing data corruption when multiple threads read concurrently.
+    let mut file = File::open(&self.file_path)?;
     file.seek(SeekFrom::Start(offset))?;
     let header = EntryHeader::deserialize(&mut file)?;
 
@@ -274,8 +280,10 @@ impl AppendWriter {
   }
 
   pub fn scan_entries(&self) -> EngineResult<EntryScanner> {
-    let file_copy = self.file.try_clone()?;
-    EntryScanner::new(file_copy)
+    // Open a fresh file handle — try_clone shares seek position on POSIX,
+    // which causes corruption under concurrent access.
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new(file)
   }
 
   pub fn file_header(&self) -> &FileHeader {

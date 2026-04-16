@@ -43,7 +43,7 @@ fn rebuild_app(
 fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "test-admin".to_string(),
+    sub: uuid::Uuid::nil().to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,

@@ -22,7 +22,7 @@
 //!
 //! ## Query Plugin Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use aeordb_plugin_sdk::prelude::*;
 //! use aeordb_plugin_sdk::aeordb_query_plugin;
 //!

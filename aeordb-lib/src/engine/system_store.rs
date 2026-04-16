@@ -579,6 +579,17 @@ pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>>
 // ---------------------------------------------------------------------------
 
 /// Deploy (or overwrite) a plugin at the given key.
+/// Encode a plugin key for safe storage as a filename.
+/// Replaces '/' with '::' to avoid creating nested directories.
+fn encode_plugin_key(key: &str) -> String {
+    key.replace('/', "::")
+}
+
+/// Decode a plugin key from the filename back to the original key.
+fn decode_plugin_key(encoded: &str) -> String {
+    encoded.replace("::", "/")
+}
+
 pub fn store_plugin(
     engine: &StorageEngine,
     ctx: &RequestContext,
@@ -586,7 +597,8 @@ pub fn store_plugin(
     encoded: &[u8],
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/plugins/{}", key);
+    let safe_key = encode_plugin_key(key);
+    let path = format!("/.system/plugins/{}", safe_key);
     ops.store_file(ctx, &path, encoded, Some("application/octet-stream"))?;
     Ok(())
 }
@@ -594,7 +606,8 @@ pub fn store_plugin(
 /// Retrieve a plugin by key.
 pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/plugins/{}", key);
+    let safe_key = encode_plugin_key(key);
+    let path = format!("/.system/plugins/{}", safe_key);
     match ops.read_file(&path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
@@ -603,6 +616,7 @@ pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<
 }
 
 /// List all plugins, returning (key, encoded_bytes) for each.
+/// Plugin keys are encoded with '::' replacing '/' for flat storage.
 pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>)>> {
     let ops = DirectoryOps::new(engine);
     let entries = match ops.list_directory("/.system/plugins") {
@@ -615,7 +629,8 @@ pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>
     for entry in &entries {
         let path = format!("/.system/plugins/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
-            results.push((entry.name.clone(), data));
+            let original_key = decode_plugin_key(&entry.name);
+            results.push((original_key, data));
         }
     }
     Ok(results)
@@ -629,7 +644,8 @@ pub fn remove_plugin(
     key: &str,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/plugins/{}", key);
+    let safe_key = encode_plugin_key(key);
+    let path = format!("/.system/plugins/{}", safe_key);
     match ops.delete_file(ctx, &path) {
         Ok(()) => Ok(true),
         Err(EngineError::NotFound(_)) => Ok(false),

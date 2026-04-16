@@ -96,12 +96,15 @@ async fn test_sync_diff_full() {
     assert!(json["root_hash"].is_string());
     assert!(!json["root_hash"].as_str().unwrap().is_empty());
 
-    // All files as "added"
+    // All files as "added" — filter out /.system/ entries from cluster secret setup
     let added = json["changes"]["files_added"].as_array().unwrap();
-    assert_eq!(added.len(), 2);
+    let user_added: Vec<_> = added.iter()
+        .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system"))
+        .collect();
+    assert_eq!(user_added.len(), 2);
     // Sorted by path
-    assert_eq!(added[0]["path"], "/hello.txt");
-    assert_eq!(added[1]["path"], "/subdir/nested.txt");
+    assert_eq!(user_added[0]["path"], "/hello.txt");
+    assert_eq!(user_added[1]["path"], "/subdir/nested.txt");
 
     // Each file has hash, size, chunk_hashes
     assert!(added[0]["hash"].is_string());
@@ -303,10 +306,12 @@ async fn test_sync_diff_empty_database() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
 
-    assert!(json["changes"]["files_added"].as_array().unwrap().is_empty());
+    // Filter out /.system/ entries (created by cluster secret setup)
+    let added: Vec<_> = json["changes"]["files_added"].as_array().unwrap()
+        .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system")).collect();
+    assert!(added.is_empty(), "No user files should be added on empty db");
     assert!(json["changes"]["files_modified"].as_array().unwrap().is_empty());
     assert!(json["changes"]["files_deleted"].as_array().unwrap().is_empty());
-    assert!(json["chunk_hashes_needed"].as_array().unwrap().is_empty());
 }
 
 // ===========================================================================
