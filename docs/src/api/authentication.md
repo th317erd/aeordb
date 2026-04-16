@@ -37,6 +37,9 @@ Identity is loaded from an external file at the specified path. On first startup
 | POST | `/admin/api-keys` | Create an API key | Yes (root) |
 | GET | `/admin/api-keys` | List API keys | Yes (root) |
 | DELETE | `/admin/api-keys/{key_id}` | Revoke an API key | Yes (root) |
+| POST | `/api-keys` | Create an API key (self-service) | Yes |
+| GET | `/api-keys` | List your own API keys | Yes |
+| DELETE | `/api-keys/{key_id}` | Revoke your own API key | Yes |
 
 ---
 
@@ -287,4 +290,209 @@ curl -X POST http://localhost:3000/auth/token \
                    v
            New JWT + New Refresh
            (old refresh revoked)
+```
+
+---
+
+## API Keys (Admin)
+
+The `/admin/api-keys` endpoints listed in the endpoint summary are for root administrators managing any user's keys.
+
+> **Note:** The `/admin/api-keys` endpoints are for root administrators managing any user's keys. For self-service key management, see [Self-Service API Keys](#self-service-api-keys) below.
+
+---
+
+## Self-Service API Keys
+
+Any authenticated user can create, list, and revoke their own API keys. Root users can additionally create keys for other users.
+
+### POST /api-keys
+
+Create an API key for yourself.
+
+**Request Body:**
+
+```json
+{
+  "label": "MacBook sync client",
+  "expires_in_days": 730,
+  "rules": [
+    {"/assets/**": "-r--l---"},
+    {"/drafts/**": "crudlify"},
+    {"**": "--------"}
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `label` | string | No | Human-friendly name for the key |
+| `expires_in_days` | integer | No | Days until expiry (default: 730, max: 3650) |
+| `rules` | array | No | Path permission rules (default: empty = full pass-through) |
+| `user_id` | string | No | Root only: create key for another user |
+
+**Response:** `201 Created`
+
+```json
+{
+  "key_id": "a1b2c3d4-...",
+  "key": "aeor_k_a1b2c3d4..._...",
+  "user_id": "e5f6a7b8-...",
+  "label": "MacBook sync client",
+  "expires_at": 1839024000000,
+  "rules": [...]
+}
+```
+
+The `key` field (plaintext) is returned **once** and can never be retrieved again. Store it securely.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3000/api-keys \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "label": "CI deploy key",
+    "expires_in_days": 90,
+    "rules": [
+      {"/deployments/**": "crudlify"},
+      {"**": "--------"}
+    ]
+  }'
+```
+
+### GET /api-keys
+
+List your own API keys (non-revoked). Root users see all keys.
+
+**Response:** `200 OK`
+
+```json
+[
+  {
+    "key_id": "a1b2c3d4-...",
+    "label": "MacBook sync client",
+    "user_id": "e5f6a7b8-...",
+    "expires_at": 1839024000000,
+    "created_at": 1776208000000,
+    "rules": [...]
+  }
+]
+```
+
+Never includes the key hash or plaintext.
+
+### DELETE /api-keys/{key_id}
+
+Revoke one of your own API keys. Root users can revoke anyone's key.
+
+**Response:** `200 OK`
+
+```json
+{
+  "revoked": true,
+  "key_id": "a1b2c3d4-..."
+}
+```
+
+---
+
+## Scoped API Keys
+
+API keys can be restricted to specific paths and operations using **rules**. Rules are an ordered list of path-glob to permission-flags pairs. The first matching rule wins.
+
+### Rule Format
+
+Each rule is a JSON object with one key (the glob pattern) and one value (the permission flags):
+
+```json
+[
+  {"/assets/**": "-r--l---"},
+  {"/drafts/**": "crudlify"},
+  {"**": "--------"}
+]
+```
+
+### Permission Flags
+
+The flags string is exactly 8 characters, one for each operation:
+
+| Position | Flag | Operation |
+|----------|------|-----------|
+| 0 | `c` | Create |
+| 1 | `r` | Read |
+| 2 | `u` | Update |
+| 3 | `d` | Delete |
+| 4 | `l` | List |
+| 5 | `i` | Invoke |
+| 6 | `f` | Functions (deploy) |
+| 7 | `y` | Configure |
+
+Use the letter to allow the operation, `-` to deny it:
+
+- `crudlify` — full access
+- `-r--l---` — read and list only
+- `cr------` — create and read only
+- `--------` — deny all
+
+### Rule Evaluation
+
+1. Rules are evaluated top-to-bottom. The **first matching glob** determines the permissions.
+2. If no rule matches the path, access is **denied**.
+3. An empty rules list means no restrictions (full pass-through to user permissions).
+4. Rules can only **restrict** — they never grant more access than the user already has.
+
+### Security Behavior
+
+When a scoped key is denied access to a path, the server returns **404 Not Found** (not 403 Forbidden). This prevents information leakage — a denied path looks identical to a path that doesn't exist.
+
+This also applies to directory listings: entries the key cannot access are silently omitted from the response.
+
+### Key Expiration
+
+All API keys have a mandatory expiration:
+
+- **Default:** 730 days (2 years)
+- **Maximum:** 3650 days (10 years)
+- Expired keys are rejected at token exchange time
+
+### Examples
+
+**Read-only key for `/assets/`:**
+
+```json
+{
+  "label": "Asset viewer",
+  "rules": [
+    {"/assets/**": "-r--l---"},
+    {"**": "--------"}
+  ]
+}
+```
+
+**Full access to one project, read-only elsewhere:**
+
+```json
+{
+  "label": "Project lead - Q4 campaign",
+  "rules": [
+    {"/projects/q4-campaign/**": "crudlify"},
+    {"/shared/**": "-r--l---"},
+    {"**": "--------"}
+  ]
+}
+```
+
+**CI/CD deploy key (create and update only, specific path):**
+
+```json
+{
+  "label": "CI pipeline",
+  "expires_in_days": 90,
+  "rules": [
+    {"/deployments/**": "cru-----"},
+    {"**": "--------"}
+  ]
+}
 ```

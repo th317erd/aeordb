@@ -807,3 +807,75 @@ phases:
           10. Selective sync: node 3 only syncs /subset/
 
     commit_message: "Comprehensive replication testing: multi-node, property-based, failure, E2E"
+
+  - name: "Phase 9: Documentation"
+    description: >
+      Update mdBook documentation to cover all replication features.
+      Build and deploy to aeordb.com/docs/.
+    depends_on: ["Phase 8"]
+    tasks:
+      - name: New docs page — Replication
+        file: docs/src/concepts/replication.md
+        details: |
+          New page under Core Concepts covering:
+          - Overview: multi-writer, eventually consistent, content-addressed sync
+          - How it works: diff trees, exchange chunks, merge, resolve conflicts
+          - Virtual clock and ordering
+          - Conflict resolution (LWW, modify beats delete, /.conflicts/)
+          - Selective sync
+          - Client = node (same protocol)
+          - Comparison to Raft/strong consistency (why we chose this)
+
+      - name: New docs page — Cluster Operations
+        file: docs/src/operations/cluster.md
+        details: |
+          New page under Operations covering:
+          - Setting up a cluster (--peers, --cluster-secret-file, --cluster-tls)
+          - Adding/removing nodes at runtime
+          - Monitoring cluster health (dashboard Nodes section, /admin/cluster)
+          - Honeymoon phase and what it means
+          - Triggering manual sync
+          - Handling conflicts (API + portal)
+          - Selective sync configuration
+          - Standalone to cluster migration
+          - Troubleshooting: node won't settle, clock drift, sync failures
+
+      - name: Update API docs — Cluster & Sync endpoints
+        file: docs/src/api/admin.md
+        details: |
+          Add cluster admin endpoints:
+          - GET /admin/cluster
+          - POST/DELETE /admin/cluster/peers
+          - POST /admin/cluster/sync
+          Add conflict resolution endpoints:
+          - GET /admin/conflicts
+          - POST /admin/conflicts/{path}/resolve
+          - POST /admin/conflicts/{path}/dismiss
+
+      - name: Update API docs — Sync endpoints
+        details: |
+          Document the internal sync endpoints (for operators and advanced users):
+          - POST /sync/diff
+          - POST /sync/chunks
+          Note: these are authenticated via cluster secret, not JWT
+
+      - name: Update CLI docs
+        file: docs/src/cli/commands.md
+        details: |
+          Document new CLI flags:
+          --peers, --cluster-secret, --cluster-secret-file,
+          --cluster-tls, --cluster-tls-cert, --cluster-tls-key
+
+      - name: Update SUMMARY.md
+        file: docs/src/SUMMARY.md
+        details: |
+          Add new pages:
+          - [Replication](./concepts/replication.md) under Core Concepts
+          - [Cluster Operations](./operations/cluster.md) under Operations
+
+      - name: Build and deploy
+        details: |
+          mdbook build
+          rsync docs/book/ to FS-Server1:/mnt/web/www/aeordb/docs/
+
+    commit_message: "Document replication: concepts, cluster operations, API endpoints, CLI flags"
