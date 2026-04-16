@@ -16,6 +16,9 @@ fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
     user_id: ROOT_USER_ID,
     created_at: chrono::Utc::now(),
     is_revoked: false,
+    expires_at: chrono::Utc::now().timestamp_millis() + (365 * 86400 * 1000),
+    label: Some("test-root-key".to_string()),
+    rules: vec![],
   };
   system_tables
     .store_api_key_for_bootstrap(&RequestContext::system(), &record)

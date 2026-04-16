@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 2,430+ (all passing, +92 API key enhancement tests)
+## Test Count: 881 passing (full suite, 2 pre-existing hot-file failures)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -99,3 +99,14 @@
 - `aeordb-lib/src/engine/api_key_cache.rs` — ApiKeyCache (LRU+TTL for scoped key records)
 - `aeordb-lib/src/server/api_key_self_service_routes.rs` — POST/GET/DELETE /api-keys handlers
 - `bot-docs/plan/enhanced-api-keys.md` — design spec for enhanced API key system
+- `aeordb-lib/src/engine/virtual_clock.rs` — VirtualClock trait, SystemClock, MockClock, PeerClockTracker
+- `aeordb-lib/src/engine/peer_connection.rs` — PeerManager, PeerConnection, ConnectionState, PeerConfig
+- `aeordb-lib/src/engine/merge.rs` — three_way_merge, deterministic LWW, modify-beats-delete
+- `aeordb-lib/src/engine/sync_apply.rs` — atomic merge application with chunk verification
+- `aeordb-lib/src/engine/sync_engine.rs` — SyncEngine with in-process bidirectional sync
+- `aeordb-lib/src/engine/conflict_store.rs` — /.conflicts/ storage, list, resolve, dismiss
+- `aeordb-lib/src/engine/cluster_join.rs` — has_signing_key, is_ready_for_traffic, get_cluster_mode
+- `aeordb-lib/src/server/sync_routes.rs` — POST /sync/diff, /sync/chunks with cluster secret auth
+- `aeordb-lib/src/server/cluster_routes.rs` — GET/POST/DELETE /admin/cluster endpoints
+- `aeordb-lib/src/server/conflict_routes.rs` — GET/POST /admin/conflicts, resolve, dismiss
+- `bot-docs/plan/replication-v2-design.md` — content-addressed sync replication design

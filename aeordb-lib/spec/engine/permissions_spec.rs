@@ -829,6 +829,8 @@ fn test_crudlify_op_from_http_method() {
     group_cache,
     permissions_cache,
     task_queue: None,
+    api_key_cache: Arc::new(aeordb::engine::ApiKeyCache::new(Duration::from_secs(60))),
+    peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
   };
 
   // GET file -> Read
