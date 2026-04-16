@@ -114,6 +114,65 @@ curl -X POST http://localhost:3000/admin/cluster/peers \
   }'
 ```
 
+## Client Sync
+
+In addition to peer-to-peer replication, AeorDB supports client sync using the same endpoints. Clients authenticate with JWT tokens instead of cluster secrets.
+
+### Authentication
+
+Sync endpoints support two authentication methods:
+
+| Method | Header | Access Level |
+|--------|--------|-------------|
+| Cluster secret | `X-Cluster-Secret: <secret>` | Full access (peer/root) |
+| JWT Bearer token | `Authorization: Bearer <token>` | Filtered access (scoped) |
+
+Root JWT tokens get the same full access as cluster secrets. Non-root tokens get filtered results:
+
+- `/.system/` entries are excluded from all responses
+- API key scoping rules further restrict which paths are visible
+- Chunks with the `FLAG_SYSTEM` flag are not served
+
+### Example: Client Sync
+
+```bash
+# Get a JWT token
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "aeor_k_..."}' | jq -r .token)
+
+# Sync diff — only see changes for allowed paths
+curl -X POST http://localhost:3000/sync/diff \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths": ["/assets/**"]}'
+
+# Fetch needed chunks
+curl -X POST http://localhost:3000/sync/chunks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"hashes": ["abc123...", "def456..."]}'
+```
+
+### Scoped API Keys for Sync
+
+Create a scoped API key for a client that should only sync specific paths:
+
+```bash
+curl -X POST http://localhost:3000/api-keys \
+  -H "Authorization: Bearer $ROOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "label": "Designer MacBook - assets only",
+    "rules": [
+      {"/assets/**": "-r--l---"},
+      {"**": "--------"}
+    ]
+  }'
+```
+
+The client using this key will only see `/assets/` changes in sync responses, regardless of what `paths` filter it requests.
+
 ## Troubleshooting
 
 ### Node stuck in Honeymoon

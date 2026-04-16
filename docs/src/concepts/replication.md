@@ -74,6 +74,17 @@ This is useful for:
 
 The replication protocol is the same protocol that the AeorDB client uses. A desktop client syncing with a server and a server syncing with another server use the same mechanism — compare hashes, exchange chunks, merge trees.
 
+## Client Sync
+
+Desktop clients and other non-peer applications can sync using the same protocol as replication peers, with appropriate access restrictions:
+
+- Clients authenticate with their JWT token (not a cluster secret)
+- The `/.system/` directory is automatically excluded from client sync results
+- API key scoping rules apply — a scoped key with restricted path access only sees changes for allowed paths
+- Clients can use the `paths` filter for selective sync (e.g., only sync `/assets/**`)
+
+This means a client with a read-only key scoped to `/assets/` will only see file changes under `/assets/` in sync diffs, and cannot access system data, other users' files, or paths outside its scope.
+
 ## Comparison with Strong Consistency
 
 AeorDB uses **eventual consistency**, not strong consistency (Raft/Paxos). This means:
