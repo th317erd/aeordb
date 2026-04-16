@@ -69,6 +69,11 @@ impl SnapshotInfo {
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+    // Currently only v0 format exists — dispatch directly
+    Self::deserialize_v0(data, hash_length)
+  }
+
+  fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     if data.len() < 2 {
       return Err(EngineError::CorruptEntry {
         offset: 0,
@@ -165,6 +170,11 @@ impl ForkInfo {
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+    // Currently only v0 format exists — dispatch directly
+    Self::deserialize_v0(data, hash_length)
+  }
+
+  fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     if data.len() < 2 {
       return Err(EngineError::CorruptEntry {
         offset: 0,

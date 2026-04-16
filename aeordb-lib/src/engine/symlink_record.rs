@@ -38,6 +38,11 @@ impl SymlinkRecord {
     }
 
     pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
+        // Currently only v0 format exists — dispatch directly
+        Self::deserialize_v0(data)
+    }
+
+    fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
         if data.len() < 4 {
             return Err(EngineError::CorruptEntry {
                 offset: 0,

@@ -64,6 +64,11 @@ impl FileRecord {
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+    // Currently only v0 format exists — dispatch directly
+    Self::deserialize_v0(data, hash_length)
+  }
+
+  fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     let mut offset = 0;
 
     let path_length = read_u16(data, &mut offset)? as usize;

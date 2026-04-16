@@ -6,6 +6,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub const ENTRY_MAGIC: u32 = 0x0AE012DB;
+pub const CURRENT_ENTRY_VERSION: u8 = 0;
 
 #[derive(Debug, Clone)]
 pub struct EntryHeader {
@@ -97,9 +98,6 @@ impl EntryHeader {
     }
 
     let entry_version = fixed_buffer[4];
-    if entry_version == 0 {
-      return Err(EngineError::InvalidEntryVersion(entry_version));
-    }
 
     let entry_type = EntryType::from_u8(fixed_buffer[5])?;
     let flags = fixed_buffer[6];

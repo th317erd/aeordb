@@ -89,6 +89,14 @@ pub fn deserialize_child_entries(
   data: &[u8],
   hash_length: usize,
 ) -> EngineResult<Vec<ChildEntry>> {
+  // Currently only v0 format exists — dispatch directly
+  deserialize_child_entries_v0(data, hash_length)
+}
+
+fn deserialize_child_entries_v0(
+  data: &[u8],
+  hash_length: usize,
+) -> EngineResult<Vec<ChildEntry>> {
   let mut entries = Vec::new();
   let mut offset = 0;
 

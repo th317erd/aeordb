@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use aeordb::engine::compression::CompressionAlgorithm;
-use aeordb::engine::entry_header::{EntryHeader, ENTRY_MAGIC};
+use aeordb::engine::entry_header::{EntryHeader, ENTRY_MAGIC, CURRENT_ENTRY_VERSION};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
 use aeordb::engine::hash_algorithm::HashAlgorithm;
@@ -24,7 +24,7 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
     EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
 
   let header = EntryHeader {
-    entry_version: 1,
+    entry_version: CURRENT_ENTRY_VERSION,
     entry_type,
     flags: 0,
     hash_algo,
@@ -79,7 +79,7 @@ fn test_entry_header_hash_verification_passes() {
     .expect("Failed to compute hash");
 
   let header = EntryHeader {
-    entry_version: 1,
+    entry_version: CURRENT_ENTRY_VERSION,
     entry_type: EntryType::FileRecord,
     flags: 0,
     hash_algo,
@@ -109,7 +109,7 @@ fn test_entry_header_hash_verification_fails_on_tamper() {
     .expect("Failed to compute hash");
 
   let header = EntryHeader {
-    entry_version: 1,
+    entry_version: CURRENT_ENTRY_VERSION,
     entry_type: EntryType::Chunk,
     flags: 0,
     hash_algo,
@@ -258,7 +258,7 @@ fn test_void_entry_format() {
     EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
 
   let header = EntryHeader {
-    entry_version: 1,
+    entry_version: CURRENT_ENTRY_VERSION,
     entry_type: EntryType::Void,
     flags: 0,
     hash_algo,
@@ -311,22 +311,45 @@ fn test_entry_header_deserialize_invalid_magic() {
 }
 
 #[test]
-fn test_entry_header_deserialize_invalid_entry_version() {
-  // Build valid magic then version 0
-  let mut data = Vec::new();
-  data.extend_from_slice(&ENTRY_MAGIC.to_le_bytes());
-  data.push(0); // entry_version = 0 (invalid)
-  data.extend_from_slice(&[0u8; 60]); // padding
-  let mut cursor = Cursor::new(&data);
-  let result = EntryHeader::deserialize(&mut cursor);
-  assert!(result.is_err());
+fn test_entry_header_deserialize_version_zero_is_valid() {
+  // Version 0 is the current format — it must be accepted.
+  assert_eq!(CURRENT_ENTRY_VERSION, 0);
+
+  let key = b"test-key";
+  let value = b"test-value";
+  let hash_algo = HashAlgorithm::Blake3_256;
+  let entry_type = EntryType::Chunk;
+
+  let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)
+    .expect("Failed to compute hash");
+  let total_length =
+    EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+
+  let header = EntryHeader {
+    entry_version: 0,
+    entry_type,
+    flags: 0,
+    hash_algo,
+    compression_algo: CompressionAlgorithm::None,
+    encryption_algo: 0,
+    key_length: key.len() as u32,
+    value_length: value.len() as u32,
+    timestamp: 1234567890,
+    total_length,
+    hash,
+  };
+
+  let serialized = header.serialize();
+  let mut cursor = Cursor::new(&serialized);
+  let deserialized = EntryHeader::deserialize(&mut cursor).expect("Version 0 must deserialize");
+  assert_eq!(deserialized.entry_version, 0);
 }
 
 #[test]
 fn test_entry_header_deserialize_invalid_entry_type() {
   let mut data = Vec::new();
   data.extend_from_slice(&ENTRY_MAGIC.to_le_bytes());
-  data.push(1); // valid entry_version
+  data.push(CURRENT_ENTRY_VERSION); // valid entry_version
   data.push(0xFF); // invalid entry_type
   data.extend_from_slice(&[0u8; 60]); // padding
   let mut cursor = Cursor::new(&data);

@@ -1,6 +1,7 @@
 use std::io::{Seek, SeekFrom, Write};
 
 use aeordb::engine::append_writer::AppendWriter;
+use aeordb::engine::entry_header::CURRENT_ENTRY_VERSION;
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::file_header::FILE_HEADER_SIZE;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
@@ -80,7 +81,7 @@ fn test_append_and_read_back_roundtrip() {
 
   assert_eq!(header.entry_type, EntryType::FileRecord);
   assert_eq!(header.flags, 0x42);
-  assert_eq!(header.entry_version, 1);
+  assert_eq!(header.entry_version, CURRENT_ENTRY_VERSION);
   assert_eq!(read_key, key);
   assert_eq!(read_value, value);
   assert!(header.verify(&read_key, &read_value));

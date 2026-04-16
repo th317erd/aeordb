@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::engine::compression::CompressionAlgorithm;
-use crate::engine::entry_header::EntryHeader;
+use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -89,7 +89,7 @@ impl AppendWriter {
     let now = chrono::Utc::now().timestamp_millis();
 
     let header = EntryHeader {
-      entry_version: 1,
+      entry_version: CURRENT_ENTRY_VERSION,
       entry_type,
       flags,
       hash_algo,
@@ -182,7 +182,7 @@ impl AppendWriter {
     let now = chrono::Utc::now().timestamp_millis();
 
     let header = EntryHeader {
-      entry_version: 1,
+      entry_version: CURRENT_ENTRY_VERSION,
       entry_type,
       flags: 0,
       hash_algo,
