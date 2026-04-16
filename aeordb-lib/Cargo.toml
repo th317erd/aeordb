@@ -520,6 +520,14 @@ name = "sync_http_spec"
 path = "spec/http/sync_http_spec.rs"
 
 [[test]]
+name = "conflict_store_spec"
+path = "spec/engine/conflict_store_spec.rs"
+
+[[test]]
+name = "conflict_http_spec"
+path = "spec/http/conflict_http_spec.rs"
+
+[[test]]
 name = "merge_spec"
 path = "spec/engine/merge_spec.rs"
 

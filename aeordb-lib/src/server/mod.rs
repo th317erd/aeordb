@@ -2,6 +2,7 @@ pub mod admin_routes;
 pub mod api_key_self_service_routes;
 pub mod backup_routes;
 pub mod cluster_routes;
+pub mod conflict_routes;
 pub mod cors;
 pub mod engine_routes;
 pub mod gc_routes;
@@ -296,6 +297,11 @@ pub fn create_app_with_all_and_task_queue(
     // Version: file-level access routes
     .route("/version/file-history/{*path}", get(version_file_routes::file_history))
     .route("/version/file-restore/{*path}", post(version_file_routes::file_restore))
+    // Conflict management routes
+    .route("/admin/conflicts", get(conflict_routes::list_conflicts))
+    .route("/admin/conflicts/{*path}", get(conflict_routes::get_conflict))
+    .route("/admin/conflict-resolve/{*path}", post(conflict_routes::resolve_conflict))
+    .route("/admin/conflict-dismiss/{*path}", post(conflict_routes::dismiss_conflict))
     // Cluster / replication admin routes
     .route("/admin/cluster", get(cluster_routes::cluster_status))
     .route("/admin/cluster/peers", post(cluster_routes::add_peer).get(cluster_routes::list_peers))

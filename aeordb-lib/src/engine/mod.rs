@@ -52,6 +52,7 @@ pub mod system_tables;
 pub mod task_queue;
 pub mod task_worker;
 pub mod user;
+pub mod conflict_store;
 pub mod merge;
 pub mod sync_apply;
 pub mod tree_walker;
