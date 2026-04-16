@@ -127,15 +127,20 @@ fn path_matches_filter(path: &str, patterns: &[String]) -> bool {
 }
 
 /// Build a full sync response (no since_root_hash -- everything is "added").
+/// When `include_system` is false, entries under /.system/ are excluded.
 fn build_full_sync_response(
     tree: &VersionTree,
     path_filter: &Option<Vec<String>>,
+    include_system: bool,
 ) -> (SyncChanges, Vec<String>) {
     let mut files_added = Vec::new();
     let mut symlinks_added = Vec::new();
     let mut chunk_hashes: Vec<String> = Vec::new();
 
     for (path, (hash, record)) in &tree.files {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -147,6 +152,9 @@ fn build_full_sync_response(
     }
 
     for (path, (hash, record)) in &tree.symlinks {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -174,10 +182,12 @@ fn build_full_sync_response(
 }
 
 /// Build a diff-based sync response from a TreeDiff.
+/// When `include_system` is false, entries under /.system/ are excluded.
 fn build_sync_response_from_diff(
     diff: &TreeDiff,
     _current_tree: &VersionTree,
     path_filter: &Option<Vec<String>>,
+    include_system: bool,
 ) -> (SyncChanges, Vec<String>) {
     let mut files_added = Vec::new();
     let mut files_modified = Vec::new();
@@ -188,6 +198,9 @@ fn build_sync_response_from_diff(
     let mut chunk_hashes: Vec<String> = Vec::new();
 
     for (path, (hash, record)) in &diff.added {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -199,6 +212,9 @@ fn build_sync_response_from_diff(
     }
 
     for (path, (hash, record)) in &diff.modified {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -210,6 +226,9 @@ fn build_sync_response_from_diff(
     }
 
     for path in &diff.deleted {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -219,6 +238,9 @@ fn build_sync_response_from_diff(
     }
 
     for (path, (hash, record)) in &diff.symlinks_added {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -228,6 +250,9 @@ fn build_sync_response_from_diff(
     }
 
     for (path, (hash, record)) in &diff.symlinks_modified {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -237,6 +262,9 @@ fn build_sync_response_from_diff(
     }
 
     for path in &diff.symlinks_deleted {
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
         if let Some(ref patterns) = path_filter {
             if !path_matches_filter(path, patterns) {
                 continue;
@@ -323,7 +351,9 @@ pub async fn sync_diff(
         };
 
         let diff = diff_trees(&base_tree, &current_tree);
-        build_sync_response_from_diff(&diff, &current_tree, &payload.paths)
+        // Cluster secret auth = root-equivalent, include system paths.
+        // TODO: When JWT auth is added to sync routes, check is_root and pass accordingly.
+        build_sync_response_from_diff(&diff, &current_tree, &payload.paths, true)
     } else {
         let tree = match walk_version_tree(&state.engine, &head_hash) {
             Ok(t) => t,
@@ -333,7 +363,9 @@ pub async fn sync_diff(
                     .into_response()
             }
         };
-        build_full_sync_response(&tree, &payload.paths)
+        // Cluster secret auth = root-equivalent, include system paths.
+        // TODO: When JWT auth is added to sync routes, check is_root and pass accordingly.
+        build_full_sync_response(&tree, &payload.paths, true)
     };
 
     let response = SyncDiffResponse {
@@ -366,6 +398,12 @@ pub async fn sync_chunks(
         };
 
         if let Ok(Some((header, _key, value))) = state.engine.get_entry(&hash) {
+            // Check FLAG_SYSTEM — deny for non-root callers.
+            // Currently sync routes use cluster secret (root-equivalent), so we
+            // don't actually block here. When JWT auth is added to sync routes,
+            // check is_root and skip system entries for non-root callers.
+            // TODO: if !is_root { if header.is_system_entry() { continue; } }
+
             let data = if header.compression_algo != CompressionAlgorithm::None {
                 match decompress(&value, header.compression_algo) {
                     Ok(d) => d,

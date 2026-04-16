@@ -551,6 +551,10 @@ path = "spec/engine/system_flag_spec.rs"
 name = "system_store_spec"
 path = "spec/engine/system_store_spec.rs"
 
+[[test]]
+name = "system_access_spec"
+path = "spec/http/system_access_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"

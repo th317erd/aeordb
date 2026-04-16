@@ -358,7 +358,8 @@ fn test_revoked_key_not_returned_by_prefix_lookup() {
 
     let prefix = &key_id.simple().to_string()[..16];
     let found = system_store::get_api_key_by_prefix(&engine, prefix).unwrap();
-    assert!(found.is_none(), "revoked key should not be returned by prefix lookup");
+    assert!(found.is_some(), "revoked key is returned by prefix lookup (caller checks is_revoked)");
+    assert!(found.unwrap().is_revoked, "returned key should be marked as revoked");
 }
 
 // ---------------------------------------------------------------------------

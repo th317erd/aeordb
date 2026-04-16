@@ -19,7 +19,7 @@ use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::compression::{CompressionAlgorithm, decompress};
-use crate::engine::directory_ops::{EngineFileStream, file_content_hash};
+use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
@@ -61,6 +61,16 @@ pub async fn engine_store_file(
   headers: HeaderMap,
   body: axum::body::Bytes,
 ) -> Response {
+  // Block non-root access to /.system/
+  if is_system_path(&path) {
+    let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
+
   let content_type = headers
     .get("content-type")
     .and_then(|value| value.to_str().ok());
@@ -127,6 +137,16 @@ pub async fn engine_get(
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
+  // Block non-root access to /.system/
+  if is_system_path(&path) {
+    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
+
   // If snapshot or version query param is present, read from historical version
   if version_query.snapshot.is_some() || version_query.version.is_some() {
     return engine_get_at_version(&state, &path, &version_query).await;
@@ -244,6 +264,16 @@ pub async fn engine_get(
             if let Some(Extension(ref rules)) = active_key_rules {
               if !rules.0.is_empty() {
                 filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
+              }
+            }
+            // Filter /.system/ from listings for non-root
+            {
+              let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+              if !is_root(&user_id) {
+                listing.retain(|entry| {
+                  let path = entry["path"].as_str().unwrap_or("");
+                  !path.starts_with("/.system")
+                });
               }
             }
             return (StatusCode::OK, Json(listing)).into_response();
@@ -367,6 +397,16 @@ pub async fn engine_get(
             filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
           }
         }
+        // Filter /.system/ from listings for non-root
+        {
+          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+          if !is_root(&user_id) {
+            listing.retain(|entry| {
+              let path = entry["path"].as_str().unwrap_or("");
+              !path.starts_with("/.system")
+            });
+          }
+        }
         return (StatusCode::OK, Json(listing)).into_response();
       }
       Err(EngineError::NotFound(_)) => {
@@ -420,6 +460,16 @@ pub async fn engine_get(
       if let Some(Extension(ref rules)) = active_key_rules {
         if !rules.0.is_empty() {
           filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
+        }
+      }
+      // Filter /.system/ from listings for non-root
+      {
+        let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+        if !is_root(&user_id) {
+          listing.retain(|entry| {
+            let path = entry["path"].as_str().unwrap_or("");
+            !path.starts_with("/.system")
+          });
         }
       }
       (StatusCode::OK, Json(listing)).into_response()
@@ -534,6 +584,16 @@ pub async fn engine_delete_file(
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
+  // Block non-root access to /.system/
+  if is_system_path(&path) {
+    let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let directory_ops = DirectoryOps::new(&state.engine);
 
@@ -581,6 +641,16 @@ pub async fn engine_head(
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
+  // Block non-root access to /.system/
+  if is_system_path(&path) {
+    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
+
   let directory_ops = DirectoryOps::new(&state.engine);
 
   // Check symlink first
