@@ -8,6 +8,9 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 pub const ENTRY_MAGIC: u32 = 0x0AE012DB;
 pub const CURRENT_ENTRY_VERSION: u8 = 0;
 
+/// Flag: entry belongs to /.system/ — root-only access.
+pub const FLAG_SYSTEM: u8 = 0x01;
+
 #[derive(Debug, Clone)]
 pub struct EntryHeader {
   pub entry_version: u8,
@@ -31,6 +34,11 @@ impl EntryHeader {
 
   pub fn header_size(&self) -> usize {
     Self::FIXED_HEADER_SIZE + self.hash_algo.hash_length()
+  }
+
+  /// Check if this entry has the system flag set.
+  pub fn is_system_entry(&self) -> bool {
+    self.flags & FLAG_SYSTEM != 0
   }
 
   pub fn compute_total_length(
