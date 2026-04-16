@@ -425,7 +425,11 @@ A joining node MUST NOT accept client HTTP traffic until its first sync complete
 
 2. **Virtual clock for all timestamps** — replace all uses of `chrono::Utc::now()` for entry timestamps with the heartbeat-synced virtual clock. This ensures `created_at` and `updated_at` are consistent across nodes. The virtual clock uses peer heartbeats to compute clock offsets, wire times, and corrected timestamps to near-ms precision.
 
-3. **Heartbeat clock sync protocol** — enhance the existing heartbeat to include `(intent_time, construct_time, sender_node_id)`. Receiving nodes compute clock offset and wire time from each heartbeat, building a per-peer stats table (offset, latency, jitter). The corrected virtual time is used for all entry timestamps and conflict ordering.
+3. **Heartbeat clock sync protocol** — enhance the existing heartbeat to include `(intent_time, construct_time, sender_node_id)`. Receiving nodes compute clock offset and wire time from each heartbeat, building a per-peer stats table (offset, latency, jitter). The corrected virtual time is used for all entry timestamps and conflict ordering. The heartbeat timing is self-correcting: it monitors its own fire accuracy and compensates for OS scheduling drift, converging to sub-ms alignment with the target interval.
+
+4. **Honeymoon phase** — mandatory settling period on every peer connect/reconnect. During honeymoon, nodes exchange heartbeats only — no data sync, no chunk exchange, no merges. The honeymoon ends when clock offset variance stabilizes below a threshold (e.g. < 5ms stddev) and a minimum heartbeat count is reached. This ensures the virtual clock is calibrated before any ordering decisions are made. The dashboard shows per-connection state (Disconnected / Honeymoon / Active) in a dedicated Nodes section with live clock stats.
+
+5. **Persisted clock state for fast honeymoon** — each peer's last known clock offset, wire time, jitter, and the timestamp of that measurement are persisted in system tables alongside the peer config. On reconnect, the honeymoon uses this as a seed estimate instead of starting from zero, allowing much faster settling when system clocks haven't drifted significantly. Confidence in the seed decays with time since last measurement.
 
 4. **Entry ordering metadata** — each entry gets `(virtual_time, node_id)` as ordering metadata, stored separately from user-visible timestamps. This is the conflict resolution key.
 
