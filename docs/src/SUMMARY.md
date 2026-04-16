@@ -27,6 +27,7 @@
 - [Events & Webhooks](./api/events.md)
 - [Authentication](./api/authentication.md)
 - [CORS](./api/cors.md)
+- [Library API](./api/library.md)
 
 # Plugin Development
 
