@@ -13,6 +13,7 @@ pub mod state;
 pub mod task_routes;
 pub mod upload_routes;
 pub mod symlink_routes;
+pub mod sync_routes;
 pub mod version_file_routes;
 
 use std::sync::Arc;
@@ -337,7 +338,10 @@ pub fn create_app_with_all_and_task_queue(
     .route("/portal/", get(portal_routes::portal_index))
     .route("/portal/{filename}", get(portal_routes::portal_asset))
     // Upload config (public, no auth)
-    .route("/upload/config", get(upload_routes::upload_config));
+    .route("/upload/config", get(upload_routes::upload_config))
+    // Sync routes (cluster secret auth, NOT JWT)
+    .route("/sync/diff", post(sync_routes::sync_diff))
+    .route("/sync/chunks", post(sync_routes::sync_chunks));
 
   let router = public_routes
     .merge(protected_routes)
