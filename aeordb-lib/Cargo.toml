@@ -519,6 +519,14 @@ path = "spec/http/api_key_filtering_spec.rs"
 name = "sync_http_spec"
 path = "spec/http/sync_http_spec.rs"
 
+[[test]]
+name = "merge_spec"
+path = "spec/engine/merge_spec.rs"
+
+[[test]]
+name = "sync_apply_spec"
+path = "spec/engine/sync_apply_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"

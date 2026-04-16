@@ -2,7 +2,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 /// A symlink entry — stores a target path that this symlink points to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymlinkRecord {
     pub path: String,
     pub target: String,
