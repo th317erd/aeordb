@@ -10,6 +10,7 @@ use base64::Engine as _;
 
 use super::responses::ErrorResponse;
 use super::state::AppState;
+use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
 use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::file_record::FileRecord;
 use crate::engine::symlink_record::SymlinkRecord;
@@ -75,6 +76,39 @@ pub struct SyncChunksRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Caller identity for sync operations
+// ---------------------------------------------------------------------------
+
+/// Describes who is calling the sync endpoint and what access they have.
+pub enum SyncCaller {
+    /// Cluster secret auth -- full access including /.system/.
+    Peer,
+    /// Root JWT (nil UUID) -- full access including /.system/.
+    RootUser,
+    /// Non-root JWT -- /.system/ filtered out, API key rules applied.
+    ScopedUser {
+        #[allow(dead_code)]
+        user_id: String,
+        key_rules: Vec<KeyRule>,
+    },
+}
+
+impl SyncCaller {
+    /// Whether this caller should see /.system/ entries.
+    fn include_system(&self) -> bool {
+        matches!(self, SyncCaller::Peer | SyncCaller::RootUser)
+    }
+
+    /// API key rules for path-level filtering (empty = no restrictions).
+    fn key_rules(&self) -> &[KeyRule] {
+        match self {
+            SyncCaller::ScopedUser { key_rules, .. } => key_rules,
+            _ => &[],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cluster secret validation
 // ---------------------------------------------------------------------------
 
@@ -93,6 +127,87 @@ fn validate_cluster_secret(headers: &HeaderMap, engine: &StorageEngine) -> bool 
         Ok(Some(stored_hash)) => provided_hash.as_bytes().to_vec() == stored_hash,
         _ => false,
     }
+}
+
+/// Determine the caller identity from request headers.
+/// Tries cluster secret first, then JWT. Returns 401 if neither works.
+fn determine_sync_caller(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<SyncCaller, Response> {
+    // 1. Try cluster secret first (peer mode).
+    if validate_cluster_secret(headers, &state.engine) {
+        return Ok(SyncCaller::Peer);
+    }
+
+    // 2. Try JWT Bearer token.
+    if let Some(auth_header) = headers.get("authorization") {
+        let token = auth_header
+            .to_str()
+            .ok()
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .ok_or_else(|| {
+                ErrorResponse::new("Invalid authorization header")
+                    .with_status(StatusCode::UNAUTHORIZED)
+                    .into_response()
+            })?;
+
+        let claims = state.jwt_manager.verify_token(token).map_err(|_| {
+            ErrorResponse::new("Invalid or expired JWT")
+                .with_status(StatusCode::UNAUTHORIZED)
+                .into_response()
+        })?;
+
+        let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
+            ErrorResponse::new("Invalid user ID in token")
+                .with_status(StatusCode::UNAUTHORIZED)
+                .into_response()
+        })?;
+
+        if crate::engine::user::is_root(&user_id) {
+            return Ok(SyncCaller::RootUser);
+        }
+
+        // Non-root: check API key scoping if key_id is present.
+        let key_rules = if let Some(ref key_id) = claims.key_id {
+            match state.api_key_cache.get_key(key_id, &state.engine) {
+                Ok(Some(key_record)) => {
+                    if key_record.is_revoked {
+                        return Err(ErrorResponse::new("API key revoked")
+                            .with_status(StatusCode::UNAUTHORIZED)
+                            .into_response());
+                    }
+                    if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
+                        return Err(ErrorResponse::new("API key expired")
+                            .with_status(StatusCode::UNAUTHORIZED)
+                            .into_response());
+                    }
+                    key_record.rules
+                }
+                Ok(None) => {
+                    return Err(ErrorResponse::new("API key not found")
+                        .with_status(StatusCode::UNAUTHORIZED)
+                        .into_response());
+                }
+                Err(_) => {
+                    return Err(ErrorResponse::new("Failed to look up API key")
+                        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .into_response());
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        return Ok(SyncCaller::ScopedUser {
+            user_id: claims.sub,
+            key_rules,
+        });
+    }
+
+    Err(ErrorResponse::new("Authentication required")
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +239,32 @@ fn path_matches_filter(path: &str, patterns: &[String]) -> bool {
         }
     }
     false
+}
+
+/// Check if a path is readable according to API key rules.
+/// Empty rules = full access (no restrictions).
+fn path_allowed_by_key_rules(path: &str, rules: &[KeyRule]) -> bool {
+    if rules.is_empty() {
+        return true; // no rules = no path-level restrictions
+    }
+    match match_rules(rules, path) {
+        Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
+        None => false,
+    }
+}
+
+/// Post-process SyncChanges to apply API key rule filtering.
+fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
+    if rules.is_empty() {
+        return;
+    }
+
+    changes.files_added.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+    changes.files_modified.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+    changes.files_deleted.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+    changes.symlinks_added.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+    changes.symlinks_modified.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+    changes.symlinks_deleted.retain(|e| path_allowed_by_key_rules(&e.path, rules));
 }
 
 /// Build a full sync response (no since_root_hash -- everything is "added").
@@ -305,11 +446,12 @@ pub async fn sync_diff(
     headers: HeaderMap,
     Json(payload): Json<SyncDiffRequest>,
 ) -> Response {
-    if !validate_cluster_secret(&headers, &state.engine) {
-        return ErrorResponse::new("Invalid or missing cluster secret")
-            .with_status(StatusCode::UNAUTHORIZED)
-            .into_response();
-    }
+    let caller = match determine_sync_caller(&headers, &state) {
+        Ok(c) => c,
+        Err(response) => return response,
+    };
+
+    let include_system = caller.include_system();
 
     let vm = VersionManager::new(&state.engine);
 
@@ -322,7 +464,7 @@ pub async fn sync_diff(
         }
     };
 
-    let (changes, chunk_hashes) = if let Some(ref since_hex) = payload.since_root_hash {
+    let (mut changes, chunk_hashes) = if let Some(ref since_hex) = payload.since_root_hash {
         let since_hash = match hex::decode(since_hex) {
             Ok(h) => h,
             Err(_) => {
@@ -351,9 +493,7 @@ pub async fn sync_diff(
         };
 
         let diff = diff_trees(&base_tree, &current_tree);
-        // Cluster secret auth = root-equivalent, include system paths.
-        // TODO: When JWT auth is added to sync routes, check is_root and pass accordingly.
-        build_sync_response_from_diff(&diff, &current_tree, &payload.paths, true)
+        build_sync_response_from_diff(&diff, &current_tree, &payload.paths, include_system)
     } else {
         let tree = match walk_version_tree(&state.engine, &head_hash) {
             Ok(t) => t,
@@ -363,10 +503,11 @@ pub async fn sync_diff(
                     .into_response()
             }
         };
-        // Cluster secret auth = root-equivalent, include system paths.
-        // TODO: When JWT auth is added to sync routes, check is_root and pass accordingly.
-        build_full_sync_response(&tree, &payload.paths, true)
+        build_full_sync_response(&tree, &payload.paths, include_system)
     };
+
+    // Apply API key rule filtering for scoped users.
+    filter_changes_by_key_rules(&mut changes, caller.key_rules());
 
     let response = SyncDiffResponse {
         root_hash: hex::encode(&head_hash),
@@ -383,11 +524,12 @@ pub async fn sync_chunks(
     headers: HeaderMap,
     Json(payload): Json<SyncChunksRequest>,
 ) -> Response {
-    if !validate_cluster_secret(&headers, &state.engine) {
-        return ErrorResponse::new("Invalid or missing cluster secret")
-            .with_status(StatusCode::UNAUTHORIZED)
-            .into_response();
-    }
+    let caller = match determine_sync_caller(&headers, &state) {
+        Ok(c) => c,
+        Err(response) => return response,
+    };
+
+    let filter_system = !caller.include_system();
 
     let mut chunks: Vec<serde_json::Value> = Vec::new();
 
@@ -398,11 +540,10 @@ pub async fn sync_chunks(
         };
 
         if let Ok(Some((header, _key, value))) = state.engine.get_entry(&hash) {
-            // Check FLAG_SYSTEM — deny for non-root callers.
-            // Currently sync routes use cluster secret (root-equivalent), so we
-            // don't actually block here. When JWT auth is added to sync routes,
-            // check is_root and skip system entries for non-root callers.
-            // TODO: if !is_root { if header.is_system_entry() { continue; } }
+            // Skip system entries for non-root/non-peer callers.
+            if filter_system && header.is_system_entry() {
+                continue;
+            }
 
             let data = if header.compression_algo != CompressionAlgorithm::None {
                 match decompress(&value, header.compression_algo) {

@@ -556,6 +556,10 @@ name = "system_access_spec"
 path = "spec/http/system_access_spec.rs"
 
 [[test]]
+name = "client_sync_spec"
+path = "spec/http/client_sync_spec.rs"
+
+[[test]]
 name = "replication_e2e_spec"
 path = "spec/http/replication_e2e_spec.rs"
 

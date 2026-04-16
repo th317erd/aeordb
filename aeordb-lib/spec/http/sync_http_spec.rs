@@ -225,7 +225,7 @@ async fn test_sync_diff_no_secret() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let json = body_json(response.into_body()).await;
-    assert!(json["error"].as_str().unwrap().contains("cluster secret"));
+    assert!(json["error"].as_str().unwrap().contains("Authentication required"));
 }
 
 // ===========================================================================
