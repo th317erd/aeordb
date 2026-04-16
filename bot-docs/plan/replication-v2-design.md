@@ -415,10 +415,28 @@ A joining node MUST NOT accept client HTTP traffic until its first sync complete
 
 ## Implementation Phases
 
+### Prerequisite: Hash and Timestamp Refactor (MUST complete before replication)
+
+**Problem:** FileRecord and SymlinkRecord content hashes currently include timestamps (`created_at`, `updated_at`) in the hashed data. This means identical content stored at different times produces different hashes, breaking dedup and causing false conflicts during replication.
+
+**Changes required:**
+
+1. **Introduce identity hashes** — new hash functions (`file_identity_hash`, `symlink_identity_hash`) that hash only content-defining fields (path, content_type, chunk_hashes) and deliberately EXCLUDE timestamps, metadata, and total_size. These identity hashes are used in `ChildEntry.hash` for directory trees and versioning.
+
+2. **Virtual clock for all timestamps** — replace all uses of `chrono::Utc::now()` for entry timestamps with the heartbeat-synced virtual clock. This ensures `created_at` and `updated_at` are consistent across nodes. The virtual clock uses peer heartbeats to compute clock offsets, wire times, and corrected timestamps to near-ms precision.
+
+3. **Heartbeat clock sync protocol** — enhance the existing heartbeat to include `(intent_time, construct_time, sender_node_id)`. Receiving nodes compute clock offset and wire time from each heartbeat, building a per-peer stats table (offset, latency, jitter). The corrected virtual time is used for all entry timestamps and conflict ordering.
+
+4. **Entry ordering metadata** — each entry gets `(virtual_time, node_id)` as ordering metadata, stored separately from user-visible timestamps. This is the conflict resolution key.
+
+5. **Migration** — existing entries retain their current hashes. New writes use the identity hash. The tree walker and diff engine must handle both formats during the transition period.
+
+This is a foundational change that affects: `file_record.rs`, `symlink_record.rs`, `directory_ops.rs`, `directory_entry.rs` (ChildEntry.hash semantics), `tree_walker.rs`, `version_access.rs`, `heartbeat.rs`, and all tests that verify content hashes.
+
 ### Phase 0: Entry Metadata
 - Add `virtual_time: u64` and `node_id: u64` to entry metadata
 - Node ID generation and persistence
-- Virtual clock sync via heartbeat
+- Virtual clock sync via heartbeat (enhanced with clock offset / wire time computation)
 
 ### Phase 1: Sync Endpoint
 - `POST /sync/diff` — compute and return tree diff with path filtering
@@ -502,3 +520,5 @@ A joining node MUST NOT accept client HTTP traffic until its first sync complete
 3. **Snapshot/version semantics** — snapshots are node-local (each node's HEAD is different until sync). A snapshot taken on Node A captures Node A's state. After sync, Node B can take an equivalent snapshot. Is this sufficient, or do we need "cluster-wide" snapshots?
 
 4. **Ordering of operations within a sync batch** — when applying a remote diff, do we apply adds before deletes? Or process in virtual_time order? The order matters for directory creation (can't add a file to a directory that doesn't exist yet).
+
+5. **Migration strategy for identity hashes** — existing databases have FileRecord content hashes that include timestamps. On upgrade, do we: (a) rewrite all hashes (expensive, breaks snapshots), (b) support both hash formats indefinitely (complexity), or (c) only use identity hashes for new writes and let old entries age out through GC? Need to decide before the prerequisite phase.
