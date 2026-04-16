@@ -270,6 +270,9 @@ async fn test_heartbeat_data_serialize() {
         db_file_size_bytes: 1_000_000,
         kv_size_bytes: 50_000,
         nvt_buckets: 1024,
+        intent_time: 1700000000000,
+        construct_time: 1700000000005,
+        node_id: 1,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["entry_count"], 100);

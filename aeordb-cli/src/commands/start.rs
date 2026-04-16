@@ -73,7 +73,9 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   }
 
   // Start the heartbeat task (emits DatabaseStats every 15 seconds).
-  let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone());
+  // TODO: replace hard-coded node_id=1 with a configured value once
+  // multi-node support is wired up.
+  let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone(), 1);
 
   // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {

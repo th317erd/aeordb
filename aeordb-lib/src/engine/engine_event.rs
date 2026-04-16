@@ -119,6 +119,12 @@ pub struct HeartbeatData {
     pub db_file_size_bytes: u64,
     pub kv_size_bytes: u64,
     pub nvt_buckets: usize,
+    /// The aligned boundary time (ms) this heartbeat targeted.
+    pub intent_time: u64,
+    /// Actual wall-clock time (ms) when the heartbeat message was constructed.
+    pub construct_time: u64,
+    /// This node's unique identifier.
+    pub node_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

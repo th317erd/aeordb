@@ -55,6 +55,7 @@ pub mod user;
 pub mod tree_walker;
 pub mod version_access;
 pub mod version_manager;
+pub mod virtual_clock;
 pub mod void_manager;
 pub mod webhook;
 
@@ -119,6 +120,7 @@ pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
+pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
 pub use group_cache::GroupCache;
