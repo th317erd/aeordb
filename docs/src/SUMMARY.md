@@ -14,6 +14,7 @@
 - [Storage Engine](./concepts/storage-engine.md)
 - [Versioning](./concepts/versioning.md)
 - [Indexing & Queries](./concepts/indexing.md)
+- [Replication](./concepts/replication.md)
 
 # API Reference
 
@@ -39,6 +40,7 @@
 - [Reindexing](./operations/reindex.md)
 - [Task System & Cron](./operations/tasks.md)
 - [Backup & Restore](./operations/backup.md)
+- [Cluster Operations](./operations/cluster.md)
 
 # CLI Reference
 
