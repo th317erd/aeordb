@@ -6,6 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::system_store;
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{EventBus, StorageEngine};
 use aeordb::plugins::PluginManager;
@@ -1406,7 +1407,7 @@ async fn scenario_security_non_root_jwt_with_random_uuid() {
   );
 
   // Even with permissions for "all active users", this user doesn't exist
-  // in SystemTables so group_cache returns empty groups.
+  // in system_store so group_cache returns empty groups.
   harness.create_group(
     "phantom_active", ".r..l...", "........",
     "is_active", "eq", "true",

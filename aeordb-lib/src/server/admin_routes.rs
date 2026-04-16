@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use super::responses::{ErrorResponse, GroupResponse, UserResponse};
 use super::state::AppState;
-use crate::engine::{Group, RequestContext, SystemTables, User, is_root};
+use crate::engine::{Group, RequestContext, User, is_root};
 use crate::engine::user::SAFE_QUERY_FIELDS;
+use crate::engine::system_store;
 use crate::auth::TokenClaims;
 
 // ---------------------------------------------------------------------------
@@ -60,9 +61,8 @@ pub async fn create_user(
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let user = User::new(&payload.username, payload.email.as_deref());
-  let system_tables = SystemTables::new(&state.engine);
 
-  if let Err(error) = system_tables.store_user(&ctx, &user) {
+  if let Err(error) = system_store::store_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to create user: {}", error);
     return ErrorResponse::new(format!("Failed to create user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -81,8 +81,7 @@ pub async fn list_users(
     return *response;
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.list_users() {
+  match system_store::list_users(&state.engine) {
     Ok(users) => {
       let responses: Vec<UserResponse> = users.iter().map(UserResponse::from).collect();
       (StatusCode::OK, Json(responses)).into_response()
@@ -115,8 +114,7 @@ pub async fn get_user(
     }
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.get_user(&user_id) {
+  match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => (StatusCode::OK, Json(UserResponse::from(&user))).into_response(),
     Ok(None) => {
       ErrorResponse::new(format!("User not found: {}", user_id))
@@ -152,8 +150,7 @@ pub async fn update_user(
     }
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  let mut user = match system_tables.get_user(&user_id) {
+  let mut user = match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => user,
     Ok(None) => {
       return ErrorResponse::new(format!("User not found: {}", user_id))
@@ -180,7 +177,7 @@ pub async fn update_user(
   }
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
-  if let Err(error) = system_tables.update_user(&ctx, &user) {
+  if let Err(error) = system_store::update_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to update user: {}", error);
     return ErrorResponse::new(format!("Failed to update user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -209,8 +206,7 @@ pub async fn deactivate_user(
     }
   };
 
-  let system_tables = SystemTables::new(&state.engine);
-  let mut user = match system_tables.get_user(&user_id) {
+  let mut user = match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => user,
     Ok(None) => {
       return ErrorResponse::new(format!("User not found: {}", user_id))
@@ -229,7 +225,7 @@ pub async fn deactivate_user(
   user.is_active = false;
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
-  if let Err(error) = system_tables.update_user(&ctx, &user) {
+  if let Err(error) = system_store::update_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to deactivate user: {}", error);
     return ErrorResponse::new(format!("Failed to deactivate user: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -296,8 +292,7 @@ pub async fn create_group(
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_group(&ctx, &group) {
+  if let Err(error) = system_store::store_group(&state.engine, &ctx, &group) {
     tracing::error!("Failed to create group: {}", error);
     return ErrorResponse::new(format!("Failed to create group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -316,8 +311,7 @@ pub async fn list_groups(
     return *response;
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.list_groups() {
+  match system_store::list_groups(&state.engine) {
     Ok(groups) => {
       let responses: Vec<GroupResponse> = groups.iter().map(GroupResponse::from).collect();
       (StatusCode::OK, Json(responses)).into_response()
@@ -341,8 +335,7 @@ pub async fn get_group(
     return *response;
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-  match system_tables.get_group(&name) {
+  match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => (StatusCode::OK, Json(GroupResponse::from(&group))).into_response(),
     Ok(None) => {
       ErrorResponse::new(format!("Group not found: {}", name))
@@ -369,8 +362,7 @@ pub async fn update_group(
     return *response;
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-  let mut group = match system_tables.get_group(&name) {
+  let mut group = match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => group,
     Ok(None) => {
       return ErrorResponse::new(format!("Group not found: {}", name))
@@ -413,7 +405,7 @@ pub async fn update_group(
   group.updated_at = chrono::Utc::now().timestamp_millis();
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  if let Err(error) = system_tables.update_group(&ctx, &group) {
+  if let Err(error) = system_store::update_group(&state.engine, &ctx, &group) {
     tracing::error!("Failed to update group: {}", error);
     return ErrorResponse::new(format!("Failed to update group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -433,10 +425,8 @@ pub async fn delete_group(
     return *response;
   }
 
-  let system_tables = SystemTables::new(&state.engine);
-
   // Check if the group exists first.
-  match system_tables.get_group(&name) {
+  match system_store::get_group(&state.engine, &name) {
     Ok(Some(_)) => {}
     Ok(None) => {
       return ErrorResponse::new(format!("Group not found: {}", name))
@@ -452,7 +442,7 @@ pub async fn delete_group(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  if let Err(error) = system_tables.delete_group(&ctx, &name) {
+  if let Err(error) = system_store::delete_group(&state.engine, &ctx, &name) {
     tracing::error!("Failed to delete group: {}", error);
     return ErrorResponse::new(format!("Failed to delete group: {}", error))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)

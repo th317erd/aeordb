@@ -9,7 +9,7 @@ use super::types::{PluginMetadata, PluginType};
 use super::wasm_runtime::WasmPluginRuntime;
 use crate::engine::RequestContext;
 use crate::engine::StorageEngine;
-use crate::engine::SystemTables;
+use crate::engine::system_store;
 
 /// Persistent record for a deployed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,10 +99,6 @@ impl PluginManager {
     }
   }
 
-  fn system_tables(&self) -> SystemTables<'_> {
-    SystemTables::new(&self.engine)
-  }
-
   /// Deploy (or overwrite) a plugin at the given path.
   ///
   /// For WASM plugins, the bytes are validated before storage.
@@ -149,8 +145,7 @@ impl PluginManager {
       .map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
 
     let ctx = RequestContext::system();
-    self.system_tables()
-      .store_plugin(&ctx, path, &encoded)
+    system_store::store_plugin(&self.engine, &ctx, path, &encoded)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     tracing::info!(
@@ -165,8 +160,7 @@ impl PluginManager {
 
   /// Retrieve a deployed plugin by its path.
   pub fn get_plugin(&self, path: &str) -> Result<Option<PluginRecord>, PluginManagerError> {
-    let data = self.system_tables()
-      .get_plugin(path)
+    let data = system_store::get_plugin(&self.engine, path)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     match data {
@@ -181,8 +175,7 @@ impl PluginManager {
 
   /// List metadata for all deployed plugins.
   pub fn list_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
-    let entries = self.system_tables()
-      .list_plugins()
+    let entries = system_store::list_plugins(&self.engine)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     let mut plugins = Vec::new();
@@ -207,8 +200,7 @@ impl PluginManager {
     }
 
     let ctx = RequestContext::system();
-    self.system_tables()
-      .remove_plugin(&ctx, path)
+    system_store::remove_plugin(&self.engine, &ctx, path)
       .map_err(|error| PluginManagerError::Storage(error.to_string()))
   }
 

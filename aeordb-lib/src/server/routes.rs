@@ -17,8 +17,9 @@ use crate::auth::{
   generate_magic_link_code, hash_magic_link_code,
   generate_refresh_token, hash_refresh_token,
 };
-use crate::auth::refresh::DEFAULT_REFRESH_EXPIRY_SECONDS;
-use crate::engine::SystemTables;
+use crate::auth::magic_link::MagicLinkRecord;
+use crate::auth::refresh::{RefreshTokenRecord, DEFAULT_REFRESH_EXPIRY_SECONDS};
+use crate::engine::system_store;
 
 pub async fn health_check() -> impl IntoResponse {
   Json(serde_json::json!({ "status": "ok" }))
@@ -341,13 +342,14 @@ pub async fn auth_token(
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_refresh_token(
-    &ctx,
-    &refresh_token_hash,
-    &record.user_id.to_string(),
-    refresh_expires_at,
-  ) {
+  let refresh_record = RefreshTokenRecord {
+    token_hash: refresh_token_hash,
+    user_subject: record.user_id.to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: refresh_expires_at,
+    is_revoked: false,
+  };
+  if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &refresh_record) {
     tracing::error!("Failed to store refresh token: {}", error);
     return ErrorResponse::new("Failed to create token".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -565,8 +567,14 @@ pub async fn request_magic_link(
     );
 
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  let system_tables = SystemTables::new(&state.engine);
-  if let Err(error) = system_tables.store_magic_link(&ctx, &code_hash, &payload.email, expires_at) {
+  let record = MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: payload.email.clone(),
+    created_at: chrono::Utc::now(),
+    expires_at,
+    is_used: false,
+  };
+  if let Err(error) = system_store::store_magic_link(&state.engine, &ctx, &record) {
     tracing::error!("Failed to store magic link: {}", error);
     // Still return 200 to prevent enumeration.
   }
@@ -596,8 +604,7 @@ pub async fn verify_magic_link(
 ) -> Response {
   let code_hash = hash_magic_link_code(&query.code);
 
-  let system_tables = SystemTables::new(&state.engine);
-  let record = match system_tables.get_magic_link(&code_hash) {
+  let record = match system_store::get_magic_link(&state.engine, &code_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return ErrorResponse::new("Invalid or expired magic link".to_string())
@@ -626,7 +633,7 @@ pub async fn verify_magic_link(
 
   // Mark as used.
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  if let Err(error) = system_tables.mark_magic_link_used(&ctx, &code_hash) {
+  if let Err(error) = system_store::mark_magic_link_used(&state.engine, &ctx, &code_hash) {
     tracing::error!("Failed to mark magic link as used: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -681,8 +688,7 @@ pub async fn refresh_token(
 ) -> Response {
   let old_token_hash = hash_refresh_token(&payload.refresh_token);
 
-  let system_tables = SystemTables::new(&state.engine);
-  let record = match system_tables.get_refresh_token(&old_token_hash) {
+  let record = match system_store::get_refresh_token(&state.engine, &old_token_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return ErrorResponse::new("Invalid refresh token".to_string())
@@ -711,7 +717,7 @@ pub async fn refresh_token(
 
   // Revoke the old refresh token (rotation).
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  if let Err(error) = system_tables.revoke_refresh_token(&ctx, &old_token_hash) {
+  if let Err(error) = system_store::revoke_refresh_token(&state.engine, &ctx, &old_token_hash) {
     tracing::error!("Failed to revoke old refresh token: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -746,12 +752,14 @@ pub async fn refresh_token(
   let refresh_expires_at =
     chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
-  if let Err(error) = system_tables.store_refresh_token(
-    &ctx,
-    &new_refresh_hash,
-    &record.user_subject,
-    refresh_expires_at,
-  ) {
+  let new_refresh_record = RefreshTokenRecord {
+    token_hash: new_refresh_hash,
+    user_subject: record.user_subject,
+    created_at: chrono::Utc::now(),
+    expires_at: refresh_expires_at,
+    is_revoked: false,
+  };
+  if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &new_refresh_record) {
     tracing::error!("Failed to store new refresh token: {}", error);
     return ErrorResponse::new("Internal server error".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)

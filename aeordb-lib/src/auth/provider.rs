@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use crate::auth::api_key::ApiKeyRecord;
 use crate::auth::jwt::JwtManager;
-use crate::engine::{RequestContext, StorageEngine, SystemTables, ROOT_USER_ID};
+use crate::engine::{RequestContext, StorageEngine, ROOT_USER_ID};
+use crate::engine::system_store;
 
 /// Error type for auth provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthProviderError {
-  #[error("system table error: {0}")]
-  SystemTable(#[from] crate::engine::system_tables::SystemTableError),
+  #[error("system storage error: {0}")]
+  SystemStore(#[from] crate::engine::errors::EngineError),
 
   #[error("auth disabled")]
   AuthDisabled,
@@ -121,7 +122,7 @@ const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
 
 impl FileAuthProvider {
   /// Create a FileAuthProvider backed by the given engine.
-  /// Loads or generates the JWT signing key from the engine's system tables.
+  /// Loads or generates the JWT signing key from the engine's system store.
   pub fn new(engine: Arc<StorageEngine>) -> Self {
     let jwt_manager = load_or_create_jwt_manager(&engine);
     Self {
@@ -163,8 +164,7 @@ impl FileAuthProvider {
 
 impl AuthProvider for FileAuthProvider {
   fn get_api_key_by_prefix(&self, key_id_prefix: &str) -> Result<Option<ApiKeyRecord>> {
-    let system_tables = SystemTables::new(&self.engine);
-    Ok(system_tables.get_system_api_key(key_id_prefix)?)
+    Ok(system_store::get_api_key_by_prefix(&self.engine, key_id_prefix)?)
   }
 
   fn jwt_manager(&self) -> &JwtManager {
@@ -173,32 +173,27 @@ impl AuthProvider for FileAuthProvider {
 
   fn store_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
     let ctx = RequestContext::system();
-    let system_tables = SystemTables::new(&self.engine);
-    Ok(system_tables.store_api_key(&ctx, record)?)
+    Ok(system_store::store_api_key(&self.engine, &ctx, record)?)
   }
 
   fn store_api_key_for_bootstrap(&self, record: &ApiKeyRecord) -> Result<()> {
     let ctx = RequestContext::system();
-    let system_tables = SystemTables::new(&self.engine);
-    Ok(system_tables.store_api_key_for_bootstrap(&ctx, record)?)
+    Ok(system_store::store_api_key_for_bootstrap(&self.engine, &ctx, record)?)
   }
 
   fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
-    let system_tables = SystemTables::new(&self.engine);
-    Ok(system_tables.list_system_api_keys()?)
+    Ok(system_store::list_api_keys(&self.engine)?)
   }
 
   fn revoke_api_key(&self, key_id: uuid::Uuid) -> Result<bool> {
     let ctx = RequestContext::system();
-    let system_tables = SystemTables::new(&self.engine);
-    Ok(system_tables.revoke_api_key(&ctx, key_id)?)
+    Ok(system_store::revoke_api_key(&self.engine, &ctx, key_id)?)
   }
 }
 
 /// Load an existing signing key from config, or generate a new one and persist it.
 fn load_or_create_jwt_manager(engine: &StorageEngine) -> JwtManager {
-  let system_tables = SystemTables::new(engine);
-  if let Ok(Some(key_bytes)) = system_tables.get_config(SIGNING_KEY_CONFIG) {
+  if let Ok(Some(key_bytes)) = system_store::get_config(engine, SIGNING_KEY_CONFIG) {
     if let Ok(manager) = JwtManager::from_bytes(&key_bytes) {
       return manager;
     }
@@ -207,8 +202,7 @@ fn load_or_create_jwt_manager(engine: &StorageEngine) -> JwtManager {
   let manager = JwtManager::generate();
   let key_bytes = manager.to_bytes();
   let ctx = RequestContext::system();
-  system_tables
-    .store_config(&ctx, SIGNING_KEY_CONFIG, &key_bytes)
+  system_store::store_config(engine, &ctx, SIGNING_KEY_CONFIG, &key_bytes)
     .expect("failed to persist JWT signing key");
   manager
 }

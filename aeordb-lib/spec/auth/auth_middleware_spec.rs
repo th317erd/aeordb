@@ -7,7 +7,8 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::engine::{StorageEngine, SystemTables};
+use aeordb::engine::StorageEngine;
+use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 
@@ -182,7 +183,7 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
   let ctx = RequestContext::system();
   let (app, _, engine, _temp_dir) = test_app();
 
-  // Create an API key via SystemTables
+  // Create an API key via system_store
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -196,8 +197,8 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
     label: None,
     rules: vec![],
   };
-  let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&ctx, &record).unwrap();
+
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
   let request = Request::builder()
     .method("POST")
@@ -289,8 +290,8 @@ async fn test_list_api_keys_returns_metadata() {
     label: None,
     rules: vec![],
   };
-  let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&ctx, &record).unwrap();
+
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
@@ -331,8 +332,8 @@ async fn test_revoke_api_key_succeeds() {
     label: None,
     rules: vec![],
   };
-  let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&ctx, &record).unwrap();
+
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
@@ -370,11 +371,11 @@ async fn test_revoked_api_key_cannot_get_token() {
     label: None,
     rules: vec![],
   };
-  let system_tables = SystemTables::new(&engine);
-  system_tables.store_api_key(&ctx, &record).unwrap();
+
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
   // Revoke it
-  system_tables.revoke_api_key(&ctx, key_id).unwrap();
+  system_store::revoke_api_key(&engine, &ctx, key_id).unwrap();
 
   let app = create_app_with_jwt(jwt_manager.clone(), engine.clone());
 
@@ -400,8 +401,8 @@ async fn test_bootstrap_creates_root_key_on_first_run() {
   assert!(plaintext_key.starts_with("aeor_k_"), "root key should have correct prefix");
 
   // Verify it was stored
-  let system_tables = SystemTables::new(&engine);
-  let keys = system_tables.list_system_api_keys().unwrap();
+
+  let keys = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys.len(), 1);
   assert_eq!(keys[0].user_id, uuid::Uuid::nil());
   assert!(!keys[0].is_revoked);
@@ -420,8 +421,8 @@ async fn test_bootstrap_returns_none_on_subsequent_runs() {
   assert!(second_result.is_none(), "should return None when keys already exist");
 
   // Still only one key in storage
-  let system_tables = SystemTables::new(&engine);
-  let keys = system_tables.list_system_api_keys().unwrap();
+
+  let keys = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys.len(), 1);
 }
 

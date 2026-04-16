@@ -6,6 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::system_store;
 use aeordb::auth::api_key::{DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS};
 use aeordb::engine::StorageEngine;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
@@ -545,8 +546,8 @@ async fn test_token_exchange_rejects_expired_key() {
   };
 
   let ctx = aeordb::engine::RequestContext::system();
-  let system_tables = aeordb::engine::SystemTables::new(&engine);
-  system_tables.store_api_key_for_bootstrap(&ctx, &record).unwrap();
+
+  system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
   let body = serde_json::json!({ "api_key": plaintext_key });

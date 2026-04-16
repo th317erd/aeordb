@@ -8,7 +8,8 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::engine::{EventBus, StorageEngine, SystemTables};
+use aeordb::engine::{EventBus, StorageEngine};
+use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
@@ -110,7 +111,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 fn seed_api_key(engine: &StorageEngine) -> String {
   let ctx = RequestContext::system();
-  let system_tables = SystemTables::new(engine);
+
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -124,13 +125,13 @@ fn seed_api_key(engine: &StorageEngine) -> String {
     label: None,
     rules: vec![],
   };
-  system_tables.store_api_key(&ctx, &record).unwrap();
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
   plaintext_key
 }
 
 fn seed_revoked_api_key(engine: &StorageEngine) -> String {
   let ctx = RequestContext::system();
-  let system_tables = SystemTables::new(engine);
+
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -144,7 +145,7 @@ fn seed_revoked_api_key(engine: &StorageEngine) -> String {
     label: None,
     rules: vec![],
   };
-  system_tables.store_api_key(&ctx, &record).unwrap();
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
   plaintext_key
 }
 

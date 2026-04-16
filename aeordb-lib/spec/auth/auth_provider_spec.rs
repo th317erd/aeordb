@@ -6,6 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::auth_uri::{AuthMode, expand_tilde, parse_auth_uri, resolve_auth_mode};
+use aeordb::engine::system_store;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::provider::{AuthProvider, FileAuthProvider, NoAuthProvider};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
@@ -270,7 +271,7 @@ fn test_file_auth_provider_validates_key() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let provider = FileAuthProvider::new(engine.clone());
 
-  // Store a key via SystemTables (like bootstrap does).
+  // Store a key via system_store (like bootstrap does).
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();

@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use aeordb::engine::{
   RequestContext,
-  Group, StorageEngine, SystemTables, User, SAFE_QUERY_FIELDS,
+  Group, StorageEngine, User, SAFE_QUERY_FIELDS,
 };
+use aeordb::engine::system_store;
 use aeordb::server::create_temp_engine_for_tests;
 
 fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
@@ -268,21 +269,19 @@ fn test_safe_query_fields_enforced() {
 }
 
 // ---------------------------------------------------------------------------
-// SystemTables group CRUD tests
+// system_store group CRUD tests
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_store_and_get_group() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
   let group = Group::new("engineers", "crudli..", "........", "is_active", "eq", "true")
     .expect("create group");
-  system_tables.store_group(&ctx, &group).expect("store group");
+  system_store::store_group(&engine, &ctx, &group).expect("store group");
 
-  let retrieved = system_tables
-    .get_group("engineers")
+  let retrieved = system_store::get_group(&engine,"engineers")
     .expect("get group")
     .expect("group should exist");
 
@@ -293,9 +292,8 @@ fn test_store_and_get_group() {
 #[test]
 fn test_get_group_not_found() {
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
-  let result = system_tables.get_group("nonexistent").expect("should not error");
+  let result = system_store::get_group(&engine, "nonexistent").expect("should not error");
   assert!(result.is_none());
 }
 
@@ -303,14 +301,13 @@ fn test_get_group_not_found() {
 fn test_list_groups() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
   let group_a = Group::new("alpha", "crudlify", "........", "is_active", "eq", "true").unwrap();
   let group_b = Group::new("beta", ".r..l...", "........", "is_active", "eq", "true").unwrap();
-  system_tables.store_group(&ctx, &group_a).unwrap();
-  system_tables.store_group(&ctx, &group_b).unwrap();
+  system_store::store_group(&engine, &ctx, &group_a).unwrap();
+  system_store::store_group(&engine, &ctx, &group_b).unwrap();
 
-  let groups = system_tables.list_groups().expect("list groups");
+  let groups = system_store::list_groups(&engine).expect("list groups");
   assert_eq!(groups.len(), 2);
 
   let names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
@@ -321,9 +318,8 @@ fn test_list_groups() {
 #[test]
 fn test_list_groups_empty() {
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
-  let groups = system_tables.list_groups().expect("list groups");
+  let groups = system_store::list_groups(&engine).expect("list groups");
   assert!(groups.is_empty());
 }
 
@@ -331,17 +327,15 @@ fn test_list_groups_empty() {
 fn test_update_group() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
   let mut group = Group::new("mutable", "crudlify", "........", "is_active", "eq", "true").unwrap();
-  system_tables.store_group(&ctx, &group).unwrap();
+  system_store::store_group(&engine, &ctx, &group).unwrap();
 
   group.default_allow = ".r..l...".to_string();
   group.updated_at = chrono::Utc::now().timestamp_millis();
-  system_tables.update_group(&ctx, &group).expect("update group");
+  system_store::update_group(&engine, &ctx, &group).expect("update group");
 
-  let retrieved = system_tables
-    .get_group("mutable")
+  let retrieved = system_store::get_group(&engine,"mutable")
     .unwrap()
     .expect("group should exist");
   assert_eq!(retrieved.default_allow, ".r..l...");
@@ -351,14 +345,13 @@ fn test_update_group() {
 fn test_delete_group() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
   let group = Group::new("deleteme", "crudlify", "........", "is_active", "eq", "true").unwrap();
-  system_tables.store_group(&ctx, &group).unwrap();
+  system_store::store_group(&engine, &ctx, &group).unwrap();
 
-  system_tables.delete_group(&ctx, "deleteme").expect("delete group");
+  system_store::delete_group(&engine, &ctx, "deleteme").expect("delete group");
 
-  let result = system_tables.get_group("deleteme").expect("should not error");
+  let result = system_store::get_group(&engine, "deleteme").expect("should not error");
   assert!(result.is_none());
 }
 
@@ -366,23 +359,21 @@ fn test_delete_group() {
 fn test_delete_group_removes_from_list() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
   let group = Group::new("listdelete", "crudlify", "........", "is_active", "eq", "true").unwrap();
-  system_tables.store_group(&ctx, &group).unwrap();
-  assert_eq!(system_tables.list_groups().unwrap().len(), 1);
+  system_store::store_group(&engine, &ctx, &group).unwrap();
+  assert_eq!(system_store::list_groups(&engine).unwrap().len(), 1);
 
-  system_tables.delete_group(&ctx, "listdelete").unwrap();
-  assert_eq!(system_tables.list_groups().unwrap().len(), 0);
+  system_store::delete_group(&engine, &ctx, "listdelete").unwrap();
+  assert_eq!(system_store::list_groups(&engine).unwrap().len(), 0);
 }
 
 #[test]
 fn test_delete_nonexistent_group_does_not_error() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
-  let system_tables = SystemTables::new(&engine);
 
-  let result = system_tables.delete_group(&ctx, "does_not_exist");
+  let result = system_store::delete_group(&engine, &ctx, "does_not_exist");
   assert!(result.is_ok());
 }
 

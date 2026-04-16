@@ -11,7 +11,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::api_key::{ApiKeyRecord, hash_api_key, generate_api_key};
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 use aeordb::engine::api_key_rules::KeyRule;
-use aeordb::engine::system_tables::SystemTables;
+use aeordb::engine::system_store;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 // ===========================================================================
@@ -70,8 +70,8 @@ fn create_scoped_key_and_token_with_expiry(
     };
 
     let ctx = RequestContext::system();
-    let system_tables = SystemTables::new(engine);
-    system_tables.store_api_key_for_bootstrap(&ctx, &record).unwrap();
+
+    system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
 
     // Create JWT with key_id embedded.
     let now_ts = now.timestamp();
@@ -355,8 +355,8 @@ async fn test_scoped_key_revoked_returns_401() {
 
     // Revoke the key.
     let ctx = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables.revoke_api_key(&ctx, key_id).unwrap();
+
+    system_store::revoke_api_key(&engine, &ctx, key_id).unwrap();
 
     let app = rebuild_app(&jwt_manager, &engine);
     let response = app

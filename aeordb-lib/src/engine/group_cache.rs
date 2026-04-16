@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::engine::errors::EngineResult;
 use crate::engine::group::Group;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::system_tables::SystemTables;
+use crate::engine::system_store;
 use crate::engine::user::User;
 
 /// Cached group memberships for a single user.
@@ -84,24 +84,16 @@ impl GroupCache {
     }
   }
 
-  /// Load all groups from SystemTables and evaluate membership for a user.
+  /// Load all groups from system_store and evaluate membership for a user.
   fn load_user_groups(&self, user_id: &Uuid, engine: &StorageEngine) -> EngineResult<Vec<String>> {
-    let system_tables = SystemTables::new(engine);
-
     // Load the user record.
-    let user: User = match system_tables.get_user(user_id)
-      .map_err(|error| crate::engine::errors::EngineError::IoError(
-        std::io::Error::other(format!("Failed to load user: {}", error)),
-      ))? {
+    let user: User = match system_store::get_user(engine, user_id)? {
       Some(user) => user,
       None => return Ok(Vec::new()),
     };
 
     // Load all groups.
-    let all_groups: Vec<Group> = system_tables.list_groups()
-      .map_err(|error| crate::engine::errors::EngineError::IoError(
-        std::io::Error::other(format!("Failed to list groups: {}", error)),
-      ))?;
+    let all_groups: Vec<Group> = system_store::list_groups(engine)?;
 
     // Evaluate membership for each group.
     let mut member_groups = Vec::new();

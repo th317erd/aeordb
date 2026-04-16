@@ -9,7 +9,7 @@ use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManage
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::sync_apply::apply_merge_operations;
-use crate::engine::system_tables::SystemTables;
+use crate::engine::system_store;
 use crate::engine::tree_walker::{diff_trees, walk_version_tree, VersionTree};
 use crate::engine::version_manager::VersionManager;
 use crate::engine::virtual_clock::PeerClockTracker;
@@ -131,8 +131,7 @@ impl SyncEngine {
         peer_node_id: u64,
         remote_engine: &StorageEngine,
     ) -> Result<SyncCycleResult, String> {
-        let system_tables = SystemTables::new(&self.engine);
-        let sync_state = system_tables.get_peer_sync_state(peer_node_id)
+        let sync_state = system_store::get_peer_sync_state(&self.engine, peer_node_id)
             .map_err(|e| format!("Failed to load peer sync state: {}", e))?;
 
         let local_vm = VersionManager::new(&self.engine);
@@ -145,7 +144,7 @@ impl SyncEngine {
 
         // If heads are identical, nothing to do
         if local_head == remote_head {
-            self.save_sync_state(&system_tables, peer_node_id, &remote_head);
+            self.save_sync_state(peer_node_id, &remote_head);
             return Ok(SyncCycleResult {
                 changes_applied: false,
                 conflicts_detected: 0,
@@ -185,7 +184,7 @@ impl SyncEngine {
 
         // If neither side has changes from the base, we're in sync
         if local_diff.is_empty() && remote_diff.is_empty() {
-            self.save_sync_state(&system_tables, peer_node_id, &remote_head);
+            self.save_sync_state(peer_node_id, &remote_head);
             return Ok(SyncCycleResult {
                 changes_applied: false,
                 conflicts_detected: 0,
@@ -215,7 +214,7 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to get post-merge HEAD: {}", e))?;
 
         // Update sync state
-        self.save_sync_state(&system_tables, peer_node_id, &new_local_head);
+        self.save_sync_state(peer_node_id, &new_local_head);
 
         // Update peer manager
         self.peer_manager.update_sync_state(
@@ -283,7 +282,6 @@ impl SyncEngine {
     /// Save sync state for a peer, recording the root hash and current time.
     fn save_sync_state(
         &self,
-        system_tables: &SystemTables,
         peer_node_id: u64,
         root_hash: &[u8],
     ) {
@@ -291,13 +289,13 @@ impl SyncEngine {
             last_synced_root_hash: Some(hex::encode(root_hash)),
             last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
         };
-        let _ = system_tables.store_peer_sync_state(peer_node_id, &state);
+        let ctx = RequestContext::system();
+        let _ = system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state);
     }
 
-    /// Load sync state for a peer from system tables.
+    /// Load sync state for a peer from system store.
     pub fn load_peer_sync_state(&self, peer_node_id: u64) -> Option<PeerSyncState> {
-        let system_tables = SystemTables::new(&self.engine);
-        system_tables.get_peer_sync_state(peer_node_id).ok().flatten()
+        system_store::get_peer_sync_state(&self.engine, peer_node_id).ok().flatten()
     }
 
     /// Sync with all active peers.

@@ -11,7 +11,8 @@ use uuid::Uuid;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::{PeerConfig, SystemTables, is_root};
+use crate::engine::{PeerConfig, is_root};
+use crate::engine::system_store;
 
 // ---------------------------------------------------------------------------
 // Authorization helper
@@ -54,8 +55,7 @@ pub async fn cluster_status(
         return *response;
     }
 
-    let system_tables = SystemTables::new(&state.engine);
-    let node_id = system_tables.get_node_id().unwrap_or(None);
+    let node_id = system_store::get_node_id(&state.engine).unwrap_or(None);
 
     let peers: Vec<serde_json::Value> = state
         .peer_manager
@@ -139,11 +139,11 @@ pub async fn add_peer(
     // Add to runtime PeerManager.
     state.peer_manager.add_peer(&config);
 
-    // Persist to system tables.
-    let system_tables = SystemTables::new(&state.engine);
-    let mut peer_configs = system_tables.get_peer_configs().unwrap_or_default();
+    // Persist to system store.
+    let mut peer_configs = system_store::get_peer_configs(&state.engine).unwrap_or_default();
     peer_configs.push(config.clone());
-    if let Err(error) = system_tables.store_peer_configs(&peer_configs) {
+    let ctx = crate::engine::RequestContext::system();
+    if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
         tracing::error!("Failed to persist peer config: {}", error);
         return ErrorResponse::new(format!("Failed to persist peer: {}", error))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -221,10 +221,10 @@ pub async fn remove_peer(
     }
 
     // Remove from persisted configs.
-    let system_tables = SystemTables::new(&state.engine);
-    let mut peer_configs = system_tables.get_peer_configs().unwrap_or_default();
+    let mut peer_configs = system_store::get_peer_configs(&state.engine).unwrap_or_default();
     peer_configs.retain(|config| config.node_id != node_id);
-    if let Err(error) = system_tables.store_peer_configs(&peer_configs) {
+    let ctx = crate::engine::RequestContext::system();
+    if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
         tracing::error!("Failed to persist peer removal: {}", error);
     }
 

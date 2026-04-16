@@ -6,7 +6,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::storage_engine::StorageEngine;
-use aeordb::engine::system_tables::SystemTables;
+use aeordb::engine::system_store;
 use aeordb::engine::user::User;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::RequestContext;
@@ -495,21 +495,19 @@ fn test_users_persist_across_restart() {
   // Session 1: create users
   {
     let engine = create_engine(&dir);
-    let st = SystemTables::new(&engine);
 
     let user = User::new("alice", Some("alice@example.com"));
     user_id = user.user_id;
-    st.store_user(&ctx, &user).unwrap();
+    system_store::store_user(&engine, &ctx, &user).unwrap();
 
     let user2 = User::new("bob", None);
-    st.store_user(&ctx, &user2).unwrap();
+    system_store::store_user(&engine, &ctx, &user2).unwrap();
   }
 
   // Session 2: list users
   let engine = reopen_engine(&dir);
-  let st = SystemTables::new(&engine);
 
-  let users = st.list_users().unwrap();
+  let users = system_store::list_users(&engine).unwrap();
   assert_eq!(users.len(), 2, "both users should survive restart");
 
   let usernames: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
@@ -517,7 +515,7 @@ fn test_users_persist_across_restart() {
   assert!(usernames.contains(&"bob"));
 
   // Verify we can look up by ID
-  let alice = st.get_user(&user_id).unwrap();
+  let alice = system_store::get_user(&engine, &user_id).unwrap();
   assert!(alice.is_some(), "user should be retrievable by ID after restart");
   assert_eq!(alice.unwrap().email.as_deref(), Some("alice@example.com"));
 }
@@ -532,11 +530,10 @@ fn test_api_keys_persist_across_restart() {
   // Session 1: create API key
   {
     let engine = create_engine(&dir);
-    let st = SystemTables::new(&engine);
 
     // Create a user first (API keys need non-nil user_id)
     let user = User::new("keyowner", None);
-    st.store_user(&ctx, &user).unwrap();
+    system_store::store_user(&engine, &ctx, &user).unwrap();
 
     plaintext_key = generate_api_key(key_id);
     let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -551,14 +548,13 @@ fn test_api_keys_persist_across_restart() {
       label: None,
       rules: vec![],
     };
-    st.store_api_key(&ctx, &record).unwrap();
+    system_store::store_api_key(&engine, &ctx, &record).unwrap();
   }
 
   // Session 2: validate the key
   let engine = reopen_engine(&dir);
-  let st = SystemTables::new(&engine);
 
-  let keys = st.list_system_api_keys().unwrap();
+  let keys = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys.len(), 1, "API key should survive restart");
   assert_eq!(keys[0].key_id, key_id);
 
@@ -645,17 +641,16 @@ fn test_complex_scenario_across_restart() {
     ).unwrap();
 
     // Create a user
-    let st = SystemTables::new(&engine);
+
     let user = User::new("admin", Some("admin@example.com"));
     user_id = user.user_id;
-    st.store_user(&ctx, &user).unwrap();
+    system_store::store_user(&engine, &ctx, &user).unwrap();
   }
 
   // Session 2: verify everything
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
-  let st = SystemTables::new(&engine);
 
   // Files that should exist
   let readme = ops.read_file("/project/README.md").unwrap();
@@ -705,7 +700,7 @@ fn test_complex_scenario_across_restart() {
   assert_eq!(fork_hash.as_ref(), Some(&fork_root_hash));
 
   // User should survive
-  let user = st.get_user(&user_id).unwrap();
+  let user = system_store::get_user(&engine, &user_id).unwrap();
   assert!(user.is_some());
   assert_eq!(user.unwrap().username, "admin");
 }

@@ -8,7 +8,8 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::JwtManager;
 use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::{EventBus, StorageEngine, SystemTables};
+use aeordb::engine::{EventBus, StorageEngine};
+use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
@@ -137,15 +138,18 @@ async fn test_magic_link_code_stored_hashed() {
   let ctx = RequestContext::system();
   let (_, _, engine, _, _temp_dir) = test_app();
 
-  let system_tables = SystemTables::new(&engine);
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_tables
-    .store_magic_link(&ctx, &code_hash, "stored@example.com", expires_at)
-    .unwrap();
+  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: "stored@example.com".to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: expires_at,
+    is_used: false,
+  }).unwrap();
 
-  let record = system_tables.get_magic_link(&code_hash).unwrap();
+  let record = system_store::get_magic_link(&engine, &code_hash).unwrap();
   assert!(record.is_some());
   let record = record.unwrap();
   assert_eq!(record.email, "stored@example.com");
@@ -153,7 +157,7 @@ async fn test_magic_link_code_stored_hashed() {
   assert!(!record.is_used);
 
   // The raw code should NOT be stored — only the hash.
-  let raw_lookup = system_tables.get_magic_link(&code).unwrap();
+  let raw_lookup = system_store::get_magic_link(&engine, &code).unwrap();
   assert!(raw_lookup.is_none(), "raw code should not be stored");
 }
 
@@ -163,13 +167,17 @@ async fn test_verify_valid_code_returns_jwt() {
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
   // Store a magic link directly.
-  let system_tables = SystemTables::new(&engine);
+
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_tables
-    .store_magic_link(&ctx, &code_hash, "valid@example.com", expires_at)
-    .unwrap();
+  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: "valid@example.com".to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: expires_at,
+    is_used: false,
+  }).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
@@ -190,13 +198,16 @@ async fn test_verify_expired_code_returns_401() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
-  let system_tables = SystemTables::new(&engine);
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
-  system_tables
-    .store_magic_link(&ctx, &code_hash, "expired@example.com", expires_at)
-    .unwrap();
+  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: "expired@example.com".to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: expires_at,
+    is_used: false,
+  }).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
@@ -213,14 +224,17 @@ async fn test_verify_used_code_returns_401() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
-  let system_tables = SystemTables::new(&engine);
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_tables
-    .store_magic_link(&ctx, &code_hash, "used@example.com", expires_at)
-    .unwrap();
-  system_tables.mark_magic_link_used(&ctx, &code_hash).unwrap();
+  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: "used@example.com".to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: expires_at,
+    is_used: false,
+  }).unwrap();
+  system_store::mark_magic_link_used(&engine, &ctx, &code_hash).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
@@ -250,13 +264,16 @@ async fn test_verify_code_is_single_use() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
-  let system_tables = SystemTables::new(&engine);
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_tables
-    .store_magic_link(&ctx, &code_hash, "single-use@example.com", expires_at)
-    .unwrap();
+  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
+    code_hash: code_hash.clone(),
+    email: "single-use@example.com".to_string(),
+    created_at: chrono::Utc::now(),
+    expires_at: expires_at,
+    is_used: false,
+  }).unwrap();
 
   // First use should succeed.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);

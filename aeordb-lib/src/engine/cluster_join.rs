@@ -1,16 +1,15 @@
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::system_tables::SystemTables;
+use crate::engine::system_store;
 
 /// Minimum size (in bytes) for a valid JWT signing key (Ed25519 seed).
 const SIGNING_KEY_MIN_LENGTH: usize = 32;
 
-/// Check if this node has a valid JWT signing key in system tables.
+/// Check if this node has a valid JWT signing key in system store.
 ///
-/// The JWT signing key is stored at `::aeordb:config:jwt_signing_key` and must
+/// The JWT signing key is stored at `/.system/config/jwt_signing_key` and must
 /// be at least 32 bytes (an Ed25519 seed).
 pub fn has_signing_key(engine: &StorageEngine) -> bool {
-    let system_tables = SystemTables::new(engine);
-    match system_tables.get_config("jwt_signing_key") {
+    match system_store::get_config(engine, "jwt_signing_key") {
         Ok(Some(key_bytes)) if key_bytes.len() >= SIGNING_KEY_MIN_LENGTH => true,
         _ => false,
     }
@@ -32,14 +31,13 @@ pub fn is_ready_for_traffic(engine: &StorageEngine, is_cluster_mode: bool) -> bo
     has_signing_key(engine)
 }
 
-/// Determine the cluster mode by inspecting system tables.
+/// Determine the cluster mode by inspecting system store.
 ///
 /// Returns `"cluster"` if any peer configurations exist, otherwise
 /// `"standalone"`. This is a heuristic based on persisted peer state — if
 /// the node was started with `--peers`, those configs will have been stored.
 pub fn get_cluster_mode(engine: &StorageEngine) -> String {
-    let system_tables = SystemTables::new(engine);
-    match system_tables.get_peer_configs() {
+    match system_store::get_peer_configs(engine) {
         Ok(peers) if !peers.is_empty() => "cluster".to_string(),
         _ => "standalone".to_string(),
     }

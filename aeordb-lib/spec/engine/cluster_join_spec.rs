@@ -6,7 +6,7 @@ use aeordb::engine::peer_connection::{PeerConfig, PeerManager};
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::sync_engine::{SyncConfig, SyncEngine};
-use aeordb::engine::system_tables::SystemTables;
+use aeordb::engine::system_store;
 use aeordb::engine::virtual_clock::PeerClockTracker;
 use aeordb::engine::DirectoryOps;
 use aeordb::server::create_temp_engine_for_tests;
@@ -19,17 +19,15 @@ fn store_signing_key(engine: &StorageEngine) -> Vec<u8> {
     let manager = JwtManager::generate();
     let key_bytes = manager.to_bytes();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &key_bytes)
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &key_bytes)
         .expect("failed to store signing key");
     key_bytes
 }
 
 fn store_peer_configs(engine: &StorageEngine, peers: &[PeerConfig]) {
-    let system_tables = SystemTables::new(engine);
-    system_tables
-        .store_peer_configs(peers)
+    let ctx = RequestContext::system();
+    system_store::store_peer_configs(engine, &ctx, peers)
         .expect("failed to store peer configs");
 }
 
@@ -90,12 +88,11 @@ fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
 /// logic from the sync engine's current limitation (it only syncs directory
 /// tree data, not loose system table KV entries).
 fn simulate_signing_key_sync(source: &StorageEngine, destination: &StorageEngine) {
-    let source_tables = SystemTables::new(source);
-    if let Ok(Some(key_bytes)) = source_tables.get_config("jwt_signing_key") {
+
+    if let Ok(Some(key_bytes)) = system_store::get_config(&source, "jwt_signing_key") {
         let context = RequestContext::system();
-        let destination_tables = SystemTables::new(destination);
-        destination_tables
-            .store_config(&context, "jwt_signing_key", &key_bytes)
+
+        system_store::store_config(&destination, &context, "jwt_signing_key", &key_bytes)
             .expect("failed to sync signing key to destination");
     }
 }
@@ -121,9 +118,8 @@ fn test_has_signing_key_absent() {
 fn test_has_signing_key_too_short() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[0u8; 16])
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 16])
         .unwrap();
     assert!(!has_signing_key(&engine));
 }
@@ -132,9 +128,8 @@ fn test_has_signing_key_too_short() {
 fn test_has_signing_key_empty() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[])
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[])
         .unwrap();
     assert!(!has_signing_key(&engine));
 }
@@ -143,9 +138,8 @@ fn test_has_signing_key_empty() {
 fn test_has_signing_key_exactly_32_bytes() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[0xABu8; 32])
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[0xABu8; 32])
         .unwrap();
     assert!(has_signing_key(&engine));
 }
@@ -155,9 +149,8 @@ fn test_has_signing_key_31_bytes_rejected() {
     // 31 bytes is one byte short of the minimum.
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[0xFFu8; 31])
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[0xFFu8; 31])
         .unwrap();
     assert!(!has_signing_key(&engine));
 }
@@ -167,9 +160,8 @@ fn test_has_signing_key_wrong_config_key() {
     // A key stored under a different config name should not be found.
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "not_jwt_signing_key", &[0xABu8; 32])
+
+    system_store::store_config(&engine, &context, "not_jwt_signing_key", &[0xABu8; 32])
         .unwrap();
     assert!(!has_signing_key(&engine));
 }
@@ -208,9 +200,8 @@ fn test_is_ready_cluster_with_key() {
 fn test_is_ready_cluster_with_short_key() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[0u8; 31])
+
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 31])
         .unwrap();
     assert!(!is_ready_for_traffic(&engine, true));
 }
@@ -295,9 +286,8 @@ fn test_signing_key_syncs_between_engines() {
     assert!(has_signing_key(&engine_b));
 
     // Verify: the synced key matches the original.
-    let system_tables_b = SystemTables::new(&engine_b);
-    let synced_key = system_tables_b
-        .get_config("jwt_signing_key")
+
+    let synced_key = system_store::get_config(&engine_b, "jwt_signing_key")
         .expect("get_config should succeed")
         .expect("key should exist after sync");
     assert_eq!(synced_key, original_key);
@@ -315,9 +305,8 @@ fn test_signing_key_syncs_and_is_usable_for_jwt() {
     store_file(&engine_a, "/data.json", b"{}");
 
     // Load the manager from A's key.
-    let system_tables_a = SystemTables::new(&engine_a);
-    let key_a = system_tables_a
-        .get_config("jwt_signing_key")
+
+    let key_a = system_store::get_config(&engine_a, "jwt_signing_key")
         .unwrap()
         .unwrap();
     let manager_a = JwtManager::from_bytes(&key_a).unwrap();
@@ -346,9 +335,8 @@ fn test_signing_key_syncs_and_is_usable_for_jwt() {
     simulate_signing_key_sync(&engine_a, &engine_b);
 
     // B loads the synced key and verifies the token signed by A.
-    let system_tables_b = SystemTables::new(&engine_b);
-    let key_b = system_tables_b
-        .get_config("jwt_signing_key")
+
+    let key_b = system_store::get_config(&engine_b, "jwt_signing_key")
         .unwrap()
         .unwrap();
     let manager_b = JwtManager::from_bytes(&key_b).unwrap();
@@ -409,9 +397,8 @@ fn test_double_sync_preserves_signing_key() {
     simulate_signing_key_sync(&engine_a, &engine_b);
 
     // Key should still be intact.
-    let system_tables_b = SystemTables::new(&engine_b);
-    let key_after = system_tables_b
-        .get_config("jwt_signing_key")
+
+    let key_after = system_store::get_config(&engine_b, "jwt_signing_key")
         .unwrap()
         .unwrap();
     assert_eq!(key_after, original_key);
@@ -426,12 +413,10 @@ fn test_mismatched_signing_keys_between_nodes() {
     store_signing_key(&engine_a);
     store_signing_key(&engine_b); // Different key!
 
-    let system_tables_a = SystemTables::new(&engine_a);
-    let key_a = system_tables_a.get_config("jwt_signing_key").unwrap().unwrap();
+    let key_a = system_store::get_config(&engine_a, "jwt_signing_key").unwrap().unwrap();
     let manager_a = JwtManager::from_bytes(&key_a).unwrap();
 
-    let system_tables_b = SystemTables::new(&engine_b);
-    let key_b = system_tables_b.get_config("jwt_signing_key").unwrap().unwrap();
+    let key_b = system_store::get_config(&engine_b, "jwt_signing_key").unwrap().unwrap();
     let manager_b = JwtManager::from_bytes(&key_b).unwrap();
 
     // Keys should be different (cryptographically random).
@@ -457,7 +442,6 @@ fn test_signing_key_overwrite_updates_readiness() {
     // the replacement is too short, and ready again with a valid key.
     let (engine, _temp) = create_temp_engine_for_tests();
     let context = RequestContext::system();
-    let system_tables = SystemTables::new(&engine);
 
     // No key: not ready.
     assert!(!is_ready_for_traffic(&engine, true));
@@ -467,15 +451,13 @@ fn test_signing_key_overwrite_updates_readiness() {
     assert!(is_ready_for_traffic(&engine, true));
 
     // Overwrite with too-short value: not ready.
-    system_tables
-        .store_config(&context, "jwt_signing_key", &[0u8; 10])
+    system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 10])
         .unwrap();
     assert!(!is_ready_for_traffic(&engine, true));
 
     // Overwrite with valid key again: ready.
     let manager = JwtManager::generate();
-    system_tables
-        .store_config(&context, "jwt_signing_key", &manager.to_bytes())
+    system_store::store_config(&engine, &context, "jwt_signing_key", &manager.to_bytes())
         .unwrap();
     assert!(is_ready_for_traffic(&engine, true));
 }

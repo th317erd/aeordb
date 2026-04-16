@@ -118,9 +118,7 @@ pub fn get_api_key_by_prefix(
         let path = format!("/.system/apikeys/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
-                if !record.is_revoked {
-                    return Ok(Some(record));
-                }
+                return Ok(Some(record));
             }
         }
     }
@@ -243,6 +241,40 @@ pub fn list_users(engine: &StorageEngine) -> EngineResult<Vec<User>> {
     Ok(users)
 }
 
+/// Retrieve a user by username (scan-based; no secondary index).
+pub fn get_user_by_username(engine: &StorageEngine, username: &str) -> EngineResult<Option<User>> {
+    let users = list_users(engine)?;
+    Ok(users.into_iter().find(|user| user.username == username))
+}
+
+/// Update an existing user. Validates user_id != nil UUID.
+/// Does NOT recreate the auto-group (use store_user for initial creation).
+pub fn update_user(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    user: &User,
+) -> EngineResult<()> {
+    validate_user_id(&user.user_id)?;
+
+    let ops = DirectoryOps::new(engine);
+    let path = format!("/.system/users/{}", user.user_id);
+    let json = serde_json::to_vec(user)
+        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+    ops.store_file(ctx, &path, &json, Some("application/json"))?;
+    Ok(())
+}
+
+/// Count all users.
+pub fn count_users(engine: &StorageEngine) -> EngineResult<u64> {
+    let ops = DirectoryOps::new(engine);
+    let entries = match ops.list_directory("/.system/users") {
+        Ok(entries) => entries,
+        Err(EngineError::NotFound(_)) => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    Ok(entries.len() as u64)
+}
+
 /// Delete a user. Also deletes the per-user auto-group.
 /// Returns true if the user existed, false otherwise.
 pub fn delete_user(
@@ -317,6 +349,15 @@ pub fn list_groups(engine: &StorageEngine) -> EngineResult<Vec<Group>> {
         }
     }
     Ok(groups)
+}
+
+/// Update a group (same as store but does not add to "registry" -- just overwrites).
+pub fn update_group(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    group: &Group,
+) -> EngineResult<()> {
+    store_group(engine, ctx, group)
 }
 
 /// Delete a group.
@@ -400,6 +441,20 @@ pub fn get_magic_link(
         Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Mark a magic link as used.
+pub fn mark_magic_link_used(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    code_hash: &str,
+) -> EngineResult<()> {
+    let mut record = match get_magic_link(engine, code_hash)? {
+        Some(record) => record,
+        None => return Err(EngineError::NotFound(format!("magic link not found: {}", code_hash))),
+    };
+    record.is_used = true;
+    store_magic_link(engine, ctx, &record)
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +633,68 @@ pub fn remove_plugin(
     match ops.delete_file(ctx, &path) {
         Ok(()) => Ok(true),
         Err(EngineError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cluster Secret
+// ---------------------------------------------------------------------------
+
+/// Persist a hashed cluster secret for peer authentication.
+pub fn store_cluster_secret_hash(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    secret_hash: &[u8],
+) -> EngineResult<()> {
+    let ops = DirectoryOps::new(engine);
+    ops.store_file(ctx, "/.system/cluster/secret_hash", secret_hash, Some("application/octet-stream"))?;
+    Ok(())
+}
+
+/// Load the persisted cluster secret hash, if any.
+pub fn get_cluster_secret_hash(engine: &StorageEngine) -> EngineResult<Option<Vec<u8>>> {
+    let ops = DirectoryOps::new(engine);
+    match ops.read_file("/.system/cluster/secret_hash") {
+        Ok(data) => Ok(Some(data)),
+        Err(EngineError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Peer Sync State
+// ---------------------------------------------------------------------------
+
+/// Persist sync state for a specific peer.
+pub fn store_peer_sync_state(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    peer_node_id: u64,
+    state: &crate::engine::sync_engine::PeerSyncState,
+) -> EngineResult<()> {
+    let ops = DirectoryOps::new(engine);
+    let path = format!("/.system/cluster/sync/{}", peer_node_id);
+    let json = serde_json::to_vec(state)
+        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+    ops.store_file(ctx, &path, &json, Some("application/json"))?;
+    Ok(())
+}
+
+/// Load sync state for a specific peer.
+pub fn get_peer_sync_state(
+    engine: &StorageEngine,
+    peer_node_id: u64,
+) -> EngineResult<Option<crate::engine::sync_engine::PeerSyncState>> {
+    let ops = DirectoryOps::new(engine);
+    let path = format!("/.system/cluster/sync/{}", peer_node_id);
+    match ops.read_file(&path) {
+        Ok(data) => {
+            let state: crate::engine::sync_engine::PeerSyncState = serde_json::from_slice(&data)
+                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+            Ok(Some(state))
+        }
+        Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
 }

@@ -9,8 +9,9 @@ use aeordb::auth::jwt::JwtManager;
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::{
-    DirectoryOps, EventBus, RequestContext, StorageEngine, SystemTables, VersionManager,
+    DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager,
 };
+use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
@@ -23,10 +24,9 @@ fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
 const TEST_SECRET: &str = "my-super-secret-cluster-key";
 
 fn setup_cluster_secret(engine: &StorageEngine, secret: &str) {
-    let system_tables = SystemTables::new(engine);
     let hash = blake3::hash(secret.as_bytes());
-    system_tables
-        .store_cluster_secret_hash(hash.as_bytes())
+    let ctx = RequestContext::system();
+    system_store::store_cluster_secret_hash(engine, &ctx, hash.as_bytes())
         .unwrap();
 }
 

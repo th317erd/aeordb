@@ -5,9 +5,10 @@ use uuid::Uuid;
 
 use aeordb::engine::{
   CrudlifyOp, DirectoryOps, GroupCache, PathPermissions, PermissionLink,
-  PermissionResolver, PermissionsCache, StorageEngine, SystemTables,
+  PermissionResolver, PermissionsCache, StorageEngine,
   merge_flags, parse_crudlify_flags, path_levels,
 };
+use aeordb::engine::system_store;
 use aeordb::engine::group::Group;
 use aeordb::engine::user::{ROOT_USER_ID, User};
 use aeordb::engine::RequestContext;
@@ -27,8 +28,8 @@ fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
   let ctx = RequestContext::system();
   let user = User::new(username, None);
   let user_id = user.user_id;
-  let system_tables = SystemTables::new(engine);
-  system_tables.store_user(&ctx, &user).unwrap();
+
+  system_store::store_user(&engine, &ctx, &user).unwrap();
   user_id
 }
 
@@ -42,8 +43,8 @@ fn create_test_group(
 ) {
   let ctx = RequestContext::system();
   let group = Group::new(name, "........", "........", query_field, query_operator, query_value).unwrap();
-  let system_tables = SystemTables::new(engine);
-  system_tables.store_group(&ctx, &group).unwrap();
+
+  system_store::store_group(&engine, &ctx, &group).unwrap();
 }
 
 /// Write a .permissions file at a given directory path.

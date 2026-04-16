@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use aeordb::engine::conflict_store::list_conflicts;
+use aeordb::engine::system_store;
 use aeordb::engine::peer_connection::{PeerConfig, PeerManager};
 use aeordb::engine::sync_engine::{PeerSyncState, SyncConfig, SyncEngine};
 use aeordb::engine::tree_walker::walk_version_tree;
@@ -227,13 +228,13 @@ fn test_peer_sync_state_persistence() {
     assert!(sync_engine.load_peer_sync_state(42).is_none());
 
     // After a sync, state should be persisted
-    // We test this through the system tables directly
-    let system_tables = aeordb::engine::SystemTables::new(sync_engine.engine());
+    // We test this through system_store directly
+    let ctx = aeordb::engine::RequestContext::system();
     let state = PeerSyncState {
         last_synced_root_hash: Some("deadbeef".to_string()),
         last_sync_at: Some(1234567890),
     };
-    system_tables.store_peer_sync_state(42, &state).unwrap();
+    aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 42, &state).unwrap();
 
     let loaded = sync_engine.load_peer_sync_state(42);
     assert!(loaded.is_some());
@@ -246,21 +247,21 @@ fn test_peer_sync_state_persistence() {
 fn test_peer_sync_state_overwrite() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let (sync_engine, _peer_manager) = make_sync_engine(engine);
-    let system_tables = aeordb::engine::SystemTables::new(sync_engine.engine());
+    let ctx = aeordb::engine::RequestContext::system();
 
     // Store initial state
     let state1 = PeerSyncState {
         last_synced_root_hash: Some("aaa".to_string()),
         last_sync_at: Some(100),
     };
-    system_tables.store_peer_sync_state(42, &state1).unwrap();
+    aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 42, &state1).unwrap();
 
     // Overwrite with new state
     let state2 = PeerSyncState {
         last_synced_root_hash: Some("bbb".to_string()),
         last_sync_at: Some(200),
     };
-    system_tables.store_peer_sync_state(42, &state2).unwrap();
+    aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 42, &state2).unwrap();
 
     let loaded = sync_engine.load_peer_sync_state(42).unwrap();
     assert_eq!(loaded.last_synced_root_hash, Some("bbb".to_string()));
@@ -271,14 +272,14 @@ fn test_peer_sync_state_overwrite() {
 fn test_peer_sync_state_multiple_peers() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let (sync_engine, _peer_manager) = make_sync_engine(engine);
-    let system_tables = aeordb::engine::SystemTables::new(sync_engine.engine());
+    let ctx = aeordb::engine::RequestContext::system();
 
-    system_tables.store_peer_sync_state(1, &PeerSyncState {
+    aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 1, &PeerSyncState {
         last_synced_root_hash: Some("hash1".to_string()),
         last_sync_at: Some(100),
     }).unwrap();
 
-    system_tables.store_peer_sync_state(2, &PeerSyncState {
+    aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 2, &PeerSyncState {
         last_synced_root_hash: Some("hash2".to_string()),
         last_sync_at: Some(200),
     }).unwrap();

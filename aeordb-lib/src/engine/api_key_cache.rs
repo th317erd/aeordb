@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::auth::api_key::ApiKeyRecord;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::system_tables::SystemTables;
+use crate::engine::system_store;
 
 /// Cached API key record with fetch timestamp.
 struct CacheEntry {
@@ -52,12 +52,7 @@ impl ApiKeyCache {
             Err(_) => return Ok(None),
         };
 
-        let system_tables = SystemTables::new(engine);
-        let all_keys = system_tables.list_system_api_keys().map_err(|error| {
-            EngineError::IoError(
-                std::io::Error::other(format!("Failed to list API keys: {}", error)),
-            )
-        })?;
+        let all_keys = system_store::list_api_keys(engine)?;
 
         let record = all_keys.into_iter().find(|k| k.key_id == key_uuid);
 

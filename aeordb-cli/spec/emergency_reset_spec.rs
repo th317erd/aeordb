@@ -1,12 +1,13 @@
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::engine::RequestContext;
-use aeordb::engine::{SystemTables, ROOT_USER_ID};
+use aeordb::engine::ROOT_USER_ID;
+use aeordb::engine::system_store;
 use aeordb::server::create_engine_for_storage;
 
 /// Helper: bootstrap a root API key into a fresh engine so there is something
 /// to revoke during emergency reset.
 fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
-  let system_tables = SystemTables::new(engine);
+
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -20,8 +21,7 @@ fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
     label: Some("test-root-key".to_string()),
     rules: vec![],
   };
-  system_tables
-    .store_api_key_for_bootstrap(&RequestContext::system(), &record)
+  system_store::store_api_key_for_bootstrap(engine, &RequestContext::system(), &record)
     .expect("failed to store root key");
   plaintext_key
 }
@@ -37,13 +37,13 @@ fn test_emergency_reset_generates_new_key() {
   let _old_key = bootstrap_root_key(&engine);
 
   // Verify the old key exists and is not revoked.
-  let system_tables = SystemTables::new(&engine);
-  let keys_before = system_tables.list_system_api_keys().unwrap();
+
+  let keys_before = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys_before.len(), 1);
   assert!(!keys_before[0].is_revoked);
   assert_eq!(keys_before[0].user_id, ROOT_USER_ID);
 
-  drop(system_tables);
+
   drop(engine);
 
   // Run emergency reset (with --force to skip prompt).
@@ -51,8 +51,8 @@ fn test_emergency_reset_generates_new_key() {
 
   // Re-open and verify.
   let engine = create_engine_for_storage(engine_path_str);
-  let system_tables = SystemTables::new(&engine);
-  let keys_after = system_tables.list_system_api_keys().unwrap();
+
+  let keys_after = system_store::list_api_keys(&engine).unwrap();
 
   // Should have 2 keys now: old (revoked) and new (active).
   assert_eq!(keys_after.len(), 2, "Should have old revoked + new active key");
@@ -77,12 +77,11 @@ fn test_emergency_reset_revokes_old_key() {
   let _key1 = bootstrap_root_key(&engine);
   let _key2 = bootstrap_root_key(&engine);
 
-  let system_tables = SystemTables::new(&engine);
-  let keys_before = system_tables.list_system_api_keys().unwrap();
+  let keys_before = system_store::list_api_keys(&engine).unwrap();
   let active_count_before = keys_before.iter().filter(|k| !k.is_revoked && k.user_id == ROOT_USER_ID).count();
   assert_eq!(active_count_before, 2, "Should have 2 active root keys before reset");
 
-  drop(system_tables);
+
   drop(engine);
 
   // Run emergency reset.
@@ -90,8 +89,8 @@ fn test_emergency_reset_revokes_old_key() {
 
   // Verify all old root keys are revoked and one new one is active.
   let engine = create_engine_for_storage(engine_path_str);
-  let system_tables = SystemTables::new(&engine);
-  let keys_after = system_tables.list_system_api_keys().unwrap();
+
+  let keys_after = system_store::list_api_keys(&engine).unwrap();
 
   let active_root_keys: Vec<_> = keys_after
     .iter()
@@ -120,8 +119,8 @@ fn test_emergency_reset_on_empty_database() {
   aeordb_cli::commands::emergency_reset::run(engine_path_str, true);
 
   let engine = create_engine_for_storage(engine_path_str);
-  let system_tables = SystemTables::new(&engine);
-  let keys = system_tables.list_system_api_keys().unwrap();
+
+  let keys = system_store::list_api_keys(&engine).unwrap();
 
   let active_root_keys: Vec<_> = keys
     .iter()

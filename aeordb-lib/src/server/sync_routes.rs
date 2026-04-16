@@ -13,7 +13,7 @@ use super::state::AppState;
 use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::file_record::FileRecord;
 use crate::engine::symlink_record::SymlinkRecord;
-use crate::engine::system_tables::SystemTables;
+use crate::engine::system_store;
 use crate::engine::tree_walker::{diff_trees, walk_version_tree, TreeDiff, VersionTree};
 use crate::engine::version_manager::VersionManager;
 use crate::engine::storage_engine::StorageEngine;
@@ -88,9 +88,8 @@ fn validate_cluster_secret(headers: &HeaderMap, engine: &StorageEngine) -> bool 
     };
 
     let provided_hash = blake3::hash(secret.as_bytes());
-    let system_tables = SystemTables::new(engine);
 
-    match system_tables.get_cluster_secret_hash() {
+    match system_store::get_cluster_secret_hash(engine) {
         Ok(Some(stored_hash)) => provided_hash.as_bytes().to_vec() == stored_hash,
         _ => false,
     }
