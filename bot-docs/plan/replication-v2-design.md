@@ -515,14 +515,24 @@ This is a foundational change that affects: `file_record.rs`, `symlink_record.rs
 
 ---
 
-## Open Questions (Fewer Than Before)
+## Resolved Questions
 
-1. **System table conflicts** — if two nodes create different users with the same username simultaneously, LWW picks one. Is that sufficient? Or do system tables need special conflict handling?
+1. **System table conflicts** — API keys are immutable after creation (no modifications, only revocation). Revocation ALWAYS wins regardless of timestamp — this is a security rule, not a conflict resolution rule. User/group LWW is sufficient for the rare concurrent-create case.
 
-2. **GC in cluster mode** — each node can GC independently since they may have different chunk sets (selective sync). A node should only GC chunks that are unreachable in ITS tree. No coordination needed.
+2. **GC in cluster mode** — each node GCs independently, scoped to its own tree. GC is **conflict-aware**: any chunk referenced by an entry in `/.conflicts/` is a live root and must not be collected. Conflicts are GC roots until resolved.
 
-3. **Snapshot/version semantics** — snapshots are node-local (each node's HEAD is different until sync). A snapshot taken on Node A captures Node A's state. After sync, Node B can take an equivalent snapshot. Is this sufficient, or do we need "cluster-wide" snapshots?
+3. **Snapshot/version semantics** — snapshots are node-local. A snapshot taken on Node A captures Node A's state at that moment. Snapshots are just more entries with chunks — they propagate to peers via normal sync. A snapshot represents a state that existed, somewhere, at some time.
 
-4. **Ordering of operations within a sync batch** — when applying a remote diff, do we apply adds before deletes? Or process in virtual_time order? The order matters for directory creation (can't add a file to a directory that doesn't exist yet).
+4. **Ordering within a sync batch** — additions/creates are processed before deletions. This ensures directories exist before files are added to them. The modify-beats-delete conflict rule only applies when the same path has conflicting operations from different nodes — it does not affect intra-batch ordering.
 
-5. **Migration strategy for identity hashes** — existing databases have FileRecord content hashes that include timestamps. On upgrade, do we: (a) rewrite all hashes (expensive, breaks snapshots), (b) support both hash formats indefinitely (complexity), or (c) only use identity hashes for new writes and let old entries age out through GC? Need to decide before the prerequisite phase.
+5. **Diamond merge problem** — not a significant problem with content-addressed sync. Nodes that have never directly synced simply diff and trade missing entries. Content addressing means the same content produces the same hash regardless of provenance. True conflicts (same path, different content) are handled by LWW. Chunks propagate through the network naturally — if a node doesn't have a chunk today, a future sync cycle with any peer that has it fills the gap.
+
+6. **Deletion propagation with selective sync** — deletions only propagate to peers that sync the affected path. If Node B only syncs `/assets/` and Node A deletes something in `/docs/`, Node B never sees the deletion. This is correct behavior — you only see changes to paths you're subscribed to.
+
+7. **Initial full sync** — new nodes sync HEAD first (immediately usable), then backfill historical versions in the background. Desktop clients may only want HEAD and request specific historical versions on demand. Replication nodes pull everything over time.
+
+8. **Auth bootstrap** — JWT signing key is stored in system tables. New node receives it during initial sync (HEAD-first). Node MUST NOT accept client traffic until signing key is present. Honeymoon phase naturally enforces this — no data sync (and thus no signing key) until clocks settle.
+
+## Remaining Open Question
+
+1. **Migration strategy for identity hashes** — existing databases have FileRecord content hashes that include timestamps. On upgrade, do we: (a) rewrite all hashes (expensive, breaks snapshots), (b) support both hash formats indefinitely (complexity), or (c) only use identity hashes for new writes and let old entries age out through GC? Need to decide before the prerequisite phase.
