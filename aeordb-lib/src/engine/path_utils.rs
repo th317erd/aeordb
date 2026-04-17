@@ -1,4 +1,6 @@
 pub fn normalize_path(path: &str) -> String {
+  // Reject null bytes (H11)
+  let path = path.replace('\0', "");
   let trimmed = path.trim();
 
   if trimmed.is_empty() {
