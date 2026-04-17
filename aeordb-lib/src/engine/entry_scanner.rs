@@ -64,6 +64,20 @@ impl Iterator for EntryScanner {
       }
     };
 
+    // Validate payload lengths against total_length to prevent unbounded allocation
+    // from corrupt headers (H7).
+    let header_size = header.header_size() as u64;
+    let payload_size = header.key_length as u64 + header.value_length as u64;
+    let max_payload = (header.total_length as u64).saturating_sub(header_size);
+    if payload_size > max_payload {
+      tracing::warn!(
+        "Corrupt entry at offset {}: key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({}). Skipping.",
+        entry_offset, header.key_length, header.value_length, header.total_length, header_size,
+      );
+      self.current_offset = entry_offset + header.total_length as u64;
+      return self.next();
+    }
+
     // Read key
     let mut key = vec![0u8; header.key_length as usize];
     if let Err(error) = self.file.read_exact(&mut key) {

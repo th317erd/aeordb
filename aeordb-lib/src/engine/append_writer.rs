@@ -248,6 +248,21 @@ impl AppendWriter {
     self.file.seek(SeekFrom::Start(offset))?;
     let header = EntryHeader::deserialize(&mut self.file)?;
 
+    // Validate payload lengths against total_length to prevent unbounded allocation
+    // from corrupt headers (H7).
+    let header_size = header.header_size() as u64;
+    let payload_size = header.key_length as u64 + header.value_length as u64;
+    let max_payload = (header.total_length as u64).saturating_sub(header_size);
+    if payload_size > max_payload {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({})",
+          header.key_length, header.value_length, header.total_length, header_size,
+        ),
+      });
+    }
+
     let mut key = vec![0u8; header.key_length as usize];
     self.file.read_exact(&mut key)?;
 
@@ -269,6 +284,21 @@ impl AppendWriter {
     let mut file = File::open(&self.file_path)?;
     file.seek(SeekFrom::Start(offset))?;
     let header = EntryHeader::deserialize(&mut file)?;
+
+    // Validate payload lengths against total_length to prevent unbounded allocation
+    // from corrupt headers (H7).
+    let header_size = header.header_size() as u64;
+    let payload_size = header.key_length as u64 + header.value_length as u64;
+    let max_payload = (header.total_length as u64).saturating_sub(header_size);
+    if payload_size > max_payload {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({})",
+          header.key_length, header.value_length, header.total_length, header_size,
+        ),
+      });
+    }
 
     let mut key = vec![0u8; header.key_length as usize];
     file.read_exact(&mut key)?;

@@ -30,9 +30,30 @@ impl FileRecord {
     }
   }
 
-  pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
+  pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
     let path_bytes = self.path.as_bytes();
     let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
+
+    if path_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len()),
+      ));
+    }
+    if content_type_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len()),
+      ));
+    }
+    if self.metadata.len() > u32::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Metadata too large: {} bytes exceeds u32 max", self.metadata.len()),
+      ));
+    }
+    if self.chunk_hashes.len() > u32::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Too many chunk hashes: {} exceeds u32 max", self.chunk_hashes.len()),
+      ));
+    }
 
     let capacity = 2 + path_bytes.len()
       + 2 + content_type_bytes.len()
@@ -60,7 +81,7 @@ impl FileRecord {
       buffer.extend_from_slice(hash);
     }
 
-    buffer
+    Ok(buffer)
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {

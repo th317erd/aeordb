@@ -4,7 +4,7 @@ use aeordb::engine::hash_algorithm::HashAlgorithm;
 #[test]
 fn test_serialize_deserialize_roundtrip() {
     let record = SymlinkRecord::new("/link".to_string(), "/target/file.txt".to_string());
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, record.path);
     assert_eq!(restored.target, record.target);
@@ -17,7 +17,7 @@ fn test_field_preservation() {
     let mut record = SymlinkRecord::new("/my/link".to_string(), "/some/deep/target".to_string());
     record.created_at = 1000;
     record.updated_at = 2000;
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "/my/link");
     assert_eq!(restored.target, "/some/deep/target");
@@ -28,7 +28,7 @@ fn test_field_preservation() {
 #[test]
 fn test_empty_target() {
     let record = SymlinkRecord::new("/link".to_string(), "".to_string());
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.target, "");
 }
@@ -36,7 +36,7 @@ fn test_empty_target() {
 #[test]
 fn test_unicode_paths() {
     let record = SymlinkRecord::new("/\u{30EA}\u{30F3}\u{30AF}".to_string(), "/\u{76EE}\u{6A19}/\u{30D5}\u{30A1}\u{30A4}\u{30EB}.txt".to_string());
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "/\u{30EA}\u{30F3}\u{30AF}");
     assert_eq!(restored.target, "/\u{76EE}\u{6A19}/\u{30D5}\u{30A1}\u{30A4}\u{30EB}.txt");
@@ -114,7 +114,7 @@ fn test_content_hash_differs_for_different_data() {
 #[test]
 fn test_empty_path() {
     let record = SymlinkRecord::new("".to_string(), "/target".to_string());
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, "");
     assert_eq!(restored.target, "/target");
@@ -125,7 +125,7 @@ fn test_max_u16_boundary_path() {
     // Path exactly at u16 max would be 65535 bytes — just test a reasonably large path
     let long_path = "/".to_string() + &"a".repeat(1000);
     let record = SymlinkRecord::new(long_path.clone(), "/t".to_string());
-    let data = record.serialize();
+    let data = record.serialize().unwrap();
     let restored = SymlinkRecord::deserialize(&data, 0).unwrap();
     assert_eq!(restored.path, long_path);
 }

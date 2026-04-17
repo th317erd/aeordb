@@ -14,9 +14,20 @@ pub struct ChildEntry {
 }
 
 impl ChildEntry {
-  pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
+  pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
     let name_bytes = self.name.as_bytes();
     let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
+
+    if name_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
+      ));
+    }
+    if content_type_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len()),
+      ));
+    }
 
     let capacity = 1 + hash_length + 8 + 8 + 8
       + 2 + name_bytes.len()
@@ -41,7 +52,7 @@ impl ChildEntry {
     buffer.extend_from_slice(&self.virtual_time.to_le_bytes());
     buffer.extend_from_slice(&self.node_id.to_le_bytes());
 
-    buffer
+    Ok(buffer)
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<(ChildEntry, usize)> {
@@ -104,12 +115,12 @@ impl ChildEntry {
   }
 }
 
-pub fn serialize_child_entries(entries: &[ChildEntry], hash_length: usize) -> Vec<u8> {
+pub fn serialize_child_entries(entries: &[ChildEntry], hash_length: usize) -> EngineResult<Vec<u8>> {
   let mut buffer = Vec::new();
   for entry in entries {
-    buffer.extend_from_slice(&entry.serialize(hash_length));
+    buffer.extend_from_slice(&entry.serialize(hash_length)?);
   }
-  buffer
+  Ok(buffer)
 }
 
 pub fn deserialize_child_entries(

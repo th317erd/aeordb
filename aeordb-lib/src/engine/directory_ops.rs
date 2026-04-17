@@ -353,7 +353,7 @@ impl<'a> DirectoryOps<'a> {
       file_record.created_at = original_created_at;
     }
 
-    let file_value = file_record.serialize(hash_length);
+    let file_value = file_record.serialize(hash_length)?;
 
     // Content-addressed key (immutable — for KV store entry)
     let file_content_key = file_content_hash(&file_value, &algo)?;
@@ -798,7 +798,7 @@ impl<'a> DirectoryOps<'a> {
             (root_entry.2, root_hash)
           } else {
             // Stay flat
-            let dir_value = serialize_child_entries(&children, hash_length);
+            let dir_value = serialize_child_entries(&children, hash_length)?;
             let content_key = directory_content_hash(&dir_value, &algo)?;
             self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
             (dir_value, content_key)
@@ -807,7 +807,7 @@ impl<'a> DirectoryOps<'a> {
         None => {
           // New directory
           let children = vec![current_child_entry];
-          let dir_value = serialize_child_entries(&children, hash_length);
+          let dir_value = serialize_child_entries(&children, hash_length)?;
           let content_key = directory_content_hash(&dir_value, &algo)?;
           self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
           (dir_value, content_key)
@@ -891,7 +891,7 @@ impl<'a> DirectoryOps<'a> {
 
         children.retain(|c| c.name != child_name);
 
-        let dir_value = serialize_child_entries(&children, hash_length);
+        let dir_value = serialize_child_entries(&children, hash_length)?;
         let content_key = directory_content_hash(&dir_value, &algo)?;
         self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
         (dir_value, content_key)
@@ -959,7 +959,7 @@ impl<'a> DirectoryOps<'a> {
       record.created_at = original_created_at;
     }
 
-    let serialized = record.serialize();
+    let serialized = record.serialize()?;
 
     // Content-addressed key (immutable — for KV store entry)
     let content_key = symlink_content_hash(&serialized, &algo)?;

@@ -21,9 +21,21 @@ impl SymlinkRecord {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> EngineResult<Vec<u8>> {
         let path_bytes = self.path.as_bytes();
         let target_bytes = self.target.as_bytes();
+
+        if path_bytes.len() > u16::MAX as usize {
+            return Err(EngineError::InvalidInput(
+                format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len()),
+            ));
+        }
+        if target_bytes.len() > u16::MAX as usize {
+            return Err(EngineError::InvalidInput(
+                format!("Target too long: {} bytes exceeds u16 max (65535)", target_bytes.len()),
+            ));
+        }
+
         let capacity = 2 + path_bytes.len() + 2 + target_bytes.len() + 8 + 8;
         let mut buffer = Vec::with_capacity(capacity);
 
@@ -34,7 +46,7 @@ impl SymlinkRecord {
         buffer.extend_from_slice(&self.created_at.to_le_bytes());
         buffer.extend_from_slice(&self.updated_at.to_le_bytes());
 
-        buffer
+        Ok(buffer)
     }
 
     pub fn deserialize(data: &[u8], version: u8) -> EngineResult<Self> {
@@ -64,7 +76,11 @@ impl SymlinkRecord {
             });
         }
 
-        let path = String::from_utf8_lossy(&data[cursor..cursor + path_length]).to_string();
+        let path = String::from_utf8(data[cursor..cursor + path_length].to_vec())
+            .map_err(|_| EngineError::CorruptEntry {
+                offset: 0,
+                reason: "Invalid UTF-8 in symlink path".to_string(),
+            })?;
         cursor += path_length;
 
         let target_length = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
@@ -77,7 +93,11 @@ impl SymlinkRecord {
             });
         }
 
-        let target = String::from_utf8_lossy(&data[cursor..cursor + target_length]).to_string();
+        let target = String::from_utf8(data[cursor..cursor + target_length].to_vec())
+            .map_err(|_| EngineError::CorruptEntry {
+                offset: 0,
+                reason: "Invalid UTF-8 in symlink target".to_string(),
+            })?;
         cursor += target_length;
 
         let created_at = i64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());

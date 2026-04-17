@@ -43,15 +43,15 @@ pub struct InternalNode {
 
 impl BTreeNode {
     /// Serialize a B-tree node to bytes.
-    pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
+    pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
         match self {
             BTreeNode::Leaf(leaf) => {
-                let child_data = serialize_child_entries(&leaf.entries, hash_length);
+                let child_data = serialize_child_entries(&leaf.entries, hash_length)?;
                 let mut buffer = Vec::with_capacity(1 + 2 + child_data.len());
                 buffer.push(BTREE_LEAF_MARKER);
                 buffer.extend_from_slice(&(leaf.entries.len() as u16).to_le_bytes());
                 buffer.extend_from_slice(&child_data);
-                buffer
+                Ok(buffer)
             }
             BTreeNode::Internal(internal) => {
                 let mut buffer = Vec::new();
@@ -61,6 +61,11 @@ impl BTreeNode {
                 // Serialize keys
                 for key in &internal.keys {
                     let key_bytes = key.as_bytes();
+                    if key_bytes.len() > u16::MAX as usize {
+                        return Err(EngineError::InvalidInput(
+                            format!("B-tree key too long: {} bytes exceeds u16 max (65535)", key_bytes.len()),
+                        ));
+                    }
                     buffer.extend_from_slice(&(key_bytes.len() as u16).to_le_bytes());
                     buffer.extend_from_slice(key_bytes);
                 }
@@ -70,7 +75,7 @@ impl BTreeNode {
                     buffer.extend_from_slice(child_hash);
                 }
 
-                buffer
+                Ok(buffer)
             }
         }
     }
@@ -163,7 +168,7 @@ impl BTreeNode {
 
     /// Compute the content hash for this node.
     pub fn content_hash(&self, hash_length: usize, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
-        let serialized = self.serialize(hash_length);
+        let serialized = self.serialize(hash_length)?;
         let mut input = Vec::with_capacity(6 + serialized.len());
         input.extend_from_slice(b"btree:");
         input.extend_from_slice(&serialized);
@@ -340,7 +345,7 @@ pub fn btree_insert_with_data(
                 keys: vec![split_key],
                 children: vec![left_hash, right_hash],
             });
-            let new_data = new_root.serialize(hash_length);
+            let new_data = new_root.serialize(hash_length)?;
             let new_hash = store_btree_node(engine, &new_root, hash_length, algo)?;
             Ok((new_hash, new_data))
         }
@@ -366,7 +371,7 @@ fn btree_insert_node(
                 Ok(InsertResult::Split(left_hash, split_key, right_hash))
             } else {
                 let node = BTreeNode::Leaf(leaf);
-                let data = node.serialize(hash_length);
+                let data = node.serialize(hash_length)?;
                 let hash = store_btree_node(engine, &node, hash_length, algo)?;
                 Ok(InsertResult::Done(hash, data))
             }
@@ -389,7 +394,7 @@ fn btree_insert_node(
                 InsertResult::Done(new_child_hash, _) => {
                     internal.children[child_idx] = new_child_hash;
                     let node = BTreeNode::Internal(internal);
-                    let data = node.serialize(hash_length);
+                    let data = node.serialize(hash_length)?;
                     let hash = store_btree_node(engine, &node, hash_length, algo)?;
                     Ok(InsertResult::Done(hash, data))
                 }
@@ -404,7 +409,7 @@ fn btree_insert_node(
                         Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
                     } else {
                         let node = BTreeNode::Internal(internal);
-                        let data = node.serialize(hash_length);
+                        let data = node.serialize(hash_length)?;
                         let hash = store_btree_node(engine, &node, hash_length, algo)?;
                         Ok(InsertResult::Done(hash, data))
                     }
@@ -421,7 +426,7 @@ pub fn store_btree_node(
     hash_length: usize,
     algo: &HashAlgorithm,
 ) -> EngineResult<Vec<u8>> {
-    let serialized = node.serialize(hash_length);
+    let serialized = node.serialize(hash_length)?;
     let content_hash = node.content_hash(hash_length, algo)?;
     engine.store_entry(EntryType::DirectoryIndex, &content_hash, &serialized)?;
     Ok(content_hash)
@@ -663,7 +668,7 @@ pub fn btree_insert_batched(
                 keys: vec![split_key],
                 children: vec![left_hash, right_hash],
             });
-            let new_data = new_root.serialize(hash_length);
+            let new_data = new_root.serialize(hash_length)?;
             let new_hash = new_root.content_hash(hash_length, algo)?;
             batch.add(EntryType::DirectoryIndex, new_hash.clone(), new_data.clone());
             (new_hash, new_data)
@@ -694,12 +699,12 @@ fn btree_insert_node_batched(
                 let right_node = BTreeNode::Leaf(right);
                 let left_hash = left_node.content_hash(hash_length, algo)?;
                 let right_hash = right_node.content_hash(hash_length, algo)?;
-                batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length));
-                batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length));
+                batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length)?);
+                batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length)?);
                 Ok(InsertResult::Split(left_hash, split_key, right_hash))
             } else {
                 let node = BTreeNode::Leaf(leaf);
-                let data = node.serialize(hash_length);
+                let data = node.serialize(hash_length)?;
                 let hash = node.content_hash(hash_length, algo)?;
                 batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
                 Ok(InsertResult::Done(hash, data))
@@ -722,7 +727,7 @@ fn btree_insert_node_batched(
                 InsertResult::Done(new_child_hash, _) => {
                     internal.children[child_idx] = new_child_hash;
                     let node = BTreeNode::Internal(internal);
-                    let data = node.serialize(hash_length);
+                    let data = node.serialize(hash_length)?;
                     let hash = node.content_hash(hash_length, algo)?;
                     batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
                     Ok(InsertResult::Done(hash, data))
@@ -737,12 +742,12 @@ fn btree_insert_node_batched(
                         let right_node = BTreeNode::Internal(right);
                         let left_hash = left_node.content_hash(hash_length, algo)?;
                         let right_hash = right_node.content_hash(hash_length, algo)?;
-                        batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length));
-                        batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length));
+                        batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length)?);
+                        batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length)?);
                         Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
                     } else {
                         let node = BTreeNode::Internal(internal);
-                        let data = node.serialize(hash_length);
+                        let data = node.serialize(hash_length)?;
                         let hash = node.content_hash(hash_length, algo)?;
                         batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
                         Ok(InsertResult::Done(hash, data))

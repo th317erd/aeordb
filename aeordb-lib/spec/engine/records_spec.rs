@@ -20,7 +20,7 @@ fn test_file_record_serialize_deserialize_roundtrip() {
     chunk_hashes: vec![chunk_hash],
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(record, deserialized);
@@ -43,7 +43,7 @@ fn test_file_record_with_chunks() {
     chunk_hashes: chunks.clone(),
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 5);
@@ -63,7 +63,7 @@ fn test_file_record_without_content_type() {
     chunk_hashes: vec![vec![0xFF; hash_length]],
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.content_type, None);
@@ -84,7 +84,7 @@ fn test_file_record_with_metadata() {
     chunk_hashes: vec![vec![0x01; hash_length]],
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.metadata, metadata);
@@ -103,7 +103,7 @@ fn test_file_record_empty_chunks() {
     chunk_hashes: Vec::new(),
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert!(deserialized.chunk_hashes.is_empty());
@@ -132,7 +132,7 @@ fn test_file_record_many_chunks() {
     chunk_hashes: chunks.clone(),
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 150);
@@ -167,7 +167,7 @@ fn test_file_record_with_64_byte_hash() {
     chunk_hashes: vec![chunk_hash.clone()],
   };
 
-  let serialized = record.serialize(hash_length);
+  let serialized = record.serialize(hash_length).unwrap();
   let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.chunk_hashes[0].len(), 64);
@@ -274,7 +274,7 @@ fn test_child_entry_serialize_deserialize_roundtrip() {
     node_id: 0,
   };
 
-  let serialized = entry.serialize(hash_length);
+  let serialized = entry.serialize(hash_length).unwrap();
   let (deserialized, bytes_consumed) =
     ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
@@ -297,7 +297,7 @@ fn test_child_entry_file_type() {
     node_id: 0,
   };
 
-  let serialized = entry.serialize(hash_length);
+  let serialized = entry.serialize(hash_length).unwrap();
   let (deserialized, _) =
     ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
@@ -320,7 +320,7 @@ fn test_child_entry_directory_type() {
     node_id: 0,
   };
 
-  let serialized = entry.serialize(hash_length);
+  let serialized = entry.serialize(hash_length).unwrap();
   let (deserialized, _) =
     ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
@@ -367,7 +367,7 @@ fn test_multiple_child_entries_roundtrip() {
     },
   ];
 
-  let serialized = serialize_child_entries(&entries, hash_length);
+  let serialized = serialize_child_entries(&entries, hash_length).unwrap();
   let deserialized = deserialize_child_entries(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(entries, deserialized);
@@ -388,7 +388,7 @@ fn test_child_entry_with_64_byte_hash() {
     node_id: 0,
   };
 
-  let serialized = entry.serialize(hash_length);
+  let serialized = entry.serialize(hash_length).unwrap();
   let (deserialized, _) =
     ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
@@ -398,7 +398,7 @@ fn test_child_entry_with_64_byte_hash() {
 
 #[test]
 fn test_child_entry_empty_list_roundtrip() {
-  let serialized = serialize_child_entries(&[], 32);
+  let serialized = serialize_child_entries(&[], 32).unwrap();
   let deserialized = deserialize_child_entries(&serialized, 32, 0).unwrap();
   assert!(deserialized.is_empty());
 }

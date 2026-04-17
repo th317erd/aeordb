@@ -49,7 +49,7 @@ const HASH_LENGTH: usize = 32;
 #[test]
 fn test_leaf_serialize_deserialize_empty() {
     let leaf = BTreeNode::Leaf(LeafNode::new());
-    let data = leaf.serialize(HASH_LENGTH);
+    let data = leaf.serialize(HASH_LENGTH).unwrap();
     let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
     match deserialized {
         BTreeNode::Leaf(l) => assert!(l.entries.is_empty()),
@@ -67,7 +67,7 @@ fn test_leaf_serialize_deserialize_with_entries() {
         make_entry("echo"),
     ];
     let leaf = BTreeNode::Leaf(LeafNode { entries: entries.clone() });
-    let data = leaf.serialize(HASH_LENGTH);
+    let data = leaf.serialize(HASH_LENGTH).unwrap();
     let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
     match deserialized {
         BTreeNode::Leaf(l) => {
@@ -97,7 +97,7 @@ fn test_internal_serialize_deserialize() {
         keys: keys.clone(),
         children: children.clone(),
     });
-    let data = internal.serialize(HASH_LENGTH);
+    let data = internal.serialize(HASH_LENGTH).unwrap();
     let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
     match deserialized {
         BTreeNode::Internal(n) => {
@@ -767,7 +767,7 @@ fn test_btree_list_from_node_leaf() {
     let leaf = BTreeNode::Leaf(LeafNode {
         entries: vec![make_entry("alpha"), make_entry("bravo")],
     });
-    let data = leaf.serialize(HASH_LENGTH);
+    let data = leaf.serialize(HASH_LENGTH).unwrap();
 
     // No engine needed for leaf-only case (but signature requires it)
     let (engine, _dir) = setup_engine();
@@ -857,7 +857,7 @@ fn test_content_hash_domain_prefix() {
     });
 
     // Compute hash manually with "btree:" prefix
-    let serialized = leaf.serialize(HASH_LENGTH);
+    let serialized = leaf.serialize(HASH_LENGTH).unwrap();
     let mut prefixed = Vec::with_capacity(6 + serialized.len());
     prefixed.extend_from_slice(b"btree:");
     prefixed.extend_from_slice(&serialized);

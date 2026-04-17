@@ -63,7 +63,11 @@ pub async fn engine_store_file(
 ) -> Response {
   // Block non-root access to /.system/
   if is_system_path(&path) {
-    let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+      Ok(id) => id,
+      Err(_) => return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
     if !is_root(&user_id) {
       return ErrorResponse::new(format!("Not found: {}", path))
         .with_status(StatusCode::NOT_FOUND)
@@ -121,7 +125,12 @@ pub async fn engine_store_file(
   // Compute the content-addressed hash so the caller can fetch by hash.
   let algo = state.engine.hash_algo();
   let hash_length = algo.hash_length();
-  let file_value = file_record.serialize(hash_length);
+  let file_value = match file_record.serialize(hash_length) {
+    Ok(v) => v,
+    Err(_) => return ErrorResponse::new("Failed to serialize file record".to_string())
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response(),
+  };
   if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
     response_body.hash = Some(hex::encode(&content_hash));
   }
@@ -139,7 +148,11 @@ pub async fn engine_get(
 ) -> Response {
   // Block non-root access to /.system/
   if is_system_path(&path) {
-    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
+      Ok(id) => id,
+      Err(_) => return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
     if !is_root(&user_id) {
       return ErrorResponse::new(format!("Not found: {}", path))
         .with_status(StatusCode::NOT_FOUND)
@@ -223,7 +236,7 @@ pub async fn engine_get(
           .header("X-Total-Size", file_record.total_size.to_string())
           .header("X-Created-At", file_record.created_at.to_string())
           .header("X-Updated-At", file_record.updated_at.to_string())
-          .header("X-Symlink-Target", &symlink_record.target);
+          .header("X-Symlink-Target", symlink_record.target.replace('\n', "").replace('\r', ""));
 
         if let Some(ref content_type) = file_record.content_type {
           response_builder = response_builder.header("content-type", content_type.as_str());
@@ -268,7 +281,11 @@ pub async fn engine_get(
             }
             // Filter /.system/ from listings for non-root
             {
-              let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+              let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
+                Ok(id) => id,
+                Err(_) => return ErrorResponse::new("Invalid user identity")
+                  .with_status(StatusCode::FORBIDDEN).into_response(),
+              };
               if !is_root(&user_id) {
                 listing.retain(|entry| {
                   let path = entry["path"].as_str().unwrap_or("");
@@ -399,7 +416,11 @@ pub async fn engine_get(
         }
         // Filter /.system/ from listings for non-root
         {
-          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+          let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
+            Ok(id) => id,
+            Err(_) => return ErrorResponse::new("Invalid user identity")
+              .with_status(StatusCode::FORBIDDEN).into_response(),
+          };
           if !is_root(&user_id) {
             listing.retain(|entry| {
               let path = entry["path"].as_str().unwrap_or("");
@@ -464,7 +485,11 @@ pub async fn engine_get(
       }
       // Filter /.system/ from listings for non-root
       {
-        let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+        let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
+          Ok(id) => id,
+          Err(_) => return ErrorResponse::new("Invalid user identity")
+            .with_status(StatusCode::FORBIDDEN).into_response(),
+        };
         if !is_root(&user_id) {
           listing.retain(|entry| {
             let path = entry["path"].as_str().unwrap_or("");
@@ -562,7 +587,7 @@ async fn engine_get_at_version(
 
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-Path", path)
+    .header("X-Path", path.replace('\n', "").replace('\r', ""))
     .header("X-Total-Size", file_record.total_size.to_string())
     .header("X-Created-At", file_record.created_at.to_string())
     .header("X-Updated-At", file_record.updated_at.to_string());
@@ -586,7 +611,11 @@ pub async fn engine_delete_file(
 ) -> Response {
   // Block non-root access to /.system/
   if is_system_path(&path) {
-    let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+      Ok(id) => id,
+      Err(_) => return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
     if !is_root(&user_id) {
       return ErrorResponse::new(format!("Not found: {}", path))
         .with_status(StatusCode::NOT_FOUND)
@@ -643,7 +672,11 @@ pub async fn engine_head(
 ) -> Response {
   // Block non-root access to /.system/
   if is_system_path(&path) {
-    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
+      Ok(id) => id,
+      Err(_) => return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
     if !is_root(&user_id) {
       return ErrorResponse::new(format!("Not found: {}", path))
         .with_status(StatusCode::NOT_FOUND)
@@ -658,7 +691,7 @@ pub async fn engine_head(
     return axum::http::Response::builder()
       .status(StatusCode::OK)
       .header("X-Entry-Type", "symlink")
-      .header("X-Symlink-Target", &symlink_record.target)
+      .header("X-Symlink-Target", symlink_record.target.replace('\n', "").replace('\r', ""))
       .header("X-Path", path.replace('\n', "").replace('\r', ""))
       .header("X-Created-At", symlink_record.created_at.to_string())
       .header("X-Updated-At", symlink_record.updated_at.to_string())

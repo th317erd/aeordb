@@ -42,10 +42,21 @@ pub struct ForkInfo {
 ///   metadata_json_length: u32
 ///   metadata_json: [u8; metadata_json_length]
 impl SnapshotInfo {
-  pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
+  pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
     let metadata_json = serde_json::to_vec(&self.metadata)
       .unwrap_or_default();
     let name_bytes = self.name.as_bytes();
+
+    if name_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Snapshot name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
+      ));
+    }
+    if metadata_json.len() > u32::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Snapshot metadata too large: {} bytes exceeds u32 max", metadata_json.len()),
+      ));
+    }
 
     let capacity = 2 + name_bytes.len() + hash_length + 8 + 4 + metadata_json.len();
     let mut buffer = Vec::with_capacity(capacity);
@@ -65,7 +76,7 @@ impl SnapshotInfo {
     buffer.extend_from_slice(&(metadata_json.len() as u32).to_le_bytes());
     buffer.extend_from_slice(&metadata_json);
 
-    buffer
+    Ok(buffer)
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
@@ -93,7 +104,11 @@ impl SnapshotInfo {
       });
     }
 
-    let name = String::from_utf8_lossy(&data[cursor..cursor + name_length]).to_string();
+    let name = String::from_utf8(data[cursor..cursor + name_length].to_vec())
+      .map_err(|_| EngineError::CorruptEntry {
+        offset: 0,
+        reason: "Invalid UTF-8 in snapshot name".to_string(),
+      })?;
     cursor += name_length;
 
     if data.len() < cursor + hash_length + 8 + 4 {
@@ -151,8 +166,15 @@ impl SnapshotInfo {
 ///   root_hash: [u8; hash_length]
 ///   created_at: i64
 impl ForkInfo {
-  pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
+  pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
     let name_bytes = self.name.as_bytes();
+
+    if name_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(
+        format!("Fork name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
+      ));
+    }
+
     let capacity = 2 + name_bytes.len() + hash_length + 8;
     let mut buffer = Vec::with_capacity(capacity);
 
@@ -168,7 +190,7 @@ impl ForkInfo {
 
     buffer.extend_from_slice(&self.created_at.to_le_bytes());
 
-    buffer
+    Ok(buffer)
   }
 
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
@@ -196,7 +218,11 @@ impl ForkInfo {
       });
     }
 
-    let name = String::from_utf8_lossy(&data[cursor..cursor + name_length]).to_string();
+    let name = String::from_utf8(data[cursor..cursor + name_length].to_vec())
+      .map_err(|_| EngineError::CorruptEntry {
+        offset: 0,
+        reason: "Invalid UTF-8 in fork name".to_string(),
+      })?;
     cursor += name_length;
 
     if data.len() < cursor + hash_length + 8 {
@@ -346,7 +372,7 @@ impl<'a> VersionManager<'a> {
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
-    let value = snapshot_info.serialize(hash_length);
+    let value = snapshot_info.serialize(hash_length)?;
 
     self.engine.store_entry_typed(
       EntryType::Snapshot,
@@ -465,7 +491,7 @@ impl<'a> VersionManager<'a> {
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
-    let value = fork_info.serialize(hash_length);
+    let value = fork_info.serialize(hash_length)?;
 
     self.engine.store_entry_typed(
       EntryType::Fork,
@@ -583,7 +609,7 @@ impl<'a> VersionManager<'a> {
       created_at: existing.created_at,
     };
 
-    let value = updated.serialize(hash_length);
+    let value = updated.serialize(hash_length)?;
 
     self.engine.store_entry_typed(
       EntryType::Fork,

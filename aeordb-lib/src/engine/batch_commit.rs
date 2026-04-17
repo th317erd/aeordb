@@ -158,7 +158,7 @@ pub fn commit_files(
         }
 
         // Store the FileRecord
-        let file_value = file_record.serialize(hash_length);
+        let file_value = file_record.serialize(hash_length)?;
 
         // Content-addressed key (immutable — for versioning via ChildEntry.hash)
         let file_content_key = file_content_hash(&file_value, &algo)?;
@@ -424,7 +424,7 @@ fn update_directory(
                 })?;
                 (root_entry.2, root_hash)
             } else {
-                let dir_value = serialize_child_entries(&children, hash_length);
+                let dir_value = serialize_child_entries(&children, hash_length)?;
                 let content_key = directory_content_hash(&dir_value, algo)?;
                 engine.store_entry(
                     EntryType::DirectoryIndex,
@@ -436,7 +436,7 @@ fn update_directory(
         }
         None => {
             // New directory
-            let dir_value = serialize_child_entries(&new_children, hash_length);
+            let dir_value = serialize_child_entries(&new_children, hash_length)?;
             let content_key = directory_content_hash(&dir_value, algo)?;
             engine.store_entry(
                 EntryType::DirectoryIndex,
