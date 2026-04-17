@@ -3,6 +3,7 @@ use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{
   ChildEntry, deserialize_child_entries, serialize_child_entries,
 };
+use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
@@ -286,6 +287,7 @@ impl<'a> DirectoryOps<'a> {
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
+    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
     // Detect content type from magic bytes when not explicitly provided
     let detected_content_type = crate::engine::content_type::detect_content_type(data, content_type);
@@ -310,17 +312,22 @@ impl<'a> DirectoryOps<'a> {
         if !self.engine.has_entry(&chunk_key)? {
           if compression_algo != CompressionAlgorithm::None {
             let compressed_data = compress(chunk_data, compression_algo)?;
-            self.engine.store_entry_compressed(
-              EntryType::Chunk,
-              &chunk_key,
-              &compressed_data,
-              compression_algo,
+            if sys_flags != 0 {
+              self.engine.store_entry_compressed_with_flags(
+                EntryType::Chunk, &chunk_key, &compressed_data, sys_flags, compression_algo,
+              )?;
+            } else {
+              self.engine.store_entry_compressed(
+                EntryType::Chunk, &chunk_key, &compressed_data, compression_algo,
+              )?;
+            }
+          } else if sys_flags != 0 {
+            self.engine.store_entry_with_flags(
+              EntryType::Chunk, &chunk_key, chunk_data, sys_flags,
             )?;
           } else {
             self.engine.store_entry(
-              EntryType::Chunk,
-              &chunk_key,
-              chunk_data,
+              EntryType::Chunk, &chunk_key, chunk_data,
             )?;
           }
         }
@@ -357,15 +364,26 @@ impl<'a> DirectoryOps<'a> {
 
     // Content-addressed key (immutable — for KV store entry)
     let file_content_key = file_content_hash(&file_value, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_content_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+    }
 
     // Identity hash (for ChildEntry.hash — excludes timestamps)
     let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
-    // Store at identity key so tree walker can look up entries by ChildEntry.hash
-    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+    }
 
     // Path-based key (mutable — for reads, indexing, deletion)
-    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+    }
 
     // Build child entry with identity hash (not content hash)
     let now_vt = chrono::Utc::now().timestamp_millis() as u64;
@@ -426,6 +444,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
+    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
     // Verify the file exists and capture metadata for event
     let file_key = file_path_hash(&normalized, &algo)?;
@@ -446,11 +465,11 @@ impl<'a> DirectoryOps<'a> {
       &algo,
     )?;
     let deletion_value = deletion.serialize();
-    self.engine.store_entry(
-      EntryType::DeletionRecord,
-      &deletion_key,
-      &deletion_value,
-    )?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+    }
 
     // Mark the FileRecord as deleted in the KV store
     self.engine.mark_entry_deleted(&file_key)?;
@@ -758,6 +777,7 @@ impl<'a> DirectoryOps<'a> {
       };
 
       let dir_key = directory_path_hash(&parent, &algo)?;
+      let dir_flags = if is_system_path(&parent) { FLAG_SYSTEM } else { 0 };
 
       // Read existing directory
       let existing = self.engine.get_entry(&dir_key)?;
@@ -856,6 +876,7 @@ impl<'a> DirectoryOps<'a> {
     };
 
     let dir_key = directory_path_hash(&parent, &algo)?;
+    let dir_flags = if is_system_path(&parent) { FLAG_SYSTEM } else { 0 };
     let child_name = file_name(child_path).unwrap_or("").to_string();
 
     let existing = self.engine.get_entry(&dir_key)?;
@@ -941,6 +962,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
     let normalized_target = normalize_path(target);
     let algo = self.engine.hash_algo();
+    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
     // Check if symlink already exists (preserve created_at on update)
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
@@ -963,15 +985,26 @@ impl<'a> DirectoryOps<'a> {
 
     // Content-addressed key (immutable — for KV store entry)
     let content_key = symlink_content_hash(&serialized, &algo)?;
-    self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &content_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
+    }
 
     // Identity hash (for ChildEntry.hash — excludes timestamps)
     let identity_key = symlink_identity_hash(&normalized, &record.target, &algo)?;
-    // Store at identity key so tree walker can look up entries by ChildEntry.hash
-    self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &identity_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
+    }
 
     // Path-based key (mutable — for reads/deletion)
-    self.engine.store_entry(EntryType::Symlink, &symlink_key, &serialized)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &symlink_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &symlink_key, &serialized)?;
+    }
 
     // Build child entry for parent directory
     let child = ChildEntry {
@@ -1023,6 +1056,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
+    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
     // Verify symlink exists
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
@@ -1035,7 +1069,11 @@ impl<'a> DirectoryOps<'a> {
     let deletion = DeletionRecord::new(normalized.clone(), None);
     let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
     let deletion_value = deletion.serialize();
-    self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+    }
 
     // Mark as deleted in KV store
     self.engine.mark_entry_deleted(&symlink_key)?;

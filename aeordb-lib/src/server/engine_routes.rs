@@ -183,6 +183,16 @@ pub async fn engine_get(
     // Follow the symlink
     match resolve_symlink(&state.engine, &path) {
       Ok(ResolvedTarget::File(ref file_record)) => {
+        // Block non-root access to symlinks resolving to /.system/ paths
+        if is_system_path(&file_record.path) {
+          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+          if !is_root(&user_id) {
+            return ErrorResponse::new(format!("Not found: {}", path))
+              .with_status(StatusCode::NOT_FOUND)
+              .into_response();
+          }
+        }
+
         // Check if the resolved target path is allowed by API key rules
         if let Some(Extension(ref rules)) = active_key_rules {
           if !rules.0.is_empty() {
@@ -249,6 +259,16 @@ pub async fn engine_get(
           });
       }
       Ok(ResolvedTarget::Directory(dir_path)) => {
+        // Block non-root access to symlinks resolving to /.system/ directories
+        if is_system_path(&dir_path) {
+          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+          if !is_root(&user_id) {
+            return ErrorResponse::new(format!("Not found: {}", path))
+              .with_status(StatusCode::NOT_FOUND)
+              .into_response();
+          }
+        }
+
         // List the resolved directory
         match directory_ops.list_directory(&dir_path) {
           Ok(entries) => {
@@ -778,6 +798,16 @@ pub async fn engine_get_by_hash(
         .into_response();
     }
   };
+
+  // Block non-root access to system-flagged entries (H1: hash bypass protection)
+  if header.is_system_entry() {
+    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
 
   match header.entry_type {
     EntryType::FileRecord => {

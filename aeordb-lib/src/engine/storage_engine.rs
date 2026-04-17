@@ -540,6 +540,44 @@ impl StorageEngine {
     Ok(offset)
   }
 
+  /// Store an entry with both compression and custom flags.
+  /// The hash is computed on the UNCOMPRESSED value (for dedup).
+  /// The compressed value is what gets written to disk.
+  pub fn store_entry_compressed_with_flags(
+    &self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<u64> {
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    let offset = writer.append_entry_with_compression(
+      entry_type,
+      key,
+      value,
+      flags,
+      compression_algo,
+    )?;
+
+    let kv_entry = KVEntry {
+      type_flags: entry_type.to_kv_type(),
+      hash: key.to_vec(),
+      offset,
+    };
+    kv.insert(kv_entry);
+
+    Ok(offset)
+  }
+
   /// Retrieve an entry by its hash key via a lock-free snapshot read.
   ///
   /// Returns `(header, key, value)` if a non-deleted entry exists.

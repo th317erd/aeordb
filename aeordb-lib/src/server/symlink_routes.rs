@@ -10,8 +10,10 @@ use serde::Deserialize;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{DirectoryOps, is_system_path};
+use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
+use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct CreateSymlinkRequest {
@@ -33,6 +35,28 @@ pub async fn create_symlink(
                 .into_response();
         }
     };
+
+    // Block non-root users from creating symlinks that point to /.system/ paths
+    let normalized_target = normalize_path(target);
+    if is_system_path(&normalized_target) {
+        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+        if !is_root(&user_id) {
+            return ErrorResponse::new("Cannot create symlink to system path")
+                .with_status(StatusCode::NOT_FOUND)
+                .into_response();
+        }
+    }
+
+    // Block non-root users from creating symlinks under /.system/ paths
+    let normalized_path = normalize_path(&path);
+    if is_system_path(&normalized_path) {
+        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
+        if !is_root(&user_id) {
+            return ErrorResponse::new(format!("Not found: {}", path))
+                .with_status(StatusCode::NOT_FOUND)
+                .into_response();
+        }
+    }
 
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
     let ops = DirectoryOps::new(&state.engine);
