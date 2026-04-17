@@ -137,6 +137,9 @@ impl SyncEngine {
         let sync_state = system_store::get_peer_sync_state(&self.engine, peer_node_id)
             .map_err(|e| format!("Failed to load peer sync state: {}", e))?;
 
+        // Load peer config for selective sync paths
+        let sync_paths = self.get_peer_sync_paths(peer_node_id);
+
         let local_vm = VersionManager::new(&self.engine);
         let remote_vm = VersionManager::new(remote_engine);
 
@@ -194,6 +197,13 @@ impl SyncEngine {
                 operations_applied: 0,
             });
         }
+
+        // Apply selective sync path filtering to the remote diff
+        let remote_diff = if let Some(ref paths) = sync_paths {
+            filter_tree_diff_by_paths(remote_diff, paths)
+        } else {
+            remote_diff
+        };
 
         // Three-way merge
         let merge_result = three_way_merge(&local_diff, &remote_diff);
@@ -369,12 +379,18 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to load peer sync state: {}", e))?;
         let since_hash = sync_state.and_then(|s| s.last_synced_root_hash);
 
+        // Load peer config for selective sync paths
+        let sync_paths = self.get_peer_sync_paths(peer.node_id);
+
         // Step 1: Request diff from peer
         let mut diff_body = serde_json::json!({
             "current_root_hash": hex::encode(&our_head),
         });
         if let Some(ref since) = since_hash {
             diff_body["since_root_hash"] = serde_json::json!(since);
+        }
+        if let Some(ref paths) = sync_paths {
+            diff_body["paths"] = serde_json::json!(paths);
         }
 
         let mut request = client
@@ -609,6 +625,31 @@ impl SyncEngine {
         let ctx = RequestContext::system();
         let _ = system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state);
     }
+
+    /// Load sync_paths from the peer config for selective sync.
+    fn get_peer_sync_paths(&self, peer_node_id: u64) -> Option<Vec<String>> {
+        let configs = system_store::get_peer_configs(&self.engine).ok()?;
+        configs.into_iter()
+            .find(|c| c.node_id == peer_node_id)
+            .and_then(|c| c.sync_paths)
+    }
+}
+
+/// Filter a TreeDiff to only include entries matching the given glob patterns.
+/// Entries whose paths don't match any pattern are removed from the diff.
+fn filter_tree_diff_by_paths(mut diff: crate::engine::tree_walker::TreeDiff, paths: &[String]) -> crate::engine::tree_walker::TreeDiff {
+    let matches = |path: &str| -> bool {
+        paths.iter().any(|pattern| glob_match::glob_match(pattern, path))
+    };
+
+    diff.added.retain(|path, _| matches(path));
+    diff.modified.retain(|path, _| matches(path));
+    diff.deleted.retain(|path| matches(path));
+    diff.symlinks_added.retain(|path, _| matches(path));
+    diff.symlinks_modified.retain(|path, _| matches(path));
+    diff.symlinks_deleted.retain(|path| matches(path));
+
+    diff
 }
 
 // ---------------------------------------------------------------------------
