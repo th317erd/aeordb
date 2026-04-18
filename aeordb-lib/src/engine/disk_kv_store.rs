@@ -278,7 +278,9 @@ impl DiskKVStore {
     /// Insert or update an entry in the write buffer.
     /// Auto-flushes when the buffer exceeds WRITE_BUFFER_THRESHOLD.
     /// Also journals the entry to the hot file buffer for crash recovery.
-    pub fn insert(&mut self, entry: KVEntry) {
+    /// H9: Returns Result so callers can detect flush/hot-buffer failures
+    /// instead of silently losing writes.
+    pub fn insert(&mut self, entry: KVEntry) -> EngineResult<()> {
         let is_new = !self.write_buffer.contains_key(&entry.hash)
             && !self.entry_exists_on_disk(&entry.hash);
 
@@ -292,16 +294,12 @@ impl DiskKVStore {
         if self.hot_file.is_some() {
             self.hot_buffer.push(entry);
             if self.hot_buffer.len() >= HOT_BUFFER_THRESHOLD {
-                if let Err(e) = self.flush_hot_buffer() {
-                    tracing::warn!("Hot buffer flush failed during insert: {}", e);
-                }
+                self.flush_hot_buffer()?;
             }
         }
 
         let did_flush = if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-            if let Err(e) = self.flush() {
-                tracing::warn!("Auto-flush failed during insert: {}", e);
-            }
+            self.flush()?;
             true
         } else {
             false
@@ -310,6 +308,8 @@ impl DiskKVStore {
         if !did_flush {
             self.publish_buffer_only();
         }
+
+        Ok(())
     }
 
     /// Bulk insert entries without snapshot publishing, hot file journaling,
@@ -858,9 +858,12 @@ impl DiskKVStore {
     }
 
     /// Truncate the hot file (after successful KV flush).
+    /// H8: fsync after truncation ensures the truncate is durable — without it,
+    /// a crash could leave stale entries on disk that get replayed on restart.
     fn truncate_hot_file(&mut self) -> EngineResult<()> {
         if let Some(ref mut file) = self.hot_file {
             file.set_len(0)?;
+            file.sync_all()?;
             file.seek(SeekFrom::Start(0))?;
         }
         Ok(())

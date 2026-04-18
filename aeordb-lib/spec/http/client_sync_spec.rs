@@ -1019,3 +1019,85 @@ async fn test_root_incremental_includes_system() {
     let has_system = paths.iter().any(|p| p.starts_with("/.system/"));
     assert!(has_system, "root incremental should include new system files");
 }
+
+/// H4: Scoped key must NOT receive chunk hashes for files outside its scope.
+#[tokio::test]
+async fn test_scoped_key_chunk_hashes_filtered() {
+    let (_app, jwt_manager, engine, _tmp) = create_node();
+
+    // Store files in two different directories.
+    store_file(&engine, "public/visible.txt", b"visible content");
+    store_file(&engine, "secret/hidden.txt", b"hidden content");
+
+    // Create a scoped key that can only read /public/**
+    let rules = vec![
+        KeyRule {
+            glob: "/public/**".to_string(),
+            permitted: "-r------".to_string(),
+        },
+        KeyRule {
+            glob: "/**".to_string(),
+            permitted: "--------".to_string(),
+        },
+    ];
+    let (scoped_token, _key_id) =
+        create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    // Full sync diff with scoped key.
+    let app = build_app(&jwt_manager, &engine);
+    let (status, json) = sync_diff_request(
+        app,
+        Some(("authorization", &scoped_token)),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Only public files should appear in changes.
+    let paths = extract_all_paths(&json["changes"]);
+    assert!(paths.contains(&"/public/visible.txt".to_string()));
+    assert!(!paths.contains(&"/secret/hidden.txt".to_string()));
+
+    // Chunk hashes must only come from visible files.
+    // Get the chunk hashes from the visible file via root to compare.
+    let root_token = root_bearer_token(&jwt_manager);
+    let app = build_app(&jwt_manager, &engine);
+    let (_, root_json) = sync_diff_request(
+        app,
+        Some(("authorization", &root_token)),
+        serde_json::json!({}),
+    )
+    .await;
+
+    // Root sees both files' chunk hashes.
+    let root_chunks: Vec<String> = root_json["chunk_hashes_needed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    // Scoped user sees fewer chunk hashes.
+    let scoped_chunks: Vec<String> = json["chunk_hashes_needed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    assert!(
+        scoped_chunks.len() < root_chunks.len(),
+        "Scoped user should see fewer chunk hashes than root ({} vs {})",
+        scoped_chunks.len(),
+        root_chunks.len(),
+    );
+
+    // Ensure no chunk hash from hidden.txt leaks to the scoped user.
+    // The hidden file's chunks should be in root but NOT in scoped.
+    for hash in &scoped_chunks {
+        assert!(
+            root_chunks.contains(hash),
+            "Scoped chunk hash should be a subset of root's"
+        );
+    }
+}

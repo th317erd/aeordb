@@ -146,7 +146,16 @@ impl TaskQueue {
     }
 
     /// Load all tasks and return the oldest pending one (FIFO order).
+    /// H18: Atomically find the oldest pending task AND mark it as Running.
+    /// Uses the enqueue_lock to prevent concurrent dequeues from claiming
+    /// the same task.
     pub fn dequeue_next(&self) -> EngineResult<Option<TaskRecord>> {
+        let _guard = self.enqueue_lock.lock().map_err(|e| {
+            EngineError::IoError(std::io::Error::other(
+                format!("dequeue lock poisoned: {}", e),
+            ))
+        })?;
+
         let tasks = self.list_tasks()?;
         let mut oldest: Option<TaskRecord> = None;
         for task in tasks {
@@ -161,6 +170,13 @@ impl TaskQueue {
                 }
             }
         }
+
+        // Atomically mark as Running before returning — no one else can
+        // see this task as Pending while we hold the lock.
+        if let Some(ref task) = oldest {
+            self.update_status(&task.id, TaskStatus::Running, None)?;
+        }
+
         Ok(oldest)
     }
 

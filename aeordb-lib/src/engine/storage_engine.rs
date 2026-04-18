@@ -294,7 +294,7 @@ impl StorageEngine {
           hash: scanned.key.clone(),
           offset: scanned.offset,
         };
-        kv.insert(entry);
+        kv.insert(entry)?;
       }
 
       // Flush write buffer to disk before deletion replay
@@ -355,7 +355,7 @@ impl StorageEngine {
     let mut kv_store = kv_store;
     if !hot_entries_to_replay.is_empty() {
       for entry in hot_entries_to_replay {
-        kv_store.insert(entry);
+        kv_store.insert(entry)?;
       }
       kv_store.flush()?;
     }
@@ -463,7 +463,7 @@ impl StorageEngine {
       hash: key.to_vec(),
       offset,
     };
-    kv.insert(kv_entry);
+    kv.insert(kv_entry)?;
 
     Ok(offset)
   }
@@ -499,7 +499,7 @@ impl StorageEngine {
       hash: key.to_vec(),
       offset,
     };
-    kv.insert(kv_entry);
+    kv.insert(kv_entry)?;
 
     Ok(offset)
   }
@@ -543,7 +543,7 @@ impl StorageEngine {
       hash: key.to_vec(),
       offset,
     };
-    kv.insert(kv_entry);
+    kv.insert(kv_entry)?;
 
     Ok(offset)
   }
@@ -581,7 +581,7 @@ impl StorageEngine {
       hash: key.to_vec(),
       offset,
     };
-    kv.insert(kv_entry);
+    kv.insert(kv_entry)?;
 
     Ok(offset)
   }
@@ -702,7 +702,7 @@ impl StorageEngine {
       hash: key.to_vec(),
       offset,
     };
-    kv.insert(kv_entry);
+    kv.insert(kv_entry)?;
 
     Ok(offset)
   }
@@ -748,7 +748,7 @@ impl StorageEngine {
         hash: entry.key.clone(),
         offset: offsets[i],
       };
-      kv.insert(kv_entry);
+      kv.insert(kv_entry)?;
     }
 
     Ok(offsets)

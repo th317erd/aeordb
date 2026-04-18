@@ -189,8 +189,10 @@ fn resolve_file_conflict(
     operations: &mut Vec<MergeOp>,
     conflicts: &mut Vec<ConflictEntry>,
 ) {
-    let local_time = local_record.updated_at as u64;
-    let remote_time = remote_record.updated_at as u64;
+    // H10: Compare as i64 directly — casting to u64 inverts ordering for
+    // negative timestamps (pre-epoch or clock errors).
+    let local_time = local_record.updated_at;
+    let remote_time = remote_record.updated_at;
 
     // Deterministic tiebreak: when timestamps are equal, compare hashes
     // lexicographically so both sides pick the same winner.
@@ -226,14 +228,14 @@ fn resolve_file_conflict(
         conflict_type,
         winner: ConflictVersion {
             hash: winner_hash.clone(),
-            virtual_time: winner_record.updated_at as u64,
+            virtual_time: winner_record.updated_at.max(0) as u64,
             node_id: 0,
             size: winner_record.total_size,
             content_type: winner_record.content_type.clone(),
         },
         loser: ConflictVersion {
             hash: loser_hash.clone(),
-            virtual_time: loser_record.updated_at as u64,
+            virtual_time: loser_record.updated_at.max(0) as u64,
             node_id: 0,
             size: loser_record.total_size,
             content_type: loser_record.content_type.clone(),
@@ -252,7 +254,7 @@ fn make_modify_delete_conflict(
         conflict_type: ConflictType::ModifyDelete,
         winner: ConflictVersion {
             hash: winner_hash.clone(),
-            virtual_time: winner_record.updated_at as u64,
+            virtual_time: winner_record.updated_at.max(0) as u64,
             node_id: 0,
             size: winner_record.total_size,
             content_type: winner_record.content_type.clone(),
@@ -310,8 +312,8 @@ fn merge_symlinks(
                 if local_record.target == remote_record.target => {}
             // Both changed, different target -> LWW conflict
             (Some((local_hash, local_record)), false, Some((remote_hash, remote_record)), false) => {
-                let local_time = local_record.updated_at as u64;
-                let remote_time = remote_record.updated_at as u64;
+                let local_time = local_record.updated_at;
+                let remote_time = remote_record.updated_at;
                 let local_wins = match local_time.cmp(&remote_time) {
                     std::cmp::Ordering::Greater => true,
                     std::cmp::Ordering::Less => false,
@@ -342,14 +344,14 @@ fn merge_symlinks(
                     conflict_type,
                     winner: ConflictVersion {
                         hash: winner_hash.clone(),
-                        virtual_time: winner_record.updated_at as u64,
+                        virtual_time: winner_record.updated_at.max(0) as u64,
                         node_id: 0,
                         size: 0,
                         content_type: None,
                     },
                     loser: ConflictVersion {
                         hash: loser_hash.clone(),
-                        virtual_time: loser_record.updated_at as u64,
+                        virtual_time: loser_record.updated_at.max(0) as u64,
                         node_id: 0,
                         size: 0,
                         content_type: None,
@@ -368,7 +370,7 @@ fn merge_symlinks(
                     conflict_type: ConflictType::ModifyDelete,
                     winner: ConflictVersion {
                         hash: hash.clone(),
-                        virtual_time: record.updated_at as u64,
+                        virtual_time: record.updated_at.max(0) as u64,
                         node_id: 0,
                         size: 0,
                         content_type: None,
@@ -389,7 +391,7 @@ fn merge_symlinks(
                     conflict_type: ConflictType::ModifyDelete,
                     winner: ConflictVersion {
                         hash: hash.clone(),
-                        virtual_time: record.updated_at as u64,
+                        virtual_time: record.updated_at.max(0) as u64,
                         node_id: 0,
                         size: 0,
                         content_type: None,

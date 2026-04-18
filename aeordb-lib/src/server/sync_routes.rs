@@ -455,7 +455,7 @@ pub async fn sync_diff(
         }
     };
 
-    let (mut changes, chunk_hashes) = if let Some(ref since_hex) = payload.since_root_hash {
+    let (mut changes, _unfiltered_chunks) = if let Some(ref since_hex) = payload.since_root_hash {
         let since_hash = match hex::decode(since_hex) {
             Ok(h) => h,
             Err(_) => {
@@ -500,10 +500,22 @@ pub async fn sync_diff(
     // Apply API key rule filtering for scoped users.
     filter_changes_by_key_rules(&mut changes, caller.key_rules());
 
+    // H4: Rebuild chunk hashes from the FILTERED changes so scoped users
+    // don't receive chunk hashes for files they can't access.
+    let filtered_chunk_hashes: Vec<String> = {
+        let mut hashes: Vec<String> = changes.files_added.iter()
+            .chain(changes.files_modified.iter())
+            .flat_map(|e| e.chunk_hashes.iter().cloned())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        hashes
+    };
+
     let response = SyncDiffResponse {
         root_hash: hex::encode(&head_hash),
         changes,
-        chunk_hashes_needed: chunk_hashes,
+        chunk_hashes_needed: filtered_chunk_hashes,
     };
 
     (StatusCode::OK, Json(response)).into_response()

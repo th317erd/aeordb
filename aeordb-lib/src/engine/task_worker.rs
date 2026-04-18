@@ -111,13 +111,12 @@ fn process_next_task_internal(
     plugin_manager: &PluginManager,
     event_bus: &EventBus,
 ) -> EngineResult<bool> {
+    // H18: dequeue_next atomically finds the oldest pending task and marks
+    // it Running under a lock, preventing double-dequeue.
     let task = match queue.dequeue_next()? {
         Some(task) => task,
         None => return Ok(false),
     };
-
-    // Set status to Running.
-    queue.update_status(&task.id, TaskStatus::Running, None)?;
 
     // Emit task started event.
     let started_event = EngineEvent::new(
