@@ -1,0 +1,114 @@
+title: "Consistency Audit — Plan Tests"
+plan: bot-docs/plan/2026-04-18-consistency-audit-plan.yaml
+spec: docs/superpowers/specs/2026-04-18-consistency-audit-design.md
+
+plan_tests:
+
+  # Completeness
+  - assert: route-restructuring has-complete-acceptance-criteria
+    severity: blocker
+    status: pass
+    notes: "Every route has old→new mapping with specific test file references"
+
+  - assert: all-phases have-test-strategy-defined
+    severity: blocker
+    status: pass
+    notes: "Each phase lists test files and acceptance criteria"
+
+  - assert: all-phases are-implementation-ready
+    severity: blocker
+    status: pass
+    notes: "File lists, exact changes, and acceptance criteria specified"
+
+  # Dependencies
+  - assert: route-restructuring no-circular-dependencies
+    severity: blocker
+    status: pass
+    notes: "Phase 1 tasks are independent. Phases 2-9 depend on Phase 1 only."
+
+  - assert: all-phases dependencies-exist-in-plan
+    severity: blocker
+    status: pass
+    notes: "Phase 2 depends on Phase 1 (correct). Phases 3,5,6,7 independent."
+
+  # Architecture
+  - assert: route-restructuring fits-architecture
+    severity: high
+    status: pass
+    notes: "8 namespaces map cleanly to product capabilities"
+
+  - assert: config-unification fits-architecture
+    severity: high
+    status: pass
+    notes: "1:1 config↔CLI mapping, auth.mode replaces auth.enabled"
+
+  - assert: header-convention fits-architecture
+    severity: high
+    status: pass
+    notes: "X-AeorDB- prefix is vendor-standard, no collision risk"
+
+  # Swarm readiness
+  - assert: route-restructuring is-swarm-divisible
+    severity: high
+    status: pass
+    notes: "Each namespace is an independent task — 8 parallel agents possible"
+
+  - assert: plan is-swarm-ready
+    severity: high
+    status: pass
+    notes: "Phase 1 parallelizable. Phases 3,5,6,7 parallelizable after Phase 1."
+
+  # Rollback
+  - assert: all-phases rollback-safe
+    severity: high
+    status: pass
+    notes: "Each phase is independently committable and revertable"
+
+  # Cross-feature
+  - assert: no-conflicting-ownership
+    severity: high
+    status: pass
+    notes: "mod.rs is shared but each agent edits distinct route lines"
+
+  - assert: implementation-order-defined
+    severity: blocker
+    status: pass
+    notes: "Phase 1 first, then 2-7 in parallel, then 8-9 last"
+
+  # Risks and gaps
+  - assert: breaking-change-documented
+    severity: high
+    status: pass
+    notes: "Plan notes this is breaking. Client team notification needed."
+
+  - assert: migration-strategy-for-system-paths
+    severity: high
+    status: pass
+    notes: "Startup migration for /.system/ path renames specified"
+
+  - assert: no-unresolved-questions
+    severity: blocker
+    status: pass
+    notes: |
+      One open question flagged in plan: should we add a temporary redirect
+      layer for old routes? This is a client-team decision, not a plan blocker.
+      Implementation can proceed without it.
+
+cross_cutting:
+  - assert: all-features have-acceptance-criteria
+    status: pass
+  - assert: all-features have-test-strategy
+    status: pass
+  - assert: all-features are-implementation-ready
+    status: pass
+  - assert: no-unresolved-questions remain
+    status: pass
+    notes: "Redirect layer is a nice-to-have, not a blocker"
+  - assert: all-plan-phases-documented
+    status: pass
+
+summary:
+  total: 18
+  pass: 18
+  fail: 0
+  needs_clarification: 0

@@ -1,0 +1,482 @@
+title: "AeorDB Consistency Audit — Implementation Plan"
+spec: docs/superpowers/specs/2026-04-18-consistency-audit-design.md
+date: 2026-04-18
+status: ready
+
+overview: |
+  Rename ~70 routes across 8 namespaces, standardize headers, config,
+  JSON responses, event names, system paths, and error codes. Each phase
+  is independently committable and testable. Phases are ordered to
+  minimize cross-phase conflicts.
+
+  Key constraint: 36 test files with 746+ route references must be updated
+  in lockstep with route changes. Full test suite (3,218+ tests) must pass
+  after each phase.
+
+  Blast radius: server/mod.rs (route registry), 14 route handler files,
+  36 HTTP spec files, CLI args, config module, marketing site.
+
+phases:
+
+  # ===========================================================================
+  # PHASE 1 — Route restructuring (largest, most mechanical)
+  # ===========================================================================
+  - name: "Route restructuring"
+    description: |
+      Rename all routes to the 8-namespace model. This is the biggest phase
+      and touches the most files. All test files updated in lockstep.
+    parallelizable: true
+    tasks:
+
+      - name: "Restructure /files/ routes"
+        files:
+          read:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/engine_routes.rs
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/engine_routes.rs
+          tests:
+            - aeordb-lib/spec/http/engine_http_spec.rs
+            - aeordb-lib/spec/http/directory_listing_http_spec.rs
+            - aeordb-lib/spec/http/rename_http_spec.rs
+            - aeordb-lib/spec/http/api_key_filtering_spec.rs
+            - aeordb-lib/spec/http/api_key_scoped_http_spec.rs
+            - aeordb-lib/spec/http/version_read_http_spec.rs
+            - aeordb-lib/spec/http/system_access_spec.rs
+        changes:
+          - "PUT /engine/{*path} → PUT /files/{*path}"
+          - "GET /engine/{*path} → GET /files/{*path}"
+          - "DELETE /engine/{*path} → DELETE /files/{*path}"
+          - "HEAD /engine/{*path} → HEAD /files/{*path}"
+          - "POST /engine-rename/{*path} → PATCH /files/{*path}"
+          - "POST /query → POST /files/query"
+        acceptance:
+          - "cargo test --test engine_http_spec passes"
+          - "cargo test --test rename_http_spec passes"
+          - "cargo test --test directory_listing_http_spec passes"
+          - "Old /engine/ routes return 404"
+
+      - name: "Restructure /links/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/symlink_routes.rs
+          tests:
+            - aeordb-lib/spec/http/symlink_http_spec.rs
+        changes:
+          - "POST /engine-symlink/{*path} → PUT /links/{*path}"
+          - "Add GET /links/{*path} (nofollow read)"
+          - "Add DELETE /links/{*path} (delete symlink)"
+          - "Remove ?nofollow query param from /files/, redirect to /links/"
+        acceptance:
+          - "cargo test --test symlink_http_spec passes"
+          - "PUT /links/foo with target body creates symlink"
+          - "GET /links/foo returns symlink record without following"
+
+      - name: "Restructure /blobs/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/upload_routes.rs
+            - aeordb-lib/src/server/engine_routes.rs
+          tests:
+            - aeordb-lib/spec/http/upload_spec.rs
+            - aeordb-lib/spec/http/upload_e2e_spec.rs
+            - aeordb-lib/spec/http/upload_commit_spec.rs
+        changes:
+          - "GET /engine/_hash/{hex} → GET /blobs/{hash}"
+          - "PUT /upload/chunks/{hash} → PUT /blobs/chunks/{hash}"
+          - "POST /upload/check → POST /blobs/check"
+          - "POST /upload/commit → POST /blobs/commit"
+          - "GET /upload/config → GET /blobs/config"
+        acceptance:
+          - "cargo test --test upload_spec passes"
+          - "cargo test --test upload_e2e_spec passes"
+          - "Old /upload/ routes return 404"
+
+      - name: "Restructure /versions/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/routes.rs
+            - aeordb-lib/src/server/backup_routes.rs
+            - aeordb-lib/src/server/version_file_routes.rs
+          tests:
+            - aeordb-lib/spec/http/engine_http_spec.rs
+            - aeordb-lib/spec/http/backup_http_spec.rs
+            - aeordb-lib/spec/http/version_file_history_spec.rs
+            - aeordb-lib/spec/http/version_file_restore_spec.rs
+        changes:
+          - "POST /version/snapshot → POST /versions/snapshots"
+          - "GET /version/snapshots → GET /versions/snapshots"
+          - "DELETE /version/snapshot/{name} → DELETE /versions/snapshots/{name}"
+          - "POST /version/restore → POST /versions/restore"
+          - "POST /version/fork → POST /versions/forks"
+          - "GET /version/forks → GET /versions/forks"
+          - "POST /version/fork/{name}/promote → POST /versions/forks/{name}/promote"
+          - "DELETE /version/fork/{name} → DELETE /versions/forks/{name}"
+          - "GET /version/file-history/{*path} → GET /versions/history/{*path}"
+          - "POST /version/file-restore/{*path} → POST /versions/restore/{*path}"
+          - "POST /admin/promote → POST /versions/promote"
+          - "POST /admin/export → POST /versions/export"
+          - "POST /admin/diff → POST /versions/diff"
+          - "POST /admin/import → POST /versions/import"
+        acceptance:
+          - "All version/backup test files pass"
+          - "Old /version/ routes return 404"
+
+      - name: "Restructure /sync/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/sync_routes.rs
+            - aeordb-lib/src/server/cluster_routes.rs
+            - aeordb-lib/src/server/conflict_routes.rs
+          tests:
+            - aeordb-lib/spec/http/sync_http_spec.rs
+            - aeordb-lib/spec/http/client_sync_spec.rs
+            - aeordb-lib/spec/http/cluster_http_spec.rs
+            - aeordb-lib/spec/http/conflict_http_spec.rs
+            - aeordb-lib/spec/http/replication_e2e_spec.rs
+        changes:
+          - "/sync/diff and /sync/chunks stay (already correct)"
+          - "GET /admin/cluster → GET /sync/status"
+          - "POST/GET/DELETE /admin/cluster/peers → /sync/peers"
+          - "POST /admin/cluster/sync → POST /sync/trigger"
+          - "GET /admin/conflicts → GET /sync/conflicts"
+          - "GET /admin/conflicts/{*path} → GET /sync/conflicts/{*path}"
+          - "POST /admin/conflict-resolve/{*path} → POST /sync/conflicts/{*path}/resolve"
+          - "POST /admin/conflict-dismiss/{*path} → POST /sync/conflicts/{*path}/dismiss"
+        acceptance:
+          - "All sync/cluster/conflict test files pass"
+
+      - name: "Restructure /auth/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/api_key_self_service_routes.rs
+          tests:
+            - aeordb-lib/spec/http/api_key_self_service_spec.rs
+            - aeordb-lib/spec/http/routes_coverage_spec.rs
+        changes:
+          - "/auth/token, /auth/magic-link, /auth/refresh stay (already correct)"
+          - "POST/GET/DELETE /api-keys → /auth/keys"
+          - "POST/GET/DELETE /admin/api-keys → /auth/keys/admin"
+        acceptance:
+          - "All API key test files pass"
+          - "Self-service and admin key routes work under /auth/"
+
+      - name: "Restructure /plugins/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/routes.rs
+          tests:
+            - aeordb-lib/spec/http/plugin_deploy_spec.rs
+        changes:
+          - "PUT /{db}/{schema}/{table}/_deploy → PUT /files/plugins/{name}"
+          - "GET /{db}/_plugins → GET /files/plugins/"
+          - "DELETE /{db}/{schema}/{table}/{fn}/_remove → DELETE /files/plugins/{name}"
+          - "POST /{db}/{schema}/{table}/{fn}/_invoke → POST /plugins/{name}/invoke"
+        acceptance:
+          - "cargo test --test plugin_deploy_spec passes"
+          - "Plugin deploy, list, invoke, remove all work at new paths"
+
+      - name: "Restructure /system/ routes"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-lib/src/server/admin_routes.rs
+            - aeordb-lib/src/server/gc_routes.rs
+            - aeordb-lib/src/server/task_routes.rs
+            - aeordb-lib/src/server/sse_routes.rs
+            - aeordb-lib/src/server/portal_routes.rs
+          tests:
+            - aeordb-lib/spec/http/admin_spec.rs
+            - aeordb-lib/spec/http/gc_http_spec.rs
+            - aeordb-lib/spec/http/task_http_spec.rs
+            - aeordb-lib/spec/http/sse_spec.rs
+            - aeordb-lib/spec/http/portal_spec.rs
+            - aeordb-lib/spec/http/cors_spec.rs
+            - aeordb-lib/spec/http/permission_scenarios_spec.rs
+        changes:
+          - "GET /admin/health → GET /system/health"
+          - "GET /admin/metrics → GET /system/metrics"
+          - "GET /api/stats → GET /system/stats"
+          - "All /admin/users → /system/users"
+          - "All /admin/groups → /system/groups"
+          - "POST /admin/gc → POST /system/gc"
+          - "All /admin/tasks → /system/tasks"
+          - "All /admin/cron → /system/cron"
+          - "GET /events/stream → GET /system/events"
+          - "GET /portal → GET /system/portal"
+        acceptance:
+          - "All admin/system test files pass"
+
+      - name: "Add deprecated route 404 tests"
+        description: |
+          Create a new test file that verifies ALL old routes return 404.
+          This proves the old routes are actually gone, not silently working.
+        files:
+          create:
+            - aeordb-lib/spec/http/deprecated_routes_spec.rs
+        acceptance:
+          - "Every old route path returns 404"
+          - "Test covers /engine/, /admin/, /upload/, /version/, /api-keys, /query"
+
+  # ===========================================================================
+  # PHASE 2 — HTTP response headers
+  # ===========================================================================
+  - name: "HTTP response headers"
+    description: "Standardize all custom headers with X-AeorDB- prefix."
+    parallelizable: false
+    depends_on: "Route restructuring"
+    tasks:
+
+      - name: "Rename custom headers"
+        files:
+          modify:
+            - aeordb-lib/src/server/engine_routes.rs
+          tests:
+            - aeordb-lib/spec/http/engine_http_spec.rs
+        changes:
+          - "X-Path → X-AeorDB-Path"
+          - "X-Total-Size → X-AeorDB-Size"
+          - "X-Created-At → X-AeorDB-Created"
+          - "X-Updated-At → X-AeorDB-Updated"
+          - "X-Entry-Type → X-AeorDB-Type"
+          - "x-hash → X-AeorDB-Hash"
+          - "x-total-size → X-AeorDB-Size (deduplicate)"
+          - "x-entry-type → X-AeorDB-Type (deduplicate)"
+          - "X-Symlink-Target → X-AeorDB-Link-Target"
+        acceptance:
+          - "All engine HTTP tests pass with new header names"
+          - "No lowercase custom headers remain"
+
+  # ===========================================================================
+  # PHASE 3 — Config / CLI unification
+  # ===========================================================================
+  - name: "Config / CLI unification"
+    description: "1:1 mapping between config keys and CLI flags."
+    parallelizable: true
+    tasks:
+
+      - name: "Unify config and CLI"
+        files:
+          modify:
+            - aeordb-cli/src/config.rs
+            - aeordb-cli/src/main.rs
+            - aeordb-cli/src/commands/start.rs
+            - aeordb.example.toml
+          tests:
+            - aeordb-cli/spec/config_spec.rs
+        changes:
+          - "auth.enabled (bool) → auth.mode (string: disabled/self/file:///path)"
+          - "--cors → --cors-origins"
+          - "Add --host CLI flag"
+          - "Add --jwt-expiry CLI flag"
+          - "Add --chunk-size CLI flag"
+          - "Add server.tls.cert/key to config"
+          - "Add storage.hot_dir to config"
+          - "Add server.log_format to config"
+        acceptance:
+          - "cargo test -p aeordb-cli passes"
+          - "Every config key has a CLI flag equivalent"
+          - "--cors-origins works (old --cors removed)"
+
+  # ===========================================================================
+  # PHASE 4 — JSON response conventions
+  # ===========================================================================
+  - name: "JSON response conventions"
+    description: "Standardize field names, wrap arrays, fix timestamps."
+    parallelizable: false
+    depends_on: "Route restructuring"
+    tasks:
+
+      - name: "Rename JSON fields"
+        files:
+          modify:
+            - aeordb-lib/src/server/responses.rs
+            - aeordb-lib/src/server/engine_routes.rs
+            - aeordb-lib/src/server/sync_routes.rs
+        changes:
+          - "total_size → size in EngineFileResponse"
+          - "type → entry_type in rename response and any other JSON"
+          - "Verify all timestamps in responses are milliseconds"
+        acceptance:
+          - "No JSON response contains 'total_size' field"
+          - "No JSON response contains bare 'type' field"
+
+      - name: "Wrap collection responses"
+        description: |
+          All list endpoints return {"items": [...]} instead of bare arrays.
+          This enables pagination metadata later.
+        files:
+          modify:
+            - aeordb-lib/src/server/admin_routes.rs
+            - aeordb-lib/src/server/routes.rs
+            - aeordb-lib/src/server/engine_routes.rs
+            - aeordb-lib/src/server/task_routes.rs
+            - aeordb-lib/src/server/cluster_routes.rs
+            - aeordb-lib/src/server/conflict_routes.rs
+        changes:
+          - "Wrap all list endpoint responses in {items: [...]}"
+          - "Update all test files that parse array responses"
+        acceptance:
+          - "Every list endpoint returns {items: [...]}"
+          - "All tests updated and passing"
+
+  # ===========================================================================
+  # PHASE 5 — Internal storage paths
+  # ===========================================================================
+  - name: "Internal storage path renames"
+    description: "Rename /.system/ paths for consistency + add migration."
+    parallelizable: true
+    tasks:
+
+      - name: "Rename system paths + add migration"
+        files:
+          modify:
+            - aeordb-lib/src/engine/system_store.rs
+          tests:
+            - aeordb-lib/spec/engine/system_store_spec.rs
+        changes:
+          - "/.system/apikeys/ → /.system/api-keys/"
+          - "/.system/cluster/sync/ → /.system/sync-peers/"
+          - "Add startup migration: detect old paths, move to new, log"
+        acceptance:
+          - "New paths work for all system store operations"
+          - "Old databases with old paths migrate on startup"
+          - "Migration is logged and idempotent"
+
+  # ===========================================================================
+  # PHASE 6 — Event names
+  # ===========================================================================
+  - name: "Event name consistency"
+    description: "Pluralize task/sync events, add gc_started."
+    parallelizable: true
+    tasks:
+
+      - name: "Rename event constants"
+        files:
+          modify:
+            - aeordb-lib/src/engine/engine_event.rs
+            - aeordb-lib/src/engine/task_worker.rs
+            - aeordb-lib/src/engine/sync_engine.rs
+            - aeordb-lib/src/engine/gc.rs
+        changes:
+          - "task_created → tasks_created (and started/completed/failed/cancelled)"
+          - "sync_succeeded → syncs_completed"
+          - "sync_failed → syncs_failed"
+          - "Add gc_started event"
+        acceptance:
+          - "SSE stream emits new event names"
+          - "cargo test --test sse_spec passes"
+          - "gc_started emitted before gc_completed"
+
+  # ===========================================================================
+  # PHASE 7 — Error codes
+  # ===========================================================================
+  - name: "Error codes"
+    description: "Add missing codes, remove SYSTEM_BOUNDARY."
+    parallelizable: true
+    tasks:
+
+      - name: "Update error code inventory"
+        files:
+          modify:
+            - aeordb-lib/src/server/responses.rs
+            - aeordb-lib/src/server/engine_routes.rs
+        changes:
+          - "Add PAYLOAD_TOO_LARGE error code"
+          - "Add METHOD_NOT_ALLOWED error code"
+          - "Add SERVICE_UNAVAILABLE error code"
+          - "Remove SYSTEM_BOUNDARY — fold uses into FORBIDDEN"
+          - "Wire SERVICE_UNAVAILABLE into graceful shutdown rejection"
+        acceptance:
+          - "413 responses include PAYLOAD_TOO_LARGE code"
+          - "405 responses include METHOD_NOT_ALLOWED code"
+          - "Shutdown rejection returns 503 with SERVICE_UNAVAILABLE"
+
+  # ===========================================================================
+  # PHASE 8 — Error message audit
+  # ===========================================================================
+  - name: "Error message audit"
+    description: |
+      Grep every ErrorResponse::new(...) across the codebase.
+      Rewrite any message that is vague, duplicated, or unhelpful.
+      Every message must tell the user what went wrong and how to fix it.
+    parallelizable: true
+    tasks:
+
+      - name: "Audit and rewrite error messages"
+        process:
+          - "grep -rn 'ErrorResponse::new(' aeordb-lib/src/"
+          - "Classify each message: specific+actionable vs vague"
+          - "Rewrite vague messages with what/why/how-to-fix"
+        rules:
+          - "No message should just say 'invalid input' or 'bad request'"
+          - "Include the specific field/param that's wrong"
+          - "Suggest the correct action where possible"
+          - "Never leak internal paths, stack traces, or raw errors"
+          - "No duplicate messages for different error scenarios"
+        acceptance:
+          - "Every ErrorResponse::new() has a unique, descriptive message"
+          - "Full test suite passes"
+
+  # ===========================================================================
+  # PHASE 9 — Marketing site + docs
+  # ===========================================================================
+  - name: "Marketing site + documentation"
+    description: "Update external-facing references to old routes."
+    parallelizable: true
+    depends_on: "Route restructuring"
+    tasks:
+
+      - name: "Update marketing site examples"
+        files:
+          modify:
+            - "../aeordb-www/index.html"
+        changes:
+          - "/engine/assets/hero-video.mp4 → /files/assets/hero-video.mp4"
+          - "/version/snapshot → /versions/snapshots"
+          - "/query → /files/query"
+        acceptance:
+          - "All code examples in index.html use new route paths"
+
+testing_strategy:
+  approach: |
+    The existing 3,218+ tests ARE the primary test plan. Each phase updates
+    test route strings in lockstep with route changes. If they pass, behavior
+    is preserved. Additionally, a deprecated_routes_spec.rs verifies old
+    routes return 404.
+  new_tests:
+    - "deprecated_routes_spec.rs — every old route returns 404"
+    - "Negative tests for SERVICE_UNAVAILABLE during shutdown"
+    - "Config migration test for auth.enabled → auth.mode"
+    - "System path migration test for old → new /.system/ paths"
+  execution_order:
+    - "Phase 1 tasks can be parallelized (each namespace is independent)"
+    - "Phase 2-9 depend on Phase 1 (routes must be renamed first)"
+    - "Phases 3, 5, 6, 7 can run in parallel with each other"
+    - "Phase 8 runs last (needs final route names in error messages)"
+    - "Phase 9 runs last (needs final route names for examples)"
+  full_suite_gates:
+    - "cargo test after each phase — zero failures required"
+    - "cargo check — zero warnings from changed files"
+
+implementation_notes:
+  parallelism: |
+    Phase 1 tasks are the best candidates for parallel sub-agents:
+    one agent per namespace. They each touch different route files and
+    test files with minimal overlap (only mod.rs is shared, but route
+    registration lines are distinct).
+  breaking_changes: |
+    This is a breaking API change. The client team must be notified and
+    given the route migration table. Consider: should we add a temporary
+    compatibility layer that redirects old routes to new ones? This adds
+    complexity but gives clients time to migrate.
+  rollback: |
+    Each phase is independently committable. If a phase breaks something
+    unexpected, revert that commit only.
