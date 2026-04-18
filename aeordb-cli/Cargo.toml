@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
 rand = "0.8"
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -37,3 +38,7 @@ path = "spec/stress_spec.rs"
 [[test]]
 name = "emergency_reset_spec"
 path = "spec/emergency_reset_spec.rs"
+
+[[test]]
+name = "config_spec"
+path = "spec/config_spec.rs"

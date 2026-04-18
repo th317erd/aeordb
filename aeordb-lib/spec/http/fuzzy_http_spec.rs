@@ -144,7 +144,7 @@ async fn test_contains_query_http() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -180,7 +180,7 @@ async fn test_similar_query_http() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -218,7 +218,7 @@ async fn test_phonetic_query_http() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -255,7 +255,7 @@ async fn test_fuzzy_query_http_dl() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -291,7 +291,7 @@ async fn test_fuzzy_query_http_jw() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -326,7 +326,7 @@ async fn test_match_query_http() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -370,7 +370,7 @@ async fn test_response_includes_score() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -409,7 +409,7 @@ async fn test_response_includes_matched_by() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -452,7 +452,7 @@ async fn test_results_sorted_by_score() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -496,7 +496,7 @@ async fn test_unknown_op_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -528,7 +528,7 @@ async fn test_contains_no_match() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -560,7 +560,7 @@ async fn test_contains_requires_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -588,7 +588,7 @@ async fn test_similar_requires_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -616,7 +616,7 @@ async fn test_phonetic_requires_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -644,7 +644,7 @@ async fn test_fuzzy_requires_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -672,7 +672,7 @@ async fn test_match_requires_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -701,7 +701,7 @@ async fn test_fuzzy_with_fixed_fuzziness() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -736,7 +736,7 @@ async fn test_similar_default_threshold() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -768,7 +768,7 @@ async fn test_match_no_match_returns_empty() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -801,7 +801,7 @@ async fn test_score_and_matched_by_on_non_fuzzy_query() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -837,7 +837,7 @@ async fn test_fuzzy_auto_fuzziness_string() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -866,7 +866,7 @@ async fn test_match_composite_returns_multiple_strategies() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))

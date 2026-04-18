@@ -69,8 +69,8 @@ async fn test_rename_file_basic() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/docs/readme.txt")
+        .method("PATCH")
+        .uri("/files/docs/readme.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/docs/readme2.txt"}"#))
@@ -98,8 +98,8 @@ async fn test_move_file_cross_directory() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/src/main.rs")
+        .method("PATCH")
+        .uri("/files/src/main.rs")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/archive/old_main.rs"}"#))
@@ -129,8 +129,8 @@ async fn test_rename_file_preserves_content() {
     // Rename via HTTP
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/data/original.bin")
+        .method("PATCH")
+        .uri("/files/data/original.bin")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/data/renamed.bin"}"#))
@@ -143,7 +143,7 @@ async fn test_rename_file_preserves_content() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/data/renamed.bin")
+        .uri("/files/data/renamed.bin")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -169,8 +169,8 @@ async fn test_rename_file_old_path_returns_404() {
     // Rename
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/file.txt")
+        .method("PATCH")
+        .uri("/files/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/moved.txt"}"#))
@@ -183,7 +183,7 @@ async fn test_rename_file_old_path_returns_404() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/file.txt")
+        .uri("/files/file.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -206,8 +206,8 @@ async fn test_rename_file_to_existing_returns_409() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/a.txt")
+        .method("PATCH")
+        .uri("/files/a.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/b.txt"}"#))
@@ -227,8 +227,8 @@ async fn test_rename_nonexistent_source_returns_404() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/does-not-exist.txt")
+        .method("PATCH")
+        .uri("/files/does-not-exist.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/new.txt"}"#))
@@ -252,8 +252,8 @@ async fn test_rename_symlink_basic() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/link")
+        .method("PATCH")
+        .uri("/files/link")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/renamed-link"}"#))
@@ -283,8 +283,8 @@ async fn test_rename_symlink_preserves_target() {
     // Rename the symlink
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/old-link")
+        .method("PATCH")
+        .uri("/files/old-link")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/new-link"}"#))
@@ -297,7 +297,7 @@ async fn test_rename_symlink_preserves_target() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/new-link")
+        .uri("/files/new-link")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -312,7 +312,7 @@ async fn test_rename_symlink_preserves_target() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/new-link?nofollow=true")
+        .uri("/files/new-link?nofollow=true")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -337,8 +337,8 @@ async fn test_rename_to_same_path_returns_400() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/same.txt")
+        .method("PATCH")
+        .uri("/files/same.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/same.txt"}"#))
@@ -371,8 +371,8 @@ async fn test_rename_across_system_boundary_returns_400() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/user-file.txt")
+        .method("PATCH")
+        .uri("/files/user-file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/.system/stolen.txt"}"#))
@@ -403,8 +403,8 @@ async fn test_rename_without_auth_returns_401() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/file.txt")
+        .method("PATCH")
+        .uri("/files/file.txt")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"to":"/new.txt"}"#))
         .unwrap();
@@ -423,8 +423,8 @@ async fn test_rename_missing_to_field_returns_400() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/file.txt")
+        .method("PATCH")
+        .uri("/files/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{}"#))
@@ -444,8 +444,8 @@ async fn test_rename_empty_to_field_returns_400() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/file.txt")
+        .method("PATCH")
+        .uri("/files/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":""}"#))
@@ -469,8 +469,8 @@ async fn test_rename_symlink_old_path_returns_404() {
     // Rename the symlink
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/old-symlink")
+        .method("PATCH")
+        .uri("/files/old-symlink")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/new-symlink"}"#))
@@ -483,7 +483,7 @@ async fn test_rename_symlink_old_path_returns_404() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/old-symlink?nofollow=true")
+        .uri("/files/old-symlink?nofollow=true")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -506,8 +506,8 @@ async fn test_rename_file_to_existing_symlink_returns_409() {
 
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/source.txt")
+        .method("PATCH")
+        .uri("/files/source.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/occupied"}"#))
@@ -532,7 +532,7 @@ async fn test_rename_file_preserves_created_at() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/ts-test.txt")
+        .uri("/files/ts-test.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -545,8 +545,8 @@ async fn test_rename_file_preserves_created_at() {
     // Rename
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-rename/ts-test.txt")
+        .method("PATCH")
+        .uri("/files/ts-test.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"to":"/ts-renamed.txt"}"#))
@@ -558,7 +558,7 @@ async fn test_rename_file_preserves_created_at() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/ts-renamed.txt")
+        .uri("/files/ts-renamed.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

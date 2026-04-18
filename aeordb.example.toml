@@ -10,13 +10,20 @@
 [server]
 port = 3000
 host = "0.0.0.0"
-# cors_origins = ["*"]
-# cors_origins = ["https://app.example.com", "https://admin.example.com"]
+log_format = "pretty"
+
+[server.tls]
+# cert = "/path/to/cert.pem"
+# key = "/path/to/key.pem"
+
+[server.cors]
+# origins = ["https://app.example.com"]
 
 [auth]
-enabled = true
+mode = "self"
 jwt_expiry_seconds = 3600
 
 [storage]
 database = "data.aeordb"
 chunk_size = 262144
+# hot_dir = "./hot"

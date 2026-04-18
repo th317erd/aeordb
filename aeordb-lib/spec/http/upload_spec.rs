@@ -64,7 +64,7 @@ async fn test_config_returns_hash_algo_and_chunk_size() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/upload/config")
+        .uri("/blobs/config")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -96,7 +96,7 @@ async fn test_config_no_auth_required() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/upload/config")
+        .uri("/blobs/config")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -135,7 +135,7 @@ async fn test_check_identifies_existing_chunks() {
     let body = serde_json::json!({ "hashes": [chunk_hash] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -165,7 +165,7 @@ async fn test_check_identifies_missing_chunks() {
     let body = serde_json::json!({ "hashes": [fake_hash] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -207,7 +207,7 @@ async fn test_check_mixed_have_and_needed() {
     let body = serde_json::json!({ "hashes": [existing_hash, missing_hash] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -237,7 +237,7 @@ async fn test_check_empty_hash_list() {
     let body = serde_json::json!({ "hashes": [] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -264,7 +264,7 @@ async fn test_check_requires_auth() {
     let body = serde_json::json!({ "hashes": [] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
@@ -285,7 +285,7 @@ async fn test_check_invalid_hex_hash_returns_400() {
     let body = serde_json::json!({ "hashes": ["not-valid-hex!@#$"] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -309,7 +309,7 @@ async fn test_check_invalid_json_body() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from("not json"))
@@ -347,7 +347,7 @@ async fn test_check_expired_token_returns_401() {
     let body = serde_json::json!({ "hashes": [] });
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/check")
+        .uri("/blobs/check")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -368,7 +368,7 @@ async fn test_config_post_method_not_allowed() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/upload/config")
+        .uri("/blobs/config")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -399,7 +399,7 @@ async fn test_chunk_upload_valid_hash() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .header("authorization", &auth)
         .body(Body::from(chunk_data.to_vec()))
         .unwrap();
@@ -427,7 +427,7 @@ async fn test_chunk_upload_hash_mismatch() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", wrong_hash))
+        .uri(format!("/blobs/chunks/{}", wrong_hash))
         .header("authorization", &auth)
         .body(Body::from(chunk_data.to_vec()))
         .unwrap();
@@ -453,7 +453,7 @@ async fn test_chunk_upload_too_large() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .header("authorization", &auth)
         .body(Body::from(oversized))
         .unwrap();
@@ -481,7 +481,7 @@ async fn test_chunk_upload_dedup() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .header("authorization", &auth)
         .body(Body::from(chunk_data.to_vec()))
         .unwrap();
@@ -496,7 +496,7 @@ async fn test_chunk_upload_dedup() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .header("authorization", &auth)
         .body(Body::from(chunk_data.to_vec()))
         .unwrap();
@@ -523,7 +523,7 @@ async fn test_chunk_upload_empty_chunk() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -549,7 +549,7 @@ async fn test_chunk_upload_requires_auth() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri(format!("/upload/chunks/{}", hash_hex))
+        .uri(format!("/blobs/chunks/{}", hash_hex))
         .body(Body::from(chunk_data.to_vec()))
         .unwrap();
 

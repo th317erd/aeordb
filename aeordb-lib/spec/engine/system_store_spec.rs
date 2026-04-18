@@ -673,3 +673,160 @@ fn test_delete_user_removes_auto_group() {
     system_store::delete_user(&engine, &ctx, &user_id).unwrap();
     assert!(system_store::get_group(&engine, &group_name).unwrap().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// System Path Migration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_migrate_apikeys_to_api_keys() {
+    let (engine, _dir) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    // Write data at the OLD path (/.system/apikeys/).
+    let key_id = Uuid::new_v4();
+    let record = make_api_key_record(Uuid::new_v4());
+    let json = serde_json::to_vec(&record).unwrap();
+    let old_path = format!("/.system/apikeys/{}", key_id);
+    ops.store_file(&ctx, &old_path, &json, Some("application/json")).unwrap();
+
+    // Verify old path exists before migration.
+    assert!(ops.read_file(&old_path).is_ok());
+
+    // Run migration.
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // Verify data now lives at the new path.
+    let new_path = format!("/.system/api-keys/{}", key_id);
+    let migrated_data = ops.read_file(&new_path).unwrap();
+    assert_eq!(migrated_data, json);
+
+    // Verify old path is gone.
+    assert!(ops.read_file(&old_path).is_err());
+}
+
+#[test]
+fn test_migrate_cluster_sync_to_sync_peers() {
+    let (engine, _dir) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    // Write data at the OLD path (/.system/cluster/sync/).
+    let peer_id = "42";
+    let state_json = br#"{"last_synced_hash":"abc123","last_synced_at":"2026-04-18T00:00:00Z"}"#;
+    let old_path = format!("/.system/cluster/sync/{}", peer_id);
+    ops.store_file(&ctx, &old_path, state_json, Some("application/json")).unwrap();
+
+    // Verify old path exists before migration.
+    assert!(ops.read_file(&old_path).is_ok());
+
+    // Run migration.
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // Verify data now lives at the new path.
+    let new_path = format!("/.system/sync-peers/{}", peer_id);
+    let migrated_data = ops.read_file(&new_path).unwrap();
+    assert_eq!(migrated_data, state_json.to_vec());
+
+    // Verify old path is gone.
+    assert!(ops.read_file(&old_path).is_err());
+}
+
+#[test]
+fn test_migration_is_idempotent() {
+    let (engine, _dir) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    // Write data at the OLD paths.
+    let key_id = Uuid::new_v4();
+    let record = make_api_key_record(Uuid::new_v4());
+    let json = serde_json::to_vec(&record).unwrap();
+    let old_api_path = format!("/.system/apikeys/{}", key_id);
+    ops.store_file(&ctx, &old_api_path, &json, Some("application/json")).unwrap();
+
+    let old_sync_path = "/.system/cluster/sync/99";
+    let sync_data = b"sync-state-data";
+    ops.store_file(&ctx, old_sync_path, sync_data, Some("application/octet-stream")).unwrap();
+
+    // Run migration twice — second run should not error or corrupt data.
+    system_store::migrate_system_paths(&engine).unwrap();
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // Verify data at new paths is intact.
+    let new_api_path = format!("/.system/api-keys/{}", key_id);
+    let api_data = ops.read_file(&new_api_path).unwrap();
+    assert_eq!(api_data, json);
+
+    let new_sync_path = "/.system/sync-peers/99";
+    let sync_result = ops.read_file(new_sync_path).unwrap();
+    assert_eq!(sync_result, sync_data.to_vec());
+}
+
+#[test]
+fn test_migration_skips_when_no_old_paths_exist() {
+    let (engine, _dir) = setup();
+
+    // No old paths exist. Migration should succeed with no errors.
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // Running again should also be fine.
+    system_store::migrate_system_paths(&engine).unwrap();
+}
+
+#[test]
+fn test_migration_preserves_existing_new_path_data() {
+    let (engine, _dir) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    let key_id = Uuid::new_v4();
+
+    // Write data at the NEW path first (simulates already-migrated data).
+    let new_data = b"new-path-data";
+    let new_path = format!("/.system/api-keys/{}", key_id);
+    ops.store_file(&ctx, &new_path, new_data, Some("application/octet-stream")).unwrap();
+
+    // Write DIFFERENT data at the OLD path (simulates a stale leftover).
+    let old_data = b"old-path-data";
+    let old_path = format!("/.system/apikeys/{}", key_id);
+    ops.store_file(&ctx, &old_path, old_data, Some("application/octet-stream")).unwrap();
+
+    // Run migration — should skip this entry because new path already exists.
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // The new path should retain its original data (not overwritten).
+    let result = ops.read_file(&new_path).unwrap();
+    assert_eq!(result, new_data.to_vec());
+}
+
+#[test]
+fn test_migration_handles_multiple_entries() {
+    let (engine, _dir) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    // Store multiple entries at the old api-keys path.
+    let mut expected_data = std::collections::HashMap::new();
+    for i in 0..5 {
+        let key_id = Uuid::new_v4();
+        let data = format!("record-data-{}", i).into_bytes();
+        let old_path = format!("/.system/apikeys/{}", key_id);
+        ops.store_file(&ctx, &old_path, &data, Some("application/octet-stream")).unwrap();
+        expected_data.insert(key_id, data);
+    }
+
+    // Run migration.
+    system_store::migrate_system_paths(&engine).unwrap();
+
+    // Verify all entries exist at new paths.
+    for (key_id, data) in &expected_data {
+        let new_path = format!("/.system/api-keys/{}", key_id);
+        let migrated = ops.read_file(&new_path).unwrap();
+        assert_eq!(&migrated, data);
+
+        let old_path = format!("/.system/apikeys/{}", key_id);
+        assert!(ops.read_file(&old_path).is_err(), "old path should be gone: {}", old_path);
+    }
+}

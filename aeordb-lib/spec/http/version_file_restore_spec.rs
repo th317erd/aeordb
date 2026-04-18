@@ -102,7 +102,7 @@ async fn test_restore_basic() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/readme.txt")
+        .uri("/versions/restore/readme.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -132,7 +132,7 @@ async fn test_restore_creates_auto_snapshot() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/data.txt")
+        .uri("/versions/restore/data.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -165,7 +165,7 @@ async fn test_restore_auto_snapshot_preserves_pre_restore_state() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/file.txt")
+        .uri("/versions/restore/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -208,7 +208,7 @@ async fn test_restore_from_version_hash() {
     let body = serde_json::json!({"version": hex_hash}).to_string();
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/hashfile.txt")
+        .uri("/versions/restore/hashfile.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(body))
@@ -241,7 +241,7 @@ async fn test_restore_file_not_at_version() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/newfile.txt")
+        .uri("/versions/restore/newfile.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -262,7 +262,7 @@ async fn test_restore_snapshot_not_found() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/file.txt")
+        .uri("/versions/restore/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"nonexistent"}"#))
@@ -284,7 +284,7 @@ async fn test_restore_no_permission() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/file.txt")
+        .uri("/versions/restore/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -305,7 +305,7 @@ async fn test_restore_missing_both_params() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/file.txt")
+        .uri("/versions/restore/file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{}"#))
@@ -328,7 +328,7 @@ async fn test_restore_response_shape() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/shape.txt")
+        .uri("/versions/restore/shape.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -364,7 +364,7 @@ async fn test_restore_preserves_content_type() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("POST")
-        .uri("/version/file-restore/config.json")
+        .uri("/versions/restore/config.json")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"snapshot":"snap1"}"#))
@@ -381,7 +381,7 @@ async fn test_restore_preserves_content_type() {
     let app2 = rebuild_app(&jwt_manager, &engine);
     let get_request = Request::builder()
         .method("GET")
-        .uri("/engine/config.json")
+        .uri("/files/config.json")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

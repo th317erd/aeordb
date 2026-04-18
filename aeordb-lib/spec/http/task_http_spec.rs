@@ -57,7 +57,7 @@ async fn test_trigger_reindex_via_http() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/reindex")
+        .uri("/system/tasks/reindex")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"path":"/data/"}"#))
@@ -83,7 +83,7 @@ async fn test_trigger_gc_via_http() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/gc")
+        .uri("/system/tasks/gc")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"dry_run":false}"#))
@@ -113,7 +113,7 @@ async fn test_list_tasks() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/tasks")
+        .uri("/system/tasks")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -149,7 +149,7 @@ async fn test_cancel_task_via_http() {
     // Cancel it via HTTP
     let request = Request::builder()
         .method("DELETE")
-        .uri(&format!("/admin/tasks/{}", task_id))
+        .uri(&format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -180,7 +180,7 @@ async fn test_get_task_by_id() {
 
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/admin/tasks/{}", task_id))
+        .uri(&format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -215,7 +215,7 @@ async fn test_cron_create_list_delete() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&cron_body).unwrap()))
@@ -232,7 +232,7 @@ async fn test_cron_create_list_delete() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -249,7 +249,7 @@ async fn test_cron_create_list_delete() {
     let app3 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("DELETE")
-        .uri("/admin/cron/nightly-reindex")
+        .uri("/system/cron/nightly-reindex")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -264,7 +264,7 @@ async fn test_cron_create_list_delete() {
     let app4 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -288,7 +288,7 @@ async fn test_task_endpoints_require_auth() {
     // No auth token -- should get 401
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/tasks")
+        .uri("/system/tasks")
         .body(Body::empty())
         .unwrap();
 
@@ -299,7 +299,7 @@ async fn test_task_endpoints_require_auth() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/reindex")
+        .uri("/system/tasks/reindex")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"path":"/data/"}"#))
         .unwrap();
@@ -311,7 +311,7 @@ async fn test_task_endpoints_require_auth() {
     let app3 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .body(Body::empty())
         .unwrap();
 
@@ -343,7 +343,7 @@ async fn test_auto_trigger_on_indexes_json_store() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/engine/data/.config/indexes.json")
+        .uri("/files/data/.config/indexes.json")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&indexes_json).unwrap()))
@@ -376,7 +376,7 @@ async fn test_get_nonexistent_task_returns_404() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/tasks/nonexistent-id")
+        .uri("/system/tasks/nonexistent-id")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -405,7 +405,7 @@ async fn test_non_root_user_forbidden_for_tasks() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/tasks")
+        .uri("/system/tasks")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -429,7 +429,7 @@ async fn test_cron_create_with_invalid_expression() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&cron_body).unwrap()))
@@ -458,7 +458,7 @@ async fn test_cron_update_enabled_flag() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&cron_body).unwrap()))
@@ -473,7 +473,7 @@ async fn test_cron_update_enabled_flag() {
 
     let request = Request::builder()
         .method("PATCH")
-        .uri("/admin/cron/test-cron")
+        .uri("/system/cron/test-cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&update_body).unwrap()))
@@ -490,7 +490,7 @@ async fn test_cron_update_enabled_flag() {
     let app3 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -508,7 +508,7 @@ async fn test_cron_delete_nonexistent_returns_404() {
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/admin/cron/nonexistent")
+        .uri("/system/cron/nonexistent")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -532,7 +532,7 @@ async fn test_cron_duplicate_id_returns_conflict() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&cron_body).unwrap()))
@@ -545,7 +545,7 @@ async fn test_cron_duplicate_id_returns_conflict() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/cron")
+        .uri("/system/cron")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&cron_body).unwrap()))
@@ -573,7 +573,7 @@ async fn test_auto_trigger_cancels_existing_reindex() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("PUT")
-        .uri("/engine/data/.config/indexes.json")
+        .uri("/files/data/.config/indexes.json")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"fields":[]}"#))

@@ -70,7 +70,7 @@ impl TestHarness {
 
     let request = Request::builder()
       .method("POST")
-      .uri("/admin/users")
+      .uri("/system/users")
       .header("content-type", "application/json")
       .header("authorization", &self.root_jwt)
       .body(Body::from(body))
@@ -95,7 +95,7 @@ impl TestHarness {
 
     let request = Request::builder()
       .method("POST")
-      .uri("/admin/api-keys")
+      .uri("/auth/keys/admin")
       .header("content-type", "application/json")
       .header("authorization", &self.root_jwt)
       .body(Body::from(body))
@@ -157,7 +157,7 @@ impl TestHarness {
 
     let request = Request::builder()
       .method("POST")
-      .uri("/admin/groups")
+      .uri("/system/groups")
       .header("content-type", "application/json")
       .header("authorization", &self.root_jwt)
       .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -181,7 +181,7 @@ impl TestHarness {
       format!("{}/.permissions", path)
     };
 
-    let uri = format!("/engine/{}", permissions_path.trim_start_matches('/'));
+    let uri = format!("/files/{}", permissions_path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("PUT")
@@ -202,7 +202,7 @@ impl TestHarness {
 
   /// Store a file as root. Returns the status code.
   async fn root_store_file(&self, path: &str, data: &[u8]) -> StatusCode {
-    let uri = format!("/engine/{}", path.trim_start_matches('/'));
+    let uri = format!("/files/{}", path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("PUT")
@@ -217,7 +217,7 @@ impl TestHarness {
 
   /// Store a file as a specific user (by JWT). Returns the status code.
   async fn user_store_file(&self, jwt: &str, path: &str, data: &[u8]) -> StatusCode {
-    let uri = format!("/engine/{}", path.trim_start_matches('/'));
+    let uri = format!("/files/{}", path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("PUT")
@@ -232,7 +232,7 @@ impl TestHarness {
 
   /// Read a file as a specific user. Returns (status, body_bytes).
   async fn user_read_file(&self, jwt: &str, path: &str) -> (StatusCode, Vec<u8>) {
-    let uri = format!("/engine/{}", path.trim_start_matches('/'));
+    let uri = format!("/files/{}", path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("GET")
@@ -255,7 +255,7 @@ impl TestHarness {
     } else {
       format!("{}/", path)
     };
-    let uri = format!("/engine/{}", normalized_path.trim_start_matches('/'));
+    let uri = format!("/files/{}", normalized_path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("GET")
@@ -269,7 +269,7 @@ impl TestHarness {
 
   /// Delete a file as a specific user. Returns status code.
   async fn user_delete_file(&self, jwt: &str, path: &str) -> StatusCode {
-    let uri = format!("/engine/{}", path.trim_start_matches('/'));
+    let uri = format!("/files/{}", path.trim_start_matches('/'));
 
     let request = Request::builder()
       .method("DELETE")
@@ -285,7 +285,7 @@ impl TestHarness {
   async fn deactivate_user(&self, user_id: &str) {
     let request = Request::builder()
       .method("DELETE")
-      .uri(&format!("/admin/users/{}", user_id))
+      .uri(&format!("/system/users/{}", user_id))
       .header("authorization", &self.root_jwt)
       .body(Body::empty())
       .unwrap();
@@ -446,7 +446,7 @@ async fn scenario_small_team() {
   assert_eq!(status, StatusCode::FORBIDDEN, "Carol (viewer) should NOT delete files");
 
   // Bob cannot configure (.config).
-  let uri = "/engine/project/.config";
+  let uri = "/files/project/.config";
   let request = Request::builder()
     .method("PUT")
     .uri(uri)
@@ -731,7 +731,7 @@ async fn scenario_security_nil_uuid_api_key() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(body))
@@ -763,7 +763,7 @@ async fn scenario_security_non_root_admin_access() {
   // Non-root user tries to create a user via admin endpoint -> 403.
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &user_jwt)
     .body(Body::from(r#"{"username":"hacker"}"#))
@@ -779,7 +779,7 @@ async fn scenario_security_non_root_admin_access() {
   // Non-root user tries to list users -> 403.
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("authorization", &user_jwt)
     .body(Body::empty())
     .unwrap();
@@ -794,7 +794,7 @@ async fn scenario_security_non_root_admin_access() {
   // Non-root user tries to create a group -> 403.
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &user_jwt)
     .body(Body::from(
@@ -812,7 +812,7 @@ async fn scenario_security_non_root_admin_access() {
   // Non-root user tries to list groups -> 403.
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("authorization", &user_jwt)
     .body(Body::empty())
     .unwrap();
@@ -827,7 +827,7 @@ async fn scenario_security_non_root_admin_access() {
   // Non-root user tries to create API keys -> 403.
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("content-type", "application/json")
     .header("authorization", &user_jwt)
     .body(Body::from(r#"{"user_id":"some-id"}"#))
@@ -913,7 +913,7 @@ async fn scenario_security_unsafe_query_field_email() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -943,7 +943,7 @@ async fn scenario_security_unsafe_query_field_username() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -973,7 +973,7 @@ async fn scenario_security_safe_query_field_user_id() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1003,7 +1003,7 @@ async fn scenario_security_safe_query_field_is_active() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1033,7 +1033,7 @@ async fn scenario_security_safe_query_field_created_at() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1063,7 +1063,7 @@ async fn scenario_security_unsafe_query_field_arbitrary() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1126,7 +1126,7 @@ async fn scenario_security_no_auth_token_on_engine_routes() {
   // No authorization header at all -> 401.
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/anything.txt")
+    .uri("/files/anything.txt")
     .body(Body::empty())
     .unwrap();
 
@@ -1145,7 +1145,7 @@ async fn scenario_security_invalid_jwt_on_engine_routes() {
   // Invalid JWT -> 401.
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/anything.txt")
+    .uri("/files/anything.txt")
     .header("authorization", "Bearer invalid.jwt.token")
     .body(Body::empty())
     .unwrap();
@@ -1181,7 +1181,7 @@ async fn scenario_security_expired_jwt_on_engine_routes() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/anything.txt")
+    .uri("/files/anything.txt")
     .header("authorization", &expired_jwt)
     .body(Body::empty())
     .unwrap();
@@ -1356,7 +1356,7 @@ async fn scenario_security_update_group_to_unsafe_field_rejected() {
 
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/groups/mutable_group")
+    .uri("/system/groups/mutable_group")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1374,7 +1374,7 @@ async fn scenario_security_update_group_to_unsafe_field_rejected() {
 
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/groups/mutable_group")
+    .uri("/system/groups/mutable_group")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))

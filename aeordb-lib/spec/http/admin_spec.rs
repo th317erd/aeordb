@@ -102,7 +102,7 @@ async fn test_create_user_returns_201() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"alice","email":"alice@example.com"}"#))
@@ -119,7 +119,7 @@ async fn test_create_user_has_uuid() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"bob"}"#))
@@ -148,7 +148,7 @@ async fn test_list_users() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"charlie"}"#))
@@ -160,7 +160,7 @@ async fn test_list_users() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -183,7 +183,7 @@ async fn test_get_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"diana","email":"diana@test.com"}"#))
@@ -197,7 +197,7 @@ async fn test_get_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/admin/users/{}", user_id))
+    .uri(&format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -219,7 +219,7 @@ async fn test_get_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/admin/users/{}", nonexistent_id))
+    .uri(&format!("/system/users/{}", nonexistent_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -237,7 +237,7 @@ async fn test_update_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"eve"}"#))
@@ -250,7 +250,7 @@ async fn test_update_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("PATCH")
-    .uri(&format!("/admin/users/{}", user_id))
+    .uri(&format!("/system/users/{}", user_id))
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"eve_updated","email":"eve@new.com"}"#))
@@ -272,7 +272,7 @@ async fn test_update_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("PATCH")
-    .uri(&format!("/admin/users/{}", nonexistent_id))
+    .uri(&format!("/system/users/{}", nonexistent_id))
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"nope"}"#))
@@ -291,7 +291,7 @@ async fn test_deactivate_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"frank"}"#))
@@ -304,7 +304,7 @@ async fn test_deactivate_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/admin/users/{}", user_id))
+    .uri(&format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -320,7 +320,7 @@ async fn test_deactivate_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/admin/users/{}", user_id))
+    .uri(&format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -338,7 +338,7 @@ async fn test_deactivate_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/admin/users/{}", nonexistent_id))
+    .uri(&format!("/system/users/{}", nonexistent_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -358,7 +358,7 @@ async fn test_create_group() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -381,7 +381,7 @@ async fn test_create_group_rejects_unsafe_field() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -409,7 +409,7 @@ async fn test_list_groups() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -423,7 +423,7 @@ async fn test_list_groups() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -445,7 +445,7 @@ async fn test_get_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -459,7 +459,7 @@ async fn test_get_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups/admins")
+    .uri("/system/groups/admins")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -479,7 +479,7 @@ async fn test_get_group_404() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups/nonexistent_group")
+    .uri("/system/groups/nonexistent_group")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -497,7 +497,7 @@ async fn test_update_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -511,7 +511,7 @@ async fn test_update_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/groups/devs")
+    .uri("/system/groups/devs")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"default_allow":"crudli..","query_value":"new-val"}"#))
@@ -532,7 +532,7 @@ async fn test_update_group_404() {
 
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/groups/nonexistent_group")
+    .uri("/system/groups/nonexistent_group")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"default_allow":"crudlify"}"#))
@@ -551,7 +551,7 @@ async fn test_update_group_rejects_unsafe_field() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -565,7 +565,7 @@ async fn test_update_group_rejects_unsafe_field() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/groups/safe_group")
+    .uri("/system/groups/safe_group")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"query_field":"username"}"#))
@@ -584,7 +584,7 @@ async fn test_delete_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -598,7 +598,7 @@ async fn test_delete_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/groups/deleteme")
+    .uri("/system/groups/deleteme")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -614,7 +614,7 @@ async fn test_delete_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups/deleteme")
+    .uri("/system/groups/deleteme")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -629,7 +629,7 @@ async fn test_delete_group_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/groups/nonexistent_group")
+    .uri("/system/groups/nonexistent_group")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -649,7 +649,7 @@ async fn test_admin_requires_root_users_post() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"should_fail"}"#))
@@ -666,7 +666,7 @@ async fn test_admin_requires_root_users_get() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -682,7 +682,7 @@ async fn test_admin_requires_root_groups_post() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(
@@ -701,7 +701,7 @@ async fn test_admin_requires_root_groups_get() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -717,7 +717,7 @@ async fn test_admin_requires_root_user_delete() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/admin/users/{}", uuid::Uuid::new_v4()))
+    .uri(&format!("/system/users/{}", uuid::Uuid::new_v4()))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -733,7 +733,7 @@ async fn test_admin_requires_root_group_delete() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/groups/some_group")
+    .uri("/system/groups/some_group")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -748,7 +748,7 @@ async fn test_admin_requires_auth_no_token() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/users")
+    .uri("/system/users")
     .body(Body::empty())
     .unwrap();
 
@@ -769,7 +769,7 @@ async fn test_create_user_returns_auto_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"autogroup_user"}"#))
@@ -785,7 +785,7 @@ async fn test_create_user_returns_auto_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/admin/groups/{}", expected_group_name))
+    .uri(&format!("/system/groups/{}", expected_group_name))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -810,7 +810,7 @@ async fn test_get_user_invalid_uuid() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/users/not-a-valid-uuid")
+    .uri("/system/users/not-a-valid-uuid")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -826,7 +826,7 @@ async fn test_create_user_malformed_json() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"not valid json"#))
@@ -848,7 +848,7 @@ async fn test_create_user_missing_username() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/users")
+    .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"email":"no_username@test.com"}"#))
@@ -870,7 +870,7 @@ async fn test_create_group_malformed_json() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"totally not json"#))
@@ -892,7 +892,7 @@ async fn test_create_group_missing_required_fields() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/groups")
+    .uri("/system/groups")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"incomplete"}"#))
@@ -914,7 +914,7 @@ async fn test_deactivate_user_invalid_uuid() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/users/bad-uuid")
+    .uri("/system/users/bad-uuid")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -930,7 +930,7 @@ async fn test_update_user_invalid_uuid() {
 
   let request = Request::builder()
     .method("PATCH")
-    .uri("/admin/users/bad-uuid")
+    .uri("/system/users/bad-uuid")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"x"}"#))

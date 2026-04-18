@@ -75,7 +75,7 @@ async fn test_portal_index_returns_html() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal")
+    .uri("/system/portal")
     .body(Body::empty())
     .unwrap();
 
@@ -109,7 +109,7 @@ async fn test_portal_index_slash_returns_html() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal/")
+    .uri("/system/portal/")
     .body(Body::empty())
     .unwrap();
 
@@ -135,7 +135,7 @@ async fn test_portal_app_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal/app.mjs")
+    .uri("/system/portal/app.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -157,7 +157,7 @@ async fn test_portal_dashboard_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal/dashboard.mjs")
+    .uri("/system/portal/dashboard.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -179,7 +179,7 @@ async fn test_portal_users_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal/users.mjs")
+    .uri("/system/portal/users.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -201,7 +201,7 @@ async fn test_portal_unknown_asset_returns_404() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/portal/nonexistent.js")
+    .uri("/system/portal/nonexistent.js")
     .body(Body::empty())
     .unwrap();
 
@@ -216,7 +216,7 @@ async fn test_portal_assets_require_no_auth() {
   // Deliberately omit Authorization header.
   let request = Request::builder()
     .method("GET")
-    .uri("/portal")
+    .uri("/system/portal")
     .body(Body::empty())
     .unwrap();
 
@@ -239,7 +239,7 @@ async fn test_stats_returns_json() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -269,7 +269,7 @@ async fn test_stats_requires_auth() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .body(Body::empty())
     .unwrap();
 
@@ -288,7 +288,7 @@ async fn test_stats_has_expected_fields() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -334,7 +334,7 @@ async fn test_stats_entry_count_zero_on_fresh_db() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -358,7 +358,7 @@ async fn test_stats_reflects_stored_files() {
   // Store a file.
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/hello.txt")
+    .uri("/files/test/hello.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("hello world"))
@@ -372,7 +372,7 @@ async fn test_stats_reflects_stored_files() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -400,7 +400,7 @@ async fn test_stats_db_file_size_positive() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -423,7 +423,7 @@ async fn test_stats_hash_algorithm_populated() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -448,7 +448,7 @@ async fn test_stats_created_at_populated() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -472,7 +472,7 @@ async fn test_stats_snapshot_count_after_snapshot() {
   // Create a snapshot.
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name": "snap1"}"#))
@@ -490,7 +490,7 @@ async fn test_stats_snapshot_count_after_snapshot() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -513,7 +513,7 @@ async fn test_stats_void_space_zero_on_fresh_db() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api/stats")
+    .uri("/system/stats")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();

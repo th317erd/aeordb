@@ -68,7 +68,7 @@ impl TestHarness {
         let body = format!(r#"{{"username":"{}"}}"#, username);
         let request = Request::builder()
             .method("POST")
-            .uri("/admin/users")
+            .uri("/system/users")
             .header("content-type", "application/json")
             .header("authorization", &self.root_jwt)
             .body(Body::from(body))
@@ -83,7 +83,7 @@ impl TestHarness {
         let body = format!(r#"{{"user_id":"{}"}}"#, user_id);
         let request = Request::builder()
             .method("POST")
-            .uri("/admin/api-keys")
+            .uri("/auth/keys/admin")
             .header("content-type", "application/json")
             .header("authorization", &self.root_jwt)
             .body(Body::from(body))
@@ -125,7 +125,7 @@ impl TestHarness {
         });
         let request = Request::builder()
             .method("POST")
-            .uri("/admin/groups")
+            .uri("/system/groups")
             .header("content-type", "application/json")
             .header("authorization", &self.root_jwt)
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -141,7 +141,7 @@ impl TestHarness {
         } else {
             format!("{}/.permissions", path)
         };
-        let uri = format!("/engine/{}", permissions_path.trim_start_matches('/'));
+        let uri = format!("/files/{}", permissions_path.trim_start_matches('/'));
         let request = Request::builder()
             .method("PUT")
             .uri(&uri)
@@ -159,7 +159,7 @@ impl TestHarness {
     }
 
     async fn store_file_as_root(&self, path: &str, content: &[u8]) {
-        let uri = format!("/engine/{}", path.trim_start_matches('/'));
+        let uri = format!("/files/{}", path.trim_start_matches('/'));
         let request = Request::builder()
             .method("PUT")
             .uri(&uri)
@@ -227,7 +227,7 @@ async fn test_system_path_hidden_from_non_root() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/config/test.json")
+        .uri("/files/.system/config/test.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -245,7 +245,7 @@ async fn test_system_path_visible_to_root() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/config/test.json")
+        .uri("/files/.system/config/test.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -278,7 +278,7 @@ async fn test_system_directory_hidden_in_listing() {
     // List /data/ directory -- should work and not leak /.system/
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/data/")
+        .uri("/files/data/")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -300,7 +300,7 @@ async fn test_system_directory_hidden_in_listing() {
     // Also verify that the /.system/ directory itself is blocked for GET
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/")
+        .uri("/files/.system/")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -323,7 +323,7 @@ async fn test_system_directory_visible_to_root() {
     // Root should be able to list /.system/ directory
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/")
+        .uri("/files/.system/")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -347,7 +347,7 @@ async fn test_system_put_blocked_for_non_root() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/engine/.system/config/evil.json")
+        .uri("/files/.system/config/evil.json")
         .header("content-type", "application/json")
         .header("authorization", &non_root_jwt)
         .body(Body::from(b"should-not-store".to_vec()))
@@ -373,7 +373,7 @@ async fn test_system_delete_blocked_for_non_root() {
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/engine/.system/config/victim.json")
+        .uri("/files/.system/config/victim.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -388,7 +388,7 @@ async fn test_system_delete_blocked_for_non_root() {
     // Verify the file is still there as root
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/config/victim.json")
+        .uri("/files/.system/config/victim.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -413,7 +413,7 @@ async fn test_system_head_blocked_for_non_root() {
 
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/.system/config/metadata.json")
+        .uri("/files/.system/config/metadata.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -436,7 +436,7 @@ async fn test_system_root_put_allowed() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/engine/.system/config/root-write.json")
+        .uri("/files/.system/config/root-write.json")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
         .body(Body::from(b"root-data".to_vec()))
@@ -459,7 +459,7 @@ async fn test_system_root_delete_allowed() {
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/engine/.system/config/to-delete.json")
+        .uri("/files/.system/config/to-delete.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -481,7 +481,7 @@ async fn test_system_head_allowed_for_root() {
 
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/.system/config/head-test.json")
+        .uri("/files/.system/config/head-test.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -515,7 +515,7 @@ async fn test_system_recursive_listing_filtered_for_non_root() {
     // Recursive listing from /data/ with depth=-1 as non-root
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/data/?depth=-1")
+        .uri("/files/data/?depth=-1")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -548,7 +548,7 @@ async fn test_non_system_path_accessible_to_non_root() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/public/hello.txt")
+        .uri("/files/public/hello.txt")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -576,7 +576,7 @@ async fn test_system_get_returns_404_not_403() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/secret.bin")
+        .uri("/files/.system/secret.bin")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -597,7 +597,7 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
     // Non-root accessing nonexistent /.system/ file -> 404
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/does-not-exist.json")
+        .uri("/files/.system/does-not-exist.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -608,7 +608,7 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
     // Root accessing nonexistent /.system/ file -> also 404
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/does-not-exist.json")
+        .uri("/files/.system/does-not-exist.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -633,7 +633,7 @@ async fn test_system_listing_blocked_for_non_root() {
     // Try to list /.system/config/ as non-root -> 404
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/config/")
+        .uri("/files/.system/config/")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -659,7 +659,7 @@ async fn test_system_listing_visible_for_root() {
     // List /.system/config/ as root -> 200
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/.system/config/")
+        .uri("/files/.system/config/")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();

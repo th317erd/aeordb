@@ -133,7 +133,7 @@ async fn test_listing_filters_denied_entries() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/stuff/?depth=-1")
+                .uri("/files/stuff/?depth=-1")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -182,7 +182,7 @@ async fn test_recursive_listing_filters_denied() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/dir/?depth=-1")
+                .uri("/files/dir/?depth=-1")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -232,7 +232,7 @@ async fn test_default_listing_filters() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/root/")
+                .uri("/files/root/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -273,7 +273,7 @@ async fn test_recursive_listing_prunes() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/tree/?depth=-1")
+                .uri("/files/tree/?depth=-1")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -307,7 +307,7 @@ async fn test_unscoped_token_no_filtering() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/dir/?depth=-1")
+                .uri("/files/dir/?depth=-1")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -340,7 +340,7 @@ async fn test_empty_rules_no_filtering() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/ns/?depth=-1")
+                .uri("/files/ns/?depth=-1")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -379,7 +379,7 @@ async fn test_listing_checks_l_flag_not_r() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/")
+                .uri("/files/data/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -416,7 +416,7 @@ async fn test_listing_all_denied_returns_empty_array() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/secret/")
+                .uri("/files/secret/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -454,7 +454,7 @@ async fn test_listing_mixed_permissions_same_directory() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/mixed/")
+                .uri("/files/mixed/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -498,7 +498,7 @@ async fn test_symlink_allowed_to_denied_target() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/link")
+                .uri("/files/link")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -528,7 +528,7 @@ async fn test_symlink_both_allowed() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/link")
+                .uri("/files/link")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -561,7 +561,7 @@ async fn test_symlink_denied_path() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/denied/link")
+                .uri("/files/denied/link")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -594,7 +594,7 @@ async fn test_nofollow_allowed_symlink_to_denied() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/link?nofollow=true")
+                .uri("/files/link?nofollow=true")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -627,7 +627,7 @@ async fn test_symlink_target_no_matching_rule() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/link")
+                .uri("/files/link")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -661,7 +661,7 @@ async fn test_symlink_in_listing_filtered() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/")
+                .uri("/files/data/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -740,7 +740,7 @@ async fn test_query_filters_denied_results() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/query")
+                .uri("/files/query")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(query_body.to_string()))
@@ -820,7 +820,7 @@ async fn test_query_unscoped_no_filtering() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/query")
+                .uri("/files/query")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(query_body.to_string()))

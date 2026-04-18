@@ -83,7 +83,7 @@ fn store_api_key_unchecked(
     record: &ApiKeyRecord,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/apikeys/{}", record.key_id);
+    let path = format!("/.system/api-keys/{}", record.key_id);
     let json = serde_json::to_vec(record)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -97,7 +97,7 @@ pub fn get_api_key_by_prefix(
     key_id_prefix: &str,
 ) -> EngineResult<Option<ApiKeyRecord>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/apikeys") {
+    let entries = match ops.list_directory("/.system/api-keys") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
@@ -115,7 +115,7 @@ pub fn get_api_key_by_prefix(
             continue;
         }
 
-        let path = format!("/.system/apikeys/{}", entry.name);
+        let path = format!("/.system/api-keys/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
                 return Ok(Some(record));
@@ -128,7 +128,7 @@ pub fn get_api_key_by_prefix(
 /// List all API key records.
 pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/apikeys") {
+    let entries = match ops.list_directory("/.system/api-keys") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -136,7 +136,7 @@ pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> 
 
     let mut records = Vec::new();
     for entry in &entries {
-        let path = format!("/.system/apikeys/{}", entry.name);
+        let path = format!("/.system/api-keys/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
                 records.push(record);
@@ -154,7 +154,7 @@ pub fn revoke_api_key(
     key_id: Uuid,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/apikeys/{}", key_id);
+    let path = format!("/.system/api-keys/{}", key_id);
     let data = match ops.read_file(&path) {
         Ok(data) => data,
         Err(EngineError::NotFound(_)) => return Ok(false),
@@ -737,7 +737,7 @@ pub fn store_peer_sync_state(
     state: &crate::engine::sync_engine::PeerSyncState,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/cluster/sync/{}", peer_node_id);
+    let path = format!("/.system/sync-peers/{}", peer_node_id);
     let json = serde_json::to_vec(state)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -750,7 +750,7 @@ pub fn get_peer_sync_state(
     peer_node_id: u64,
 ) -> EngineResult<Option<crate::engine::sync_engine::PeerSyncState>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/cluster/sync/{}", peer_node_id);
+    let path = format!("/.system/sync-peers/{}", peer_node_id);
     match ops.read_file(&path) {
         Ok(data) => {
             let state: crate::engine::sync_engine::PeerSyncState = serde_json::from_slice(&data)
@@ -760,4 +760,83 @@ pub fn get_peer_sync_state(
         Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Startup Migration: Rename legacy system paths
+// ---------------------------------------------------------------------------
+
+/// Migrate data from legacy system paths to their new canonical names.
+///
+/// Path renames:
+///   `/.system/apikeys/`       -> `/.system/api-keys/`
+///   `/.system/cluster/sync/`  -> `/.system/sync-peers/`
+///
+/// This function is idempotent: if the old path does not exist (or is empty),
+/// it is silently skipped. Safe to call on every startup.
+pub fn migrate_system_paths(engine: &StorageEngine) -> EngineResult<()> {
+    let ops = DirectoryOps::new(engine);
+    let ctx = RequestContext::system();
+
+    migrate_directory(&ops, &ctx, "/.system/apikeys", "/.system/api-keys")?;
+    migrate_directory(&ops, &ctx, "/.system/cluster/sync", "/.system/sync-peers")?;
+
+    Ok(())
+}
+
+/// Move all entries from `old_dir` to `new_dir`, preserving filenames.
+/// Skips entries that already exist at the new path (idempotent).
+fn migrate_directory(
+    ops: &DirectoryOps,
+    ctx: &RequestContext,
+    old_dir: &str,
+    new_dir: &str,
+) -> EngineResult<()> {
+    let entries = match ops.list_directory(old_dir) {
+        Ok(entries) => entries,
+        Err(EngineError::NotFound(_)) => return Ok(()), // nothing to migrate
+        Err(error) => return Err(error),
+    };
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        old_path = %old_dir,
+        new_path = %new_dir,
+        entry_count = entries.len(),
+        "Migrating system path entries",
+    );
+
+    for entry in &entries {
+        let old_path = format!("{}/{}", old_dir, entry.name);
+        let new_path = format!("{}/{}", new_dir, entry.name);
+
+        // Skip if the entry already exists at the new path (idempotent).
+        match ops.read_file(&new_path) {
+            Ok(_) => {
+                tracing::info!(
+                    old = %old_path,
+                    new = %new_path,
+                    "Entry already exists at new path, skipping",
+                );
+                continue;
+            }
+            Err(EngineError::NotFound(_)) => {} // expected — proceed with migration
+            Err(error) => return Err(error),
+        }
+
+        let data = ops.read_file(&old_path)?;
+        ops.store_file(ctx, &new_path, &data, Some("application/octet-stream"))?;
+        ops.delete_file(ctx, &old_path)?;
+
+        tracing::info!(
+            old = %old_path,
+            new = %new_path,
+            "Migrated system entry",
+        );
+    }
+
+    Ok(())
 }

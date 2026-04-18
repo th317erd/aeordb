@@ -80,7 +80,7 @@ async fn test_no_cors_flag_no_cors_headers() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://attacker.com")
         .header("authorization", &auth)
         .body(Body::empty())
@@ -107,7 +107,7 @@ async fn test_cors_wildcard_allows_any_origin() {
     // Use a public endpoint (health) so we don't need auth
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://anything.example.com")
         .body(Body::empty())
         .unwrap();
@@ -133,7 +133,7 @@ async fn test_cors_specific_origin_allowed() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://myapp.com")
         .body(Body::empty())
         .unwrap();
@@ -159,7 +159,7 @@ async fn test_cors_specific_origin_denied() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://evil.com")
         .body(Body::empty())
         .unwrap();
@@ -184,7 +184,7 @@ async fn test_cors_preflight_options_returns_204() {
 
     let request = Request::builder()
         .method("OPTIONS")
-        .uri("/engine/test.txt")
+        .uri("/files/test.txt")
         .header("origin", "https://myapp.com")
         .header("access-control-request-method", "PUT")
         .body(Body::empty())
@@ -212,7 +212,7 @@ async fn test_cors_config_file_overrides_default() {
     let cors_state = CorsState {
         default_origins: Some(vec!["https://default.com".to_string()]),
         rules: vec![CorsRule {
-            path: "/engine/*".to_string(),
+            path: "/files/*".to_string(),
             origins: vec!["https://special.com".to_string()],
             methods: vec!["GET".to_string(), "PUT".to_string()],
             allow_headers: vec!["Content-Type".to_string()],
@@ -227,7 +227,7 @@ async fn test_cors_config_file_overrides_default() {
     // Request to /engine/* from special.com -- should be allowed by config rule
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/test.txt")
+        .uri("/files/test.txt")
         .header("origin", "https://special.com")
         .header("authorization", &auth)
         .body(Body::empty())
@@ -244,7 +244,7 @@ async fn test_cors_config_file_overrides_default() {
     let app2 = rebuild_app_with_cors(&jwt_manager, &_engine, cors_state.clone());
     let request2 = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://default.com")
         .body(Body::empty())
         .unwrap();
@@ -261,7 +261,7 @@ async fn test_cors_config_file_overrides_default() {
     let app3 = rebuild_app_with_cors(&jwt_manager, &_engine, cors_state);
     let request3 = Request::builder()
         .method("GET")
-        .uri("/engine/test.txt")
+        .uri("/files/test.txt")
         .header("origin", "https://default.com")
         .header("authorization", &auth)
         .body(Body::empty())
@@ -286,7 +286,7 @@ async fn test_cors_config_file_path_matching() {
     let cors_state = CorsState {
         default_origins: None,
         rules: vec![CorsRule {
-            path: "/engine/*".to_string(),
+            path: "/files/*".to_string(),
             origins: vec!["https://myapp.com".to_string()],
             methods: vec!["GET".to_string()],
             allow_headers: vec!["Content-Type".to_string()],
@@ -301,7 +301,7 @@ async fn test_cors_config_file_path_matching() {
     // Deep nested path should match /engine/*
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/files/nested/deep/test.txt")
+        .uri("/files/files/nested/deep/test.txt")
         .header("origin", "https://myapp.com")
         .header("authorization", &auth)
         .body(Body::empty())
@@ -324,7 +324,7 @@ async fn test_cors_credentials_header() {
     let cors_state = CorsState {
         default_origins: None,
         rules: vec![CorsRule {
-            path: "/admin/*".to_string(),
+            path: "/system/*".to_string(),
             origins: vec!["https://admin.myapp.com".to_string()],
             methods: vec!["GET".to_string(), "POST".to_string()],
             allow_headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
@@ -338,7 +338,7 @@ async fn test_cors_credentials_header() {
     // Normal request
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://admin.myapp.com")
         .body(Body::empty())
         .unwrap();
@@ -363,7 +363,7 @@ async fn test_cors_credentials_header() {
     let app2 = rebuild_app_with_cors(&_jwt_manager, &_engine, cors_state);
     let request2 = Request::builder()
         .method("OPTIONS")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://admin.myapp.com")
         .header("access-control-request-method", "POST")
         .body(Body::empty())
@@ -391,7 +391,7 @@ async fn test_cors_preflight_disallowed_origin_returns_403() {
 
     let request = Request::builder()
         .method("OPTIONS")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://evil.com")
         .header("access-control-request-method", "POST")
         .body(Body::empty())
@@ -411,7 +411,7 @@ async fn test_cors_no_origin_header_wildcard() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .body(Body::empty())
         .unwrap();
 
@@ -445,7 +445,7 @@ async fn test_cors_multiple_origins() {
     // First origin
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://app1.com")
         .body(Body::empty())
         .unwrap();
@@ -463,7 +463,7 @@ async fn test_cors_multiple_origins() {
     let app2 = rebuild_app_with_cors(&_jwt_manager, &_engine, cors_state.clone());
     let request2 = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://app2.com")
         .body(Body::empty())
         .unwrap();
@@ -481,7 +481,7 @@ async fn test_cors_multiple_origins() {
     let app3 = rebuild_app_with_cors(&_jwt_manager, &_engine, cors_state);
     let request3 = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://app3.com")
         .body(Body::empty())
         .unwrap();
@@ -502,7 +502,7 @@ async fn test_cors_preflight_uses_config_rule_values() {
     let cors_state = CorsState {
         default_origins: Some(vec!["*".to_string()]),
         rules: vec![CorsRule {
-            path: "/engine/*".to_string(),
+            path: "/files/*".to_string(),
             origins: vec!["https://myapp.com".to_string()],
             methods: vec!["GET".to_string(), "PUT".to_string()],
             allow_headers: vec!["X-Custom-Header".to_string()],
@@ -515,7 +515,7 @@ async fn test_cors_preflight_uses_config_rule_values() {
 
     let request = Request::builder()
         .method("OPTIONS")
-        .uri("/engine/test.txt")
+        .uri("/files/test.txt")
         .header("origin", "https://myapp.com")
         .header("access-control-request-method", "PUT")
         .body(Body::empty())
@@ -544,7 +544,7 @@ async fn test_cors_exact_path_matching() {
     let cors_state = CorsState {
         default_origins: None,
         rules: vec![CorsRule {
-            path: "/admin/health".to_string(),
+            path: "/system/health".to_string(),
             origins: vec!["https://monitor.com".to_string()],
             methods: vec!["GET".to_string()],
             allow_headers: vec!["Content-Type".to_string()],
@@ -558,7 +558,7 @@ async fn test_cors_exact_path_matching() {
     // Exact match
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("origin", "https://monitor.com")
         .body(Body::empty())
         .unwrap();
@@ -595,7 +595,7 @@ async fn test_cors_first_rule_wins() {
         default_origins: None,
         rules: vec![
             CorsRule {
-                path: "/engine/*".to_string(),
+                path: "/files/*".to_string(),
                 origins: vec!["https://first.com".to_string()],
                 methods: vec!["GET".to_string()],
                 allow_headers: vec!["Content-Type".to_string()],
@@ -603,7 +603,7 @@ async fn test_cors_first_rule_wins() {
                 allow_credentials: false,
             },
             CorsRule {
-                path: "/engine/*".to_string(),
+                path: "/files/*".to_string(),
                 origins: vec!["https://second.com".to_string()],
                 methods: vec!["POST".to_string()],
                 allow_headers: vec!["Authorization".to_string()],
@@ -619,7 +619,7 @@ async fn test_cors_first_rule_wins() {
     // https://first.com should be allowed (first rule)
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/test.txt")
+        .uri("/files/test.txt")
         .header("origin", "https://first.com")
         .header("authorization", &auth)
         .body(Body::empty())
@@ -648,7 +648,7 @@ async fn test_load_cors_config_from_engine() {
     let config_json = r#"{
         "rules": [
             {
-                "path": "/engine/*",
+                "path": "/files/*",
                 "origins": ["https://myapp.com"],
                 "methods": ["GET", "PUT"],
                 "max_age": 600
@@ -666,7 +666,7 @@ async fn test_load_cors_config_from_engine() {
 
     let rules = aeordb::server::load_cors_config(&engine);
     assert_eq!(rules.len(), 2);
-    assert_eq!(rules[0].path, "/engine/*");
+    assert_eq!(rules[0].path, "/files/*");
     assert_eq!(rules[0].origins, vec!["https://myapp.com"]);
     assert_eq!(rules[0].methods, vec!["GET", "PUT"]);
     assert_eq!(rules[0].max_age, 600);

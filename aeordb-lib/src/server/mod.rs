@@ -41,10 +41,10 @@ pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_conf
 /// Default cache TTL in seconds.
 const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
-// NOTE: The permission_middleware only checks /engine/ routes for path-level
+// NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
-// checks: /query, /upload/*, /version/*, /{db}/{schema}/{table}/_deploy,
-// /{db}/{schema}/{table}/{fn}/_invoke, /events/stream.
+// checks: /files/query, /blobs/*, /versions/*, /{db}/{schema}/{table}/_deploy,
+// /{db}/{schema}/{table}/{fn}/_invoke, /system/events.
 // Consider expanding permission checks to these routes in a future update.
 
 /// Build the full application router with all routes and middleware.
@@ -230,96 +230,100 @@ pub fn create_app_with_all_and_task_queue(
   // Routes with large body limits (file uploads: 10 GB)
   let large_upload_routes = Router::new()
     .route(
-      "/engine/_hash/{hex_hash}",
+      "/blobs/{hex_hash}",
       get(engine_routes::engine_get_by_hash),
     )
     .route(
-      "/engine/{*path}",
+      "/files/{*path}",
       put(engine_routes::engine_store_file)
         .get(engine_routes::engine_get)
         .delete(engine_routes::engine_delete_file)
-        .head(engine_routes::engine_head),
+        .head(engine_routes::engine_head)
+        .patch(engine_routes::engine_rename),
     )
-    .route("/upload/chunks/{hash}", put(upload_routes::upload_chunk))
+    .route("/blobs/chunks/{hash}", put(upload_routes::upload_chunk))
     .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10 GB
 
   // Routes with medium body limits (backup import: 10 MB)
   let medium_upload_routes = Router::new()
-    .route("/admin/import", post(backup_routes::import_backup))
+    .route("/versions/import", post(backup_routes::import_backup))
     .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
 
   // Routes that require authentication (default 1 MB limit)
   let protected_routes = Router::new()
-    .route("/api-keys", post(api_key_self_service_routes::create_own_key)
-                       .get(api_key_self_service_routes::list_own_keys))
-    .route("/api-keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
-    .route("/admin/api-keys", post(routes::create_api_key).get(routes::list_api_keys))
-    .route("/admin/api-keys/{key_id}", delete(routes::revoke_api_key))
-    .route("/admin/metrics", get(routes::metrics_endpoint))
-    .route("/api/stats", get(portal_routes::get_stats))
-    // Admin user/group management
-    .route("/admin/users", post(admin_routes::create_user).get(admin_routes::list_users))
+    // Auth: API key self-service
+    .route("/auth/keys", post(api_key_self_service_routes::create_own_key)
+                        .get(api_key_self_service_routes::list_own_keys))
+    .route("/auth/keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
+    .route("/auth/keys/admin", post(routes::create_api_key).get(routes::list_api_keys))
+    .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key))
+    // System: metrics, stats
+    .route("/system/metrics", get(routes::metrics_endpoint))
+    .route("/system/stats", get(portal_routes::get_stats))
+    // System: user/group management
+    .route("/system/users", post(admin_routes::create_user).get(admin_routes::list_users))
     .route(
-      "/admin/users/{user_id}",
+      "/system/users/{user_id}",
       get(admin_routes::get_user)
         .patch(admin_routes::update_user)
         .delete(admin_routes::deactivate_user),
     )
-    .route("/admin/groups", post(admin_routes::create_group).get(admin_routes::list_groups))
+    .route("/system/groups", post(admin_routes::create_group).get(admin_routes::list_groups))
     .route(
-      "/admin/groups/{name}",
+      "/system/groups/{name}",
       get(admin_routes::get_group)
         .patch(admin_routes::update_group)
         .delete(admin_routes::delete_group),
     )
-    // Backup routes (export, diff, promote — import handled above with 10MB limit)
-    .route("/admin/export", post(backup_routes::export_backup))
-    .route("/admin/diff", post(backup_routes::diff_backup))
-    .route("/admin/promote", post(backup_routes::promote_head))
-    .route("/admin/gc", post(gc_routes::run_gc_endpoint))
-    // Task & cron routes
-    .route("/admin/tasks", get(task_routes::list_tasks))
-    .route("/admin/tasks/reindex", post(task_routes::trigger_reindex))
-    .route("/admin/tasks/gc", post(task_routes::trigger_gc))
-    .route("/admin/tasks/cleanup", post(task_routes::trigger_cleanup))
-    .route("/admin/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
-    .route("/admin/cron", get(task_routes::list_cron).post(task_routes::create_cron))
-    .route("/admin/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
-    // Upload check, commit, and config (small payloads)
-    .route("/upload/check", post(upload_routes::upload_check))
-    .route("/upload/commit", post(upload_routes::upload_commit))
-    .route("/upload/config", get(upload_routes::upload_config))
-    // SSE event stream
-    .route("/events/stream", get(sse_routes::event_stream))
-    // Query route
-    .route("/query", post(engine_routes::query_endpoint))
-    // Version: snapshot routes
-    .route("/version/snapshot", post(engine_routes::snapshot_create))
-    .route("/version/snapshots", get(engine_routes::snapshot_list))
-    .route("/version/restore", post(engine_routes::snapshot_restore))
-    .route("/version/snapshot/{name}", delete(engine_routes::snapshot_delete))
-    // Version: fork routes
-    .route("/version/fork", post(engine_routes::fork_create))
-    .route("/version/forks", get(engine_routes::fork_list))
-    .route("/version/fork/{name}/promote", post(engine_routes::fork_promote))
-    .route("/version/fork/{name}", delete(engine_routes::fork_abandon))
-    // Version: file-level access routes
-    .route("/version/file-history/{*path}", get(version_file_routes::file_history))
-    .route("/version/file-restore/{*path}", post(version_file_routes::file_restore))
-    // Conflict management routes
-    .route("/admin/conflicts", get(conflict_routes::list_conflicts))
-    .route("/admin/conflicts/{*path}", get(conflict_routes::get_conflict))
-    .route("/admin/conflict-resolve/{*path}", post(conflict_routes::resolve_conflict))
-    .route("/admin/conflict-dismiss/{*path}", post(conflict_routes::dismiss_conflict))
-    // Cluster / replication admin routes
-    .route("/admin/cluster", get(cluster_routes::cluster_status))
-    .route("/admin/cluster/peers", post(cluster_routes::add_peer).get(cluster_routes::list_peers))
-    .route("/admin/cluster/peers/{node_id}", delete(cluster_routes::remove_peer))
-    .route("/admin/cluster/sync", post(cluster_routes::trigger_sync))
-    // Symlink routes
-    .route("/engine-symlink/{*path}", post(symlink_routes::create_symlink))
-    // Rename / move routes
-    .route("/engine-rename/{*path}", post(engine_routes::engine_rename))
+    // Versions: export, diff, promote
+    .route("/versions/export", post(backup_routes::export_backup))
+    .route("/versions/diff", post(backup_routes::diff_backup))
+    .route("/versions/promote", post(backup_routes::promote_head))
+    // System: GC
+    .route("/system/gc", post(gc_routes::run_gc_endpoint))
+    // System: task & cron routes
+    .route("/system/tasks", get(task_routes::list_tasks))
+    .route("/system/tasks/reindex", post(task_routes::trigger_reindex))
+    .route("/system/tasks/gc", post(task_routes::trigger_gc))
+    .route("/system/tasks/cleanup", post(task_routes::trigger_cleanup))
+    .route("/system/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
+    .route("/system/cron", get(task_routes::list_cron).post(task_routes::create_cron))
+    .route("/system/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
+    // Blobs: upload check, commit, and config (small payloads)
+    .route("/blobs/check", post(upload_routes::upload_check))
+    .route("/blobs/commit", post(upload_routes::upload_commit))
+    .route("/blobs/config", get(upload_routes::upload_config))
+    // System: SSE event stream
+    .route("/system/events", get(sse_routes::event_stream))
+    // Files: query route (registered before /files/{*path} wildcard)
+    .route("/files/query", post(engine_routes::query_endpoint))
+    // Versions: snapshot routes
+    .route("/versions/snapshots", post(engine_routes::snapshot_create)
+                                 .get(engine_routes::snapshot_list))
+    .route("/versions/restore", post(engine_routes::snapshot_restore))
+    .route("/versions/snapshots/{name}", delete(engine_routes::snapshot_delete))
+    // Versions: fork routes
+    .route("/versions/forks", post(engine_routes::fork_create)
+                             .get(engine_routes::fork_list))
+    .route("/versions/forks/{name}/promote", post(engine_routes::fork_promote))
+    .route("/versions/forks/{name}", delete(engine_routes::fork_abandon))
+    // Versions: file-level access routes
+    .route("/versions/history/{*path}", get(version_file_routes::file_history))
+    .route("/versions/restore/{*path}", post(version_file_routes::file_restore))
+    // Sync: conflict management routes
+    .route("/sync/conflicts", get(conflict_routes::list_conflicts))
+    .route("/sync/conflicts/{*path}", get(conflict_routes::get_conflict))
+    .route("/sync/resolve/{*path}", post(conflict_routes::resolve_conflict))
+    .route("/sync/dismiss/{*path}", post(conflict_routes::dismiss_conflict))
+    // Sync: cluster / replication routes
+    .route("/sync/status", get(cluster_routes::cluster_status))
+    .route("/sync/peers", post(cluster_routes::add_peer).get(cluster_routes::list_peers))
+    .route("/sync/peers/{node_id}", delete(cluster_routes::remove_peer))
+    .route("/sync/trigger", post(cluster_routes::trigger_sync))
+    // Links: symlink routes
+    .route("/links/{*path}", put(symlink_routes::create_symlink)
+                            .get(symlink_routes::get_symlink)
+                            .delete(symlink_routes::delete_symlink))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",
@@ -345,15 +349,15 @@ pub fn create_app_with_all_and_task_queue(
 
   // Public routes (no auth required)
   let public_routes = Router::new()
-    .route("/admin/health", get(routes::health_check))
+    .route("/system/health", get(routes::health_check))
     .route("/auth/token", post(routes::auth_token))
     .route("/auth/magic-link", post(routes::request_magic_link))
     .route("/auth/magic-link/verify", get(routes::verify_magic_link))
     .route("/auth/refresh", post(routes::refresh_token))
     // Portal (embedded dashboard UI)
-    .route("/portal", get(portal_routes::portal_index))
-    .route("/portal/", get(portal_routes::portal_index))
-    .route("/portal/{filename}", get(portal_routes::portal_asset))
+    .route("/system/portal", get(portal_routes::portal_index))
+    .route("/system/portal/", get(portal_routes::portal_index))
+    .route("/system/portal/{filename}", get(portal_routes::portal_asset))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
@@ -378,6 +382,7 @@ pub fn create_app_with_all_and_task_queue(
 
 use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
+use crate::engine::system_store;
 
 /// Create or open a StorageEngine at the given path (no hot file — for tests/tools).
 pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
@@ -400,6 +405,11 @@ pub fn create_engine_with_hot_dir(engine_path: &str, hot_dir: Option<&std::path:
   directory_ops
     .ensure_root_directory(&ctx)
     .expect("failed to create engine root directory");
+
+  // Run system path migrations (idempotent — safe on every startup).
+  system_store::migrate_system_paths(&engine)
+    .expect("failed to run system path migration");
+
   engine
 }
 

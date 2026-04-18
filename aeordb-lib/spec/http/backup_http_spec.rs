@@ -72,7 +72,7 @@ async fn test_export_head_returns_aeordb() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/export")
+        .uri("/versions/export")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -113,7 +113,7 @@ async fn test_export_invalid_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/export?hash=not_valid_hex_zzz")
+        .uri("/versions/export?hash=not_valid_hex_zzz")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -138,7 +138,7 @@ async fn test_export_nonexistent_snapshot() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/export?snapshot=nonexistent")
+        .uri("/versions/export?snapshot=nonexistent")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -159,7 +159,7 @@ async fn test_import_export_round_trip() {
     // Export
     let export_request = Request::builder()
         .method("POST")
-        .uri("/admin/export")
+        .uri("/versions/export")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -174,7 +174,7 @@ async fn test_import_export_round_trip() {
     let app2 = rebuild_app(&jwt_manager, &engine);
     let import_request = Request::builder()
         .method("POST")
-        .uri("/admin/import?promote=true")
+        .uri("/versions/import?promote=true")
         .header("authorization", &auth)
         .header("content-type", "application/octet-stream")
         .body(Body::from(exported_data))
@@ -201,7 +201,7 @@ async fn test_promote_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri(&format!("/admin/promote?hash={}", head_hash))
+        .uri(&format!("/versions/promote?hash={}", head_hash))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -223,7 +223,7 @@ async fn test_promote_invalid_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/promote?hash=zzzz_not_hex")
+        .uri("/versions/promote?hash=zzzz_not_hex")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -250,7 +250,7 @@ async fn test_promote_nonexistent_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri(&format!("/admin/promote?hash={}", bogus))
+        .uri(&format!("/versions/promote?hash={}", bogus))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -273,7 +273,7 @@ async fn test_import_without_auth_fails() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/import")
+        .uri("/versions/import")
         .body(Body::empty())
         .unwrap();
 
@@ -289,7 +289,7 @@ async fn test_export_without_auth_fails() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/export")
+        .uri("/versions/export")
         .body(Body::empty())
         .unwrap();
 
@@ -305,7 +305,7 @@ async fn test_promote_without_auth_fails() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/promote?hash=abc123")
+        .uri("/versions/promote?hash=abc123")
         .body(Body::empty())
         .unwrap();
 
@@ -321,7 +321,7 @@ async fn test_diff_without_auth_fails() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/diff?from=abc")
+        .uri("/versions/diff?from=abc")
         .body(Body::empty())
         .unwrap();
 
@@ -338,7 +338,7 @@ async fn test_import_empty_body() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/import")
+        .uri("/versions/import")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -359,7 +359,7 @@ async fn test_import_with_force_and_promote_params() {
     // First export to get valid data
     let export_request = Request::builder()
         .method("POST")
-        .uri("/admin/export")
+        .uri("/versions/export")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -371,7 +371,7 @@ async fn test_import_with_force_and_promote_params() {
     let app2 = rebuild_app(&jwt_manager, &engine);
     let import_request = Request::builder()
         .method("POST")
-        .uri("/admin/import?force=true&promote=true")
+        .uri("/versions/import?force=true&promote=true")
         .header("authorization", &auth)
         .body(Body::from(exported_data))
         .unwrap();

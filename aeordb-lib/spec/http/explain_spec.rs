@@ -125,7 +125,7 @@ async fn query_with_explain(
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -281,7 +281,7 @@ async fn test_explain_shows_order_by() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &bearer_token(&jwt_manager))
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -313,7 +313,7 @@ async fn test_explain_shows_aggregate() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &bearer_token(&jwt_manager))
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -366,7 +366,7 @@ async fn test_explain_off_returns_normal() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -417,7 +417,7 @@ async fn test_explain_false_returns_normal() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -447,7 +447,7 @@ async fn test_explain_plan_shows_limit() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))

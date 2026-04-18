@@ -65,7 +65,7 @@ async fn test_engine_store_file_returns_201() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/docs/readme.txt")
+    .uri("/files/docs/readme.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("hello engine"))
@@ -88,7 +88,7 @@ async fn test_engine_get_file_returns_data() {
   // Store a file
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/data.bin")
+    .uri("/files/test/data.bin")
     .header("content-type", "application/octet-stream")
     .header("authorization", &auth)
     .body(Body::from(vec![1u8, 2, 3, 4, 5]))
@@ -101,7 +101,7 @@ async fn test_engine_get_file_returns_data() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/test/data.bin")
+    .uri("/files/test/data.bin")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -120,7 +120,7 @@ async fn test_engine_get_file_returns_content_type() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/app/config.json")
+    .uri("/files/app/config.json")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"key":"val"}"#))
@@ -132,7 +132,7 @@ async fn test_engine_get_file_returns_content_type() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/app/config.json")
+    .uri("/files/app/config.json")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -152,7 +152,7 @@ async fn test_engine_get_file_404() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/nonexistent/file.txt")
+    .uri("/files/nonexistent/file.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -169,7 +169,7 @@ async fn test_engine_get_directory_returns_listing() {
   // Store two files in the same directory
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/mydir/file1.txt")
+    .uri("/files/mydir/file1.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("first"))
@@ -180,7 +180,7 @@ async fn test_engine_get_directory_returns_listing() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/mydir/file2.txt")
+    .uri("/files/mydir/file2.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("second"))
@@ -192,7 +192,7 @@ async fn test_engine_get_directory_returns_listing() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/mydir")
+    .uri("/files/mydir")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -220,7 +220,7 @@ async fn test_engine_delete_file_returns_200() {
   // Store first
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/todelete/file.txt")
+    .uri("/files/todelete/file.txt")
     .header("authorization", &auth)
     .body(Body::from("delete me"))
     .unwrap();
@@ -231,7 +231,7 @@ async fn test_engine_delete_file_returns_200() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri("/engine/todelete/file.txt")
+    .uri("/files/todelete/file.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -250,7 +250,7 @@ async fn test_engine_delete_file_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/engine/nope/gone.txt")
+    .uri("/files/nope/gone.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -266,7 +266,7 @@ async fn test_engine_head_returns_metadata() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/meta/info.txt")
+    .uri("/files/meta/info.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("metadata test"))
@@ -277,7 +277,7 @@ async fn test_engine_head_returns_metadata() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("HEAD")
-    .uri("/engine/meta/info.txt")
+    .uri("/files/meta/info.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -314,7 +314,7 @@ async fn test_engine_head_on_directory_returns_directory_type() {
   // Store a file to create the directory implicitly
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/headdir/child.txt")
+    .uri("/files/headdir/child.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("content"))
@@ -326,7 +326,7 @@ async fn test_engine_head_on_directory_returns_directory_type() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("HEAD")
-    .uri("/engine/headdir")
+    .uri("/files/headdir")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -350,7 +350,7 @@ async fn test_engine_store_without_content_type() {
   // PUT without content-type header -- should still succeed
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/noct/file.bin")
+    .uri("/files/noct/file.bin")
     .header("authorization", &auth)
     .body(Body::from("some data"))
     .unwrap();
@@ -374,7 +374,7 @@ async fn test_engine_get_nonexistent_directory() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/totally/does/not/exist")
+    .uri("/files/totally/does/not/exist")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -390,7 +390,7 @@ async fn test_engine_delete_nonexistent_deep_path_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/engine/deep/nested/nonexistent/path.txt")
+    .uri("/files/deep/nested/nonexistent/path.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -405,7 +405,7 @@ async fn test_engine_put_requires_auth() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/unauthed/file.txt")
+    .uri("/files/unauthed/file.txt")
     .header("content-type", "text/plain")
     .body(Body::from("no auth"))
     .unwrap();
@@ -420,7 +420,7 @@ async fn test_engine_delete_requires_auth() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/engine/unauthed/file.txt")
+    .uri("/files/unauthed/file.txt")
     .body(Body::empty())
     .unwrap();
 
@@ -434,7 +434,7 @@ async fn test_engine_head_requires_auth() {
 
   let request = Request::builder()
     .method("HEAD")
-    .uri("/engine/unauthed/file.txt")
+    .uri("/files/unauthed/file.txt")
     .body(Body::empty())
     .unwrap();
 
@@ -457,7 +457,7 @@ async fn test_query_unsupported_value_type_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -482,7 +482,7 @@ async fn test_query_unsupported_value2_type_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -499,7 +499,7 @@ async fn test_snapshot_create_with_malformed_json_returns_error() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"not_valid_json"#))
@@ -521,7 +521,7 @@ async fn test_fork_create_with_malformed_json_returns_error() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"not json at all"#))
@@ -543,7 +543,7 @@ async fn test_snapshot_restore_with_missing_name_returns_error() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/restore")
+    .uri("/versions/restore")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{}"#))
@@ -565,7 +565,7 @@ async fn test_engine_get_file_returns_metadata_headers() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/headers/test.txt")
+    .uri("/files/headers/test.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("header test"))
@@ -576,7 +576,7 @@ async fn test_engine_get_file_returns_metadata_headers() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/headers/test.txt")
+    .uri("/files/headers/test.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -603,7 +603,7 @@ async fn test_engine_overwrite_existing_file() {
   // Store initial file
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/overwrite/file.txt")
+    .uri("/files/overwrite/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("version 1"))
@@ -615,7 +615,7 @@ async fn test_engine_overwrite_existing_file() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/overwrite/file.txt")
+    .uri("/files/overwrite/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("version 2 is longer"))
@@ -627,7 +627,7 @@ async fn test_engine_overwrite_existing_file() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/overwrite/file.txt")
+    .uri("/files/overwrite/file.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -646,7 +646,7 @@ async fn test_engine_store_creates_intermediate_dirs() {
   // Store file at a deeply nested path
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/a/b/c/deep.txt")
+    .uri("/files/a/b/c/deep.txt")
     .header("authorization", &auth)
     .body(Body::from("deep"))
     .unwrap();
@@ -657,7 +657,7 @@ async fn test_engine_store_creates_intermediate_dirs() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/a/b/c")
+    .uri("/files/a/b/c")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -680,7 +680,7 @@ async fn test_engine_store_and_get_roundtrip() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/roundtrip/fox.txt")
+    .uri("/files/roundtrip/fox.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from(original_data))
@@ -691,7 +691,7 @@ async fn test_engine_store_and_get_roundtrip() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/roundtrip/fox.txt")
+    .uri("/files/roundtrip/fox.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -710,7 +710,7 @@ async fn test_engine_routes_require_auth() {
   // GET without auth should fail
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/some/path")
+    .uri("/files/some/path")
     .body(Body::empty())
     .unwrap();
 
@@ -729,7 +729,7 @@ async fn test_snapshot_create() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"v1","metadata":{"env":"test"}}"#))
@@ -753,7 +753,7 @@ async fn test_snapshot_list() {
   // Create two snapshots
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"snap1","metadata":{}}"#))
@@ -764,7 +764,7 @@ async fn test_snapshot_list() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"snap2","metadata":{}}"#))
@@ -776,7 +776,7 @@ async fn test_snapshot_list() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/version/snapshots")
+    .uri("/versions/snapshots")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -797,7 +797,7 @@ async fn test_snapshot_restore() {
   // Create a snapshot
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"restore-me","metadata":{}}"#))
@@ -809,7 +809,7 @@ async fn test_snapshot_restore() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/version/restore")
+    .uri("/versions/restore")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"restore-me"}"#))
@@ -831,7 +831,7 @@ async fn test_snapshot_delete() {
   // Create a snapshot
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"to-delete","metadata":{}}"#))
@@ -843,7 +843,7 @@ async fn test_snapshot_delete() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri("/version/snapshot/to-delete")
+    .uri("/versions/snapshots/to-delete")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -858,7 +858,7 @@ async fn test_snapshot_delete() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/version/snapshots")
+    .uri("/versions/snapshots")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -880,7 +880,7 @@ async fn test_fork_create() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"my-batch"}"#))
@@ -903,7 +903,7 @@ async fn test_fork_list() {
   // Create a fork
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"fork-a"}"#))
@@ -915,7 +915,7 @@ async fn test_fork_list() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/version/forks")
+    .uri("/versions/forks")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -937,7 +937,7 @@ async fn test_fork_promote() {
   // Create a fork
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"promote-me"}"#))
@@ -949,7 +949,7 @@ async fn test_fork_promote() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork/promote-me/promote")
+    .uri("/versions/forks/promote-me/promote")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -965,7 +965,7 @@ async fn test_fork_promote() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/version/forks")
+    .uri("/versions/forks")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -984,7 +984,7 @@ async fn test_fork_abandon() {
   // Create a fork
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"abandon-me"}"#))
@@ -996,7 +996,7 @@ async fn test_fork_abandon() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri("/version/fork/abandon-me")
+    .uri("/versions/forks/abandon-me")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1011,7 +1011,7 @@ async fn test_fork_abandon() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/version/forks")
+    .uri("/versions/forks")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1036,7 +1036,7 @@ async fn test_engine_large_file() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/big/largefile.bin")
+    .uri("/files/big/largefile.bin")
     .header("content-type", "application/octet-stream")
     .header("authorization", &auth)
     .body(Body::from(large_data.clone()))
@@ -1052,7 +1052,7 @@ async fn test_engine_large_file() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/big/largefile.bin")
+    .uri("/files/big/largefile.bin")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1076,7 +1076,7 @@ async fn test_snapshot_create_duplicate_returns_conflict() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"dup","metadata":{}}"#))
@@ -1088,7 +1088,7 @@ async fn test_snapshot_create_duplicate_returns_conflict() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"dup","metadata":{}}"#))
@@ -1105,7 +1105,7 @@ async fn test_snapshot_restore_nonexistent_returns_404() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/restore")
+    .uri("/versions/restore")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"nonexistent"}"#))
@@ -1122,7 +1122,7 @@ async fn test_snapshot_delete_nonexistent_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/version/snapshot/nope")
+    .uri("/versions/snapshots/nope")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1138,7 +1138,7 @@ async fn test_fork_create_duplicate_returns_conflict() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"dup-fork"}"#))
@@ -1149,7 +1149,7 @@ async fn test_fork_create_duplicate_returns_conflict() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork")
+    .uri("/versions/forks")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"name":"dup-fork"}"#))
@@ -1166,7 +1166,7 @@ async fn test_fork_promote_nonexistent_returns_404() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/fork/ghost/promote")
+    .uri("/versions/forks/ghost/promote")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1182,7 +1182,7 @@ async fn test_fork_abandon_nonexistent_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/version/fork/ghost")
+    .uri("/versions/forks/ghost")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1197,7 +1197,7 @@ async fn test_version_routes_require_auth() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/version/snapshot")
+    .uri("/versions/snapshots")
     .header("content-type", "application/json")
     .body(Body::from(r#"{"name":"noauth","metadata":{}}"#))
     .unwrap();
@@ -1213,7 +1213,7 @@ async fn test_engine_head_nonexistent_returns_404() {
 
   let request = Request::builder()
     .method("HEAD")
-    .uri("/engine/nope/nothing.txt")
+    .uri("/files/nope/nothing.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1229,7 +1229,7 @@ async fn test_engine_store_empty_file() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/empty/zero.txt")
+    .uri("/files/empty/zero.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::empty())
@@ -1245,7 +1245,7 @@ async fn test_engine_store_empty_file() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/empty/zero.txt")
+    .uri("/files/empty/zero.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1271,7 +1271,7 @@ async fn test_get_by_hash_returns_file_content() {
   // Store a file
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/hashtest/file.txt")
+    .uri("/files/hashtest/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from(content))
@@ -1286,7 +1286,7 @@ async fn test_get_by_hash_returns_file_content() {
 
   // Fetch by hash
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri = format!("/engine/_hash/{}", hash);
+  let uri = format!("/blobs/{}", hash);
   let request = Request::builder()
     .method("GET")
     .uri(&uri)
@@ -1327,7 +1327,7 @@ async fn test_get_by_hash_not_found() {
 
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/engine/_hash/{}", fake_hash))
+    .uri(&format!("/blobs/{}", fake_hash))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1343,7 +1343,7 @@ async fn test_get_by_hash_invalid_hex() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/_hash/not-valid-hex-string!")
+    .uri("/blobs/not-valid-hex-string!")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1364,7 +1364,7 @@ async fn test_get_by_hash_requires_auth() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/_hash/deadbeef")
+    .uri("/blobs/deadbeef")
     .body(Body::empty())
     .unwrap();
 
@@ -1382,7 +1382,7 @@ async fn test_get_by_hash_large_file_roundtrip() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/hashtest/large.bin")
+    .uri("/files/hashtest/large.bin")
     .header("content-type", "application/octet-stream")
     .header("authorization", &auth)
     .body(Body::from(large_data.clone()))
@@ -1396,7 +1396,7 @@ async fn test_get_by_hash_large_file_roundtrip() {
 
   // Fetch the large file by hash
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri = format!("/engine/_hash/{}", hash);
+  let uri = format!("/blobs/{}", hash);
   let request = Request::builder()
     .method("GET")
     .uri(&uri)
@@ -1420,7 +1420,7 @@ async fn test_get_by_hash_empty_file() {
   // Store an empty file
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/hashtest/empty.txt")
+    .uri("/files/hashtest/empty.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::empty())
@@ -1434,7 +1434,7 @@ async fn test_get_by_hash_empty_file() {
 
   // Fetch by hash — should return empty body
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri = format!("/engine/_hash/{}", hash);
+  let uri = format!("/blobs/{}", hash);
   let request = Request::builder()
     .method("GET")
     .uri(&uri)
@@ -1456,7 +1456,7 @@ async fn test_put_response_includes_hash_field() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/hashfield/doc.txt")
+    .uri("/files/hashfield/doc.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("check hash field"))
@@ -1486,7 +1486,7 @@ async fn test_get_by_hash_same_content_different_paths() {
   // Store same content at two different paths
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/dup/a.txt")
+    .uri("/files/dup/a.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from(content))
@@ -1499,7 +1499,7 @@ async fn test_get_by_hash_same_content_different_paths() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/dup/b.txt")
+    .uri("/files/dup/b.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from(content))
@@ -1518,7 +1518,7 @@ async fn test_get_by_hash_same_content_different_paths() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
       .method("GET")
-      .uri(&format!("/engine/_hash/{}", hash))
+      .uri(&format!("/blobs/{}", hash))
       .header("authorization", &auth)
       .body(Body::empty())
       .unwrap();

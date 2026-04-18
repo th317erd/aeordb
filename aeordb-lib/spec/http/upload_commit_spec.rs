@@ -62,7 +62,7 @@ async fn upload_chunk(app: axum::Router, token: &str, data: &[u8]) -> String {
     let hash = compute_chunk_hash(data);
     let resp = app
         .oneshot(
-            Request::put(&format!("/upload/chunks/{}", hash))
+            Request::put(&format!("/blobs/chunks/{}", hash))
                 .header("Authorization", token)
                 .header("Content-Type", "application/octet-stream")
                 .body(Body::from(data.to_vec()))
@@ -102,7 +102,7 @@ async fn test_commit_single_file() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -120,7 +120,7 @@ async fn test_commit_single_file() {
     // Read it back via GET /engine/test/hello.txt
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::get("/engine/test/hello.txt")
+            Request::get("/files/test/hello.txt")
                 .header("Authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -160,7 +160,7 @@ async fn test_commit_multiple_files() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -181,7 +181,7 @@ async fn test_commit_multiple_files() {
     ] {
         let resp = rebuild_app(&jwt, &engine)
             .oneshot(
-                Request::get(&format!("/engine{}", path))
+                Request::get(&format!("/files{}", path))
                     .header("Authorization", &token)
                     .body(Body::empty())
                     .unwrap(),
@@ -214,7 +214,7 @@ async fn test_commit_missing_chunks() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -245,7 +245,7 @@ async fn test_commit_empty_files_list() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -282,7 +282,7 @@ async fn test_commit_empty_file_zero_chunks() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -322,7 +322,7 @@ async fn test_commit_preserves_chunk_order() {
 
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Authorization", &token)
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
@@ -335,7 +335,7 @@ async fn test_commit_preserves_chunk_order() {
     // Read back the file
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
-            Request::get("/engine/ordered.bin")
+            Request::get("/files/ordered.bin")
                 .header("Authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -372,7 +372,7 @@ async fn test_commit_requires_auth() {
 
     let resp = app
         .oneshot(
-            Request::post("/upload/commit")
+            Request::post("/blobs/commit")
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
                 .unwrap(),

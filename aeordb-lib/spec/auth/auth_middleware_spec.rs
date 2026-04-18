@@ -64,7 +64,7 @@ async fn test_unauthenticated_request_returns_401() {
   let (app, _, _, _temp_dir) = test_app();
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .body(Body::from("hello"))
     .unwrap();
 
@@ -79,7 +79,7 @@ async fn test_valid_bearer_token_passes() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .header("authorization", format!("Bearer {}", token))
     .header("content-type", "text/plain")
     .body(Body::from("hello"))
@@ -106,7 +106,7 @@ async fn test_expired_bearer_token_returns_401() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .header("authorization", format!("Bearer {}", token))
     .body(Body::from("hello"))
     .unwrap();
@@ -121,7 +121,7 @@ async fn test_malformed_bearer_token_returns_401() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .header("authorization", "Bearer not.a.real.jwt.token")
     .body(Body::from("hello"))
     .unwrap();
@@ -136,7 +136,7 @@ async fn test_missing_authorization_header_returns_401() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .body(Body::from("hello"))
     .unwrap();
 
@@ -149,7 +149,7 @@ async fn test_health_endpoint_exempt_from_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
   let request = Request::builder()
-    .uri("/admin/health")
+    .uri("/system/health")
     .body(Body::empty())
     .unwrap();
 
@@ -238,7 +238,7 @@ async fn test_create_api_key_requires_admin_role() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", format!("Bearer {}", token))
     .header("content-type", "application/json")
     .body(Body::from(r#"{}"#))
@@ -256,7 +256,7 @@ async fn test_create_api_key_returns_new_key() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", format!("Bearer {}", token))
     .header("content-type", "application/json")
     .body(Body::from(format!(r#"{{"user_id":"{}"}}"#, target_user_id)))
@@ -296,7 +296,7 @@ async fn test_list_api_keys_returns_metadata() {
 
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", format!("Bearer {}", token))
     .body(Body::empty())
     .unwrap();
@@ -339,7 +339,7 @@ async fn test_revoke_api_key_succeeds() {
   let token = admin_token(&jwt_manager);
   let request = Request::builder()
     .method("DELETE")
-    .uri(format!("/admin/api-keys/{}", key_id))
+    .uri(format!("/auth/keys/admin/{}", key_id))
     .header("authorization", format!("Bearer {}", token))
     .body(Body::empty())
     .unwrap();
@@ -438,7 +438,7 @@ async fn test_authorization_header_without_bearer_prefix_returns_401() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .header("authorization", format!("Basic {}", token))
     .body(Body::from("hello"))
     .unwrap();
@@ -455,7 +455,7 @@ async fn test_token_from_different_jwt_manager_rejected() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/file.txt")
+    .uri("/files/test/file.txt")
     .header("authorization", format!("Bearer {}", token))
     .body(Body::from("hello"))
     .unwrap();
@@ -472,7 +472,7 @@ async fn test_revoke_nonexistent_key_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(format!("/admin/api-keys/{}", fake_id))
+    .uri(format!("/auth/keys/admin/{}", fake_id))
     .header("authorization", format!("Bearer {}", token))
     .body(Body::empty())
     .unwrap();
@@ -487,7 +487,7 @@ async fn test_list_api_keys_requires_admin_role() {
   let token = reader_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", format!("Bearer {}", token))
     .body(Body::empty())
     .unwrap();
@@ -504,7 +504,7 @@ async fn test_revoke_api_key_requires_admin_role() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(format!("/admin/api-keys/{}", fake_id))
+    .uri(format!("/auth/keys/admin/{}", fake_id))
     .header("authorization", format!("Bearer {}", token))
     .body(Body::empty())
     .unwrap();
@@ -547,7 +547,7 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
   let app2 = create_app_with_jwt(jwt_manager.clone(), engine.clone());
   let store_request = Request::builder()
     .method("PUT")
-    .uri("/engine/e2e/test.txt")
+    .uri("/files/e2e/test.txt")
     .header("authorization", &bearer)
     .header("content-type", "text/plain")
     .body(Body::from("e2e test data"))
@@ -559,7 +559,7 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
   // Step 4: Verify the file exists by fetching it
   let app3 = create_app_with_jwt(jwt_manager.clone(), engine.clone());
   let get_request = Request::builder()
-    .uri("/engine/e2e/test.txt")
+    .uri("/files/e2e/test.txt")
     .header("authorization", &bearer)
     .body(Body::empty())
     .unwrap();

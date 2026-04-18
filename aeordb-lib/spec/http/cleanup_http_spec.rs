@@ -80,7 +80,7 @@ async fn test_trigger_cleanup_endpoint() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -104,7 +104,7 @@ async fn test_cleanup_endpoint_empty() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -127,7 +127,7 @@ async fn test_cleanup_endpoint_requires_auth() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .body(Body::empty())
         .unwrap();
 
@@ -159,7 +159,7 @@ async fn test_cleanup_endpoint_requires_root() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -199,7 +199,7 @@ async fn test_cleanup_endpoint_preserves_valid() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -239,7 +239,7 @@ async fn test_cleanup_endpoint_idempotent() {
     // First call
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -253,7 +253,7 @@ async fn test_cleanup_endpoint_idempotent() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/tasks/cleanup")
+        .uri("/system/tasks/cleanup")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

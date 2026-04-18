@@ -887,7 +887,7 @@ async fn test_permission_middleware_allows_root() {
   // Store a file -- root should be allowed even with no .permissions
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/root_test/file.txt")
+    .uri("/files/root_test/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("root data"))
@@ -929,7 +929,7 @@ async fn test_permission_middleware_denies_without_permission() {
   // Try to store a file -- no .permissions anywhere, so default deny
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/restricted/file.txt")
+    .uri("/files/restricted/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("blocked data"))
@@ -981,7 +981,7 @@ async fn test_permission_middleware_allows_with_permission() {
   // Store a file -- should be allowed
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/allowed/file.txt")
+    .uri("/files/allowed/file.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("allowed data"))
@@ -1004,7 +1004,7 @@ async fn test_permission_middleware_skips_non_engine_routes() {
   // Health check should work without any permission
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/health")
+    .uri("/system/health")
     .body(Body::empty())
     .unwrap();
 

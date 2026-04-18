@@ -87,7 +87,7 @@ async fn test_cluster_status_returns_node_info() {
 
     let response = app
         .oneshot(
-            Request::get("/admin/cluster")
+            Request::get("/sync/status")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -109,7 +109,7 @@ async fn test_cluster_status_requires_root() {
 
     let response = app
         .oneshot(
-            Request::get("/admin/cluster")
+            Request::get("/sync/status")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -126,7 +126,7 @@ async fn test_cluster_status_requires_auth() {
 
     let response = app
         .oneshot(
-            Request::get("/admin/cluster")
+            Request::get("/sync/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -147,7 +147,7 @@ async fn test_add_peer_returns_201() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -177,7 +177,7 @@ async fn test_add_peer_missing_address_returns_400() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -203,7 +203,7 @@ async fn test_add_peer_requires_root() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -227,7 +227,7 @@ async fn test_add_peer_without_label() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -257,7 +257,7 @@ async fn test_list_peers_empty() {
 
     let response = app
         .oneshot(
-            Request::get("/admin/cluster/peers")
+            Request::get("/sync/peers")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -279,7 +279,7 @@ async fn test_list_peers_after_add() {
     let add_response = app
         .clone()
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -298,7 +298,7 @@ async fn test_list_peers_after_add() {
     // List peers
     let list_response = app
         .oneshot(
-            Request::get("/admin/cluster/peers")
+            Request::get("/sync/peers")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -322,7 +322,7 @@ async fn test_list_peers_requires_root() {
 
     let response = app
         .oneshot(
-            Request::get("/admin/cluster/peers")
+            Request::get("/sync/peers")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -346,7 +346,7 @@ async fn test_remove_peer_returns_200() {
     let add_response = app
         .clone()
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -366,7 +366,7 @@ async fn test_remove_peer_returns_200() {
     // Remove the peer
     let response = app
         .oneshot(
-            Request::delete(&format!("/admin/cluster/peers/{}", node_id))
+            Request::delete(&format!("/sync/peers/{}", node_id))
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -387,7 +387,7 @@ async fn test_remove_peer_not_found_returns_404() {
 
     let response = app
         .oneshot(
-            Request::delete("/admin/cluster/peers/999999999")
+            Request::delete("/sync/peers/999999999")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -405,7 +405,7 @@ async fn test_remove_peer_invalid_node_id_returns_400() {
 
     let response = app
         .oneshot(
-            Request::delete("/admin/cluster/peers/not-a-number")
+            Request::delete("/sync/peers/not-a-number")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -423,7 +423,7 @@ async fn test_remove_peer_requires_root() {
 
     let response = app
         .oneshot(
-            Request::delete("/admin/cluster/peers/12345")
+            Request::delete("/sync/peers/12345")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -445,7 +445,7 @@ async fn test_trigger_sync_returns_not_implemented() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/sync")
+            Request::post("/sync/trigger")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -463,7 +463,7 @@ async fn test_trigger_sync_requires_root() {
 
     let response = app
         .oneshot(
-            Request::post("/admin/cluster/sync")
+            Request::post("/sync/trigger")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -487,7 +487,7 @@ async fn test_admin_cluster_includes_sync_status() {
     let add_response = app
         .clone()
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -506,7 +506,7 @@ async fn test_admin_cluster_includes_sync_status() {
     // Get cluster status
     let response = app
         .oneshot(
-            Request::get("/admin/cluster")
+            Request::get("/sync/status")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -540,7 +540,7 @@ async fn test_list_peers_includes_sync_status() {
     let add_response = app
         .clone()
         .oneshot(
-            Request::post("/admin/cluster/peers")
+            Request::post("/sync/peers")
                 .header("authorization", &token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -558,7 +558,7 @@ async fn test_list_peers_includes_sync_status() {
     // List peers
     let response = app
         .oneshot(
-            Request::get("/admin/cluster/peers")
+            Request::get("/sync/peers")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::engine::btree::{BTreeNode, is_btree_format};
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
-use crate::engine::engine_event::EVENT_GC_COMPLETED;
+use crate::engine::engine_event::{EVENT_GC_COMPLETED, EVENT_GC_STARTED};
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
@@ -480,6 +480,11 @@ pub fn run_gc(
   dry_run: bool,
 ) -> EngineResult<GcResult> {
   let start = std::time::Instant::now();
+
+  // Emit GC started event
+  ctx.emit(EVENT_GC_STARTED, serde_json::json!({
+    "dry_run": dry_run,
+  }));
 
   let vm = VersionManager::new(engine);
   let snapshot_count = vm.list_snapshots()?.len();

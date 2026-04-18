@@ -143,7 +143,7 @@ async fn test_query_exact_match() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -174,7 +174,7 @@ async fn test_query_gt() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -208,7 +208,7 @@ async fn test_query_lt() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -239,7 +239,7 @@ async fn test_query_between() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -274,7 +274,7 @@ async fn test_query_multiple_fields() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -306,7 +306,7 @@ async fn test_query_with_limit() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -336,7 +336,7 @@ async fn test_query_empty_results() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -363,7 +363,7 @@ async fn test_query_requires_auth() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     // No authorization header
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -380,7 +380,7 @@ async fn test_query_invalid_body_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"this is not valid"#))
@@ -410,7 +410,7 @@ async fn test_query_nonexistent_path() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -435,7 +435,7 @@ async fn test_query_between_missing_value2_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -459,7 +459,7 @@ async fn test_query_unknown_op_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -485,7 +485,7 @@ async fn test_query_response_contains_metadata_fields() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -523,7 +523,7 @@ async fn test_query_with_string_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -553,7 +553,7 @@ async fn test_query_with_boolean_value() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -578,7 +578,7 @@ async fn test_query_empty_where_returns_empty_array() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -615,7 +615,7 @@ async fn test_query_json_boolean_and() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -649,7 +649,7 @@ async fn test_query_json_boolean_or() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -683,7 +683,7 @@ async fn test_query_json_boolean_not() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -729,7 +729,7 @@ async fn test_query_json_nested_boolean() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -761,7 +761,7 @@ async fn test_query_json_backward_compatible_array() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -795,7 +795,7 @@ async fn test_query_json_in_operation() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -828,7 +828,7 @@ async fn test_query_json_invalid_boolean_structure() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -854,7 +854,7 @@ async fn test_query_json_in_with_string_values() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -887,7 +887,7 @@ async fn test_query_json_in_non_array_returns_400() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -914,7 +914,7 @@ async fn test_query_json_or_missing_field_returns_error() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))

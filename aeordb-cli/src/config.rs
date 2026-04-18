@@ -22,14 +22,32 @@ pub struct ServerConfig {
   pub port: Option<u16>,
   /// Bind address (default: "0.0.0.0").
   pub host: Option<String>,
-  /// CORS allowed origins.  Use `["*"]` to allow all.
-  pub cors_origins: Option<Vec<String>>,
+  /// Structured log format: "pretty" or "json" (default: "pretty").
+  pub log_format: Option<String>,
+  /// TLS certificate and key paths.
+  pub tls: Option<TlsConfig>,
+  /// CORS configuration.
+  pub cors: Option<CorsConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TlsConfig {
+  /// Path to the TLS certificate PEM file.
+  pub cert: Option<String>,
+  /// Path to the TLS private key PEM file.
+  pub key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CorsConfig {
+  /// Allowed origins.  Use `["*"]` to allow all.
+  pub origins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AuthConfig {
-  /// Whether authentication is enabled (default: true).
-  pub enabled: Option<bool>,
+  /// Auth mode: "disabled", "self", or "file:///path/to/identity" (default: "self").
+  pub mode: Option<String>,
   /// JWT token lifetime in seconds (default: 3600).
   pub jwt_expiry_seconds: Option<i64>,
 }
@@ -40,6 +58,8 @@ pub struct StorageConfig {
   pub database: Option<String>,
   /// Write chunk size in bytes (default: 262144 = 256 KiB).
   pub chunk_size: Option<usize>,
+  /// Directory for write-ahead hot files (defaults to database file's parent directory).
+  pub hot_dir: Option<String>,
 }
 
 /// Load and parse a TOML configuration file.
@@ -72,11 +92,14 @@ mod tests {
     let config = AeorConfig::default();
     assert!(config.server.port.is_none());
     assert!(config.server.host.is_none());
-    assert!(config.server.cors_origins.is_none());
-    assert!(config.auth.enabled.is_none());
+    assert!(config.server.log_format.is_none());
+    assert!(config.server.tls.is_none());
+    assert!(config.server.cors.is_none());
+    assert!(config.auth.mode.is_none());
     assert!(config.auth.jwt_expiry_seconds.is_none());
     assert!(config.storage.database.is_none());
     assert!(config.storage.chunk_size.is_none());
+    assert!(config.storage.hot_dir.is_none());
   }
 
   #[test]

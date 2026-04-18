@@ -267,7 +267,7 @@ async fn test_request_id_on_real_server_routes() {
   let response = app
     .oneshot(
       Request::builder()
-        .uri("/admin/health")
+        .uri("/system/health")
         .body(Body::empty())
         .unwrap(),
     )
@@ -294,7 +294,7 @@ async fn test_client_request_id_preserved_on_real_server() {
   let response = app
     .oneshot(
       Request::builder()
-        .uri("/admin/health")
+        .uri("/system/health")
         .header("x-request-id", client_id)
         .body(Body::empty())
         .unwrap(),

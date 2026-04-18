@@ -254,7 +254,7 @@ async fn test_create_api_key_requires_admin_role() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("content-type", "application/json")
     .header("authorization", &non_admin_auth)
     .body(Body::from(r#"{}"#))
@@ -271,7 +271,7 @@ async fn test_list_api_keys_requires_admin_role() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", &non_admin_auth)
     .body(Body::empty())
     .unwrap();
@@ -287,7 +287,7 @@ async fn test_revoke_api_key_requires_admin_role() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/api-keys/00000000-0000-0000-0000-000000000000")
+    .uri("/auth/keys/admin/00000000-0000-0000-0000-000000000000")
     .header("authorization", &non_admin_auth)
     .body(Body::empty())
     .unwrap();
@@ -303,7 +303,7 @@ async fn test_revoke_nonexistent_api_key_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/api-keys/00000000-0000-0000-0000-000000000001")
+    .uri("/auth/keys/admin/00000000-0000-0000-0000-000000000001")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -319,7 +319,7 @@ async fn test_revoke_api_key_invalid_uuid_returns_400() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/admin/api-keys/not-a-valid-uuid")
+    .uri("/auth/keys/admin/not-a-valid-uuid")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -336,7 +336,7 @@ async fn test_create_api_key_with_user_id() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(format!(r#"{{"user_id":"{}"}}"#, target_user_id)))
@@ -361,7 +361,7 @@ async fn test_list_api_keys_returns_stored_keys() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(format!(r#"{{"user_id":"{}"}}"#, target_user_id)))
@@ -373,7 +373,7 @@ async fn test_list_api_keys_returns_stored_keys() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -397,7 +397,7 @@ async fn test_expired_jwt_returns_401() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", &expired_auth)
     .body(Body::empty())
     .unwrap();
@@ -412,7 +412,7 @@ async fn test_malformed_bearer_token_returns_401() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .header("authorization", "Bearer not.a.valid.jwt.token")
     .body(Body::empty())
     .unwrap();
@@ -427,7 +427,7 @@ async fn test_missing_authorization_header_returns_401() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .body(Body::empty())
     .unwrap();
 
@@ -561,7 +561,7 @@ async fn test_health_check_returns_ok() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/health")
+    .uri("/system/health")
     .body(Body::empty())
     .unwrap();
 
@@ -586,7 +586,7 @@ async fn test_metrics_endpoint_requires_auth() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .body(Body::empty())
     .unwrap();
 
@@ -601,7 +601,7 @@ async fn test_metrics_endpoint_returns_prometheus_text() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();

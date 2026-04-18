@@ -23,7 +23,7 @@ pub struct ActiveKeyRules(pub Vec<KeyRule>);
 const CONFIGURE_FILES: &[&str] = &[".config", ".permissions"];
 const DEPLOY_FILES: &[&str] = &[".functions"];
 
-/// Axum middleware that checks crudlify permissions on `/engine/` routes.
+/// Axum middleware that checks crudlify permissions on `/files/` routes.
 ///
 /// This runs AFTER `auth_middleware` (which has already validated the JWT
 /// and inserted `TokenClaims` into request extensions).
@@ -39,12 +39,12 @@ pub async fn permission_middleware(
   next: Next,
 ) -> Response {
   let request_path = request.uri().path().to_string();
-  let is_engine_route = request_path.starts_with("/engine/");
+  let is_files_route = request_path.starts_with("/files/") && request_path != "/files/query";
 
-  // For non-engine routes, we still need to load key rules for downstream filtering
-  // (e.g. /query endpoint filters results by key rules). But we skip the path-level
-  // permission checks that are engine-specific.
-  if !is_engine_route {
+  // For non-files routes, we still need to load key rules for downstream filtering
+  // (e.g. /files/query endpoint filters results by key rules). But we skip the path-level
+  // permission checks that are files-specific.
+  if !is_files_route {
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
       if let Ok(Some(key_record)) = state.api_key_cache.get_key(key_id, &state.engine) {
@@ -58,8 +58,8 @@ pub async fn permission_middleware(
     return next.run(request).await;
   }
 
-  // Extract the engine sub-path (strip the "/engine/" prefix).
-  let engine_path = &request_path["/engine/".len()..];
+  // Extract the files sub-path (strip the "/files/" prefix).
+  let engine_path = &request_path["/files/".len()..];
 
   // Extract claims from extensions (set by auth_middleware).
   let claims = match request.extensions().get::<TokenClaims>() {

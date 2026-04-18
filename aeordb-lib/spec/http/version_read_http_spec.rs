@@ -62,7 +62,7 @@ async fn put_file(
 ) -> StatusCode {
   let request = Request::builder()
     .method("PUT")
-    .uri(format!("/engine/{}", path))
+    .uri(format!("/files/{}", path))
     .header("content-type", content_type)
     .header("authorization", auth)
     .body(Body::from(body.to_vec()))
@@ -116,13 +116,13 @@ async fn test_get_file_at_snapshot() {
 
   // GET current version should return v2
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, bytes) = get_file(app, &auth, "/engine/file.txt").await;
+  let (status, _, bytes) = get_file(app, &auth, "/files/file.txt").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"version-two");
 
   // GET at snapshot should return v1
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, bytes) = get_file(app, &auth, "/engine/file.txt?snapshot=snap1").await;
+  let (status, _, bytes) = get_file(app, &auth, "/files/file.txt?snapshot=snap1").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"version-one");
 }
@@ -150,7 +150,7 @@ async fn test_get_file_at_version_hash() {
 
   // GET with ?version={hex_hash} should return v1
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri = format!("/engine/file.txt?version={}", hex_hash);
+  let uri = format!("/files/file.txt?version={}", hex_hash);
   let (status, _, bytes) = get_file(app, &auth, &uri).await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"version-one");
@@ -162,7 +162,7 @@ async fn test_get_file_snapshot_not_found() {
   let (app, jwt_manager, _engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let (status, _, _) = get_file(app, &auth, "/engine/file.txt?snapshot=nonexistent").await;
+  let (status, _, _) = get_file(app, &auth, "/files/file.txt?snapshot=nonexistent").await;
   assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -188,7 +188,7 @@ async fn test_get_file_not_at_version() {
 
   // GET later.txt at snapshot should be 404 (file didn't exist at that version)
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, _) = get_file(app, &auth, "/engine/later.txt?snapshot=before").await;
+  let (status, _, _) = get_file(app, &auth, "/files/later.txt?snapshot=before").await;
   assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -221,21 +221,21 @@ async fn test_get_file_snapshot_precedence() {
   // Provide both: snapshot=snap1 and version=<snap2 hash>
   // Snapshot should take precedence; we should get v1 "snap-content"
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri = format!("/engine/file.txt?snapshot=snap1&version={}", snap2_hex);
+  let uri = format!("/files/file.txt?snapshot=snap1&version={}", snap2_hex);
   let (status, _, bytes) = get_file(app, &auth, &uri).await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"snap-content");
 
   // Verify the other snapshot would give different content (sanity check)
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri2 = format!("/engine/file.txt?snapshot=snap2");
+  let uri2 = format!("/files/file.txt?snapshot=snap2");
   let (status2, _, bytes2) = get_file(app, &auth, &uri2).await;
   assert_eq!(status2, StatusCode::OK);
   assert_eq!(bytes2, b"v2-content");
 
   // And verify using snap2 hex hash directly gives v2
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri3 = format!("/engine/file.txt?version={}", snap2_hex);
+  let uri3 = format!("/files/file.txt?version={}", snap2_hex);
   let (status3, _, bytes3) = get_file(app, &auth, &uri3).await;
   assert_eq!(status3, StatusCode::OK);
   assert_eq!(bytes3, b"v2-content");
@@ -247,7 +247,7 @@ async fn test_get_file_invalid_version_hash() {
   let (app, jwt_manager, _engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let (status, _, _) = get_file(app, &auth, "/engine/file.txt?version=notahexvalue!!!").await;
+  let (status, _, _) = get_file(app, &auth, "/files/file.txt?version=notahexvalue!!!").await;
   assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -263,7 +263,7 @@ async fn test_get_file_no_version_params_still_works() {
 
   // GET without any query params
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, bytes) = get_file(app, &auth, "/engine/hello.txt").await;
+  let (status, _, bytes) = get_file(app, &auth, "/files/hello.txt").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"hello world");
 }
@@ -290,7 +290,7 @@ async fn test_get_file_at_version_content_type() {
 
   // GET at snapshot should return with original content-type
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, headers, bytes) = get_file(app, &auth, "/engine/data.json?snapshot=json-snap").await;
+  let (status, headers, bytes) = get_file(app, &auth, "/files/data.json?snapshot=json-snap").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"{\"v\":1}");
   let ct = headers.get("content-type").unwrap().to_str().unwrap();
@@ -305,7 +305,7 @@ async fn test_get_file_version_hash_not_found() {
 
   // A valid hex hash that doesn't exist in the engine
   let fake_hash = "00".repeat(32); // 32-byte zero hash
-  let uri = format!("/engine/file.txt?version={}", fake_hash);
+  let uri = format!("/files/file.txt?version={}", fake_hash);
   let (status, _, _) = get_file(app, &auth, &uri).await;
   // Should fail - either 404 or 500 depending on engine error
   assert_ne!(status, StatusCode::OK);
@@ -333,13 +333,13 @@ async fn test_get_file_at_snapshot_nested_path() {
 
   // GET at snapshot returns original
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, bytes) = get_file(app, &auth, "/engine/docs/readme.txt?snapshot=nested-snap").await;
+  let (status, _, bytes) = get_file(app, &auth, "/files/docs/readme.txt?snapshot=nested-snap").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"original readme");
 
   // GET current returns updated
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, _, bytes) = get_file(app, &auth, "/engine/docs/readme.txt").await;
+  let (status, _, bytes) = get_file(app, &auth, "/files/docs/readme.txt").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"updated readme");
 }
@@ -359,7 +359,7 @@ async fn test_get_file_at_version_response_headers() {
   vm.create_snapshot(&ctx, "hdr-snap", HashMap::new()).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let (status, headers, bytes) = get_file(app, &auth, "/engine/headers.txt?snapshot=hdr-snap").await;
+  let (status, headers, bytes) = get_file(app, &auth, "/files/headers.txt?snapshot=hdr-snap").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, content);
 

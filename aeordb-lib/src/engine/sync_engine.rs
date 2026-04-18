@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::conflict_store::store_conflict;
 use crate::engine::directory_ops::DirectoryOps;
-use crate::engine::engine_event::{EngineEvent, EVENT_SYNC_SUCCEEDED, EVENT_SYNC_FAILED};
+use crate::engine::engine_event::{EngineEvent, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED};
 use crate::engine::event_bus::EventBus;
 use crate::engine::merge::three_way_merge;
 use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManager};
@@ -751,7 +751,7 @@ pub fn spawn_sync_loop(
                         }
                         if let Some(ref bus) = event_bus {
                             let event = EngineEvent::new(
-                                EVENT_SYNC_SUCCEEDED,
+                                EVENT_SYNCS_COMPLETED,
                                 "sync",
                                 serde_json::json!({
                                     "peer_node_id": peer.node_id,
@@ -783,7 +783,7 @@ pub fn spawn_sync_loop(
                         );
                         if let Some(ref bus) = event_bus {
                             let event = EngineEvent::new(
-                                EVENT_SYNC_FAILED,
+                                EVENT_SYNCS_FAILED,
                                 "sync",
                                 serde_json::json!({
                                     "peer_node_id": peer.node_id,

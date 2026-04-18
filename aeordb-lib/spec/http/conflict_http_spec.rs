@@ -126,7 +126,7 @@ async fn test_list_conflicts_empty() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -153,7 +153,7 @@ async fn test_list_conflicts() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -180,7 +180,7 @@ async fn test_get_conflict() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts/docs/target.txt")
+        .uri("/sync/conflicts/docs/target.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -204,7 +204,7 @@ async fn test_get_conflict_not_found() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts/nonexistent.txt")
+        .uri("/sync/conflicts/nonexistent.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -227,7 +227,7 @@ async fn test_dismiss_conflict() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-dismiss/docs/dismiss.txt")
+        .uri("/sync/dismiss/docs/dismiss.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -242,7 +242,7 @@ async fn test_dismiss_conflict() {
     let app2 = rebuild_app(&jwt_manager, &engine);
     let request2 = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts/docs/dismiss.txt")
+        .uri("/sync/conflicts/docs/dismiss.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -261,7 +261,7 @@ async fn test_dismiss_conflict_not_found() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-dismiss/nonexistent.txt")
+        .uri("/sync/dismiss/nonexistent.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -284,7 +284,7 @@ async fn test_resolve_conflict_invalid_pick() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-resolve/docs/invalid-pick.txt")
+        .uri("/sync/resolve/docs/invalid-pick.txt")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"pick": "neither"}"#))
@@ -305,7 +305,7 @@ async fn test_resolve_conflict_not_found() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-resolve/nonexistent.txt")
+        .uri("/sync/resolve/nonexistent.txt")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"pick": "winner"}"#))
@@ -325,7 +325,7 @@ async fn test_conflicts_no_auth_returns_401() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .body(Body::empty())
         .unwrap();
 
@@ -344,7 +344,7 @@ async fn test_conflicts_non_root_returns_403() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -364,7 +364,7 @@ async fn test_all_conflict_endpoints_require_auth() {
     // GET /admin/conflicts
     let r = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .body(Body::empty())
         .unwrap();
     assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
@@ -372,7 +372,7 @@ async fn test_all_conflict_endpoints_require_auth() {
     // GET /admin/conflicts/path
     let r = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts/some/path")
+        .uri("/sync/conflicts/some/path")
         .body(Body::empty())
         .unwrap();
     assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
@@ -380,7 +380,7 @@ async fn test_all_conflict_endpoints_require_auth() {
     // POST /admin/conflict-resolve/path
     let r = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-resolve/some/path")
+        .uri("/sync/resolve/some/path")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"pick":"winner"}"#))
         .unwrap();
@@ -389,7 +389,7 @@ async fn test_all_conflict_endpoints_require_auth() {
     // POST /admin/conflict-dismiss/path
     let r = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-dismiss/some/path")
+        .uri("/sync/dismiss/some/path")
         .body(Body::empty())
         .unwrap();
     assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
@@ -407,7 +407,7 @@ async fn test_all_conflict_endpoints_forbid_non_root() {
     // GET /admin/conflicts
     let r = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -416,7 +416,7 @@ async fn test_all_conflict_endpoints_forbid_non_root() {
     // GET /admin/conflicts/path
     let r = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts/some/path")
+        .uri("/sync/conflicts/some/path")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -425,7 +425,7 @@ async fn test_all_conflict_endpoints_forbid_non_root() {
     // POST /admin/conflict-resolve/path
     let r = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-resolve/some/path")
+        .uri("/sync/resolve/some/path")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"pick":"winner"}"#))
@@ -435,7 +435,7 @@ async fn test_all_conflict_endpoints_forbid_non_root() {
     // POST /admin/conflict-dismiss/path
     let r = Request::builder()
         .method("POST")
-        .uri("/admin/conflict-dismiss/some/path")
+        .uri("/sync/dismiss/some/path")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -465,7 +465,7 @@ async fn test_conflicts_expired_token_returns_401() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/conflicts")
+        .uri("/sync/conflicts")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

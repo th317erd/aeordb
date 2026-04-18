@@ -84,7 +84,7 @@ async fn test_gc_root_user_succeeds() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -109,7 +109,7 @@ async fn test_gc_dry_run_returns_results_without_deleting() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc?dry_run=true")
+        .uri("/system/gc?dry_run=true")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -131,7 +131,7 @@ async fn test_gc_on_empty_engine_succeeds() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -155,7 +155,7 @@ async fn test_gc_non_root_user_forbidden() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -177,7 +177,7 @@ async fn test_gc_no_auth_returns_401() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .body(Body::empty())
         .unwrap();
 
@@ -196,7 +196,7 @@ async fn test_gc_get_method_not_allowed() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -222,7 +222,7 @@ async fn test_gc_invalid_dry_run_param() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc?dry_run=notabool")
+        .uri("/system/gc?dry_run=notabool")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -245,7 +245,7 @@ async fn test_gc_twice_in_a_row_succeeds() {
     // First GC
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -257,7 +257,7 @@ async fn test_gc_twice_in_a_row_succeeds() {
     let app2 = rebuild_app(&jwt_manager, &engine);
     let request2 = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -283,7 +283,7 @@ async fn test_gc_explicit_dry_run_false() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc?dry_run=false")
+        .uri("/system/gc?dry_run=false")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -305,7 +305,7 @@ async fn test_gc_invalid_jwt_returns_401() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", "Bearer invalid.jwt.token")
         .body(Body::empty())
         .unwrap();
@@ -337,7 +337,7 @@ async fn test_gc_expired_token_returns_401() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/gc")
+        .uri("/system/gc")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

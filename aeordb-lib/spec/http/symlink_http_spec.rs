@@ -66,8 +66,8 @@ async fn test_create_symlink() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"target":"/data.txt"}"#))
@@ -91,8 +91,8 @@ async fn test_create_symlink_update() {
 
     // First create
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"target":"/old.txt"}"#))
@@ -106,8 +106,8 @@ async fn test_create_symlink_update() {
     // Update with a new target
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"target":"/new.txt"}"#))
@@ -127,8 +127,8 @@ async fn test_create_symlink_missing_target() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{}"#))
@@ -152,8 +152,8 @@ async fn test_create_symlink_empty_target() {
     let auth = bearer_token(&jwt_manager);
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(r#"{"target":""}"#))
@@ -186,7 +186,7 @@ async fn test_get_symlink_transparent() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link")
+        .uri("/files/link")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -218,7 +218,7 @@ async fn test_get_symlink_nofollow() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link?nofollow=true")
+        .uri("/files/link?nofollow=true")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -246,7 +246,7 @@ async fn test_head_symlink() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/link")
+        .uri("/files/link")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -281,7 +281,7 @@ async fn test_delete_symlink() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("DELETE")
-        .uri("/engine/link")
+        .uri("/files/link")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -297,7 +297,7 @@ async fn test_delete_symlink() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/file.txt")
+        .uri("/files/file.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -323,7 +323,7 @@ async fn test_get_dangling_symlink() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link")
+        .uri("/files/link")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -356,7 +356,7 @@ async fn test_get_symlink_to_directory() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/shortcut")
+        .uri("/files/shortcut")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -391,7 +391,7 @@ async fn test_get_symlink_chain() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link1")
+        .uri("/files/link1")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -418,7 +418,7 @@ async fn test_get_cyclic_symlink() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/a")
+        .uri("/files/a")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -450,7 +450,7 @@ async fn test_symlink_in_listing() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/dir/")
+        .uri("/files/dir/")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -483,8 +483,8 @@ async fn test_create_symlink_requires_auth() {
     let (app, _jwt_manager, _engine, _temp_dir) = test_app();
 
     let request = Request::builder()
-        .method("POST")
-        .uri("/engine-symlink/link.txt")
+        .method("PUT")
+        .uri("/links/link.txt")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"target":"/data.txt"}"#))
         .unwrap();
@@ -510,7 +510,7 @@ async fn test_delete_symlink_does_not_affect_other_symlinks() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("DELETE")
-        .uri("/engine/link1")
+        .uri("/files/link1")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -522,7 +522,7 @@ async fn test_delete_symlink_does_not_affect_other_symlinks() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link2")
+        .uri("/files/link2")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -548,7 +548,7 @@ async fn test_head_file_still_works() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("HEAD")
-        .uri("/engine/normal.txt")
+        .uri("/files/normal.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -577,7 +577,7 @@ async fn test_get_symlink_nofollow_false() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/engine/link?nofollow=false")
+        .uri("/files/link?nofollow=false")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

@@ -89,7 +89,7 @@ async fn test_history_file_added() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/readme.txt")
+        .uri("/versions/history/readme.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -122,7 +122,7 @@ async fn test_history_file_modified() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/data.txt")
+        .uri("/versions/history/data.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -158,7 +158,7 @@ async fn test_history_file_unchanged() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/stable.txt")
+        .uri("/versions/history/stable.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -196,7 +196,7 @@ async fn test_history_file_deleted() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/temp.txt")
+        .uri("/versions/history/temp.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -241,7 +241,7 @@ async fn test_history_full_lifecycle() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/lifecycle.txt")
+        .uri("/versions/history/lifecycle.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -284,7 +284,7 @@ async fn test_history_ordering_newest_first() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/ordered.txt")
+        .uri("/versions/history/ordered.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -321,7 +321,7 @@ async fn test_history_never_existed() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/nonexistent.txt")
+        .uri("/versions/history/nonexistent.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -353,7 +353,7 @@ async fn test_history_includes_metadata() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/meta.json")
+        .uri("/versions/history/meta.json")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -402,7 +402,7 @@ async fn test_history_no_snapshots() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/lonely.txt")
+        .uri("/versions/history/lonely.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -427,7 +427,7 @@ async fn test_history_unauthenticated_returns_401() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/secret.txt")
+        .uri("/versions/history/secret.txt")
         // No authorization header
         .body(Body::empty())
         .unwrap();
@@ -446,7 +446,7 @@ async fn test_history_invalid_token_returns_401() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/secret.txt")
+        .uri("/versions/history/secret.txt")
         .header("authorization", "Bearer invalid-garbage-token")
         .body(Body::empty())
         .unwrap();
@@ -466,7 +466,7 @@ async fn test_history_nested_path() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/deep/nested/dir/file.txt")
+        .uri("/versions/history/deep/nested/dir/file.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -501,7 +501,7 @@ async fn test_history_re_added_after_delete() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
         .method("GET")
-        .uri("/version/file-history/phoenix.txt")
+        .uri("/versions/history/phoenix.txt")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

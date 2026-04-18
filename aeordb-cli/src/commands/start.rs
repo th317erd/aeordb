@@ -12,6 +12,7 @@ use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
 
 pub async fn run(
   port: u16,
+  host: &str,
   database: &str,
   log_format: &str,
   auth_flag: Option<&str>,
@@ -19,6 +20,8 @@ pub async fn run(
   cors_flag: Option<&str>,
   tls_cert: Option<&str>,
   tls_key: Option<&str>,
+  _jwt_expiry: i64,
+  _chunk_size: usize,
 ) {
   let log_config = LogConfig {
     format: match log_format {
@@ -54,6 +57,7 @@ pub async fn run(
 
   tracing::info!(
     port = %port,
+    host = %host,
     auth_mode = %auth_mode_str,
     db_path = %database,
     tls = %tls_config.is_some(),
@@ -63,6 +67,7 @@ pub async fn run(
 
   println!("AeorDB v{}", env!("CARGO_PKG_VERSION"));
   println!("Database: {database}");
+  println!("Host: {host}");
   println!("Port: {port}");
   match &auth_mode {
     AuthMode::Disabled => println!("Auth: disabled (dev mode)"),
@@ -149,7 +154,13 @@ pub async fn run(
   let webhook_handle = spawn_webhook_dispatcher(event_bus, engine.clone(), cancel.clone());
 
   let startup_instant = std::time::Instant::now();
-  let address = SocketAddr::from(([0, 0, 0, 0], port));
+
+  // Parse the host address into an IP.
+  let bind_address: std::net::IpAddr = host.parse().unwrap_or_else(|_| {
+    eprintln!("Error: invalid host address '{host}'");
+    std::process::exit(1);
+  });
+  let address = SocketAddr::from((bind_address, port));
 
   let server_result = if let Some((cert_path, key_path)) = tls_config {
     // TLS path: use axum_server with rustls + Handle for graceful shutdown

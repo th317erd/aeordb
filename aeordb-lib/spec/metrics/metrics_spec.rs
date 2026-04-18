@@ -76,7 +76,7 @@ async fn test_metrics_endpoint_returns_200() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -91,7 +91,7 @@ async fn test_metrics_endpoint_returns_prometheus_format() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -117,7 +117,7 @@ async fn test_metrics_endpoint_requires_auth() {
   let (app, _, _, _, _temp_dir) = test_app_standalone();
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .body(Body::empty())
     .unwrap();
 
@@ -130,7 +130,7 @@ async fn test_metrics_endpoint_rejects_invalid_token() {
   let (app, _, _, _, _temp_dir) = test_app_standalone();
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", "Bearer invalid-token")
     .body(Body::empty())
     .unwrap();
@@ -145,7 +145,7 @@ async fn test_metrics_endpoint_returns_empty_when_no_activity() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -170,7 +170,7 @@ async fn test_http_request_duration_recorded() {
   let (app, _, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
-    .uri("/admin/health")
+    .uri("/system/health")
     .body(Body::empty())
     .unwrap();
 
@@ -182,7 +182,7 @@ async fn test_http_request_duration_recorded() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -208,7 +208,7 @@ async fn test_auth_failure_records_metric() {
   let (app, _, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", "Bearer bad-token")
     .body(Body::empty())
     .unwrap();
@@ -221,7 +221,7 @@ async fn test_auth_failure_records_metric() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -242,7 +242,7 @@ async fn test_missing_auth_header_records_metric() {
   let (app, _, prometheus_handle, engine, _temp_dir) = test_app_global();
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .body(Body::empty())
     .unwrap();
 
@@ -254,7 +254,7 @@ async fn test_missing_auth_header_records_metric() {
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -281,7 +281,7 @@ async fn test_engine_file_store_records_metrics() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/metrics-test/file-store.txt")
+    .uri("/files/metrics-test/file-store.txt")
     .header("content-type", "text/plain")
     .header("authorization", &auth)
     .body(Body::from("hello metrics world"))
@@ -292,7 +292,7 @@ async fn test_engine_file_store_records_metrics() {
 
   let app = rebuild_app(&jwt_manager, &prometheus_handle, &engine);
   let request = Request::builder()
-    .uri("/admin/metrics")
+    .uri("/system/metrics")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();

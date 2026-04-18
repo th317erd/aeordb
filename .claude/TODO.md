@@ -80,6 +80,49 @@
 - [x] 20 functional code fixes + 18 documentation/deferred items
 ---
 
+## Consistency Audit — In Progress
+
+### Phase 1: Route Restructuring
+- [ ] /files/ routes (PUT/GET/DELETE/HEAD /engine/ → /files/, PATCH rename, /files/query)
+- [ ] /links/ routes (PUT/GET/DELETE /links/, replaces /engine-symlink/)
+- [ ] /blobs/ routes (/upload/ → /blobs/, /engine/_hash/ → /blobs/)
+- [ ] /versions/ routes (/version/ → /versions/, backup routes moved here)
+- [ ] /sync/ routes (/admin/cluster/ → /sync/, conflicts moved here)
+- [ ] /auth/ routes (/api-keys → /auth/keys, admin keys → /auth/keys/admin)
+- [ ] /plugins/ routes (/{db}/{schema}/{table}/ → /files/plugins/ + /plugins/)
+- [ ] /system/ routes (/admin/ → /system/, portal, events, stats)
+- [ ] Deprecated route 404 tests
+
+### Phase 2: HTTP Response Headers
+- [ ] X-AeorDB- prefix on all custom headers
+
+### Phase 3: Config / CLI Unification
+- [ ] auth.mode, --cors-origins, new CLI flags, config 1:1 mapping
+
+### Phase 4: JSON Response Conventions
+- [ ] total_size → size, type → entry_type
+- [ ] Wrap collections in {items: [...]}
+
+### Phase 5: Internal Storage Paths
+- [ ] /.system/apikeys → api-keys, cluster/sync → sync-peers, migration
+
+### Phase 6: Event Names
+- [ ] Pluralize task_*/sync_*, add gc_started
+
+### Phase 7: Error Codes
+- [ ] Add PAYLOAD_TOO_LARGE, METHOD_NOT_ALLOWED, SERVICE_UNAVAILABLE
+- [ ] Remove SYSTEM_BOUNDARY → FORBIDDEN
+
+### Phase 8: Error Message Audit
+- [ ] Audit and rewrite all vague ErrorResponse messages
+
+### Phase 9-11: Docs & Communication
+- [ ] Client migration report
+- [ ] Update docs/src/ (29 files)
+- [ ] Update aeordb-www marketing site
+
+---
+
 ## Future Plans (Not Started)
 
 - [ ] Fork merging (true merge with conflict detection)

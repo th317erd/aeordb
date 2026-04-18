@@ -536,7 +536,7 @@ async fn test_health_endpoint_returns_full_report() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .body(Body::empty())
         .unwrap();
 
@@ -589,7 +589,7 @@ async fn test_health_endpoint_no_auth_required() {
     // No Authorization header.
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .body(Body::empty())
         .unwrap();
 
@@ -621,7 +621,7 @@ async fn test_health_endpoint_cluster_mode_with_key_healthy() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/health")
+        .uri("/system/health")
         .body(Body::empty())
         .unwrap();
 

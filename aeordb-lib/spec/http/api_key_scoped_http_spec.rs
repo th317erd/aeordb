@@ -142,7 +142,7 @@ async fn test_scoped_key_allowed_path() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/allowed/file.txt")
+                .uri("/files/allowed/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -174,7 +174,7 @@ async fn test_scoped_key_denied_path_returns_404() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/denied/file.txt")
+                .uri("/files/denied/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -205,7 +205,7 @@ async fn test_scoped_key_no_matching_rule() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/other/file.txt")
+                .uri("/files/other/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -234,7 +234,7 @@ async fn test_scoped_key_read_only() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -249,7 +249,7 @@ async fn test_scoped_key_read_only() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/engine/data/new_file.txt")
+                .uri("/files/data/new_file.txt")
                 .header("authorization", &token)
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(b"new data".to_vec()))
@@ -282,7 +282,7 @@ async fn test_scoped_key_first_match_wins() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/a/special/file.txt")
+                .uri("/files/a/special/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -297,7 +297,7 @@ async fn test_scoped_key_first_match_wins() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/engine/a/special/file.txt")
+                .uri("/files/a/special/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -328,7 +328,7 @@ async fn test_scoped_key_expired_returns_401() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -363,7 +363,7 @@ async fn test_scoped_key_revoked_returns_401() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -391,7 +391,7 @@ async fn test_no_key_id_normal_permissions() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -419,7 +419,7 @@ async fn test_empty_rules_full_passthrough() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/anywhere/file.txt")
+                .uri("/files/anywhere/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -448,7 +448,7 @@ async fn test_full_crudlify_all_operations() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/engine/data/crud_file.txt")
+                .uri("/files/data/crud_file.txt")
                 .header("authorization", &token)
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(b"crud data".to_vec()))
@@ -464,7 +464,7 @@ async fn test_full_crudlify_all_operations() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/crud_file.txt")
+                .uri("/files/data/crud_file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -481,7 +481,7 @@ async fn test_full_crudlify_all_operations() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/engine/data/crud_file.txt")
+                .uri("/files/data/crud_file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -509,7 +509,7 @@ async fn test_deny_all_operations() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -524,7 +524,7 @@ async fn test_deny_all_operations() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(b"try write".to_vec()))
@@ -553,7 +553,7 @@ async fn test_list_operation_denied() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/dir/")
+                .uri("/files/dir/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -580,7 +580,7 @@ async fn test_list_operation_allowed() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/dir/")
+                .uri("/files/dir/")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -617,7 +617,7 @@ async fn test_stale_key_id_returns_401() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -655,7 +655,7 @@ async fn test_malformed_key_id_returns_401() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/file.txt")
+                .uri("/files/data/file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -683,7 +683,7 @@ async fn test_create_only_key() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/engine/data/new_file.txt")
+                .uri("/files/data/new_file.txt")
                 .header("authorization", &token)
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(b"created".to_vec()))
@@ -699,7 +699,7 @@ async fn test_create_only_key() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/new_file.txt")
+                .uri("/files/data/new_file.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -727,7 +727,7 @@ async fn test_delete_only_key() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/engine/data/doomed.txt")
+                .uri("/files/data/doomed.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -742,7 +742,7 @@ async fn test_delete_only_key() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/engine/data/doomed.txt")
+                .uri("/files/data/doomed.txt")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
@@ -770,7 +770,7 @@ async fn test_non_engine_routes_bypass_key_rules() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api-keys")
+                .uri("/auth/keys")
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),

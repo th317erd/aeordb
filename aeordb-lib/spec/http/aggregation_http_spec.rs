@@ -129,7 +129,7 @@ async fn test_aggregate_count_http() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -163,7 +163,7 @@ async fn test_aggregate_sum_http() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -200,7 +200,7 @@ async fn test_aggregate_group_by_http() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -241,7 +241,7 @@ async fn test_aggregate_no_field_returns_error() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -279,7 +279,7 @@ async fn test_aggregate_response_shape() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -333,7 +333,7 @@ async fn test_aggregate_sum_on_string_returns_error() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -362,7 +362,7 @@ async fn test_aggregate_group_by_with_limit() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -392,7 +392,7 @@ async fn test_regular_query_still_works_without_aggregate() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/query")
+        .uri("/files/query")
         .header("content-type", "application/json")
         .header("authorization", &auth)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))

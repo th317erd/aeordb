@@ -87,7 +87,7 @@ async fn test_sse_requires_auth() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .body(Body::empty())
         .unwrap();
 
@@ -102,7 +102,7 @@ async fn test_sse_rejects_expired_token() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -117,7 +117,7 @@ async fn test_sse_rejects_malformed_token() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", "Bearer not-a-real-jwt")
         .body(Body::empty())
         .unwrap();
@@ -132,7 +132,7 @@ async fn test_sse_rejects_wrong_scheme() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", "Basic dXNlcjpwYXNz")
         .body(Body::empty())
         .unwrap();
@@ -152,7 +152,7 @@ async fn test_sse_endpoint_returns_200_with_correct_content_type() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -180,7 +180,7 @@ async fn test_sse_endpoint_with_query_params_returns_200() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream?events=entries_created,entries_deleted&path_prefix=/docs/")
+        .uri("/system/events?events=entries_created,entries_deleted&path_prefix=/docs/")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -196,7 +196,7 @@ async fn test_sse_endpoint_with_empty_events_param() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream?events=")
+        .uri("/system/events?events=")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -278,7 +278,7 @@ async fn test_sse_receives_emitted_events() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream",
+        "/system/events",
         &event_bus,
         events,
     )
@@ -308,7 +308,7 @@ async fn test_sse_event_format_is_valid_sse() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream",
+        "/system/events",
         &event_bus,
         vec![test_event],
     )
@@ -342,7 +342,7 @@ async fn test_sse_filter_by_event_type_passes_matching() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?events=entries_created",
+        "/system/events?events=entries_created",
         &event_bus,
         events,
     )
@@ -371,7 +371,7 @@ async fn test_sse_filter_by_event_type_blocks_non_matching() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?events=entries_created",
+        "/system/events?events=entries_created",
         &event_bus,
         events,
     )
@@ -399,7 +399,7 @@ async fn test_sse_filter_multiple_event_types() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?events=entries_created,entries_deleted",
+        "/system/events?events=entries_created,entries_deleted",
         &event_bus,
         events,
     )
@@ -433,7 +433,7 @@ async fn test_sse_filter_by_path_prefix_passes_matching() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?path_prefix=/people/",
+        "/system/events?path_prefix=/people/",
         &event_bus,
         events,
     )
@@ -460,7 +460,7 @@ async fn test_sse_filter_by_path_prefix_blocks_non_matching() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?path_prefix=/people/",
+        "/system/events?path_prefix=/people/",
         &event_bus,
         events,
     )
@@ -490,7 +490,7 @@ async fn test_sse_path_prefix_with_top_level_path_field() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?path_prefix=/people/",
+        "/system/events?path_prefix=/people/",
         &event_bus,
         events,
     )
@@ -517,7 +517,7 @@ async fn test_sse_path_prefix_blocks_top_level_path_non_matching() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?path_prefix=/people/",
+        "/system/events?path_prefix=/people/",
         &event_bus,
         events,
     )
@@ -547,7 +547,7 @@ async fn test_sse_path_prefix_no_path_in_payload_filters_out() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?path_prefix=/anything/",
+        "/system/events?path_prefix=/anything/",
         &event_bus,
         events,
     )
@@ -581,7 +581,7 @@ async fn test_sse_combined_event_type_and_path_prefix() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?events=entries_created&path_prefix=/people/",
+        "/system/events?events=entries_created&path_prefix=/people/",
         &event_bus,
         events,
     )
@@ -612,7 +612,7 @@ async fn test_sse_no_events_emitted_stream_has_no_data_events() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -654,7 +654,7 @@ async fn test_sse_filter_with_whitespace_in_events_param() {
     let body = collect_sse_with_events(
         app,
         &auth,
-        "/events/stream?events=%20entries_created%20,%20entries_deleted%20",
+        "/system/events?events=%20entries_created%20,%20entries_deleted%20",
         &event_bus,
         events,
     )
@@ -673,7 +673,7 @@ async fn test_sse_method_not_allowed_for_post() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/events/stream")
+        .uri("/system/events")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -782,7 +782,7 @@ async fn test_sse_subscription_creates_subscriber() {
     let handle = tokio::spawn(async move {
         let request = Request::builder()
             .method("GET")
-            .uri("/events/stream")
+            .uri("/system/events")
             .header("authorization", &auth_clone)
             .body(Body::empty())
             .unwrap();

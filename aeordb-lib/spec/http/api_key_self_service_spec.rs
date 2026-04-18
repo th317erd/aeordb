@@ -76,7 +76,7 @@ async fn test_create_own_key() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"label": "my-key"}"#))
@@ -108,7 +108,7 @@ async fn test_create_key_with_rules() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -131,7 +131,7 @@ async fn test_create_key_default_expiry() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{}"#))
@@ -159,7 +159,7 @@ async fn test_create_key_max_expiry_clamped() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -189,7 +189,7 @@ async fn test_create_key_invalid_rules() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -213,7 +213,7 @@ async fn test_create_key_rules_not_array() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -237,7 +237,7 @@ async fn test_list_own_keys() {
     let body = serde_json::json!({ "label": label });
     let request = Request::builder()
       .method("POST")
-      .uri("/api-keys")
+      .uri("/auth/keys")
       .header("content-type", "application/json")
       .header("authorization", &auth)
       .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -252,7 +252,7 @@ async fn test_list_own_keys() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -282,7 +282,7 @@ async fn test_list_keys_filters_by_user() {
   let body = serde_json::json!({ "label": "a-key", "user_id": user_a.to_string() });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth_root)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -295,7 +295,7 @@ async fn test_list_keys_filters_by_user() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("authorization", &auth_b)
     .body(Body::empty())
     .unwrap();
@@ -309,7 +309,7 @@ async fn test_list_keys_filters_by_user() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("authorization", &auth_a)
     .body(Body::empty())
     .unwrap();
@@ -333,7 +333,7 @@ async fn test_revoke_own_key() {
   let body = serde_json::json!({ "label": "to-revoke" });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -348,7 +348,7 @@ async fn test_revoke_own_key() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/api-keys/{}", key_id))
+    .uri(&format!("/auth/keys/{}", key_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -367,7 +367,7 @@ async fn test_revoke_nonexistent_key() {
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/api-keys/{}", fake_id))
+    .uri(&format!("/auth/keys/{}", fake_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -383,7 +383,7 @@ async fn test_revoke_invalid_key_id() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/api-keys/not-a-uuid")
+    .uri("/auth/keys/not-a-uuid")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -409,7 +409,7 @@ async fn test_create_key_for_other_user_as_root() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -436,7 +436,7 @@ async fn test_create_key_for_other_forbidden() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -460,7 +460,7 @@ async fn test_revoke_other_users_key_forbidden() {
   let body = serde_json::json!({ "label": "theirs", "user_id": other_user.to_string() });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth_root)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -476,7 +476,7 @@ async fn test_revoke_other_users_key_forbidden() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/api-keys/{}", key_id))
+    .uri(&format!("/auth/keys/{}", key_id))
     .header("authorization", &auth_attacker)
     .body(Body::empty())
     .unwrap();
@@ -499,7 +499,7 @@ async fn test_root_can_revoke_other_users_key() {
   let body = serde_json::json!({ "label": "theirs", "user_id": other_user.to_string() });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth_root)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -513,7 +513,7 @@ async fn test_root_can_revoke_other_users_key() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/api-keys/{}", key_id))
+    .uri(&format!("/auth/keys/{}", key_id))
     .header("authorization", &auth_root)
     .body(Body::empty())
     .unwrap();
@@ -579,7 +579,7 @@ async fn test_token_exchange_embeds_key_id() {
   let body = serde_json::json!({ "label": "embed-test" });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth_root)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -623,7 +623,7 @@ async fn test_non_root_creates_own_key() {
   let body = serde_json::json!({ "label": "my-personal-key" });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -647,7 +647,7 @@ async fn test_unauthenticated_create_rejected() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .body(Body::from(r#"{"label": "no-auth"}"#))
     .unwrap();
@@ -662,7 +662,7 @@ async fn test_unauthenticated_list_rejected() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .body(Body::empty())
     .unwrap();
 
@@ -677,7 +677,7 @@ async fn test_unauthenticated_revoke_rejected() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/api-keys/{}", fake_id))
+    .uri(&format!("/auth/keys/{}", fake_id))
     .body(Body::empty())
     .unwrap();
 
@@ -697,7 +697,7 @@ async fn test_create_key_zero_days_clamped_to_one() {
   let body = serde_json::json!({ "expires_in_days": 0 });
   let request = Request::builder()
     .method("POST")
-    .uri("/api-keys")
+    .uri("/auth/keys")
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(serde_json::to_string(&body).unwrap()))

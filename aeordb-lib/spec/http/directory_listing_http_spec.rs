@@ -67,7 +67,7 @@ async fn test_default_listing_includes_hash_and_path() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/")
+    .uri("/files/dir/")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -99,7 +99,7 @@ async fn test_recursive_unlimited() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/?depth=-1")
+    .uri("/files/dir/?depth=-1")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -130,7 +130,7 @@ async fn test_recursive_depth_1() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/?depth=1")
+    .uri("/files/dir/?depth=1")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -159,7 +159,7 @@ async fn test_glob_filter() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/?glob=*.txt")
+    .uri("/files/dir/?glob=*.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -186,7 +186,7 @@ async fn test_glob_with_depth() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/?depth=-1&glob=*.txt")
+    .uri("/files/dir/?depth=-1&glob=*.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -216,7 +216,7 @@ async fn test_directories_excluded_recursive() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/dir/?depth=-1")
+    .uri("/files/dir/?depth=-1")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -243,7 +243,7 @@ async fn test_nonexistent_directory_404() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/nonexistent/?depth=-1")
+    .uri("/files/nonexistent/?depth=-1")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -263,7 +263,7 @@ async fn test_file_get_unaffected() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/file.txt")
+    .uri("/files/file.txt")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -296,7 +296,7 @@ async fn test_version_query_still_works() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/engine/file.txt?snapshot=snap1")
+    .uri("/files/file.txt?snapshot=snap1")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();

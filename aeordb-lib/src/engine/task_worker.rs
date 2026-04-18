@@ -6,7 +6,7 @@ use tokio::time::sleep;
 use crate::engine::backup;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{
-    EngineEvent, EVENT_TASK_COMPLETED, EVENT_TASK_FAILED, EVENT_TASK_STARTED,
+    EngineEvent, EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED,
 };
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
@@ -121,7 +121,7 @@ fn process_next_task_internal(
 
     // Emit task started event.
     let started_event = EngineEvent::new(
-        EVENT_TASK_STARTED,
+        EVENT_TASKS_STARTED,
         "system",
         serde_json::json!({
             "task_id": task.id,
@@ -143,7 +143,7 @@ fn process_next_task_internal(
         Ok(summary) => {
             queue.update_status(&task.id, TaskStatus::Completed, None)?;
             let completed_event = EngineEvent::new(
-                EVENT_TASK_COMPLETED,
+                EVENT_TASKS_COMPLETED,
                 "system",
                 serde_json::json!({
                     "task_id": task.id,
@@ -156,7 +156,7 @@ fn process_next_task_internal(
         Err(error_message) => {
             queue.update_status(&task.id, TaskStatus::Failed, Some(error_message.clone()))?;
             let failed_event = EngineEvent::new(
-                EVENT_TASK_FAILED,
+                EVENT_TASKS_FAILED,
                 "system",
                 serde_json::json!({
                     "task_id": task.id,

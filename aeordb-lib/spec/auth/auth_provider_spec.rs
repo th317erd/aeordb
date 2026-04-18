@@ -443,7 +443,7 @@ async fn test_no_auth_mode_allows_engine_writes_without_token() {
   // No Authorization header at all -- should still work.
   let request = Request::builder()
     .method("PUT")
-    .uri("/engine/test/hello.txt")
+    .uri("/files/test/hello.txt")
     .header("content-type", "text/plain")
     .body(Body::from("hello world"))
     .unwrap();
@@ -473,7 +473,7 @@ async fn test_no_auth_mode_allows_admin_without_token() {
 
   // GET /admin/api-keys without auth should work (root claims injected).
   let request = Request::builder()
-    .uri("/admin/api-keys")
+    .uri("/auth/keys/admin")
     .body(Body::empty())
     .unwrap();
 
@@ -504,7 +504,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
 
   let write_req = Request::builder()
     .method("PUT")
-    .uri("/engine/noauth/data.json")
+    .uri("/files/noauth/data.json")
     .header("content-type", "application/json")
     .body(Body::from(r#"{"test": true}"#))
     .unwrap();
@@ -525,7 +525,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
   );
 
   let read_req = Request::builder()
-    .uri("/engine/noauth/data.json")
+    .uri("/files/noauth/data.json")
     .body(Body::empty())
     .unwrap();
 

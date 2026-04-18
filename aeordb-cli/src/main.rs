@@ -13,6 +13,7 @@
 //! - `aeordb emergency-reset` — reset the root API key
 
 use aeordb_cli::commands;
+use aeordb_cli::config::{AeorConfig, load_config};
 use clap::{Parser, Subcommand};
 use commands::stress::StressArgs;
 
@@ -27,13 +28,19 @@ struct Cli {
 enum Commands {
   /// Start the database server
   Start {
-    #[arg(short, long, default_value = "3000")]
-    port: u16,
-    #[arg(short = 'D', long, default_value = "data.aeordb")]
-    database: String,
-    #[arg(long, default_value = "pretty")]
-    log_format: String,
-    /// Auth provider URI: false/null/no/0, self, file:///path/to/identity
+    /// Path to a TOML configuration file
+    #[arg(short, long)]
+    config: Option<String>,
+    #[arg(short, long)]
+    port: Option<u16>,
+    /// Bind address (default: "0.0.0.0")
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(short = 'D', long)]
+    database: Option<String>,
+    #[arg(long)]
+    log_format: Option<String>,
+    /// Auth provider URI: disabled/false/null/no/0, self, file:///path/to/identity
     #[arg(long)]
     auth: Option<String>,
     /// Directory for write-ahead hot files (defaults to database file's parent directory)
@@ -41,13 +48,19 @@ enum Commands {
     hot_dir: Option<String>,
     /// CORS allowed origins: "*" for all, or comma-separated origins (e.g. "https://a.com,https://b.com")
     #[arg(long)]
-    cors: Option<String>,
+    cors_origins: Option<String>,
     /// Path to TLS certificate PEM file (requires --tls-key)
     #[arg(long)]
     tls_cert: Option<String>,
     /// Path to TLS private key PEM file (requires --tls-cert)
     #[arg(long)]
     tls_key: Option<String>,
+    /// JWT token lifetime in seconds (default: 3600)
+    #[arg(long)]
+    jwt_expiry: Option<i64>,
+    /// Write chunk size in bytes (default: 262144 = 256 KiB)
+    #[arg(long)]
+    chunk_size: Option<usize>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -113,8 +126,94 @@ async fn main() {
   let cli = Cli::parse();
 
   match cli.command {
-    Commands::Start { port, database, log_format, auth, hot_dir, cors, tls_cert, tls_key } => {
-      commands::start::run(port, &database, &log_format, auth.as_deref(), hot_dir.as_deref(), cors.as_deref(), tls_cert.as_deref(), tls_key.as_deref()).await;
+    Commands::Start {
+      config,
+      port,
+      host,
+      database,
+      log_format,
+      auth,
+      hot_dir,
+      cors_origins,
+      tls_cert,
+      tls_key,
+      jwt_expiry,
+      chunk_size,
+    } => {
+      // Load config file if specified; otherwise use all-None defaults.
+      let file_config = match config {
+        Some(ref path) => match load_config(path) {
+          Ok(configuration) => configuration,
+          Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+          }
+        },
+        None => AeorConfig::default(),
+      };
+
+      // Merge: CLI flag > config file > built-in default.
+      let merged_port = port
+        .or(file_config.server.port)
+        .unwrap_or(3000);
+
+      let merged_host = host
+        .or(file_config.server.host)
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+
+      let merged_database = database
+        .or(file_config.storage.database)
+        .unwrap_or_else(|| "data.aeordb".to_string());
+
+      let merged_log_format = log_format
+        .or(file_config.server.log_format)
+        .unwrap_or_else(|| "pretty".to_string());
+
+      // Auth: CLI --auth overrides config auth.mode.
+      let merged_auth: Option<String> = auth.or(file_config.auth.mode);
+
+      // Hot dir: CLI --hot-dir overrides config storage.hot_dir.
+      let merged_hot_dir: Option<String> = hot_dir.or(file_config.storage.hot_dir);
+
+      // CORS: CLI --cors-origins overrides config server.cors.origins.
+      // Config origins (Vec<String>) are joined with commas for the server layer.
+      let merged_cors: Option<String> = cors_origins.or_else(|| {
+        file_config.server.cors
+          .and_then(|cors| cors.origins)
+          .map(|origins| origins.join(","))
+      });
+
+      // TLS: CLI flags override config values.
+      let merged_tls_cert: Option<String> = tls_cert.or_else(|| {
+        file_config.server.tls.as_ref().and_then(|tls| tls.cert.clone())
+      });
+      let merged_tls_key: Option<String> = tls_key.or_else(|| {
+        file_config.server.tls.as_ref().and_then(|tls| tls.key.clone())
+      });
+
+      // JWT expiry: CLI --jwt-expiry overrides config auth.jwt_expiry_seconds.
+      let merged_jwt_expiry = jwt_expiry
+        .or(file_config.auth.jwt_expiry_seconds)
+        .unwrap_or(3600);
+
+      // Chunk size: CLI --chunk-size overrides config storage.chunk_size.
+      let merged_chunk_size = chunk_size
+        .or(file_config.storage.chunk_size)
+        .unwrap_or(262144);
+
+      commands::start::run(
+        merged_port,
+        &merged_host,
+        &merged_database,
+        &merged_log_format,
+        merged_auth.as_deref(),
+        merged_hot_dir.as_deref(),
+        merged_cors.as_deref(),
+        merged_tls_cert.as_deref(),
+        merged_tls_key.as_deref(),
+        merged_jwt_expiry,
+        merged_chunk_size,
+      ).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

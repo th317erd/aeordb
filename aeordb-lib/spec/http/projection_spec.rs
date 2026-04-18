@@ -128,7 +128,7 @@ async fn query_with_select(
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", auth)
     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -283,7 +283,7 @@ async fn test_select_on_aggregate_response() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", &bearer_token(&jwt_manager))
     .body(Body::from(serde_json::to_vec(&body).unwrap()))

@@ -106,7 +106,7 @@ async fn query_post(
 ) -> (StatusCode, serde_json::Value) {
   let request = Request::builder()
     .method("POST")
-    .uri("/query")
+    .uri("/files/query")
     .header("content-type", "application/json")
     .header("authorization", auth)
     .body(Body::from(serde_json::to_vec(body).unwrap()))
