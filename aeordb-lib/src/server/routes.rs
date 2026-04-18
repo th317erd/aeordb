@@ -649,9 +649,27 @@ pub async fn verify_magic_link(
   }
 
   // Issue a JWT for this email.
+  // Look up the user by email so we can use their UUID as `sub`.
+  // Permission middleware expects a UUID — using the raw email would fail auth.
+  let sub = match system_store::get_user_by_username(&state.engine, &record.email) {
+    Ok(Some(user)) => user.user_id.to_string(),
+    Ok(None) => {
+      tracing::warn!("Magic link verified for '{}' but no user record found", record.email);
+      return ErrorResponse::new("No user account for this email".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to look up user by email '{}': {}", record.email, error);
+      return ErrorResponse::new("Internal server error".to_string())
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: record.email.clone(),
+    sub,
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,

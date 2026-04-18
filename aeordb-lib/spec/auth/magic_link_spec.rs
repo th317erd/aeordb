@@ -166,8 +166,11 @@ async fn test_verify_valid_code_returns_jwt() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
 
-  // Store a magic link directly.
+  // Create a user record so the magic-link verify can resolve email → UUID.
+  let user = aeordb::engine::User::new("valid@example.com", Some("valid@example.com"));
+  system_store::store_user(&engine, &ctx, &user).unwrap();
 
+  // Store a magic link directly.
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
@@ -263,6 +266,10 @@ async fn test_verify_invalid_code_returns_401() {
 async fn test_verify_code_is_single_use() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+
+  // Create a user record so the magic-link verify can resolve email → UUID.
+  let user = aeordb::engine::User::new("single-use@example.com", Some("single-use@example.com"));
+  system_store::store_user(&engine, &ctx, &user).unwrap();
 
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);

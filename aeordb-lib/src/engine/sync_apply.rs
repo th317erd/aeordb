@@ -5,7 +5,17 @@ use crate::engine::merge::MergeOp;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
-/// Apply merge results atomically.
+/// Apply merge operations to the local engine.
+///
+/// NOTE: This is NOT atomic in the database sense. Each operation is applied
+/// individually and durable (per-entry fsync). If operation N fails, operations
+/// 1..N-1 are already committed. The caller should NOT save sync state if this
+/// returns an error -- the next sync cycle will re-attempt from the last
+/// successfully saved base hash.
+///
+/// Pre-flight: verifies all required chunks exist before applying any operations.
+/// This prevents the most common failure mode (missing chunks) but does not
+/// protect against I/O errors or disk-full conditions during the apply phase.
 ///
 /// Steps:
 /// 1. Verify all required chunks exist locally (pre-flight check)

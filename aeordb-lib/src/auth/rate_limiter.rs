@@ -58,6 +58,20 @@ impl RateLimiter {
     let now = Instant::now();
     let window_duration = std::time::Duration::from_secs(self.window_seconds);
 
+    // M4: Evict oldest entries when the HashMap grows too large to prevent
+    // unbounded memory growth from unique keys (e.g. IP-based rate limiting).
+    if inner.windows.len() > 100_000 {
+      let mut entries: Vec<_> = inner
+        .windows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.last().copied()))
+        .collect();
+      entries.sort_by_key(|(_, t)| *t);
+      for (key, _) in entries.iter().take(10_000) {
+        inner.windows.remove(key);
+      }
+    }
+
     let timestamps = inner
       .windows
       .entry(key.to_string())

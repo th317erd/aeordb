@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +87,9 @@ pub struct TaskQueue {
     engine: Arc<StorageEngine>,
     progress: Arc<RwLock<HashMap<String, ProgressInfo>>>,
     cancelled: Arc<RwLock<HashSet<String>>>,
+    /// Serializes enqueue operations so the load-registry / push / save-registry
+    /// sequence is not interleaved by concurrent enqueues (which would lose entries).
+    enqueue_lock: Mutex<()>,
 }
 
 impl TaskQueue {
@@ -95,6 +98,7 @@ impl TaskQueue {
             engine,
             progress: Arc::new(RwLock::new(HashMap::new())),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
+            enqueue_lock: Mutex::new(()),
         }
     }
 
@@ -107,6 +111,14 @@ impl TaskQueue {
     ///
     /// Returns the created [`TaskRecord`] including the generated UUID.
     pub fn enqueue(&self, task_type: &str, args: serde_json::Value) -> EngineResult<TaskRecord> {
+        // Serialize the entire enqueue operation so concurrent enqueues cannot
+        // interleave registry reads and writes (which would lose entries).
+        let _enqueue_guard = self.enqueue_lock.lock().map_err(|e| {
+            EngineError::IoError(std::io::Error::other(
+                format!("enqueue lock poisoned: {}", e),
+            ))
+        })?;
+
         let id = uuid::Uuid::new_v4().to_string();
         let record = TaskRecord {
             id: id.clone(),
@@ -240,7 +252,10 @@ impl TaskQueue {
     /// Cancel a task: mark it as cancelled both in memory and on disk.
     pub fn cancel(&self, id: &str) -> EngineResult<()> {
         {
-            let mut cancelled = self.cancelled.write().unwrap();
+            let mut cancelled = self.cancelled.write().unwrap_or_else(|e| {
+                tracing::warn!("cancelled set write lock poisoned, recovering: {}", e);
+                e.into_inner()
+            });
             cancelled.insert(id.to_string());
         }
         self.update_status(id, TaskStatus::Cancelled, None)
@@ -249,31 +264,46 @@ impl TaskQueue {
     /// Mark a task as cancelled in memory only (without updating persisted status).
     /// Useful for testing mid-execution cancellation detection.
     pub fn mark_cancelled_in_memory(&self, id: &str) {
-        let mut cancelled = self.cancelled.write().unwrap();
+        let mut cancelled = self.cancelled.write().unwrap_or_else(|e| {
+            tracing::warn!("cancelled set write lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         cancelled.insert(id.to_string());
     }
 
     /// Check if a task has been cancelled (in-memory check for speed).
     pub fn is_cancelled(&self, id: &str) -> bool {
-        let cancelled = self.cancelled.read().unwrap();
+        let cancelled = self.cancelled.read().unwrap_or_else(|e| {
+            tracing::warn!("cancelled set read lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         cancelled.contains(id)
     }
 
     /// Set in-memory progress info for a task.
     pub fn set_progress(&self, id: &str, info: ProgressInfo) {
-        let mut progress = self.progress.write().unwrap();
+        let mut progress = self.progress.write().unwrap_or_else(|e| {
+            tracing::warn!("progress map write lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         progress.insert(id.to_string(), info);
     }
 
     /// Get in-memory progress info for a task.
     pub fn get_progress(&self, id: &str) -> Option<ProgressInfo> {
-        let progress = self.progress.read().unwrap();
+        let progress = self.progress.read().unwrap_or_else(|e| {
+            tracing::warn!("progress map read lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         progress.get(id).cloned()
     }
 
     /// Find any running reindex task whose args.path is a prefix of the given path.
     pub fn get_reindex_progress_for_path(&self, path: &str) -> Option<ProgressInfo> {
-        let progress = self.progress.read().unwrap();
+        let progress = self.progress.read().unwrap_or_else(|e| {
+            tracing::warn!("progress map read lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         for info in progress.values() {
             if info.task_type == "reindex" {
                 if let Some(task_path) = info.args.get("path").and_then(|v| v.as_str()) {
@@ -288,7 +318,10 @@ impl TaskQueue {
 
     /// Remove in-memory progress info for a task.
     pub fn clear_progress(&self, id: &str) {
-        let mut progress = self.progress.write().unwrap();
+        let mut progress = self.progress.write().unwrap_or_else(|e| {
+            tracing::warn!("progress map write lock poisoned, recovering: {}", e);
+            e.into_inner()
+        });
         progress.remove(id);
     }
 

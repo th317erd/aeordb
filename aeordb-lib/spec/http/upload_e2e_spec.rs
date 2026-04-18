@@ -90,10 +90,11 @@ async fn test_full_round_trip_config_check_upload_commit_read() {
     let (_app, jwt, engine, _tmp) = test_app();
     let token = root_bearer_token(&jwt);
 
-    // Phase 1: GET /upload/config
+    // Phase 1: GET /upload/config (requires auth after M5 fix)
     let resp = rebuild_app(&jwt, &engine)
         .oneshot(
             Request::get("/upload/config")
+                .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),
         )

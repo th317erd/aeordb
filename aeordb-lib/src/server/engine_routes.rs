@@ -89,7 +89,7 @@ pub async fn engine_store_file(
     Err(error) => {
       tracing::error!("Engine: failed to store file at '{}': {}", path, error);
       let status = engine_error_status(&error);
-      return ErrorResponse::new(format!("Failed to store file: {}", error))
+      return ErrorResponse::new(sanitize_engine_error("Failed to store file", &error))
         .with_status(status)
         .into_response();
     }
@@ -225,7 +225,8 @@ pub async fn engine_get(
         ) {
           Ok(s) => s,
           Err(error) => {
-            return ErrorResponse::new(format!("Failed to read resolved file: {}", error))
+            tracing::error!("Engine: failed to read resolved file via symlink: {}", error);
+            return ErrorResponse::new("Failed to read resolved file")
               .with_status(StatusCode::INTERNAL_SERVER_ERROR)
               .into_response();
           }
@@ -316,7 +317,8 @@ pub async fn engine_get(
             return (StatusCode::OK, Json(listing)).into_response();
           }
           Err(error) => {
-            return ErrorResponse::new(format!("Failed to list resolved directory: {}", error))
+            tracing::error!("Engine: failed to list resolved directory: {}", error);
+            return ErrorResponse::new("Failed to list resolved directory")
               .with_status(StatusCode::INTERNAL_SERVER_ERROR)
               .into_response();
           }
@@ -338,7 +340,8 @@ pub async fn engine_get(
           .into_response();
       }
       Err(error) => {
-        return ErrorResponse::new(format!("Failed to resolve symlink: {}", error))
+        tracing::error!("Engine: failed to resolve symlink '{}': {}", path, error);
+        return ErrorResponse::new("Failed to resolve symlink")
           .with_status(StatusCode::INTERNAL_SERVER_ERROR)
           .into_response();
       }
@@ -353,7 +356,7 @@ pub async fn engine_get(
         Ok(file_stream) => file_stream,
         Err(error) => {
           tracing::error!("Engine: failed to read file '{}': {}", path, error);
-          return ErrorResponse::new(format!("Failed to read file: {}", error))
+          return ErrorResponse::new("Failed to read file")
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -390,7 +393,7 @@ pub async fn engine_get(
     }
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new(format!("Failed to read path: {}", error))
+      return ErrorResponse::new("Failed to read path")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -401,6 +404,8 @@ pub async fn engine_get(
   // If depth or glob is specified, use recursive listing
   if version_query.depth.is_some() || version_query.glob.is_some() {
     let depth = version_query.depth.unwrap_or(0);
+    // M17: Clamp recursive listing depth to prevent runaway traversals.
+    let depth = if depth < 0 { -1 } else { depth.min(256) };
     let glob = version_query.glob.as_deref();
     match list_directory_recursive(&state.engine, &path, depth, glob) {
       Ok(entries) => {
@@ -457,7 +462,7 @@ pub async fn engine_get(
       }
       Err(error) => {
         tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-        return ErrorResponse::new(format!("Failed to list directory: {}", error))
+        return ErrorResponse::new("Failed to list directory")
           .with_status(StatusCode::INTERNAL_SERVER_ERROR)
           .into_response();
       }
@@ -526,7 +531,7 @@ pub async fn engine_get(
     }
     Err(error) => {
       tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to list directory: {}", error))
+      ErrorResponse::new("Failed to list directory")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -578,7 +583,7 @@ async fn engine_get_at_version(
     }
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!("Failed to read file at version: {}", error))
+      return ErrorResponse::new("Failed to read file at version")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -591,7 +596,7 @@ async fn engine_get_at_version(
     Ok(stream) => stream,
     Err(error) => {
       tracing::error!("Engine: failed to stream file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!("Failed to stream file: {}", error))
+      return ErrorResponse::new("Failed to stream file")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -655,7 +660,7 @@ pub async fn engine_delete_file(
       }
       Err(error) => {
         tracing::error!("Engine: failed to delete symlink '{}': {}", path, error);
-        ErrorResponse::new(format!("Failed to delete symlink: {}", error))
+        ErrorResponse::new("Failed to delete symlink")
           .with_status(StatusCode::INTERNAL_SERVER_ERROR)
           .into_response()
       }
@@ -677,7 +682,7 @@ pub async fn engine_delete_file(
     }
     Err(error) => {
       tracing::error!("Engine: failed to delete file '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to delete file: {}", error))
+      ErrorResponse::new("Failed to delete file")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -819,7 +824,7 @@ pub async fn engine_get_by_hash(
         Ok(r) => r,
         Err(e) => {
           tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new(format!("Corrupt FileRecord: {}", e))
+          return ErrorResponse::new("Corrupt or unreadable entry")
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -829,7 +834,7 @@ pub async fn engine_get_by_hash(
         Ok(s) => s,
         Err(e) => {
           tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new(format!("Failed to read file chunks: {}", e))
+          return ErrorResponse::new("Failed to read file chunks")
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -1764,6 +1769,19 @@ fn engine_error_status(error: &EngineError) -> StatusCode {
   match error {
     EngineError::NotFound(_) => StatusCode::NOT_FOUND,
     EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
+    EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
     _ => StatusCode::INTERNAL_SERVER_ERROR,
+  }
+}
+
+/// L12: Return a safe error message for client responses.
+/// Passes through user-facing validation messages (InvalidInput, NotFound,
+/// AlreadyExists) but suppresses internal details for all other error variants.
+fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
+  match error {
+    EngineError::InvalidInput(msg) => format!("{}: {}", prefix, msg),
+    EngineError::NotFound(msg) => format!("{}: {}", prefix, msg),
+    EngineError::AlreadyExists(msg) => format!("{}: {}", prefix, msg),
+    _ => prefix.to_string(),
   }
 }

@@ -58,7 +58,40 @@ impl DiskKVStore {
     /// Writes empty pages for stage 0.
     /// When `hot_dir` is Some, a write-ahead hot file is created for crash recovery.
     pub fn create(path: &Path, hash_algo: HashAlgorithm, hot_dir: Option<&Path>) -> EngineResult<Self> {
-        let stage = 0;
+        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
+            // Derive db_name: "test.aeordb.kv" -> stem "test.aeordb" -> stem "test"
+            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+            let db_name = std::path::Path::new(kv_stem)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
+            let (f, p) = Self::init_hot_file(dir, db_name)?;
+            (Some(f), Some(p))
+        } else {
+            (None, None)
+        };
+
+        Self::init_at_stage(path, hash_algo, 0, hot_file, hot_path)
+    }
+
+    /// Create a new disk KV store at the given path with a specific stage.
+    /// Used during resize operations. No hot file -- callers manage their own journaling.
+    pub fn create_at_stage(
+        path: &Path,
+        hash_algo: HashAlgorithm,
+        stage: usize,
+    ) -> EngineResult<Self> {
+        let stage = stage.min(KV_STAGES.len() - 1);
+        Self::init_at_stage(path, hash_algo, stage, None, None)
+    }
+
+    /// Shared initialization: create a new KV file at the given stage, write empty
+    /// pages, build NVT + snapshot, and return the assembled `DiskKVStore`.
+    fn init_at_stage(
+        path: &Path,
+        hash_algo: HashAlgorithm,
+        stage: usize,
+        hot_file: Option<File>,
+        hot_path: Option<PathBuf>,
+    ) -> EngineResult<Self> {
         let (_block_size, bucket_count) = KV_STAGES[stage];
         let hash_length = hash_algo.hash_length();
 
@@ -77,17 +110,6 @@ impl DiskKVStore {
         file.sync_all()?;
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
-
-        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
-            // Derive db_name: "test.aeordb.kv" → stem "test.aeordb" → stem "test"
-            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-            let db_name = std::path::Path::new(kv_stem)
-                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
-            let (f, p) = Self::init_hot_file(dir, db_name)?;
-            (Some(f), Some(p))
-        } else {
-            (None, None)
-        };
 
         let shared_nvt = Arc::new(nvt.clone());
         let kv_path = path.to_path_buf();
@@ -113,62 +135,6 @@ impl DiskKVStore {
             bucket_count,
             hot_file,
             hot_path,
-            hot_buffer: Vec::new(),
-            snapshot,
-            shared_nvt,
-        })
-    }
-
-    /// Create a new disk KV store at the given path with a specific stage.
-    /// Used during resize operations. No hot file — callers manage their own journaling.
-    pub fn create_at_stage(
-        path: &Path,
-        hash_algo: HashAlgorithm,
-        stage: usize,
-    ) -> EngineResult<Self> {
-        let stage = stage.min(KV_STAGES.len() - 1);
-        let (_block_size, bucket_count) = KV_STAGES[stage];
-        let hash_length = hash_algo.hash_length();
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(EngineError::from)?;
-
-        let empty_page = vec![0u8; page_size(hash_length)];
-        for _ in 0..bucket_count {
-            file.write_all(&empty_page)?;
-        }
-        file.sync_all()?;
-
-        let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
-
-        let shared_nvt = Arc::new(nvt.clone());
-        let kv_path = path.to_path_buf();
-        let pages = Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count]);
-        let initial_snapshot = ReadSnapshot::new(
-            HashMap::new(),
-            Arc::clone(&shared_nvt),
-            bucket_count,
-            hash_algo,
-            0,
-            pages,
-        );
-        let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
-
-        Ok(DiskKVStore {
-            nvt,
-            write_buffer: HashMap::new(),
-            kv_file: file,
-            kv_path,
-            stage,
-            hash_algo,
-            entry_count: 0,
-            bucket_count,
-            hot_file: None,
-            hot_path: None,
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
@@ -535,6 +501,13 @@ impl DiskKVStore {
         // Swap files: rename temp -> current path
         std::fs::rename(&temp_path, &self.kv_path)?;
 
+        // Ensure the rename is durable by fsyncing the parent directory
+        if let Some(parent) = self.kv_path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
         // Reopen at the original path
         self.kv_file = OpenOptions::new()
             .read(true)
@@ -748,7 +721,12 @@ impl DiskKVStore {
     /// Incremental snapshot publish: only re-read modified pages from disk.
     /// Unmodified pages are shared via Arc from the previous snapshot.
     fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) {
-        self.shared_nvt = Arc::new(self.nvt.clone());
+        // Only re-clone the NVT if the bucket count changed (e.g. after a resize).
+        // The NVT is determined entirely by bucket_count, so if it hasn't changed
+        // the existing Arc is still valid and we avoid an expensive clone.
+        if self.shared_nvt.bucket_count() != self.nvt.bucket_count() {
+            self.shared_nvt = Arc::new(self.nvt.clone());
+        }
 
         // Get current pages from existing snapshot
         let current = self.snapshot.load();

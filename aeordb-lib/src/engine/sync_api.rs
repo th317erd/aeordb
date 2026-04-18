@@ -107,6 +107,12 @@ pub struct ConflictVersionInfo {
 /// If `since_root_hash` is None, returns the entire tree as "added".
 /// If `paths_filter` is Some, only entries matching the glob patterns are included.
 /// If `include_system` is false, entries under `/.system/` are excluded.
+///
+/// NOTE: If `since_root_hash` refers to a hash that does not exist in the engine,
+/// `walk_version_tree` returns an empty tree, causing the diff to treat all current
+/// entries as "added" -- effectively a full re-sync. This is a safe degradation but
+/// may cause unexpected bandwidth usage. Callers should validate the base hash
+/// if they want to detect this case.
 pub fn compute_sync_diff(
     engine: &StorageEngine,
     since_root_hash: Option<&[u8]>,
@@ -199,12 +205,16 @@ pub fn apply_sync_chunks(engine: &StorageEngine, chunks: &[ChunkData]) -> Engine
 // ---------------------------------------------------------------------------
 
 /// List all unresolved conflicts with typed data.
+///
+/// Malformed conflict records that fail deserialization are logged and skipped
+/// rather than causing the entire listing to fail.
 pub fn list_conflicts_typed(engine: &StorageEngine) -> EngineResult<Vec<ConflictRecord>> {
     let raw = conflict_store::list_conflicts(engine)?;
     let mut conflicts = Vec::new();
     for value in raw {
-        if let Ok(record) = serde_json::from_value::<ConflictRecord>(value) {
-            conflicts.push(record);
+        match serde_json::from_value::<ConflictRecord>(value.clone()) {
+            Ok(record) => conflicts.push(record),
+            Err(e) => tracing::warn!("Skipping malformed conflict record: {}", e),
         }
     }
     Ok(conflicts)

@@ -156,13 +156,14 @@ fn test_resolve_self_reference() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create_engine(&dir);
 
-    store_symlink(&engine, "/a", "/a");
-
-    match resolve_symlink(&engine, "/a") {
-        Err(EngineError::CyclicSymlink(msg)) => {
-            assert!(msg.contains("/a"), "Cycle message should contain /a: {}", msg);
+    // Self-referencing symlinks are now rejected at creation time (M16).
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    match ops.store_symlink(&ctx, "/a", "/a") {
+        Err(EngineError::InvalidInput(msg)) => {
+            assert!(msg.contains("/a"), "Error should mention /a: {}", msg);
         }
-        other => panic!("Expected CyclicSymlink, got {:?}", other),
+        other => panic!("Expected InvalidInput for self-reference, got {:?}", other),
     }
 }
 

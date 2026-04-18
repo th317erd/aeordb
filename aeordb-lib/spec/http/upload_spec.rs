@@ -86,20 +86,25 @@ async fn test_config_returns_hash_algo_and_chunk_size() {
 }
 
 // ===========================================================================
-// 2. GET /upload/config requires no auth
+// 2. GET /upload/config requires auth (moved behind auth middleware, M5)
 // ===========================================================================
 
 #[tokio::test]
 async fn test_config_no_auth_required() {
-    let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+    let (_app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
 
     let request = Request::builder()
         .method("GET")
         .uri("/upload/config")
+        .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
+    let response = rebuild_app(&jwt_manager, &engine)
+        .oneshot(request)
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
@@ -358,15 +363,20 @@ async fn test_check_expired_token_returns_401() {
 
 #[tokio::test]
 async fn test_config_post_method_not_allowed() {
-    let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+    let (_app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
 
     let request = Request::builder()
         .method("POST")
         .uri("/upload/config")
+        .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
+    let response = rebuild_app(&jwt_manager, &engine)
+        .oneshot(request)
+        .await
+        .unwrap();
     assert!(
         response.status() == StatusCode::METHOD_NOT_ALLOWED
             || response.status() == StatusCode::NOT_FOUND,

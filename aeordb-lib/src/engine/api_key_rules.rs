@@ -89,11 +89,21 @@ pub fn validate_flags(flags: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a list of rules (all globs non-empty, all flags valid).
+/// Maximum allowed length for a single glob pattern (bytes).
+const MAX_GLOB_PATTERN_LENGTH: usize = 1024;
+
+/// Validate a list of rules (all globs non-empty, within length limits, all flags valid).
 pub fn validate_rules(rules: &[KeyRule]) -> Result<(), String> {
     for rule in rules {
         if rule.glob.is_empty() {
             return Err("Rule glob pattern cannot be empty".to_string());
+        }
+        if rule.glob.len() > MAX_GLOB_PATTERN_LENGTH {
+            return Err(format!(
+                "Glob pattern too long: {} chars (max {})",
+                rule.glob.len(),
+                MAX_GLOB_PATTERN_LENGTH
+            ));
         }
         validate_flags(&rule.permitted)?;
     }

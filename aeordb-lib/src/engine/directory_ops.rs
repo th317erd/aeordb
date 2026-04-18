@@ -286,6 +286,12 @@ impl<'a> DirectoryOps<'a> {
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
+
+    // M15: Reject storing at root path — it would create a ghost entry.
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+    }
+
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
@@ -777,7 +783,6 @@ impl<'a> DirectoryOps<'a> {
       };
 
       let dir_key = directory_path_hash(&parent, &algo)?;
-      let dir_flags = if is_system_path(&parent) { FLAG_SYSTEM } else { 0 };
 
       // Read existing directory
       let existing = self.engine.get_entry(&dir_key)?;
@@ -876,7 +881,6 @@ impl<'a> DirectoryOps<'a> {
     };
 
     let dir_key = directory_path_hash(&parent, &algo)?;
-    let dir_flags = if is_system_path(&parent) { FLAG_SYSTEM } else { 0 };
     let child_name = file_name(child_path).unwrap_or("").to_string();
 
     let existing = self.engine.get_entry(&dir_key)?;
@@ -961,6 +965,19 @@ impl<'a> DirectoryOps<'a> {
   ) -> EngineResult<SymlinkRecord> {
     let normalized = normalize_path(path);
     let normalized_target = normalize_path(target);
+
+    // M15: Reject storing at root path — it would create a ghost entry.
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+    }
+
+    // M16: Reject self-referencing symlinks at creation time.
+    if normalized == normalized_target {
+      return Err(EngineError::InvalidInput(
+        format!("Symlink cannot point to itself: {}", normalized)
+      ));
+    }
+
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
