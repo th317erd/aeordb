@@ -135,6 +135,11 @@ fn determine_sync_caller(
     headers: &HeaderMap,
     state: &AppState,
 ) -> Result<SyncCaller, Response> {
+    // 0. If auth is disabled (dev mode), treat as root.
+    if !state.auth_provider.is_enabled() {
+        return Ok(SyncCaller::RootUser);
+    }
+
     // 1. Try cluster secret first (peer mode).
     if validate_cluster_secret(headers, &state.engine) {
         return Ok(SyncCaller::Peer);
