@@ -726,31 +726,6 @@ pub fn remove_plugin(
 }
 
 // ---------------------------------------------------------------------------
-// Cluster Secret
-// ---------------------------------------------------------------------------
-
-/// Persist a hashed cluster secret for peer authentication.
-pub fn store_cluster_secret_hash(
-    engine: &StorageEngine,
-    ctx: &RequestContext,
-    secret_hash: &[u8],
-) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    ops.store_file(ctx, "/.system/cluster/secret_hash", secret_hash, Some("application/octet-stream"))?;
-    Ok(())
-}
-
-/// Load the persisted cluster secret hash, if any.
-pub fn get_cluster_secret_hash(engine: &StorageEngine) -> EngineResult<Option<Vec<u8>>> {
-    let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.system/cluster/secret_hash") {
-        Ok(data) => Ok(Some(data)),
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Peer Sync State
 // ---------------------------------------------------------------------------
 

@@ -2,16 +2,17 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use uuid::Uuid;
 
-use aeordb::auth::jwt::JwtManager;
+use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::{
     DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager,
 };
-use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
@@ -21,19 +22,9 @@ fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
         .handle()
 }
 
-const TEST_SECRET: &str = "my-super-secret-cluster-key";
-
-fn setup_cluster_secret(engine: &StorageEngine, secret: &str) {
-    let hash = blake3::hash(secret.as_bytes());
-    let ctx = RequestContext::system();
-    system_store::store_cluster_secret_hash(engine, &ctx, hash.as_bytes())
-        .unwrap();
-}
-
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
     let jwt_manager = Arc::new(JwtManager::generate());
     let (engine, temp_dir) = create_temp_engine_for_tests();
-    setup_cluster_secret(&engine, TEST_SECRET);
     let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
     let rate_limiter = Arc::new(RateLimiter::default_config());
     let auth_provider: Arc<dyn aeordb::auth::AuthProvider> =
@@ -66,21 +57,38 @@ fn store_test_file(engine: &StorageEngine, path: &str, data: &[u8]) {
         .expect("store file");
 }
 
+/// Create a root-user Bearer token (nil UUID).
+fn bearer_token(jwt_manager: &JwtManager) -> String {
+    let now = Utc::now().timestamp();
+    let claims = TokenClaims {
+        sub: Uuid::nil().to_string(),
+        iss: "aeordb".to_string(),
+        iat: now,
+        exp: now + DEFAULT_EXPIRY_SECONDS,
+        scope: None,
+        permissions: None,
+        key_id: None,
+    };
+    let token = jwt_manager.create_token(&claims).unwrap();
+    format!("Bearer {}", token)
+}
+
 // ===========================================================================
 // POST /sync/diff — full sync (no since_root_hash)
 // ===========================================================================
 
 #[tokio::test]
 async fn test_sync_diff_full() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
     store_test_file(&engine, "/hello.txt", b"hello world");
     store_test_file(&engine, "/subdir/nested.txt", b"nested content");
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -96,7 +104,7 @@ async fn test_sync_diff_full() {
     assert!(json["root_hash"].is_string());
     assert!(!json["root_hash"].as_str().unwrap().is_empty());
 
-    // All files as "added" — filter out /.system/ entries from cluster secret setup
+    // All files as "added"
     let added = json["changes"]["files_added"].as_array().unwrap();
     let user_added: Vec<_> = added.iter()
         .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system"))
@@ -126,7 +134,7 @@ async fn test_sync_diff_full() {
 
 #[tokio::test]
 async fn test_sync_diff_incremental() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
 
     // Store initial files
     store_test_file(&engine, "/file_a.txt", b"content A");
@@ -138,11 +146,12 @@ async fn test_sync_diff_incremental() {
     // Store more files (these should appear as added in the diff)
     store_test_file(&engine, "/file_b.txt", b"content B");
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "since_root_hash": since_hash
@@ -173,17 +182,18 @@ async fn test_sync_diff_incremental() {
 
 #[tokio::test]
 async fn test_sync_diff_with_path_filter() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
 
     store_test_file(&engine, "/docs/readme.txt", b"readme");
     store_test_file(&engine, "/src/main.rs", b"fn main() {}");
     store_test_file(&engine, "/src/lib.rs", b"pub fn lib() {}");
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "paths": ["/src/*"]
@@ -207,11 +217,11 @@ async fn test_sync_diff_with_path_filter() {
 }
 
 // ===========================================================================
-// POST /sync/diff — missing secret → 401
+// POST /sync/diff — missing auth → 401
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_diff_no_secret() {
+async fn test_sync_diff_no_auth() {
     let (app, _jwt, _engine, _tmp) = test_app();
 
     let response = app
@@ -232,18 +242,18 @@ async fn test_sync_diff_no_secret() {
 }
 
 // ===========================================================================
-// POST /sync/diff — wrong secret → 401
+// POST /sync/diff — invalid JWT → 401
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_diff_wrong_secret() {
+async fn test_sync_diff_invalid_jwt() {
     let (app, _jwt, _engine, _tmp) = test_app();
 
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", "wrong-secret-value")
+                .header("authorization", "Bearer totally.not.valid")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -261,13 +271,14 @@ async fn test_sync_diff_wrong_secret() {
 
 #[tokio::test]
 async fn test_sync_diff_invalid_since_hash() {
-    let (app, _jwt, _engine, _tmp) = test_app();
+    let (app, jwt, _engine, _tmp) = test_app();
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "since_root_hash": "ZZZZ_not_hex"
@@ -288,13 +299,14 @@ async fn test_sync_diff_invalid_since_hash() {
 
 #[tokio::test]
 async fn test_sync_diff_empty_database() {
-    let (app, _jwt, _engine, _tmp) = test_app();
+    let (app, jwt, _engine, _tmp) = test_app();
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -306,7 +318,7 @@ async fn test_sync_diff_empty_database() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
 
-    // Filter out /.system/ entries (created by cluster secret setup)
+    // Filter out /.system/ entries
     let added: Vec<_> = json["changes"]["files_added"].as_array().unwrap()
         .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system")).collect();
     assert!(added.is_empty(), "No user files should be added on empty db");
@@ -320,10 +332,12 @@ async fn test_sync_diff_empty_database() {
 
 #[tokio::test]
 async fn test_sync_chunks_returns_data() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
 
     // Store a file to get real chunk hashes
     store_test_file(&engine, "/data.bin", b"some binary content here");
+
+    let auth = bearer_token(&jwt);
 
     // Get the chunk hashes from a diff
     let diff_response = app
@@ -331,7 +345,7 @@ async fn test_sync_chunks_returns_data() {
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -355,7 +369,7 @@ async fn test_sync_chunks_returns_data() {
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "hashes": chunk_hashes
@@ -387,15 +401,16 @@ async fn test_sync_chunks_returns_data() {
 
 #[tokio::test]
 async fn test_sync_chunks_missing_hash() {
-    let (app, _jwt, _engine, _tmp) = test_app();
+    let (app, jwt, _engine, _tmp) = test_app();
 
     let fake_hash = hex::encode(blake3::hash(b"nonexistent").as_bytes());
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "hashes": [fake_hash]
@@ -414,11 +429,11 @@ async fn test_sync_chunks_missing_hash() {
 }
 
 // ===========================================================================
-// POST /sync/chunks — missing secret → 401
+// POST /sync/chunks — missing auth → 401
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_chunks_no_secret() {
+async fn test_sync_chunks_no_auth() {
     let (app, _jwt, _engine, _tmp) = test_app();
 
     let response = app
@@ -440,18 +455,18 @@ async fn test_sync_chunks_no_secret() {
 }
 
 // ===========================================================================
-// POST /sync/chunks — wrong secret → 401
+// POST /sync/chunks — invalid JWT → 401
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_chunks_wrong_secret() {
+async fn test_sync_chunks_invalid_jwt() {
     let (app, _jwt, _engine, _tmp) = test_app();
 
     let response = app
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", "bad-secret")
+                .header("authorization", "Bearer bad-token-value")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "hashes": []
@@ -472,13 +487,14 @@ async fn test_sync_chunks_wrong_secret() {
 
 #[tokio::test]
 async fn test_sync_chunks_invalid_hex_skipped() {
-    let (app, _jwt, _engine, _tmp) = test_app();
+    let (app, jwt, _engine, _tmp) = test_app();
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "hashes": ["not-valid-hex!!!", "also_bad"]
@@ -501,13 +517,14 @@ async fn test_sync_chunks_invalid_hex_skipped() {
 
 #[tokio::test]
 async fn test_sync_chunks_empty_hashes() {
-    let (app, _jwt, _engine, _tmp) = test_app();
+    let (app, jwt, _engine, _tmp) = test_app();
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "hashes": []
@@ -525,38 +542,22 @@ async fn test_sync_chunks_empty_hashes() {
 }
 
 // ===========================================================================
-// POST /sync/diff — no cluster secret configured → 401 for any request
+// POST /sync/diff — JWT from wrong signing key → 401
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_diff_no_secret_configured() {
-    // Build an app WITHOUT setting up a cluster secret
-    let jwt_manager = Arc::new(JwtManager::generate());
-    let (engine, _tmp) = create_temp_engine_for_tests();
-    // deliberately NOT calling setup_cluster_secret
-    let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
-    let rate_limiter = Arc::new(RateLimiter::default_config());
-    let auth_provider: Arc<dyn aeordb::auth::AuthProvider> =
-        Arc::new(FileAuthProvider::new(engine.clone()));
-    let app = create_app_with_all(
-        auth_provider,
-        jwt_manager,
-        plugin_manager,
-        rate_limiter,
-        make_prometheus_handle(),
-        engine,
-        Arc::new(EventBus::new()),
-        CorsState {
-            default_origins: None,
-            rules: vec![],
-        },
-    );
+async fn test_sync_diff_wrong_signing_key() {
+    let (app, _jwt, _engine, _tmp) = test_app();
+
+    // Create token with a different JwtManager
+    let other_jwt = JwtManager::generate();
+    let bad_auth = bearer_token(&other_jwt);
 
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", "any-secret")
+                .header("authorization", &bad_auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -574,7 +575,7 @@ async fn test_sync_diff_no_secret_configured() {
 
 #[tokio::test]
 async fn test_sync_diff_incremental_with_deletion() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
 
     // Store initial files
     store_test_file(&engine, "/keep.txt", b"keep me");
@@ -588,11 +589,12 @@ async fn test_sync_diff_incremental_with_deletion() {
     let ops = DirectoryOps::new(&engine);
     ops.delete_file(&ctx, "/remove.txt").unwrap();
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "since_root_hash": since_hash
@@ -618,7 +620,7 @@ async fn test_sync_diff_incremental_with_deletion() {
 
 #[tokio::test]
 async fn test_sync_diff_incremental_with_modification() {
-    let (app, _jwt, engine, _tmp) = test_app();
+    let (app, jwt, engine, _tmp) = test_app();
 
     // Store initial file
     store_test_file(&engine, "/mutable.txt", b"version 1");
@@ -629,11 +631,12 @@ async fn test_sync_diff_incremental_with_modification() {
     // Modify the file
     store_test_file(&engine, "/mutable.txt", b"version 2 with different content");
 
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "since_root_hash": since_hash
@@ -657,20 +660,21 @@ async fn test_sync_diff_incremental_with_modification() {
 }
 
 // ===========================================================================
-// Sync routes bypass JWT auth (no Authorization header needed)
+// Sync routes are public routes — JWT is checked inside the handler
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_routes_bypass_jwt() {
-    let (app, _jwt, engine, _tmp) = test_app();
+async fn test_sync_routes_are_public_with_jwt_check() {
+    let (app, jwt, engine, _tmp) = test_app();
     store_test_file(&engine, "/test.txt", b"data");
 
-    // Request with cluster secret but NO Authorization header
+    // Request with valid JWT (no middleware auth needed — handler verifies JWT)
+    let auth = bearer_token(&jwt);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -679,6 +683,5 @@ async fn test_sync_routes_bypass_jwt() {
         .await
         .unwrap();
 
-    // Should succeed — JWT is not required for sync routes
     assert_eq!(response.status(), StatusCode::OK);
 }

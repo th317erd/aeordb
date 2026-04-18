@@ -16,8 +16,7 @@ Add peers at startup or at runtime:
 
 ```bash
 # At startup
-aeordb start -D data.aeordb --peers "node2:3000,node3:3000" \
-  --cluster-secret-file /etc/aeordb/cluster.key
+aeordb start -D data.aeordb --peers "node2:3000,node3:3000"
 
 # At runtime
 curl -X POST http://localhost:3000/admin/cluster/peers \
@@ -26,14 +25,9 @@ curl -X POST http://localhost:3000/admin/cluster/peers \
   -d '{"address": "https://node2:3000", "label": "US West"}'
 ```
 
-### Cluster Secret
+### Authentication
 
-Nodes authenticate with each other using a shared secret:
-
-- `--cluster-secret "mysecret"` — for development (visible in process list)
-- `--cluster-secret-file /path/to/secret` — for production (read from file)
-
-The secret is hashed with BLAKE3 and stored in the database. All `/sync/*` endpoints require the `X-Cluster-Secret` header.
+All `/sync/*` endpoints require JWT authentication. Nodes use root JWT tokens (nil UUID) for peer-to-peer sync, which grants full access including `/.system/` entries.
 
 ### TLS
 
@@ -116,18 +110,18 @@ curl -X POST http://localhost:3000/admin/cluster/peers \
 
 ## Client Sync
 
-In addition to peer-to-peer replication, AeorDB supports client sync using the same endpoints. Clients authenticate with JWT tokens instead of cluster secrets.
+In addition to peer-to-peer replication, AeorDB supports client sync using the same endpoints.
 
 ### Authentication
 
-Sync endpoints support two authentication methods:
+All sync endpoints use JWT Bearer token authentication:
 
-| Method | Header | Access Level |
-|--------|--------|-------------|
-| Cluster secret | `X-Cluster-Secret: <secret>` | Full access (peer/root) |
-| JWT Bearer token | `Authorization: Bearer <token>` | Filtered access (scoped) |
+| Caller | Access Level |
+|--------|-------------|
+| Root JWT (nil UUID) | Full access including `/.system/` |
+| Non-root JWT | Filtered access (scoped) |
 
-Root JWT tokens get the same full access as cluster secrets. Non-root tokens get filtered results:
+Root JWT tokens get full access. Non-root tokens get filtered results:
 
 - `/.system/` entries are excluded from all responses
 - API key scoping rules further restrict which paths are visible
@@ -185,7 +179,7 @@ The clock hasn't settled. Possible causes:
 ### Sync not happening
 
 - Check peer is in Active state: `GET /admin/cluster`
-- Check cluster secret matches on both nodes
+- Verify JWT tokens are valid and use the same signing key on both nodes
 - Verify network connectivity between nodes
 - Trigger manual sync: `POST /admin/cluster/sync`
 

@@ -14,10 +14,8 @@ use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRu
 use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::file_record::FileRecord;
 use crate::engine::symlink_record::SymlinkRecord;
-use crate::engine::system_store;
 use crate::engine::tree_walker::{diff_trees, walk_version_tree, TreeDiff, VersionTree};
 use crate::engine::version_manager::VersionManager;
-use crate::engine::storage_engine::StorageEngine;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -81,8 +79,6 @@ pub struct SyncChunksRequest {
 
 /// Describes who is calling the sync endpoint and what access they have.
 pub enum SyncCaller {
-    /// Cluster secret auth -- full access including /.system/.
-    Peer,
     /// Root JWT (nil UUID) -- full access including /.system/.
     RootUser,
     /// Non-root JWT -- /.system/ filtered out, API key rules applied.
@@ -96,7 +92,7 @@ pub enum SyncCaller {
 impl SyncCaller {
     /// Whether this caller should see /.system/ entries.
     fn include_system(&self) -> bool {
-        matches!(self, SyncCaller::Peer | SyncCaller::RootUser)
+        matches!(self, SyncCaller::RootUser)
     }
 
     /// API key rules for path-level filtering (empty = no restrictions).
@@ -108,29 +104,8 @@ impl SyncCaller {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cluster secret validation
-// ---------------------------------------------------------------------------
-
-fn validate_cluster_secret(headers: &HeaderMap, engine: &StorageEngine) -> bool {
-    let secret = match headers.get("X-Cluster-Secret") {
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return false,
-        },
-        None => return false,
-    };
-
-    let provided_hash = blake3::hash(secret.as_bytes());
-
-    match system_store::get_cluster_secret_hash(engine) {
-        Ok(Some(stored_hash)) => provided_hash.as_bytes().to_vec() == stored_hash,
-        _ => false,
-    }
-}
-
 /// Determine the caller identity from request headers.
-/// Tries cluster secret first, then JWT. Returns 401 if neither works.
+/// Verifies JWT Bearer token. Returns 401 if no valid auth is present.
 fn determine_sync_caller(
     headers: &HeaderMap,
     state: &AppState,
@@ -140,12 +115,7 @@ fn determine_sync_caller(
         return Ok(SyncCaller::RootUser);
     }
 
-    // 1. Try cluster secret first (peer mode).
-    if validate_cluster_secret(headers, &state.engine) {
-        return Ok(SyncCaller::Peer);
-    }
-
-    // 2. Try JWT Bearer token.
+    // 1. Try JWT Bearer token.
     if let Some(auth_header) = headers.get("authorization") {
         let token = auth_header
             .to_str()

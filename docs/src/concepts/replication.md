@@ -78,7 +78,7 @@ The replication protocol is the same protocol that the AeorDB client uses. A des
 
 Desktop clients and other non-peer applications can sync using the same protocol as replication peers, with appropriate access restrictions:
 
-- Clients authenticate with their JWT token (not a cluster secret)
+- Clients authenticate with their JWT token
 - The `/.system/` directory is automatically excluded from client sync results
 - API key scoping rules apply — a scoped key with restricted path access only sees changes for allowed paths
 - Clients can use the `paths` filter for selective sync (e.g., only sync `/assets/**`)

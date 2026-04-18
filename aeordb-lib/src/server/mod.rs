@@ -348,7 +348,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/portal/{filename}", get(portal_routes::portal_asset))
     // Upload config (public, no auth)
     .route("/upload/config", get(upload_routes::upload_config))
-    // Sync routes (cluster secret auth, NOT JWT)
+    // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
 

@@ -23,8 +23,6 @@ use crate::engine::virtual_clock::PeerClockTracker;
 pub struct SyncConfig {
     /// How often (in seconds) the periodic fallback sync runs.
     pub periodic_interval_secs: u64,
-    /// Shared secret for peer authentication (optional).
-    pub cluster_secret: Option<String>,
 }
 
 /// Per-peer sync state (persisted in system tables).
@@ -62,6 +60,7 @@ pub struct SyncEngine {
     engine: Arc<StorageEngine>,
     peer_manager: Arc<PeerManager>,
     clock_tracker: Arc<PeerClockTracker>,
+    #[allow(dead_code)]
     config: SyncConfig,
     /// Per-peer sync lock to prevent concurrent syncs with the same peer.
     sync_locks: Mutex<HashMap<u64, bool>>,
@@ -395,14 +394,10 @@ impl SyncEngine {
             diff_body["paths"] = serde_json::json!(paths);
         }
 
-        let mut request = client
+        let response = client
             .post(format!("{}/sync/diff", peer.address))
-            .json(&diff_body);
-        if let Some(ref secret) = self.config.cluster_secret {
-            request = request.header("X-Cluster-Secret", secret);
-        }
-
-        let response = request.send().await
+            .json(&diff_body)
+            .send().await
             .map_err(|e| format!("Failed to contact peer {}: {}", peer.node_id, e))?;
 
         if !response.status().is_success() {
@@ -462,14 +457,10 @@ impl SyncEngine {
             .unwrap_or_default();
 
         if !chunk_hashes.is_empty() {
-            let mut chunks_req = client
+            let chunks_resp = client
                 .post(format!("{}/sync/chunks", peer.address))
-                .json(&serde_json::json!({ "hashes": chunk_hashes }));
-            if let Some(ref secret) = self.config.cluster_secret {
-                chunks_req = chunks_req.header("X-Cluster-Secret", secret);
-            }
-
-            let chunks_resp = chunks_req.send().await
+                .json(&serde_json::json!({ "hashes": chunk_hashes }))
+                .send().await
                 .map_err(|e| format!("Failed to fetch chunks from peer {}: {}", peer.node_id, e))?;
 
             if !chunks_resp.status().is_success() {

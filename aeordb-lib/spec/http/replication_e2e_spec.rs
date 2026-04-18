@@ -3,7 +3,7 @@
 //! These tests simulate the HTTP sync protocol between two in-process nodes
 //! using the tower `oneshot` pattern (no real TCP sockets). Node B calls
 //! Node A's `/sync/diff` and `/sync/chunks` endpoints, then applies the
-//! returned changes through its own engine — exactly the same flow as
+//! returned changes through its own engine -- exactly the same flow as
 //! `do_sync_cycle_remote` but exercised through the full HTTP layer.
 
 use std::sync::Arc;
@@ -11,14 +11,15 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
+use chrono::Utc;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use uuid::Uuid;
 
-use aeordb::auth::jwt::JwtManager;
+use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::compression::{decompress, CompressionAlgorithm};
-use aeordb::engine::system_store;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::{DirectoryOps, EventBus, RequestContext, StorageEngine};
@@ -29,32 +30,23 @@ use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsStat
 // Helpers
 // ---------------------------------------------------------------------------
 
-const TEST_SECRET: &str = "e2e-replication-cluster-secret";
-
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .build_recorder()
         .handle()
 }
 
-fn setup_cluster_secret(engine: &StorageEngine, secret: &str) {
-    let hash = blake3::hash(secret.as_bytes());
-    let ctx = RequestContext::system();
-    system_store::store_cluster_secret_hash(engine, &ctx, hash.as_bytes()).unwrap();
-}
-
-/// Create a full app + engine pair (a "node") with the shared cluster secret.
-fn create_node() -> (axum::Router, Arc<StorageEngine>, tempfile::TempDir) {
+/// Create a full app + engine pair (a "node") with a JwtManager for auth.
+fn create_node() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
     let jwt_manager = Arc::new(JwtManager::generate());
     let (engine, temp_dir) = create_temp_engine_for_tests();
-    setup_cluster_secret(&engine, TEST_SECRET);
     let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
     let rate_limiter = Arc::new(RateLimiter::default_config());
     let auth_provider: Arc<dyn aeordb::auth::AuthProvider> =
         Arc::new(FileAuthProvider::new(engine.clone()));
     let app = create_app_with_all(
         auth_provider,
-        jwt_manager,
+        jwt_manager.clone(),
         plugin_manager,
         rate_limiter,
         make_prometheus_handle(),
@@ -65,20 +57,19 @@ fn create_node() -> (axum::Router, Arc<StorageEngine>, tempfile::TempDir) {
             rules: vec![],
         },
     );
-    (app, engine, temp_dir)
+    (app, jwt_manager, engine, temp_dir)
 }
 
-/// Rebuild the router from an existing engine (needed for multi-request tests
-/// because `oneshot` consumes the router).
-fn rebuild_app(engine: &Arc<StorageEngine>) -> axum::Router {
-    let jwt_manager = Arc::new(JwtManager::generate());
+/// Rebuild the router from an existing engine and JwtManager (needed for
+/// multi-request tests because `oneshot` consumes the router).
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
     let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
     let rate_limiter = Arc::new(RateLimiter::default_config());
     let auth_provider: Arc<dyn aeordb::auth::AuthProvider> =
         Arc::new(FileAuthProvider::new(engine.clone()));
     create_app_with_all(
         auth_provider,
-        jwt_manager,
+        jwt_manager.clone(),
         plugin_manager,
         rate_limiter,
         make_prometheus_handle(),
@@ -89,6 +80,22 @@ fn rebuild_app(engine: &Arc<StorageEngine>) -> axum::Router {
             rules: vec![],
         },
     )
+}
+
+/// Create a root-user Bearer token (nil UUID).
+fn bearer_token(jwt_manager: &JwtManager) -> String {
+    let now = Utc::now().timestamp();
+    let claims = TokenClaims {
+        sub: Uuid::nil().to_string(),
+        iss: "aeordb".to_string(),
+        iat: now,
+        exp: now + DEFAULT_EXPIRY_SECONDS,
+        scope: None,
+        permissions: None,
+        key_id: None,
+    };
+    let token = jwt_manager.create_token(&claims).unwrap();
+    format!("Bearer {}", token)
 }
 
 async fn body_json(body: Body) -> serde_json::Value {
@@ -143,12 +150,14 @@ fn get_head_hex(engine: &StorageEngine) -> String {
 /// This mirrors the logic in `SyncEngine::do_sync_cycle_remote` but drives
 /// it through the actual HTTP layer.
 async fn sync_pull(
+    source_jwt: &Arc<JwtManager>,
     source_engine: &Arc<StorageEngine>,
     target_engine: &Arc<StorageEngine>,
     since_root_hash: Option<&str>,
 ) -> (usize, serde_json::Value) {
     // Step 1: POST /sync/diff on the source
-    let source_app = rebuild_app(source_engine);
+    let source_app = rebuild_app(source_jwt, source_engine);
+    let auth = bearer_token(source_jwt);
 
     let mut diff_body = serde_json::json!({});
     if let Some(since) = since_root_hash {
@@ -159,7 +168,7 @@ async fn sync_pull(
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(serde_json::to_string(&diff_body).unwrap()))
                 .unwrap(),
         )
@@ -184,12 +193,12 @@ async fn sync_pull(
         .unwrap_or_default();
 
     if !chunk_hashes.is_empty() {
-        let source_app = rebuild_app(source_engine);
+        let source_app = rebuild_app(source_jwt, source_engine);
         let chunks_response = source_app
             .oneshot(
                 Request::post("/sync/chunks")
                     .header("content-type", "application/json")
-                    .header("X-Cluster-Secret", TEST_SECRET)
+                    .header("authorization", &auth)
                     .body(Body::from(
                         serde_json::to_string(&serde_json::json!({ "hashes": chunk_hashes }))
                             .unwrap(),
@@ -324,8 +333,8 @@ async fn sync_pull(
 
 #[tokio::test]
 async fn test_full_sync_file_transfer() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store files on Node A
     store_file(&engine_a, "/hello.txt", b"hello world");
@@ -333,7 +342,7 @@ async fn test_full_sync_file_transfer() {
     store_file_typed(&engine_a, "/page.html", b"<h1>Test</h1>", "text/html");
 
     // Sync: B pulls from A (full sync, no since_root_hash)
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     assert!(ops >= 3, "should apply at least 3 file operations, got {}", ops);
 
     // Verify Node B has all the files
@@ -348,14 +357,14 @@ async fn test_full_sync_file_transfer() {
 
 #[tokio::test]
 async fn test_sync_with_deletes() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store files on A, sync to B
     store_file(&engine_a, "/keep.txt", b"keep me");
     store_file(&engine_a, "/remove.txt", b"remove me");
 
-    let (_, diff_json) = sync_pull(&engine_a, &engine_b, None).await;
+    let (_, diff_json) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since_hash = diff_json["root_hash"].as_str().unwrap().to_string();
 
     assert!(file_exists(&engine_b, "/keep.txt"));
@@ -365,7 +374,7 @@ async fn test_sync_with_deletes() {
     delete_file(&engine_a, "/remove.txt");
 
     // Incremental sync: B pulls from A with since_root_hash
-    let (ops, _) = sync_pull(&engine_a, &engine_b, Some(&since_hash)).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since_hash)).await;
     assert!(ops >= 1, "should apply at least 1 deletion");
 
     // Verify
@@ -379,15 +388,15 @@ async fn test_sync_with_deletes() {
 
 #[tokio::test]
 async fn test_sync_symlinks() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store a file and a symlink on A
     store_file(&engine_a, "/original.txt", b"original content");
     store_symlink(&engine_a, "/link.txt", "/original.txt");
 
     // Sync to B
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     assert!(ops >= 2, "should sync file + symlink");
 
     // Verify the file synced
@@ -413,8 +422,8 @@ async fn test_sync_symlinks() {
 
 #[tokio::test]
 async fn test_sync_nested_directories() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Create a deep directory tree on A
     store_file(&engine_a, "/a/b/c/deep.txt", b"deep content");
@@ -424,7 +433,7 @@ async fn test_sync_nested_directories() {
     store_file(&engine_a, "/x/y/z/w/very-deep.bin", b"\xDE\xAD\xBE\xEF");
 
     // Sync to B
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     assert!(ops >= 5, "should sync all 5 files, got {}", ops);
 
     // Verify all files on B
@@ -444,15 +453,15 @@ async fn test_sync_nested_directories() {
 
 #[tokio::test]
 async fn test_sync_incremental() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store initial files on A
     store_file(&engine_a, "/file1.txt", b"content 1");
     store_file(&engine_a, "/file2.txt", b"content 2");
 
     // Full sync
-    let (ops_full, diff_json) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops_full, diff_json) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since_hash = diff_json["root_hash"].as_str().unwrap().to_string();
     assert!(ops_full >= 2, "full sync should transfer at least 2 files");
 
@@ -460,7 +469,7 @@ async fn test_sync_incremental() {
     store_file(&engine_a, "/file3.txt", b"content 3");
 
     // Incremental sync
-    let (ops_incr, _) = sync_pull(&engine_a, &engine_b, Some(&since_hash)).await;
+    let (ops_incr, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since_hash)).await;
     assert_eq!(ops_incr, 1, "incremental sync should only transfer 1 new file");
 
     // Verify all files exist on B
@@ -475,12 +484,12 @@ async fn test_sync_incremental() {
 
 #[tokio::test]
 async fn test_sync_bidirectional() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store a file on A and sync to B
     store_file(&engine_a, "/shared.txt", b"initial");
-    let (_, diff_json) = sync_pull(&engine_a, &engine_b, None).await;
+    let (_, diff_json) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since_a = diff_json["root_hash"].as_str().unwrap().to_string();
 
     // Capture B's HEAD before creating new files (this is the common ancestor)
@@ -491,12 +500,12 @@ async fn test_sync_bidirectional() {
     store_file(&engine_b, "/from_b.txt", b"created on B");
 
     // B pulls from A (gets /from_a.txt)
-    let (ops, _) = sync_pull(&engine_a, &engine_b, Some(&since_a)).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since_a)).await;
     assert!(ops >= 1, "B should get at least /from_a.txt");
     assert_eq!(read_file(&engine_b, "/from_a.txt"), b"created on A");
 
     // A pulls from B (gets /from_b.txt)
-    let (ops, _) = sync_pull(&engine_b, &engine_a, Some(&since_b)).await;
+    let (ops, _) = sync_pull(&jwt_b, &engine_b, &engine_a, Some(&since_b)).await;
     assert!(ops >= 1, "A should get at least /from_b.txt");
     assert_eq!(read_file(&engine_a, "/from_b.txt"), b"created on B");
 
@@ -515,14 +524,14 @@ async fn test_sync_bidirectional() {
 
 #[tokio::test]
 async fn test_sync_from_empty_source() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // B already has files
     store_file(&engine_b, "/local.txt", b"local content");
 
     // Sync from empty A — should produce 0 operations
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
 
     // The diff from empty A will report 0 user files (only system paths
     // which we handle, but user-visible ops should be 0 or only system).
@@ -538,15 +547,15 @@ async fn test_sync_from_empty_source() {
 
 #[tokio::test]
 async fn test_sync_large_file() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Create a file larger than the default chunk size (256KB)
     let large_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
     store_file(&engine_a, "/large.bin", &large_data);
 
     // Sync to B
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     assert!(ops >= 1, "should sync the large file");
 
     // Verify content integrity
@@ -561,12 +570,12 @@ async fn test_sync_large_file() {
 
 #[tokio::test]
 async fn test_sync_file_modification() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Store v1 on A and sync
     store_file(&engine_a, "/mutable.txt", b"version 1");
-    let (_, diff_json) = sync_pull(&engine_a, &engine_b, None).await;
+    let (_, diff_json) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since = diff_json["root_hash"].as_str().unwrap().to_string();
     assert_eq!(read_file(&engine_b, "/mutable.txt"), b"version 1");
 
@@ -574,7 +583,7 @@ async fn test_sync_file_modification() {
     store_file(&engine_a, "/mutable.txt", b"version 2 with more content");
 
     // Incremental sync
-    let (ops, _) = sync_pull(&engine_a, &engine_b, Some(&since)).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since)).await;
     assert!(ops >= 1, "should sync the modification");
     assert_eq!(
         read_file(&engine_b, "/mutable.txt"),
@@ -583,19 +592,19 @@ async fn test_sync_file_modification() {
 }
 
 // ===========================================================================
-// Test 10: Sync diff endpoint rejects bad cluster secret
+// Test 10: Sync diff endpoint rejects invalid JWT
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_rejects_wrong_secret() {
-    let (app_a, engine_a, _tmp_a) = create_node();
+async fn test_sync_rejects_invalid_jwt() {
+    let (app_a, _jwt_a, engine_a, _tmp_a) = create_node();
     store_file(&engine_a, "/secret-data.txt", b"classified");
 
     let response = app_a
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", "wrong-secret")
+                .header("authorization", "Bearer invalid-token-value")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -608,12 +617,12 @@ async fn test_sync_rejects_wrong_secret() {
 }
 
 // ===========================================================================
-// Test 11: Sync diff endpoint rejects missing cluster secret
+// Test 11: Sync diff endpoint rejects missing auth
 // ===========================================================================
 
 #[tokio::test]
-async fn test_sync_rejects_missing_secret() {
-    let (app_a, _engine_a, _tmp_a) = create_node();
+async fn test_sync_rejects_missing_auth() {
+    let (app_a, _jwt_a, _engine_a, _tmp_a) = create_node();
 
     let response = app_a
         .oneshot(
@@ -636,18 +645,20 @@ async fn test_sync_rejects_missing_secret() {
 
 #[tokio::test]
 async fn test_sync_chunks_data_integrity() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
 
     let test_data = b"chunk integrity test data 1234567890";
     store_file(&engine_a, "/integrity.txt", test_data);
 
+    let auth = bearer_token(&jwt_a);
+
     // Get diff to discover chunk hashes
-    let app = rebuild_app(&engine_a);
+    let app = rebuild_app(&jwt_a, &engine_a);
     let diff_response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))
@@ -676,12 +687,12 @@ async fn test_sync_chunks_data_integrity() {
     assert!(!file_chunk_hashes.is_empty(), "file should have chunk hashes");
 
     // Fetch chunks
-    let app = rebuild_app(&engine_a);
+    let app = rebuild_app(&jwt_a, &engine_a);
     let chunks_response = app
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({ "hashes": file_chunk_hashes }))
                         .unwrap(),
@@ -725,13 +736,14 @@ async fn test_sync_chunks_data_integrity() {
 
 #[tokio::test]
 async fn test_sync_diff_invalid_since_hash() {
-    let (app_a, _engine_a, _tmp_a) = create_node();
+    let (app_a, jwt_a, _engine_a, _tmp_a) = create_node();
 
+    let auth = bearer_token(&jwt_a);
     let response = app_a
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "since_root_hash": "NOT_VALID_HEX!!!"
@@ -752,13 +764,13 @@ async fn test_sync_diff_invalid_since_hash() {
 
 #[tokio::test]
 async fn test_sync_preserves_content_type() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     store_file_typed(&engine_a, "/doc.json", b"{\"key\":\"value\"}", "application/json");
     store_file_typed(&engine_a, "/image.png", b"\x89PNG\r\n\x1a\n", "image/png");
 
-    let (ops, _) = sync_pull(&engine_a, &engine_b, None).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     assert!(ops >= 2);
 
     // Verify files transferred
@@ -777,18 +789,18 @@ async fn test_sync_preserves_content_type() {
 
 #[tokio::test]
 async fn test_multiple_incremental_syncs() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Round 1: initial file
     store_file(&engine_a, "/r1.txt", b"round 1");
-    let (_, d1) = sync_pull(&engine_a, &engine_b, None).await;
+    let (_, d1) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since1 = d1["root_hash"].as_str().unwrap().to_string();
     assert_eq!(read_file(&engine_b, "/r1.txt"), b"round 1");
 
     // Round 2: add another file
     store_file(&engine_a, "/r2.txt", b"round 2");
-    let (ops2, d2) = sync_pull(&engine_a, &engine_b, Some(&since1)).await;
+    let (ops2, d2) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since1)).await;
     let since2 = d2["root_hash"].as_str().unwrap().to_string();
     assert_eq!(ops2, 1, "round 2 should only sync 1 file");
     assert_eq!(read_file(&engine_b, "/r2.txt"), b"round 2");
@@ -796,7 +808,7 @@ async fn test_multiple_incremental_syncs() {
     // Round 3: modify r1 and add r3
     store_file(&engine_a, "/r1.txt", b"round 1 modified");
     store_file(&engine_a, "/r3.txt", b"round 3");
-    let (ops3, _) = sync_pull(&engine_a, &engine_b, Some(&since2)).await;
+    let (ops3, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since2)).await;
     assert_eq!(ops3, 2, "round 3 should sync 2 changes (1 modified + 1 added)");
     assert_eq!(read_file(&engine_b, "/r1.txt"), b"round 1 modified");
     assert_eq!(read_file(&engine_b, "/r3.txt"), b"round 3");
@@ -808,15 +820,15 @@ async fn test_multiple_incremental_syncs() {
 
 #[tokio::test]
 async fn test_sync_symlink_deletion() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
-    let (_app_b, engine_b, _tmp_b) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
+    let (_app_b, _jwt_b, engine_b, _tmp_b) = create_node();
 
     // Create file and symlink on A
     store_file(&engine_a, "/target.txt", b"target data");
     store_symlink(&engine_a, "/symlink.txt", "/target.txt");
 
     // Sync to B
-    let (_, d) = sync_pull(&engine_a, &engine_b, None).await;
+    let (_, d) = sync_pull(&jwt_a, &engine_a, &engine_b, None).await;
     let since = d["root_hash"].as_str().unwrap().to_string();
 
     // Verify symlink exists on B
@@ -830,7 +842,7 @@ async fn test_sync_symlink_deletion() {
     ops_a.delete_symlink(&ctx, "/symlink.txt").unwrap();
 
     // Incremental sync
-    let (ops, _) = sync_pull(&engine_a, &engine_b, Some(&since)).await;
+    let (ops, _) = sync_pull(&jwt_a, &engine_a, &engine_b, Some(&since)).await;
     assert!(ops >= 1, "should sync symlink deletion");
 
     // Verify symlink is gone on B
@@ -850,13 +862,14 @@ async fn test_sync_symlink_deletion() {
 
 #[tokio::test]
 async fn test_sync_chunks_empty_request() {
-    let (app_a, _engine_a, _tmp_a) = create_node();
+    let (app_a, jwt_a, _engine_a, _tmp_a) = create_node();
 
+    let auth = bearer_token(&jwt_a);
     let response = app_a
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({ "hashes": [] })).unwrap(),
                 ))
@@ -876,15 +889,16 @@ async fn test_sync_chunks_empty_request() {
 
 #[tokio::test]
 async fn test_sync_chunks_nonexistent_hashes() {
-    let (app_a, _engine_a, _tmp_a) = create_node();
+    let (app_a, jwt_a, _engine_a, _tmp_a) = create_node();
 
     let fake = hex::encode(blake3::hash(b"nonexistent").as_bytes());
 
+    let auth = bearer_token(&jwt_a);
     let response = app_a
         .oneshot(
             Request::post("/sync/chunks")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({ "hashes": [fake] })).unwrap(),
                 ))
@@ -907,17 +921,18 @@ async fn test_sync_chunks_nonexistent_hashes() {
 
 #[tokio::test]
 async fn test_sync_diff_response_structure() {
-    let (_app_a, engine_a, _tmp_a) = create_node();
+    let (_app_a, jwt_a, engine_a, _tmp_a) = create_node();
 
     store_file(&engine_a, "/a.txt", b"aaa");
     store_file(&engine_a, "/b.txt", b"bbb");
 
-    let app = rebuild_app(&engine_a);
+    let auth = bearer_token(&jwt_a);
+    let app = rebuild_app(&jwt_a, &engine_a);
     let response = app
         .oneshot(
             Request::post("/sync/diff")
                 .header("content-type", "application/json")
-                .header("X-Cluster-Secret", TEST_SECRET)
+                .header("authorization", &auth)
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({})).unwrap(),
                 ))

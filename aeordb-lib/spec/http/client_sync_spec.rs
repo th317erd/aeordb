@@ -28,25 +28,16 @@ use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsStat
 // Helpers
 // ---------------------------------------------------------------------------
 
-const TEST_SECRET: &str = "client-sync-test-cluster-secret";
-
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .build_recorder()
         .handle()
 }
 
-fn setup_cluster_secret(engine: &StorageEngine, secret: &str) {
-    let hash = blake3::hash(secret.as_bytes());
-    let ctx = RequestContext::system();
-    system_store::store_cluster_secret_hash(engine, &ctx, hash.as_bytes()).unwrap();
-}
-
-/// Create a full app + engine pair with shared cluster secret and known JwtManager.
+/// Create a full app + engine pair with known JwtManager.
 fn create_node() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
     let jwt_manager = Arc::new(JwtManager::generate());
     let (engine, temp_dir) = create_temp_engine_for_tests();
-    setup_cluster_secret(&engine, TEST_SECRET);
     let app = build_app(&jwt_manager, &engine);
     (app, jwt_manager, engine, temp_dir)
 }
@@ -567,16 +558,17 @@ async fn test_client_sync_incremental() {
     );
 }
 
-/// Cluster secret auth still works alongside JWT.
+/// Root JWT auth works and sees all files including system.
 #[tokio::test]
-async fn test_peer_cluster_secret_still_works() {
+async fn test_root_jwt_sees_all_files() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
-    store_file(&engine, "public/file.txt", b"hello peer");
+    store_file(&engine, "public/file.txt", b"hello root");
 
+    let token = root_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
     let (status, json) = sync_diff_request(
         app,
-        Some(("X-Cluster-Secret", TEST_SECRET)),
+        Some(("authorization", &token)),
         serde_json::json!({}),
     )
     .await;
@@ -585,19 +577,19 @@ async fn test_peer_cluster_secret_still_works() {
     let paths = extract_all_paths(&json["changes"]);
     assert!(
         paths.contains(&"/public/file.txt".to_string()),
-        "peer should see files"
+        "root should see files"
     );
 }
 
-/// Wrong cluster secret with no JWT results in 401.
+/// Non-Bearer authorization header results in 401.
 #[tokio::test]
-async fn test_wrong_cluster_secret_no_jwt_rejected() {
+async fn test_non_bearer_auth_header_rejected() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
 
     let app = build_app(&jwt_manager, &engine);
     let (status, _json) = sync_diff_request(
         app,
-        Some(("X-Cluster-Secret", "wrong-secret")),
+        Some(("authorization", "Basic dXNlcjpwYXNz")),
         serde_json::json!({}),
     )
     .await;
@@ -789,24 +781,25 @@ async fn test_jwt_wrong_signing_key_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Peer (cluster secret) sees /.system/ paths; non-root JWT does not -- same data.
+/// Root JWT sees /.system/ paths; non-root JWT does not -- same data.
 #[tokio::test]
-async fn test_peer_vs_client_system_visibility() {
+async fn test_root_vs_client_system_visibility() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
 
     store_file(&engine, "public/file.txt", b"public");
     store_file(&engine, ".system/config/key", b"system data");
 
-    // Peer sync
+    // Root sync
+    let root_token = root_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
-    let (status, peer_json) = sync_diff_request(
+    let (status, root_json) = sync_diff_request(
         app,
-        Some(("X-Cluster-Secret", TEST_SECRET)),
+        Some(("authorization", &root_token)),
         serde_json::json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let peer_paths = extract_all_paths(&peer_json["changes"]);
+    let root_paths = extract_all_paths(&root_json["changes"]);
 
     // Client sync
     let token = non_root_bearer_token(&jwt_manager);
@@ -820,22 +813,22 @@ async fn test_peer_vs_client_system_visibility() {
     assert_eq!(status, StatusCode::OK);
     let client_paths = extract_all_paths(&client_json["changes"]);
 
-    // Peer should have more paths (system entries).
+    // Root should have more paths (system entries).
     assert!(
-        peer_paths.len() > client_paths.len(),
-        "peer should see more paths than client: peer={:?}, client={:?}",
-        peer_paths,
+        root_paths.len() > client_paths.len(),
+        "root should see more paths than client: root={:?}, client={:?}",
+        root_paths,
         client_paths
     );
 
     // Both should see public file.
-    assert!(peer_paths.contains(&"/public/file.txt".to_string()));
+    assert!(root_paths.contains(&"/public/file.txt".to_string()));
     assert!(client_paths.contains(&"/public/file.txt".to_string()));
 
-    // Only peer should see system entries.
-    let peer_has_system = peer_paths.iter().any(|p| p.starts_with("/.system/"));
+    // Only root should see system entries.
+    let root_has_system = root_paths.iter().any(|p| p.starts_with("/.system/"));
     let client_has_system = client_paths.iter().any(|p| p.starts_with("/.system/"));
-    assert!(peer_has_system, "peer should see /.system/");
+    assert!(root_has_system, "root should see /.system/");
     assert!(!client_has_system, "client should NOT see /.system/");
 }
 
@@ -959,17 +952,19 @@ async fn test_sync_chunks_no_auth_401() {
     assert!(json["error"].is_string());
 }
 
-/// Sync chunks with cluster secret still works.
+/// Sync chunks with root JWT works.
 #[tokio::test]
-async fn test_sync_chunks_cluster_secret_works() {
+async fn test_sync_chunks_root_jwt_works() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
     store_file(&engine, "test/file.txt", b"chunk test data");
+
+    let token = root_bearer_token(&jwt_manager);
 
     // Get chunk hashes.
     let app = build_app(&jwt_manager, &engine);
     let (status, diff_json) = sync_diff_request(
         app,
-        Some(("X-Cluster-Secret", TEST_SECRET)),
+        Some(("authorization", &token)),
         serde_json::json!({}),
     )
     .await;
@@ -984,7 +979,7 @@ async fn test_sync_chunks_cluster_secret_works() {
         let app = build_app(&jwt_manager, &engine);
         let (status, json) = sync_chunks_request(
             app,
-            Some(("X-Cluster-Secret", TEST_SECRET)),
+            Some(("authorization", &token)),
             chunk_hashes,
         )
         .await;

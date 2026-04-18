@@ -49,7 +49,6 @@ fn make_sync_engine(engine: Arc<StorageEngine>) -> (SyncEngine, Arc<PeerManager>
     let clock_tracker = Arc::new(PeerClockTracker::new(30_000));
     let config = SyncConfig {
         periodic_interval_secs: 30,
-        cluster_secret: None,
     };
     let sync_engine = SyncEngine::new(
         engine,
