@@ -47,6 +47,9 @@ hmac = "0.12"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# Graceful shutdown
+tokio-util = "0.7"
+
 # Streaming
 futures-util = "0.3"
 http-body = "1"
@@ -74,6 +77,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 futures-util = "0.3"
+tokio-util = "0.7"
 http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
@@ -577,6 +581,10 @@ path = "spec/engine/health_spec.rs"
 [[test]]
 name = "sync_status_spec"
 path = "spec/engine/sync_status_spec.rs"
+
+[[test]]
+name = "shutdown_spec"
+path = "spec/engine/shutdown_spec.rs"
 
 [[bin]]
 name = "stress-benchmark"

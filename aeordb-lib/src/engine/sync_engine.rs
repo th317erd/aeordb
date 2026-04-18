@@ -667,11 +667,16 @@ fn filter_tree_diff_by_paths(mut diff: crate::engine::tree_walker::TreeDiff, pat
 /// Missed ticks (e.g. when a sync cycle takes longer than the interval) are
 /// skipped rather than queued.
 ///
-/// Returns a `JoinHandle` that can be used to abort the task on shutdown.
+/// Accepts a [`CancellationToken`](tokio_util::sync::CancellationToken) for
+/// graceful shutdown. When the token is cancelled, the loop exits after the
+/// current tick completes.
+///
+/// Returns a `JoinHandle` that resolves when the task exits.
 pub fn spawn_sync_loop(
     sync_engine: Arc<SyncEngine>,
     interval_secs: u64,
     event_bus: Option<Arc<EventBus>>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let max_backoff_secs: u64 = 300;
 
@@ -682,7 +687,14 @@ pub fn spawn_sync_loop(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Sync loop shutting down");
+                    break;
+                }
+                _ = interval.tick() => {}
+            }
+
             let peers = sync_engine.peer_manager().all_peers();
             let mut results = Vec::new();
 

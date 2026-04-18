@@ -2,6 +2,7 @@ use std::sync::Arc;
 use aeordb::engine::EventBus;
 use aeordb::engine::heartbeat::spawn_heartbeat;
 use aeordb::server::create_temp_engine_for_tests;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_heartbeat_emits_event() {
@@ -9,7 +10,7 @@ async fn test_heartbeat_emits_event() {
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1);
+    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
 
     // Wait for first heartbeat (max ~20 seconds for alignment + one interval)
     let event = tokio::time::timeout(
@@ -33,7 +34,7 @@ async fn test_heartbeat_contains_all_stats_fields() {
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1);
+    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
 
     let event = tokio::time::timeout(
         std::time::Duration::from_secs(20),
@@ -63,7 +64,7 @@ async fn test_heartbeat_abort_stops_emission() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1);
+    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
     handle.abort();
 
     // Should not panic or cause issues
@@ -94,7 +95,7 @@ async fn test_heartbeat_no_subscribers_does_not_panic() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1);
+    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
 
     // Let it run briefly without any subscriber
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -109,7 +110,7 @@ async fn test_heartbeat_event_has_valid_envelope() {
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1);
+    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
 
     let event = tokio::time::timeout(
         std::time::Duration::from_secs(20),

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::time::Duration;
 use chrono::Timelike;
+use tokio_util::sync::CancellationToken;
 use crate::engine::engine_event::{EngineEvent, HeartbeatData, EVENT_HEARTBEAT};
 use crate::engine::event_bus::EventBus;
 use crate::engine::storage_engine::StorageEngine;
@@ -16,16 +17,26 @@ const HEARTBEAT_INTERVAL_MS: u64 = HEARTBEAT_INTERVAL_SECS * 1000;
 /// next sleep duration is adaptively adjusted to compensate for any drift
 /// between the target boundary and the actual fire time.
 ///
-/// Returns a JoinHandle that can be aborted to stop the heartbeat.
+/// Accepts a [`CancellationToken`] for graceful shutdown. When the token is
+/// cancelled, the heartbeat loop exits cleanly.
+///
+/// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_heartbeat(
     bus: Arc<EventBus>,
     engine: Arc<StorageEngine>,
     node_id: u64,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Align to the next 15-second wall-clock boundary.
         let initial_delay = delay_to_next_boundary();
-        tokio::time::sleep(initial_delay).await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("Heartbeat cancelled during initial alignment");
+                return;
+            }
+            _ = tokio::time::sleep(initial_delay) => {}
+        }
 
         loop {
             // The boundary we intended to fire on (ms since epoch, rounded
@@ -69,7 +80,13 @@ pub fn spawn_heartbeat(
             let overshoot_ms = after_emit_ms.saturating_sub(intent_time) % HEARTBEAT_INTERVAL_MS;
             let next_sleep_ms = HEARTBEAT_INTERVAL_MS.saturating_sub(overshoot_ms).max(1);
 
-            tokio::time::sleep(Duration::from_millis(next_sleep_ms)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Heartbeat shutting down");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(next_sleep_ms)) => {}
+            }
         }
     })
 }

@@ -996,4 +996,48 @@ impl StorageEngine {
       hash_algorithm: format!("{:?}", self.hash_algo),
     }
   }
+
+  /// Gracefully shut down the engine: flush all buffers and sync to disk.
+  ///
+  /// This is a best-effort operation. Errors during individual flush steps
+  /// are logged but do not prevent subsequent steps from executing. The
+  /// ordered shutdown sequence is:
+  ///
+  /// 1. Flush the KV write buffer to disk pages
+  /// 2. Flush the hot file buffer (crash-recovery journal)
+  /// 3. Sync the WAL file to ensure all OS-buffered writes are durable
+  pub fn shutdown(&self) -> EngineResult<()> {
+    tracing::info!("Shutting down storage engine...");
+
+    // Step 1: Flush the KV write buffer to disk pages
+    match self.kv_writer.lock() {
+      Ok(mut kv) => {
+        if let Err(e) = kv.flush() {
+          tracing::error!("KV flush failed during shutdown: {}", e);
+        }
+        // Step 2: Flush the hot file buffer
+        if let Err(e) = kv.flush_hot_buffer() {
+          tracing::error!("Hot file flush failed during shutdown: {}", e);
+        }
+      }
+      Err(e) => {
+        tracing::error!("Could not acquire KV lock during shutdown: {}", e);
+      }
+    }
+
+    // Step 3: Sync the WAL file
+    match self.writer.write() {
+      Ok(mut writer) => {
+        if let Err(e) = writer.sync() {
+          tracing::error!("WAL sync failed during shutdown: {}", e);
+        }
+      }
+      Err(e) => {
+        tracing::error!("Could not acquire writer lock during shutdown: {}", e);
+      }
+    }
+
+    tracing::info!("Storage engine shutdown complete");
+    Ok(())
+  }
 }

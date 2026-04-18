@@ -183,10 +183,17 @@ pub fn spawn_cron_scheduler(
     queue: Arc<TaskQueue>,
     engine: Arc<StorageEngine>,
     _event_bus: Arc<EventBus>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Cron scheduler shutting down");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
+            }
 
             let schedules = load_cron_config(&engine);
 

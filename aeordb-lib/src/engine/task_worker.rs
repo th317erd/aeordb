@@ -31,15 +31,25 @@ const ROLLING_AVERAGE_WINDOW: usize = 10;
 /// Spawn a background task worker that dequeues and executes tasks in a loop.
 ///
 /// Follows the heartbeat pattern: `tokio::spawn` + loop + sleep.
-/// Returns a JoinHandle that can be aborted to stop the worker.
+/// Accepts a [`CancellationToken`](tokio_util::sync::CancellationToken) for
+/// graceful shutdown. When the token is cancelled, the worker finishes
+/// processing the current task (if any) and then exits.
+///
+/// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_task_worker(
     queue: Arc<TaskQueue>,
     engine: Arc<StorageEngine>,
     plugin_manager: Arc<PluginManager>,
     event_bus: Arc<EventBus>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            if cancel.is_cancelled() {
+                tracing::info!("Task worker shutting down");
+                break;
+            }
+
             let queue_clone = queue.clone();
             let engine_clone = engine.clone();
             let plugin_manager_clone = plugin_manager.clone();
@@ -56,19 +66,27 @@ pub fn spawn_task_worker(
             })
             .await;
 
-            match result {
+            let sleep_duration = match result {
                 Ok(Ok(true)) => {
                     // A task was processed; brief pause before checking for more.
-                    sleep(Duration::from_secs(1)).await;
+                    Duration::from_secs(1)
                 }
                 Ok(Ok(false)) => {
                     // No task found; wait longer before polling again.
-                    sleep(Duration::from_secs(2)).await;
+                    Duration::from_secs(2)
                 }
                 Ok(Err(_)) | Err(_) => {
                     // Error occurred; wait before retrying.
-                    sleep(Duration::from_secs(2)).await;
+                    Duration::from_secs(2)
                 }
+            };
+
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Task worker shutting down");
+                    break;
+                }
+                _ = sleep(sleep_duration) => {}
             }
         }
     })

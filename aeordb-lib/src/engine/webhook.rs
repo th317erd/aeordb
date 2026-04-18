@@ -134,6 +134,7 @@ async fn deliver_webhook(webhook: &WebhookConfig, event: &EngineEvent) {
 pub fn spawn_webhook_dispatcher(
     bus: Arc<EventBus>,
     engine: Arc<StorageEngine>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     // Subscribe before spawning so we don't capture the Arc<EventBus> in the task.
     // This allows the channel to close when all external senders are dropped.
@@ -142,46 +143,54 @@ pub fn spawn_webhook_dispatcher(
         let mut config = load_webhook_config(&engine);
 
         loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    // Check if webhook config file changed -- reload if so
-                    if event.event_type == "entries_created" || event.event_type == "entries_updated" {
-                        if let Some(entries) = event.payload.get("entries") {
-                            if let Some(arr) = entries.as_array() {
-                                let config_changed = arr.iter().any(|e| {
-                                    e.get("path")
-                                        .and_then(|p| p.as_str())
-                                        .map(|p| p == WEBHOOK_CONFIG_PATH)
-                                        .unwrap_or(false)
-                                });
-                                if config_changed {
-                                    config = load_webhook_config(&engine);
-                                    tracing::info!("Webhook config reloaded");
-                                    continue; // Don't deliver the config change itself
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Webhook dispatcher shutting down (cancelled)");
+                    break;
+                }
+                recv_result = rx.recv() => {
+                    match recv_result {
+                        Ok(event) => {
+                            // Check if webhook config file changed -- reload if so
+                            if event.event_type == "entries_created" || event.event_type == "entries_updated" {
+                                if let Some(entries) = event.payload.get("entries") {
+                                    if let Some(arr) = entries.as_array() {
+                                        let config_changed = arr.iter().any(|e| {
+                                            e.get("path")
+                                                .and_then(|p| p.as_str())
+                                                .map(|p| p == WEBHOOK_CONFIG_PATH)
+                                                .unwrap_or(false)
+                                        });
+                                        if config_changed {
+                                            config = load_webhook_config(&engine);
+                                            tracing::info!("Webhook config reloaded");
+                                            continue; // Don't deliver the config change itself
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Deliver to matching webhooks
+                            if let Some(ref registry) = config {
+                                for webhook in &registry.webhooks {
+                                    if event_matches_webhook(&event, webhook) {
+                                        let wh = webhook.clone();
+                                        let evt = event.clone();
+                                        tokio::spawn(async move {
+                                            deliver_webhook(&wh, &evt).await;
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
-
-                    // Deliver to matching webhooks
-                    if let Some(ref registry) = config {
-                        for webhook in &registry.webhooks {
-                            if event_matches_webhook(&event, webhook) {
-                                let wh = webhook.clone();
-                                let evt = event.clone();
-                                tokio::spawn(async move {
-                                    deliver_webhook(&wh, &evt).await;
-                                });
-                            }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(missed = n, "Webhook dispatcher lagged, skipped events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::info!("EventBus closed, webhook dispatcher shutting down");
+                            break;
                         }
                     }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(missed = n, "Webhook dispatcher lagged, skipped events");
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("EventBus closed, webhook dispatcher shutting down");
-                    break;
                 }
             }
         }

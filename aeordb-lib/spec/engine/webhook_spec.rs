@@ -429,7 +429,7 @@ async fn test_webhook_dispatcher_receives_events() {
     ops.store_file(&ctx, "/.config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
     // Spawn the dispatcher
-    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone());
+    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone(), tokio_util::sync::CancellationToken::new());
 
     // Give the dispatcher a moment to subscribe
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -447,7 +447,7 @@ async fn test_webhook_dispatcher_reloads_config_on_change() {
     let bus = Arc::new(EventBus::new());
 
     // Start with no config
-    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone());
+    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone(), tokio_util::sync::CancellationToken::new());
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -471,7 +471,7 @@ async fn test_webhook_dispatcher_handles_bus_close() {
     let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
 
-    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone());
+    let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone(), tokio_util::sync::CancellationToken::new());
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
