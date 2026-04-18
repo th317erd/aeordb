@@ -61,6 +61,9 @@ glob-match = "0.2"
 # Task scheduling
 cron = "0.13"
 
+# System-level info (disk stats)
+libc = "0.2"
+
 # Common
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -566,6 +569,10 @@ path = "spec/http/client_sync_spec.rs"
 [[test]]
 name = "replication_e2e_spec"
 path = "spec/http/replication_e2e_spec.rs"
+
+[[test]]
+name = "health_spec"
+path = "spec/engine/health_spec.rs"
 
 [[test]]
 name = "sync_status_spec"

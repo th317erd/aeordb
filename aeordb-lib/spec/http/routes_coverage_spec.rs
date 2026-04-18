@@ -569,7 +569,11 @@ async fn test_health_check_returns_ok() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["status"], "ok");
+  // Health endpoint now returns a full HealthReport with status "healthy".
+  assert_eq!(json["status"], "healthy");
+  assert!(json["checks"].is_object());
+  assert!(json["uptime_seconds"].is_number());
+  assert!(json["version"].is_string());
 }
 
 // ---------------------------------------------------------------------------

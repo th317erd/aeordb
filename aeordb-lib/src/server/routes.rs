@@ -21,8 +21,16 @@ use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::refresh::{RefreshTokenRecord, DEFAULT_REFRESH_EXPIRY_SECONDS};
 use crate::engine::system_store;
 
-pub async fn health_check() -> impl IntoResponse {
-  Json(serde_json::json!({ "status": "ok" }))
+pub async fn health_check(
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  let report = crate::engine::health::full_health_check(
+    &state.engine,
+    &state.db_path,
+    &state.peer_manager,
+    state.startup_time,
+  );
+  Json(report)
 }
 
 // ---------------------------------------------------------------------------

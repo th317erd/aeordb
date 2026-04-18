@@ -28,4 +28,6 @@ pub struct AppState {
   pub api_key_cache: Arc<ApiKeyCache>,
   pub task_queue: Option<Arc<TaskQueue>>,
   pub peer_manager: Arc<PeerManager>,
+  pub startup_time: u64,
+  pub db_path: String,
 }

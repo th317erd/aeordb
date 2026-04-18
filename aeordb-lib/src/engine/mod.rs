@@ -25,6 +25,7 @@ pub mod file_record;
 pub mod fuzzy;
 pub mod gc;
 pub mod group;
+pub mod health;
 pub mod phonetic;
 pub mod group_cache;
 pub mod hash_algorithm;
@@ -122,6 +123,7 @@ pub use indexing_pipeline::IndexingPipeline;
 pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
 pub use query_engine::{QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder, should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, QueryMeta, DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode, ExplainResult};
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
+pub use health::{HealthStatus, HealthReport, HealthChecks, EngineHealth, DiskHealth, SyncHealth, AuthHealth, check_engine, check_disk, check_sync, check_auth, compute_overall_status, full_health_check};
 pub use merge::{three_way_merge, MergeResult, MergeOp, ConflictEntry, ConflictType, ConflictVersion};
 pub use sync_apply::apply_merge_operations;
 pub use sync_api::{

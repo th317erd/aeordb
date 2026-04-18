@@ -157,7 +157,8 @@ async fn test_health_endpoint_exempt_from_auth() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["status"], "ok");
+  // Health endpoint now returns a full HealthReport with status "healthy".
+  assert_eq!(json["status"], "healthy");
 }
 
 #[tokio::test]
