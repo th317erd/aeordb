@@ -1,0 +1,339 @@
+title: Production Readiness
+spec: bot-docs/plan/production-readiness.md
+date: 2026-04-17
+
+notes: |
+  AGIS ponder additions beyond the spec:
+  - Auto-GC scheduling (WAL growth prevention)
+  - Expired token/magic-link cleanup (system table bloat)
+  - File descriptor monitoring (concurrent read handles)
+  - KV index memory growth awareness
+
+  AGIS test_protocol: graceful shutdown is the hardest test
+  (requires CancellationToken + in-flight request completion verification).
+
+  AGIS map_territory: touches sync_engine, peer_connection, server/mod,
+  engine_routes, cluster_routes. New modules: health.rs, disk_monitor.rs.
+
+phases:
+  - name: "Phase 1: Sync Status Tracking + Retry Backoff"
+    description: >
+      Add per-peer sync status tracking, exponential backoff with jitter,
+      and surface sync health in the admin API.
+    tasks:
+      - name: Add SyncRetryState to peer tracking
+        file: aeordb-lib/src/engine/peer_connection.rs
+        details: |
+          Add to PeerConnection:
+          ```rust
+          pub struct SyncStatus {
+              pub last_success_at: Option<u64>,
+              pub last_attempt_at: Option<u64>,
+              pub last_error: Option<String>,
+              pub consecutive_failures: u32,
+              pub total_syncs: u64,
+              pub total_failures: u64,
+          }
+          ```
+          Add `sync_status: SyncStatus` field to PeerConnection.
+          Add methods: record_sync_success(), record_sync_failure(error).
+
+          Add retry interval calculation:
+          ```rust
+          pub fn next_retry_interval(&self, base_secs: u64, max_secs: u64) -> u64
+          ```
+          Exponential backoff: base * 2^(failures-1), capped at max.
+          Add ±10% jitter using rand.
+
+      - name: Integrate retry into sync loop
+        file: aeordb-lib/src/engine/sync_engine.rs
+        details: |
+          In spawn_sync_loop, for each peer:
+          1. Check if enough time has elapsed since last attempt (based on retry interval)
+          2. If not, skip this peer
+          3. After sync attempt, call record_sync_success() or record_sync_failure()
+          4. Log at appropriate levels
+
+      - name: Emit sync events
+        file: aeordb-lib/src/engine/sync_engine.rs
+        details: |
+          Add event types to engine_event.rs:
+          - EVENT_SYNC_SUCCEEDED = "sync_succeeded"
+          - EVENT_SYNC_FAILED = "sync_failed"
+
+          Emit after each sync cycle via the event bus.
+          Payload: { peer_node_id, peer_address, duration_ms, operations_applied,
+          conflicts_detected } for success. { peer_node_id, error,
+          consecutive_failures, next_retry_secs } for failure.
+
+          The SyncEngine needs access to the EventBus. Add it to the constructor.
+
+      - name: Surface sync status in admin API
+        file: aeordb-lib/src/server/cluster_routes.rs
+        details: |
+          Modify GET /admin/cluster response to include per-peer sync_status
+          with: last_success_at, last_attempt_at, last_error, consecutive_failures,
+          total_syncs, total_failures.
+
+      - name: Write tests
+        details: |
+          Unit tests:
+          - SyncStatus record_success resets consecutive_failures
+          - SyncStatus record_failure increments counter
+          - next_retry_interval exponential backoff calculation
+          - next_retry_interval capped at max
+          - next_retry_interval returns base when no failures
+
+          HTTP tests:
+          - GET /admin/cluster includes sync_status for each peer
+
+          Integration tests:
+          - Sync loop respects backoff (mock time, verify skip logic)
+
+    commit_message: "Add sync status tracking with exponential backoff and admin API visibility"
+
+  - name: "Phase 2: Health Endpoint Enhancement"
+    description: >
+      Deep health checks, disk space monitoring, startup validation.
+    depends_on: ["Phase 1"]
+    tasks:
+      - name: Create health module
+        file: aeordb-lib/src/engine/health.rs
+        details: |
+          ```rust
+          #[derive(Serialize)]
+          pub struct HealthReport {
+              pub status: HealthStatus,  // healthy, degraded, unhealthy
+              pub checks: HealthChecks,
+              pub uptime_seconds: u64,
+              pub version: String,
+          }
+
+          #[derive(Serialize)]
+          pub enum HealthStatus { Healthy, Degraded, Unhealthy }
+
+          #[derive(Serialize)]
+          pub struct HealthChecks {
+              pub engine: EngineHealth,
+              pub disk: DiskHealth,
+              pub sync: SyncHealth,
+              pub auth: AuthHealth,
+          }
+          ```
+
+          Functions:
+          - check_engine(engine) -> EngineHealth (entry count, file size, can read/write)
+          - check_disk(db_path) -> DiskHealth (available bytes, total, usage percent)
+          - check_sync(peer_manager) -> SyncHealth (active/failing peers, details)
+          - check_auth(engine, is_cluster) -> AuthHealth (mode, signing key present)
+          - compute_overall_status(checks) -> HealthStatus
+
+          Thresholds:
+          - Disk > 90% → degraded
+          - Disk > 98% → unhealthy
+          - Any peer > 10 consecutive failures → degraded
+          - No signing key in cluster mode → unhealthy
+
+          For disk space: use std::fs::metadata on the database file's parent directory,
+          or the statvfs syscall on Linux.
+
+      - name: Update health endpoint
+        file: aeordb-lib/src/server/routes.rs
+        details: |
+          Replace the simple {"status": "ok"} with the full HealthReport.
+          The health endpoint needs access to engine, peer_manager, and startup time.
+
+          Add startup_time to AppState (set at server creation time).
+
+      - name: Add startup validation
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Before binding the HTTP port, validate:
+          1. Engine opens cleanly (already done)
+          2. Signing key present (if auth enabled)
+          3. Disk space > configurable minimum (default 100MB)
+          4. Hot file replayed (already done)
+
+          If validation fails: log the error, bind the port but only serve
+          /admin/health (returning unhealthy) and reject all other requests
+          with 503 Service Unavailable.
+
+      - name: Add disk space check to write paths
+        file: aeordb-lib/src/server/engine_routes.rs
+        details: |
+          Before store_file, check disk space. If below threshold (e.g. 98%):
+          return 507 Insufficient Storage.
+
+          Don't check on every request — cache the disk stats and refresh
+          every N seconds (e.g. 30). Use the heartbeat to refresh.
+
+      - name: Write tests
+        details: |
+          Unit tests:
+          - HealthReport with all checks passing → Healthy
+          - Disk > 90% → Degraded
+          - Missing signing key in cluster → Unhealthy
+          - compute_overall_status picks worst status
+
+          HTTP tests:
+          - GET /admin/health returns full HealthReport
+          - Response includes engine, disk, sync, auth checks
+
+    commit_message: "Add deep health checks, disk monitoring, and startup validation"
+
+  - name: "Phase 3: Graceful Shutdown"
+    description: >
+      Signal handling, CancellationToken propagation, ordered shutdown sequence.
+    depends_on: ["Phase 2"]
+    tasks:
+      - name: Add CancellationToken infrastructure
+        file: aeordb-lib/src/server/mod.rs
+        details: |
+          Add tokio_util dependency if not present (for CancellationToken).
+
+          Create a shutdown signal handler:
+          ```rust
+          async fn shutdown_signal(cancel: CancellationToken) {
+              let ctrl_c = tokio::signal::ctrl_c();
+              let mut sigterm = tokio::signal::unix::signal(
+                  tokio::signal::unix::SignalKind::terminate()
+              ).expect("failed to register SIGTERM");
+
+              tokio::select! {
+                  _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
+                  _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+              }
+              cancel.cancel();
+          }
+          ```
+
+          Pass the CancellationToken to:
+          - The HTTP server (axum::serve with graceful shutdown)
+          - The sync loop (select! between tick and cancellation)
+          - The heartbeat (select! between tick and cancellation)
+          - The task worker (select! between work and cancellation)
+
+      - name: Update sync loop for cancellation
+        file: aeordb-lib/src/engine/sync_engine.rs
+        details: |
+          spawn_sync_loop accepts a CancellationToken.
+          The loop uses select! between the periodic tick and cancellation.
+          On cancellation: finish current sync cycle (don't abort mid-sync),
+          then break.
+
+      - name: Add flush-on-shutdown to StorageEngine
+        file: aeordb-lib/src/engine/storage_engine.rs
+        details: |
+          Add a pub fn shutdown(&self) method that:
+          1. Flushes the KV store (write buffer → disk)
+          2. Flushes the hot file buffer
+          3. Syncs all data to disk (fsync on all file handles)
+          4. Logs "Database shutdown complete"
+
+          Call this from the server shutdown handler after all background
+          tasks have stopped.
+
+      - name: Wire up shutdown in CLI start command
+        file: aeordb-cli/src/commands/start.rs
+        details: |
+          Create the CancellationToken.
+          Spawn the signal handler.
+          Pass the token to the server, sync loop, heartbeat, task worker.
+          After the server exits, call engine.shutdown().
+
+      - name: Write tests
+        details: |
+          Integration test:
+          - Create engine, write data, call shutdown(), verify data durable
+          - CancellationToken test: cancel sync loop, verify it exits cleanly
+
+    commit_message: "Add graceful shutdown with signal handling and ordered flush"
+
+  - name: "Phase 4: Operational Improvements"
+    description: >
+      Expired token cleanup, auto-GC scheduling, Prometheus sync metrics,
+      structured logging consistency.
+    depends_on: ["Phase 3"]
+    tasks:
+      - name: Expired token/magic-link cleanup
+        details: |
+          Add a cleanup function to system_store:
+          ```rust
+          pub fn cleanup_expired_tokens(engine, ctx) -> EngineResult<(usize, usize)>
+          ```
+          Lists /.system/refresh-tokens/ and /.system/magic-links/,
+          deletes entries where expires_at < now or is_used/is_revoked.
+          Returns (tokens_cleaned, links_cleaned).
+
+          Add as a default cron job (e.g. every hour).
+
+      - name: Auto-GC cron default
+        details: |
+          On first startup (no existing cron config), create a default
+          cron job for GC: every 24 hours, dry_run=false.
+          Store in cron config. User can modify or delete.
+
+      - name: Prometheus sync metrics
+        details: |
+          Add metrics:
+          - aeordb_sync_cycles_total (counter, labels: peer, result)
+          - aeordb_sync_duration_seconds (histogram, label: peer)
+          - aeordb_sync_consecutive_failures (gauge, label: peer)
+
+          Emit from the sync loop after each cycle.
+
+      - name: Structured logging audit
+        details: |
+          Review all tracing:: calls against the logging table in the spec.
+          Add missing log entries. Ensure consistent levels.
+          Key additions:
+          - Server startup: INFO with port, auth_mode, db_path, version
+          - Server shutdown: INFO with reason, uptime
+          - Sync completed: INFO with peer, operations, duration_ms
+          - Peer connected/disconnected: INFO/WARN
+          - Disk space warning: WARN
+
+      - name: Write tests
+        details: |
+          Unit tests:
+          - cleanup_expired_tokens removes expired entries
+          - cleanup_expired_tokens preserves valid entries
+
+          Integration tests:
+          - Auto-GC cron job created on first startup
+          - Prometheus metrics include sync counters after sync cycle
+
+    commit_message: "Add token cleanup, auto-GC, sync metrics, and structured logging"
+
+  - name: "Phase 5: Testing + E2E Verification"
+    description: >
+      Full test suite, E2E with real server, verify all production
+      readiness features work together.
+    depends_on: ["Phase 4"]
+    tasks:
+      - name: Run full test suite
+        details: |
+          cargo test — all tests must pass, zero failures.
+
+      - name: E2E verification
+        details: |
+          Start a real server (--auth self):
+          1. Verify health endpoint returns full report
+          2. Write files, verify disk stats in health response
+          3. Add a peer, verify sync status in /admin/cluster
+          4. Trigger sync failure (peer offline), verify:
+             - Error in sync status
+             - consecutive_failures increments
+             - Backoff interval increases
+             - Event emitted (if SSE subscriber)
+          5. Send SIGTERM, verify graceful shutdown (data not lost)
+          6. Restart, verify all data intact
+          7. Check /admin/metrics for sync counters
+
+      - name: Update DETAILS.md and docs
+        details: |
+          Update DETAILS.md with production readiness features.
+          Update docs: health endpoint, cluster operations, CLI.
+          Build and deploy mdBook.
+
+    commit_message: "Production readiness: full test suite + E2E verification + docs"
