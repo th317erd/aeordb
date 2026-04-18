@@ -413,24 +413,22 @@ pub fn gc_sweep(
     }
   }
 
+  // Free the full entry list before the sweep loop
+  drop(all_entries);
+
   // Second pass (non-dry-run): re-verify each candidate against the current KV
   // state before overwriting. A concurrent write between mark and sweep could
   // have made an entry live (new offset for the same hash = re-created entry).
+  // Uses per-entry get_kv_entry() lookups instead of loading all entries into
+  // a HashMap to avoid doubling memory usage.
   let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
 
   if !dry_run && !garbage_candidates.is_empty() {
-    // Re-read KV entries to detect concurrent writes since the mark phase.
-    let fresh_entries = engine.iter_kv_entries()?;
-    let fresh_map: std::collections::HashMap<Vec<u8>, u64> = fresh_entries
-      .into_iter()
-      .map(|e| (e.hash, e.offset))
-      .collect();
-
     for (hash, offset, entry_size) in &garbage_candidates {
-      // If the entry no longer exists or now points to a different offset,
-      // a concurrent write occurred — skip this entry.
-      match fresh_map.get(hash) {
-        Some(&fresh_offset) if fresh_offset == *offset => {
+      // Re-verify: if the entry no longer exists or now points to a different
+      // offset, a concurrent write occurred — skip this entry.
+      match engine.get_kv_entry(hash) {
+        Some(fresh_entry) if fresh_entry.offset == *offset => {
           // Still garbage at the same offset — safe to sweep
         }
         _ => {

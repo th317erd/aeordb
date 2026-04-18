@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 aeordb = { path = "../aeordb-lib" }
 axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 tokio = { workspace = true }

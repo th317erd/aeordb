@@ -42,6 +42,12 @@ enum Commands {
     /// CORS allowed origins: "*" for all, or comma-separated origins (e.g. "https://a.com,https://b.com")
     #[arg(long)]
     cors: Option<String>,
+    /// Path to TLS certificate PEM file (requires --tls-key)
+    #[arg(long)]
+    tls_cert: Option<String>,
+    /// Path to TLS private key PEM file (requires --tls-cert)
+    #[arg(long)]
+    tls_key: Option<String>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -107,8 +113,8 @@ async fn main() {
   let cli = Cli::parse();
 
   match cli.command {
-    Commands::Start { port, database, log_format, auth, hot_dir, cors } => {
-      commands::start::run(port, &database, &log_format, auth.as_deref(), hot_dir.as_deref(), cors.as_deref()).await;
+    Commands::Start { port, database, log_format, auth, hot_dir, cors, tls_cert, tls_key } => {
+      commands::start::run(port, &database, &log_format, auth.as_deref(), hot_dir.as_deref(), cors.as_deref(), tls_cert.as_deref(), tls_key.as_deref()).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

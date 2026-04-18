@@ -10,7 +10,16 @@ use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
 
-pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<&str>, hot_dir_arg: Option<&str>, cors_flag: Option<&str>) {
+pub async fn run(
+  port: u16,
+  database: &str,
+  log_format: &str,
+  auth_flag: Option<&str>,
+  hot_dir_arg: Option<&str>,
+  cors_flag: Option<&str>,
+  tls_cert: Option<&str>,
+  tls_key: Option<&str>,
+) {
   let log_config = LogConfig {
     format: match log_format {
       "json" => LogFormat::Json,
@@ -20,6 +29,20 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   };
 
   initialize_logging(&log_config);
+
+  // Validate TLS flags: must supply both or neither.
+  let tls_config = match (tls_cert, tls_key) {
+    (Some(cert), Some(key)) => Some((cert.to_string(), key.to_string())),
+    (None, None) => None,
+    (Some(_), None) => {
+      eprintln!("Error: --tls-cert requires --tls-key");
+      std::process::exit(1);
+    }
+    (None, Some(_)) => {
+      eprintln!("Error: --tls-key requires --tls-cert");
+      std::process::exit(1);
+    }
+  };
 
   let auth_mode = resolve_auth_mode(auth_flag);
 
@@ -33,6 +56,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     port = %port,
     auth_mode = %auth_mode_str,
     db_path = %database,
+    tls = %tls_config.is_some(),
     version = env!("CARGO_PKG_VERSION"),
     "AeorDB starting",
   );
@@ -61,6 +85,9 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
     Some("*") => println!("CORS: allow all origins"),
     Some(origins) => println!("CORS: {origins}"),
     None => println!("CORS: disabled"),
+  }
+  if tls_config.is_some() {
+    println!("TLS: enabled");
   }
   println!();
 
@@ -123,27 +150,60 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
 
   let startup_instant = std::time::Instant::now();
   let address = SocketAddr::from(([0, 0, 0, 0], port));
-  println!("Listening on http://{address}");
 
-  let listener = match tokio::net::TcpListener::bind(address).await {
-    Ok(listener) => listener,
-    Err(error) => {
-      eprintln!("Failed to bind to {address}: {error}");
-      std::process::exit(1);
-    }
+  let server_result = if let Some((cert_path, key_path)) = tls_config {
+    // TLS path: use axum_server with rustls + Handle for graceful shutdown
+    println!("Listening on https://{address}");
+
+    let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await {
+      Ok(config) => config,
+      Err(error) => {
+        eprintln!("Failed to load TLS certificate/key: {error}");
+        eprintln!("  cert: {cert_path}");
+        eprintln!("  key:  {key_path}");
+        std::process::exit(1);
+      }
+    };
+
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    let server_cancel = cancel.clone();
+    tokio::spawn(async move {
+      shutdown_signal().await;
+      server_cancel.cancel();
+      shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+    });
+
+    axum_server::bind_rustls(address, rustls_config)
+      .handle(handle)
+      .serve(application.into_make_service())
+      .await
+      .map_err(|error| format!("{}", error))
+  } else {
+    // Non-TLS path: standard axum::serve
+    println!("Listening on http://{address}");
+
+    let listener = match tokio::net::TcpListener::bind(address).await {
+      Ok(listener) => listener,
+      Err(error) => {
+        eprintln!("Failed to bind to {address}: {error}");
+        std::process::exit(1);
+      }
+    };
+
+    let server_cancel = cancel.clone();
+    let shutdown_fut = async move {
+      shutdown_signal().await;
+      server_cancel.cancel();
+    };
+
+    axum::serve(listener, application)
+      .with_graceful_shutdown(shutdown_fut)
+      .await
+      .map_err(|error| format!("{}", error))
   };
 
-  // Wire axum's graceful shutdown to the cancellation token.
-  let server_cancel = cancel.clone();
-  let shutdown_fut = async move {
-    shutdown_signal().await;
-    server_cancel.cancel();
-  };
-
-  if let Err(error) = axum::serve(listener, application)
-    .with_graceful_shutdown(shutdown_fut)
-    .await
-  {
+  if let Err(error) = server_result {
     eprintln!("Server error: {error}");
     cancel.cancel();
     // Give background tasks a moment to notice cancellation

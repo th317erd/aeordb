@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 
+use crate::engine::backup;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{
     EngineEvent, EVENT_TASK_COMPLETED, EVENT_TASK_FAILED, EVENT_TASK_STARTED,
@@ -134,6 +135,7 @@ fn process_next_task_internal(
     let result = match task.task_type.as_str() {
         "reindex" => execute_reindex(queue, &task, engine, plugin_manager),
         "gc" => execute_gc(queue, &task, engine),
+        "backup" => execute_backup(&task, engine),
         unknown => Err(format!("unknown task type: {}", unknown)),
     };
 
@@ -343,6 +345,111 @@ fn execute_gc(
         "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",
         result.garbage_entries, result.reclaimed_bytes, result.dry_run
     ))
+}
+
+/// Execute a backup task: export HEAD (or a named snapshot) to a timestamped `.aeordb` file.
+///
+/// Task args:
+/// - `backup_dir` (string) -- destination directory, default `"./backups/"`.
+/// - `retention_count` (integer) -- keep at most this many `.aeordb` files in
+///   `backup_dir`. 0 means unlimited. Default: 0.
+/// - `snapshot` (string, optional) -- export a named snapshot instead of HEAD.
+fn execute_backup(
+    task: &TaskRecord,
+    engine: &StorageEngine,
+) -> Result<String, String> {
+    let backup_dir = task
+        .args
+        .get("backup_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("./backups/");
+
+    let retention_count = task
+        .args
+        .get("retention_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    let snapshot_name = task
+        .args
+        .get("snapshot")
+        .and_then(|v| v.as_str());
+
+    // Ensure the backup directory exists.
+    std::fs::create_dir_all(backup_dir)
+        .map_err(|error| format!("failed to create backup directory '{}': {}", backup_dir, error))?;
+
+    // Build a timestamped output filename (with milliseconds to avoid collisions).
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let filename = match snapshot_name {
+        Some(name) => format!("backup-{}-{}.aeordb", name, timestamp),
+        None => format!("backup-head-{}.aeordb", timestamp),
+    };
+    let output_path = std::path::Path::new(backup_dir).join(&filename);
+    let output_path_string = output_path.to_string_lossy().to_string();
+
+    // Run the export.
+    let result = backup::export_snapshot(engine, snapshot_name, &output_path_string)
+        .map_err(|error| format!("backup export failed: {}", error))?;
+
+    // Enforce retention policy if configured.
+    if retention_count > 0 {
+        if let Err(error) = enforce_backup_retention(backup_dir, retention_count) {
+            // Retention failure is not fatal -- log but do not fail the task.
+            tracing::warn!(
+                backup_dir = %backup_dir,
+                retention_count = %retention_count,
+                error = %error,
+                "backup retention enforcement failed"
+            );
+        }
+    }
+
+    Ok(format!(
+        "backup created: {} ({} chunks, {} files, {} dirs)",
+        filename,
+        result.chunks_written,
+        result.files_written,
+        result.directories_written,
+    ))
+}
+
+/// Remove oldest `.aeordb` files in `backup_dir` until at most `keep` remain.
+///
+/// Files are sorted by modification time (oldest first), and excess files are deleted.
+fn enforce_backup_retention(backup_dir: &str, keep: usize) -> Result<(), String> {
+    let mut aeordb_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+
+    let entries = std::fs::read_dir(backup_dir)
+        .map_err(|error| format!("failed to read backup directory: {}", error))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("failed to read directory entry: {}", error))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("aeordb") {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            aeordb_files.push((path, modified));
+        }
+    }
+
+    if aeordb_files.len() <= keep {
+        return Ok(());
+    }
+
+    // Sort oldest first.
+    aeordb_files.sort_by_key(|(_path, modified)| *modified);
+
+    let remove_count = aeordb_files.len() - keep;
+    for (path, _modified) in aeordb_files.iter().take(remove_count) {
+        if let Err(error) = std::fs::remove_file(path) {
+            tracing::warn!(path = %path.display(), error = %error, "failed to remove old backup");
+        }
+    }
+
+    Ok(())
 }
 
 /// Compute estimated time remaining based on rolling average of batch durations.

@@ -896,6 +896,13 @@ impl StorageEngine {
     snapshot.iter_all()
   }
 
+  /// Lightweight single-hash lookup in the KV snapshot.
+  /// Returns `None` for deleted or missing entries.
+  pub fn get_kv_entry(&self, hash: &[u8]) -> Option<KVEntry> {
+    let snapshot = self.kv_snapshot.load();
+    snapshot.get(hash)
+  }
+
   /// Return all (key_hash, value) pairs for entries matching a KV type.
   /// Reads each entry's value from disk. Includes deleted entries in the
   /// result — callers should check `is_entry_deleted` if needed.
