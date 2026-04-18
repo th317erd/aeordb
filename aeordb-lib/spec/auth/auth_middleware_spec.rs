@@ -305,7 +305,7 @@ async fn test_list_api_keys_returns_metadata() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let array = json.as_array().expect("response should be an array");
+  let array = json["items"].as_array().expect("response should have items array");
   assert_eq!(array.len(), 1);
   assert!(array[0]["key_id"].is_string());
   assert!(array[0]["user_id"].is_string());

@@ -122,7 +122,7 @@ async fn test_list_tasks() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let tasks = json.as_array().expect("response should be an array");
+    let tasks = json["items"].as_array().expect("response should have items array");
     assert_eq!(tasks.len(), 2, "should have 2 tasks");
 
     // Verify task types present
@@ -241,7 +241,7 @@ async fn test_cron_create_list_delete() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let schedules = json.as_array().expect("should be array");
+    let schedules = json["items"].as_array().expect("should have items array");
     assert_eq!(schedules.len(), 1);
     assert_eq!(schedules[0]["id"], "nightly-reindex");
 
@@ -273,7 +273,7 @@ async fn test_cron_create_list_delete() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let schedules = json.as_array().expect("should be array");
+    let schedules = json["items"].as_array().expect("should have items array");
     assert_eq!(schedules.len(), 0);
 }
 
@@ -497,7 +497,7 @@ async fn test_cron_update_enabled_flag() {
 
     let response = app3.oneshot(request).await.unwrap();
     let json = body_json(response.into_body()).await;
-    let schedules = json.as_array().unwrap();
+    let schedules = json["items"].as_array().unwrap();
     assert_eq!(schedules[0]["enabled"], false);
 }
 

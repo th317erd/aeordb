@@ -70,6 +70,7 @@ pub async fn permission_middleware(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
           error: "Authentication required".to_string(),
+          code: None,
         }),
       )
         .into_response();
@@ -89,6 +90,7 @@ pub async fn permission_middleware(
         StatusCode::FORBIDDEN,
         Json(ErrorResponse {
           error: "Invalid user identity".to_string(),
+          code: None,
         }),
       )
         .into_response();
@@ -110,6 +112,7 @@ pub async fn permission_middleware(
           StatusCode::UNAUTHORIZED,
           Json(ErrorResponse {
             error: "API key not found".to_string(),
+            code: None,
           }),
         )
           .into_response();
@@ -120,6 +123,7 @@ pub async fn permission_middleware(
           StatusCode::INTERNAL_SERVER_ERROR,
           Json(ErrorResponse {
             error: "Failed to verify API key".to_string(),
+            code: None,
           }),
         )
           .into_response();
@@ -132,6 +136,7 @@ pub async fn permission_middleware(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
           error: "API key has been revoked".to_string(),
+          code: None,
         }),
       )
         .into_response();
@@ -144,6 +149,7 @@ pub async fn permission_middleware(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
           error: "API key expired".to_string(),
+          code: None,
         }),
       )
         .into_response();
@@ -203,6 +209,7 @@ pub async fn permission_middleware(
         StatusCode::FORBIDDEN,
         Json(ErrorResponse {
           error: "Permission denied".to_string(),
+          code: None,
         }),
       )
         .into_response()
@@ -218,6 +225,7 @@ pub async fn permission_middleware(
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
           error: "Permission check failed".to_string(),
+          code: None,
         }),
       )
         .into_response()

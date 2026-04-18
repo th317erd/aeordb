@@ -209,7 +209,7 @@ pub async fn list_plugins(
 ) -> Response {
   match state.plugin_manager.list_plugins() {
     Ok(plugins) => match serde_json::to_value(plugins) {
-      Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+      Ok(value) => (StatusCode::OK, Json(serde_json::json!({"items": value}))).into_response(),
       Err(e) => {
         tracing::error!("Failed to serialize plugins: {}", e);
         ErrorResponse::new(format!("Failed to serialize plugins: {}", e))
@@ -492,7 +492,7 @@ pub async fn list_api_keys(
           })
         })
         .collect();
-      (StatusCode::OK, Json(metadata)).into_response()
+      (StatusCode::OK, Json(serde_json::json!({"items": metadata}))).into_response()
     }
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);

@@ -169,7 +169,7 @@ async fn test_list_users() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let users = json.as_array().expect("response should be an array");
+  let users = json["items"].as_array().expect("response should have items array");
   assert!(!users.is_empty(), "should have at least one user");
   assert!(users.iter().any(|u| u["username"] == "charlie"));
 }
@@ -432,7 +432,7 @@ async fn test_list_groups() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let groups = json.as_array().expect("response should be an array");
+  let groups = json["items"].as_array().expect("response should have items array");
   assert!(groups.iter().any(|g| g["name"] == "viewers"));
 }
 

@@ -135,7 +135,7 @@ async fn test_list_conflicts_empty() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    assert!(json.as_array().unwrap().is_empty());
+    assert!(json["items"].as_array().unwrap().is_empty());
 }
 
 // ===========================================================================
@@ -162,7 +162,7 @@ async fn test_list_conflicts() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let arr = json.as_array().unwrap();
+    let arr = json["items"].as_array().unwrap();
     assert_eq!(arr.len(), 2);
 }
 

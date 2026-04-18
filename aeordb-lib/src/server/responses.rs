@@ -10,18 +10,47 @@ use crate::auth::TokenClaims;
 #[derive(Debug, Serialize, Clone)]
 pub struct ErrorResponse {
   pub error: String,
+  /// Machine-readable error code from [`error_codes`].
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
 }
 
 impl ErrorResponse {
   pub fn new(error: impl Into<String>) -> Self {
     Self {
       error: error.into(),
+      code: None,
     }
+  }
+
+  /// Attach a machine-readable error code (from [`error_codes`]).
+  pub fn with_code(mut self, code: &str) -> Self {
+    self.code = Some(code.to_owned());
+    self
   }
 
   pub fn with_status(self, status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
     (status, Json(self))
   }
+}
+
+// ---------------------------------------------------------------------------
+// Machine-readable error codes
+// ---------------------------------------------------------------------------
+
+pub mod error_codes {
+  pub const NOT_FOUND: &str = "NOT_FOUND";
+  pub const ALREADY_EXISTS: &str = "ALREADY_EXISTS";
+  pub const CONFLICT: &str = "CONFLICT";
+  pub const INVALID_INPUT: &str = "INVALID_INPUT";
+  pub const INVALID_PATH: &str = "INVALID_PATH";
+  pub const AUTH_REQUIRED: &str = "AUTH_REQUIRED";
+  pub const FORBIDDEN: &str = "FORBIDDEN";
+  pub const RATE_LIMITED: &str = "RATE_LIMITED";
+  pub const PAYLOAD_TOO_LARGE: &str = "PAYLOAD_TOO_LARGE";
+  pub const METHOD_NOT_ALLOWED: &str = "METHOD_NOT_ALLOWED";
+  pub const SERVICE_UNAVAILABLE: &str = "SERVICE_UNAVAILABLE";
+  pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 }
 
 impl IntoResponse for ErrorResponse {
@@ -56,7 +85,7 @@ pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
 pub struct EngineFileResponse {
   pub path: String,
   pub content_type: Option<String>,
-  pub total_size: u64,
+  pub size: u64,
   pub created_at: i64,
   pub updated_at: i64,
   /// Content-addressed hash (hex-encoded) for fetch-by-hash lookups.
@@ -69,7 +98,7 @@ impl From<&crate::engine::FileRecord> for EngineFileResponse {
     Self {
       path: record.path.clone(),
       content_type: record.content_type.clone(),
-      total_size: record.total_size,
+      size: record.total_size,
       created_at: record.created_at,
       updated_at: record.updated_at,
       hash: None,
@@ -164,5 +193,136 @@ impl From<&crate::engine::Group> for GroupResponse {
       created_at: group.created_at,
       updated_at: group.updated_at,
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // ---- error_codes constant values ----------------------------------------
+
+  #[test]
+  fn error_code_not_found() {
+    assert_eq!(error_codes::NOT_FOUND, "NOT_FOUND");
+  }
+
+  #[test]
+  fn error_code_forbidden() {
+    assert_eq!(error_codes::FORBIDDEN, "FORBIDDEN");
+  }
+
+  #[test]
+  fn error_code_auth_required() {
+    assert_eq!(error_codes::AUTH_REQUIRED, "AUTH_REQUIRED");
+  }
+
+  #[test]
+  fn error_code_invalid_input() {
+    assert_eq!(error_codes::INVALID_INPUT, "INVALID_INPUT");
+  }
+
+  #[test]
+  fn error_code_already_exists() {
+    assert_eq!(error_codes::ALREADY_EXISTS, "ALREADY_EXISTS");
+  }
+
+  #[test]
+  fn error_code_invalid_path() {
+    assert_eq!(error_codes::INVALID_PATH, "INVALID_PATH");
+  }
+
+  #[test]
+  fn error_code_rate_limited() {
+    assert_eq!(error_codes::RATE_LIMITED, "RATE_LIMITED");
+  }
+
+  #[test]
+  fn error_code_conflict() {
+    assert_eq!(error_codes::CONFLICT, "CONFLICT");
+  }
+
+  #[test]
+  fn error_code_internal_error() {
+    assert_eq!(error_codes::INTERNAL_ERROR, "INTERNAL_ERROR");
+  }
+
+  #[test]
+  fn error_code_payload_too_large() {
+    assert_eq!(error_codes::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE");
+  }
+
+  #[test]
+  fn error_code_method_not_allowed() {
+    assert_eq!(error_codes::METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED");
+  }
+
+  #[test]
+  fn error_code_service_unavailable() {
+    assert_eq!(error_codes::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE");
+  }
+
+  // ---- ErrorResponse behaviour -------------------------------------------
+
+  #[test]
+  fn error_response_new_has_no_code() {
+    let resp = ErrorResponse::new("something broke");
+    assert_eq!(resp.error, "something broke");
+    assert!(resp.code.is_none());
+  }
+
+  #[test]
+  fn error_response_with_code_attaches_code() {
+    let resp = ErrorResponse::new("forbidden")
+      .with_code(error_codes::FORBIDDEN);
+    assert_eq!(resp.code.as_deref(), Some("FORBIDDEN"));
+  }
+
+  #[test]
+  fn error_response_with_status_preserves_code() {
+    let (status, Json(body)) = ErrorResponse::new("gone")
+      .with_code(error_codes::NOT_FOUND)
+      .with_status(StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body.code.as_deref(), Some("NOT_FOUND"));
+    assert_eq!(body.error, "gone");
+  }
+
+  #[test]
+  fn error_response_serializes_without_code_when_none() {
+    let resp = ErrorResponse::new("oops");
+    let json = serde_json::to_value(&resp).unwrap();
+    assert!(json.get("code").is_none(), "code field should be absent when None");
+    assert_eq!(json["error"], "oops");
+  }
+
+  #[test]
+  fn error_response_serializes_with_code_when_set() {
+    let resp = ErrorResponse::new("too big")
+      .with_code(error_codes::PAYLOAD_TOO_LARGE);
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["code"], "PAYLOAD_TOO_LARGE");
+    assert_eq!(json["error"], "too big");
+  }
+
+  #[test]
+  fn error_response_clone_preserves_code() {
+    let resp = ErrorResponse::new("err")
+      .with_code(error_codes::CONFLICT);
+    let cloned = resp.clone();
+    assert_eq!(cloned.error, "err");
+    assert_eq!(cloned.code.as_deref(), Some("CONFLICT"));
+  }
+
+  #[test]
+  fn with_code_is_chainable_last_wins() {
+    let resp = ErrorResponse::new("x")
+      .with_code(error_codes::INVALID_INPUT)
+      .with_code(error_codes::INTERNAL_ERROR);
+    assert_eq!(resp.code.as_deref(), Some("INTERNAL_ERROR"));
   }
 }

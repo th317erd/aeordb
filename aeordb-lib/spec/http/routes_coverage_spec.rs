@@ -382,7 +382,7 @@ async fn test_list_api_keys_returns_stored_keys() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let keys = json.as_array().unwrap();
+  let keys = json["items"].as_array().unwrap();
   assert!(!keys.is_empty(), "should have at least one API key");
 }
 

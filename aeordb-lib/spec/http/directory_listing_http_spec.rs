@@ -76,7 +76,7 @@ async fn test_default_listing_includes_hash_and_path() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
   assert_eq!(entries.len(), 1);
 
   let entry = &entries[0];
@@ -108,7 +108,7 @@ async fn test_recursive_unlimited() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
   assert_eq!(entries.len(), 3, "should return all 3 files recursively");
 
   let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
@@ -139,7 +139,7 @@ async fn test_recursive_depth_1() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
 
   let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
   assert!(names.contains(&"a.txt"), "should include immediate child a.txt");
@@ -168,7 +168,7 @@ async fn test_glob_filter() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
   assert_eq!(entries.len(), 1);
   assert_eq!(entries[0]["name"], "a.txt");
 }
@@ -195,7 +195,7 @@ async fn test_glob_with_depth() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
   assert_eq!(entries.len(), 2);
 
   let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
@@ -225,7 +225,7 @@ async fn test_directories_excluded_recursive() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("listing is array");
+  let entries = json["items"].as_array().expect("listing should have items array");
 
   // EntryType::DirectoryIndex = 3; all entries should be files (entry_type 2)
   for entry in entries {

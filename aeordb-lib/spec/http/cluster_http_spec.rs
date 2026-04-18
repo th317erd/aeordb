@@ -267,7 +267,7 @@ async fn test_list_peers_empty() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    assert!(json.as_array().unwrap().is_empty());
+    assert!(json["items"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -308,7 +308,7 @@ async fn test_list_peers_after_add() {
 
     assert_eq!(list_response.status(), StatusCode::OK);
     let json = body_json(list_response.into_body()).await;
-    let peers = json.as_array().unwrap();
+    let peers = json["items"].as_array().unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0]["address"], "10.0.0.5:9000");
     assert_eq!(peers[0]["label"], "replica-1");
@@ -568,7 +568,7 @@ async fn test_list_peers_includes_sync_status() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let peers = json.as_array().expect("response should be an array");
+    let peers = json["items"].as_array().expect("response should be an array");
     assert_eq!(peers.len(), 1);
 
     let peer = &peers[0];

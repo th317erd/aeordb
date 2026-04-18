@@ -143,7 +143,7 @@ async fn test_listing_filters_denied_entries() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
@@ -192,7 +192,7 @@ async fn test_recursive_listing_filters_denied() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
@@ -242,7 +242,7 @@ async fn test_default_listing_filters() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
@@ -283,7 +283,7 @@ async fn test_recursive_listing_prunes() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
@@ -317,7 +317,7 @@ async fn test_unscoped_token_no_filtering() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
     assert!(paths.iter().any(|p| p.contains("/dir/a/")), "Should contain /dir/a/ path, got: {:?}", paths);
@@ -350,7 +350,7 @@ async fn test_empty_rules_no_filtering() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
 
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
     assert!(paths.iter().any(|p| p.contains("/ns/x/")), "Should contain /ns/x/ path, got: {:?}", paths);
@@ -389,7 +389,7 @@ async fn test_listing_checks_l_flag_not_r() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
     assert!(paths.contains(&"/data/public.txt"), "Should contain /data/public.txt, got: {:?}", paths);
@@ -426,7 +426,7 @@ async fn test_listing_all_denied_returns_empty_array() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
     assert!(entries.is_empty(), "All entries denied should return empty array, got: {:?}", entries);
 }
 
@@ -464,7 +464,7 @@ async fn test_listing_mixed_permissions_same_directory() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
     assert!(paths.contains(&"/mixed/public.txt"), "Should contain public.txt, got: {:?}", paths);
@@ -671,7 +671,7 @@ async fn test_symlink_in_listing_filtered() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let entries = json.as_array().expect("listing should be an array");
+    let entries = json["items"].as_array().expect("listing should have items array");
     let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
 
     assert!(paths.contains(&"/data/allowed_link"), "Should contain allowed_link, got: {:?}", paths);

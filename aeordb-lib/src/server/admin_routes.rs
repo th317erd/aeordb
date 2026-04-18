@@ -69,7 +69,7 @@ pub async fn list_users(
   match system_store::list_users(&state.engine) {
     Ok(users) => {
       let responses: Vec<UserResponse> = users.iter().map(UserResponse::from).collect();
-      (StatusCode::OK, Json(responses)).into_response()
+      (StatusCode::OK, Json(serde_json::json!({"items": responses}))).into_response()
     }
     Err(error) => {
       tracing::error!("Failed to list users: {}", error);
@@ -304,7 +304,7 @@ pub async fn list_groups(
   match system_store::list_groups(&state.engine) {
     Ok(groups) => {
       let responses: Vec<GroupResponse> = groups.iter().map(GroupResponse::from).collect();
-      (StatusCode::OK, Json(responses)).into_response()
+      (StatusCode::OK, Json(serde_json::json!({"items": responses}))).into_response()
     }
     Err(error) => {
       tracing::error!("Failed to list groups: {}", error);

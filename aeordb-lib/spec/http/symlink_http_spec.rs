@@ -195,8 +195,8 @@ async fn test_get_symlink_transparent() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Should have symlink target header
-    let symlink_target = response.headers().get("X-Symlink-Target")
-        .expect("X-Symlink-Target header missing")
+    let symlink_target = response.headers().get("X-AeorDB-Link-Target")
+        .expect("X-AeorDB-Link-Target header missing")
         .to_str().unwrap();
     assert_eq!(symlink_target, "/file.txt");
 
@@ -254,13 +254,13 @@ async fn test_head_symlink() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let entry_type = response.headers().get("X-Entry-Type")
-        .expect("X-Entry-Type header missing")
+    let entry_type = response.headers().get("X-AeorDB-Type")
+        .expect("X-AeorDB-Type header missing")
         .to_str().unwrap();
     assert_eq!(entry_type, "symlink");
 
-    let symlink_target = response.headers().get("X-Symlink-Target")
-        .expect("X-Symlink-Target header missing")
+    let symlink_target = response.headers().get("X-AeorDB-Link-Target")
+        .expect("X-AeorDB-Link-Target header missing")
         .to_str().unwrap();
     assert_eq!(symlink_target, "/somewhere.txt");
 }
@@ -291,7 +291,7 @@ async fn test_delete_symlink() {
 
     let json = body_json(response.into_body()).await;
     assert_eq!(json["deleted"], true);
-    assert_eq!(json["type"], "symlink");
+    assert_eq!(json["entry_type"], "symlink");
 
     // Original file should still be accessible
     let app = rebuild_app(&jwt_manager, &engine);
@@ -365,7 +365,7 @@ async fn test_get_symlink_to_directory() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let arr = json.as_array().expect("expected array listing");
+    let arr = json["items"].as_array().expect("expected items array");
     assert!(arr.len() >= 2, "Expected at least 2 entries in listing, got {}", arr.len());
 
     let names: Vec<&str> = arr.iter()
@@ -459,7 +459,7 @@ async fn test_symlink_in_listing() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let arr = json.as_array().expect("expected array listing");
+    let arr = json["items"].as_array().expect("expected items array");
 
     // Find the symlink entry
     let symlink_entry = arr.iter()
@@ -556,8 +556,8 @@ async fn test_head_file_still_works() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let entry_type = response.headers().get("X-Entry-Type")
-        .expect("X-Entry-Type header missing")
+    let entry_type = response.headers().get("X-AeorDB-Type")
+        .expect("X-AeorDB-Type header missing")
         .to_str().unwrap();
     assert_eq!(entry_type, "file");
 }

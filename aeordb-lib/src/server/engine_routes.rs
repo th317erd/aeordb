@@ -11,7 +11,7 @@ use axum::{
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 
-use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
+use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse, error_codes};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
@@ -102,6 +102,7 @@ pub async fn engine_store_file(
             MAX_INLINE_UPLOAD_BYTES,
             MAX_INLINE_UPLOAD_BYTES / (1024 * 1024),
           ))
+            .with_code(error_codes::PAYLOAD_TOO_LARGE)
             .with_status(StatusCode::PAYLOAD_TOO_LARGE)
             .into_response();
         }
@@ -184,9 +185,9 @@ pub async fn engine_store_file(
 
 /// Build a streaming HTTP response from a file's chunk hashes.
 ///
-/// Constructs the standard response with X-Path, X-Total-Size, X-Created-At,
-/// X-Updated-At headers. If `symlink_target` is provided, adds an
-/// X-Symlink-Target header as well.
+/// Constructs the standard response with X-AeorDB-Path, X-AeorDB-Size,
+/// X-AeorDB-Created, X-AeorDB-Updated headers. If `symlink_target` is
+/// provided, adds an X-AeorDB-Link-Target header as well.
 fn build_file_streaming_response(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   file_record: &FileRecord,
@@ -215,14 +216,14 @@ fn build_file_streaming_response(
   let safe_path = file_record.path.replace('\n', "").replace('\r', "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-Path", safe_path)
-    .header("X-Total-Size", file_record.total_size.to_string())
-    .header("X-Created-At", file_record.created_at.to_string())
-    .header("X-Updated-At", file_record.updated_at.to_string());
+    .header("X-AeorDB-Path", safe_path)
+    .header("X-AeorDB-Size", file_record.total_size.to_string())
+    .header("X-AeorDB-Created", file_record.created_at.to_string())
+    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
 
   if let Some(target) = symlink_target {
     response_builder = response_builder
-      .header("X-Symlink-Target", target.replace('\n', "").replace('\r', ""));
+      .header("X-AeorDB-Link-Target", target.replace('\n', "").replace('\r', ""));
   }
 
   if let Some(ref content_type) = file_record.content_type {
@@ -259,7 +260,7 @@ fn build_directory_listing(
         "name": child.name,
         "entry_type": child.entry_type,
         "hash": hex::encode(&child.hash),
-        "total_size": child.total_size,
+        "size": child.total_size,
         "created_at": child.created_at,
         "updated_at": child.updated_at,
         "content_type": child.content_type,
@@ -377,7 +378,7 @@ fn handle_symlink_resolution(
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
           match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-            Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
             Err(response) => response,
           }
         }
@@ -457,10 +458,10 @@ fn handle_file_response(
   let safe_path = file_record.path.replace('\n', "").replace('\r', "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-Path", safe_path)
-    .header("X-Total-Size", file_record.total_size.to_string())
-    .header("X-Created-At", file_record.created_at.to_string())
-    .header("X-Updated-At", file_record.updated_at.to_string());
+    .header("X-AeorDB-Path", safe_path)
+    .header("X-AeorDB-Size", file_record.total_size.to_string())
+    .header("X-AeorDB-Created", file_record.created_at.to_string())
+    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
 
   if let Some(ref content_type) = file_record.content_type {
     response_builder = response_builder.header("content-type", content_type.as_str());
@@ -498,7 +499,7 @@ fn handle_recursive_listing(
             "name": entry.name,
             "entry_type": entry.entry_type,
             "hash": hex::encode(&entry.hash),
-            "total_size": entry.total_size,
+            "size": entry.total_size,
             "created_at": entry.created_at,
             "updated_at": entry.updated_at,
             "content_type": entry.content_type,
@@ -516,7 +517,7 @@ fn handle_recursive_listing(
         .collect();
 
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
         Err(response) => response,
       }
     }
@@ -547,7 +548,7 @@ fn handle_directory_listing(
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
         Err(response) => response,
       }
     }
@@ -722,10 +723,10 @@ async fn engine_get_at_version(
 
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-Path", path.replace('\n', "").replace('\r', ""))
-    .header("X-Total-Size", file_record.total_size.to_string())
-    .header("X-Created-At", file_record.created_at.to_string())
-    .header("X-Updated-At", file_record.updated_at.to_string());
+    .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+    .header("X-AeorDB-Size", file_record.total_size.to_string())
+    .header("X-AeorDB-Created", file_record.created_at.to_string())
+    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
 
   if let Some(ref content_type) = file_record.content_type {
     response_builder = response_builder.header("content-type", content_type.as_str());
@@ -765,7 +766,7 @@ pub async fn engine_delete_file(
   if directory_ops.get_symlink(&path).ok().flatten().is_some() {
     return match directory_ops.delete_symlink(&ctx, &path) {
       Ok(()) => {
-        (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "type": "symlink" })))
+        (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "symlink" })))
           .into_response()
       }
       Err(error) => {
@@ -825,11 +826,11 @@ pub async fn engine_head(
   if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
     return axum::http::Response::builder()
       .status(StatusCode::OK)
-      .header("X-Entry-Type", "symlink")
-      .header("X-Symlink-Target", symlink_record.target.replace('\n', "").replace('\r', ""))
-      .header("X-Path", path.replace('\n', "").replace('\r', ""))
-      .header("X-Created-At", symlink_record.created_at.to_string())
-      .header("X-Updated-At", symlink_record.updated_at.to_string())
+      .header("X-AeorDB-Type", "symlink")
+      .header("X-AeorDB-Link-Target", symlink_record.target.replace('\n', "").replace('\r', ""))
+      .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+      .header("X-AeorDB-Created", symlink_record.created_at.to_string())
+      .header("X-AeorDB-Updated", symlink_record.updated_at.to_string())
       .body(Body::empty())
       .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
   }
@@ -839,11 +840,11 @@ pub async fn engine_head(
       let safe_path = file_record.path.replace('\n', "").replace('\r', "");
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
-        .header("X-Entry-Type", "file")
-        .header("X-Path", safe_path)
-        .header("X-Total-Size", file_record.total_size.to_string())
-        .header("X-Created-At", file_record.created_at.to_string())
-        .header("X-Updated-At", file_record.updated_at.to_string());
+        .header("X-AeorDB-Type", "file")
+        .header("X-AeorDB-Path", safe_path)
+        .header("X-AeorDB-Size", file_record.total_size.to_string())
+        .header("X-AeorDB-Created", file_record.created_at.to_string())
+        .header("X-AeorDB-Updated", file_record.updated_at.to_string());
 
       if let Some(ref content_type) = file_record.content_type {
         response_builder = response_builder.header("content-type", content_type.as_str());
@@ -860,8 +861,8 @@ pub async fn engine_head(
           let safe_path = path.replace('\n', "").replace('\r', "");
           axum::http::Response::builder()
             .status(StatusCode::OK)
-            .header("X-Entry-Type", "directory")
-            .header("X-Path", safe_path)
+            .header("X-AeorDB-Type", "directory")
+            .header("X-AeorDB-Path", safe_path)
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -960,9 +961,9 @@ pub async fn engine_get_by_hash(
 
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
-        .header("x-entry-type", header.entry_type.to_u8().to_string())
-        .header("x-hash", &hex_hash)
-        .header("x-total-size", file_record.total_size.to_string());
+        .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
+        .header("X-AeorDB-Hash", &hex_hash)
+        .header("X-AeorDB-Size", file_record.total_size.to_string());
 
       if let Some(ref ct) = file_record.content_type {
         response_builder = response_builder.header("content-type", ct.as_str());
@@ -989,8 +990,8 @@ pub async fn engine_get_by_hash(
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
-        .header("x-entry-type", header.entry_type.to_u8().to_string())
-        .header("x-hash", &hex_hash)
+        .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
+        .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(data))
         .unwrap_or_else(|_| {
           (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
@@ -1001,8 +1002,8 @@ pub async fn engine_get_by_hash(
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
-        .header("x-entry-type", header.entry_type.to_u8().to_string())
-        .header("x-hash", &hex_hash)
+        .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
+        .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(value))
         .unwrap_or_else(|_| {
           (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
@@ -1014,8 +1015,8 @@ pub async fn engine_get_by_hash(
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
-        .header("x-entry-type", header.entry_type.to_u8().to_string())
-        .header("x-hash", &hex_hash)
+        .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
+        .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(value))
         .unwrap_or_else(|_| {
           (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
@@ -1081,7 +1082,7 @@ pub async fn snapshot_list(
         .iter()
         .map(SnapshotResponse::from)
         .collect();
-      (StatusCode::OK, Json(listing)).into_response()
+      (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response()
     }
     Err(error) => {
       tracing::error!("Engine: failed to list snapshots: {}", error);
@@ -1233,7 +1234,7 @@ pub async fn fork_list(
         .iter()
         .map(ForkResponse::from)
         .collect();
-      (StatusCode::OK, Json(listing)).into_response()
+      (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response()
     }
     Err(error) => {
       tracing::error!("Engine: failed to list forks: {}", error);
@@ -1564,7 +1565,7 @@ fn map_select_fields(select: &[String]) -> Vec<String> {
     match s.as_str() {
       "@path" => "path".to_string(),
       "@score" => "score".to_string(),
-      "@size" => "total_size".to_string(),
+      "@size" => "size".to_string(),
       "@content_type" => "content_type".to_string(),
       "@created_at" => "created_at".to_string(),
       "@updated_at" => "updated_at".to_string(),
@@ -1765,7 +1766,7 @@ pub async fn query_endpoint(
         .map(|result| {
           serde_json::json!({
             "path": result.file_record.path,
-            "total_size": result.file_record.total_size,
+            "size": result.file_record.total_size,
             "content_type": result.file_record.content_type,
             "created_at": result.file_record.created_at,
             "updated_at": result.file_record.updated_at,
@@ -1923,7 +1924,7 @@ pub async fn engine_rename(
         (StatusCode::OK, Json(serde_json::json!({
           "from": from_normalized,
           "to": to_normalized,
-          "type": "symlink",
+          "entry_type": "symlink",
         }))).into_response()
       }
       Err(ref error) => {
@@ -1944,7 +1945,7 @@ pub async fn engine_rename(
       (StatusCode::OK, Json(serde_json::json!({
         "from": from_normalized,
         "to": to_normalized,
-        "type": "file",
+        "entry_type": "file",
       }))).into_response()
     }
     Err(ref error) => {

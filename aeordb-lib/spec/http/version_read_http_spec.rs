@@ -344,7 +344,7 @@ async fn test_get_file_at_snapshot_nested_path() {
   assert_eq!(bytes, b"updated readme");
 }
 
-/// Verify X-Total-Size and timestamp headers are present on versioned reads.
+/// Verify X-AeorDB-Size and timestamp headers are present on versioned reads.
 #[tokio::test]
 async fn test_get_file_at_version_response_headers() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
@@ -364,10 +364,10 @@ async fn test_get_file_at_version_response_headers() {
   assert_eq!(bytes, content);
 
   // Check expected headers
-  assert!(headers.get("X-Path").is_some(), "Missing X-Path header");
-  assert!(headers.get("X-Total-Size").is_some(), "Missing X-Total-Size header");
-  let size: u64 = headers.get("X-Total-Size").unwrap().to_str().unwrap().parse().unwrap();
+  assert!(headers.get("X-AeorDB-Path").is_some(), "Missing X-AeorDB-Path header");
+  assert!(headers.get("X-AeorDB-Size").is_some(), "Missing X-AeorDB-Size header");
+  let size: u64 = headers.get("X-AeorDB-Size").unwrap().to_str().unwrap().parse().unwrap();
   assert_eq!(size, content.len() as u64);
-  assert!(headers.get("X-Created-At").is_some(), "Missing X-Created-At header");
-  assert!(headers.get("X-Updated-At").is_some(), "Missing X-Updated-At header");
+  assert!(headers.get("X-AeorDB-Created").is_some(), "Missing X-AeorDB-Created header");
+  assert!(headers.get("X-AeorDB-Updated").is_some(), "Missing X-AeorDB-Updated header");
 }

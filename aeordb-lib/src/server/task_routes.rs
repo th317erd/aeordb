@@ -10,7 +10,7 @@ use crate::engine::{
     CronConfig, CronSchedule, RequestContext,
 };
 use crate::engine::system_store;
-use crate::server::responses::{ErrorResponse, require_root};
+use crate::server::responses::{ErrorResponse, error_codes, require_root};
 use crate::server::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,7 @@ pub struct UpdateCronRequest {
 fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine::TaskQueue>, Response> {
     state.task_queue.as_ref().ok_or_else(|| {
         ErrorResponse::new("Task queue not available")
+            .with_code(error_codes::SERVICE_UNAVAILABLE)
             .with_status(StatusCode::SERVICE_UNAVAILABLE)
             .into_response()
     })
@@ -77,7 +78,7 @@ pub async fn list_tasks(
                 }
                 Some(json)
             }).collect();
-            (StatusCode::OK, Json(serde_json::json!(response))).into_response()
+            (StatusCode::OK, Json(serde_json::json!({"items": response}))).into_response()
         }
         Err(e) => {
             ErrorResponse::new(format!("Failed to list tasks: {}", e))
@@ -270,7 +271,7 @@ pub async fn list_cron(
     };
 
     let schedules = load_cron_config(&state.engine);
-    (StatusCode::OK, Json(serde_json::json!(schedules))).into_response()
+    (StatusCode::OK, Json(serde_json::json!({"items": schedules}))).into_response()
 }
 
 /// POST /admin/cron -- create a new cron schedule.

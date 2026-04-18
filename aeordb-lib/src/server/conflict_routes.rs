@@ -28,7 +28,7 @@ pub async fn list_conflicts(
         tokio::task::spawn_blocking(move || conflict_store::list_conflicts(&engine)).await;
 
     match result {
-        Ok(Ok(conflicts)) => (StatusCode::OK, Json(serde_json::json!(conflicts))).into_response(),
+        Ok(Ok(conflicts)) => (StatusCode::OK, Json(serde_json::json!({"items": conflicts}))).into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to list conflicts: {}", e)})),

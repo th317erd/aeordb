@@ -175,7 +175,7 @@ pub async fn list_peers(
         .map(|peer| peer_to_json(peer, &state.peer_manager))
         .collect();
 
-    (StatusCode::OK, Json(serde_json::json!(peers))).into_response()
+    (StatusCode::OK, Json(serde_json::json!({"items": peers}))).into_response()
 }
 
 /// DELETE /admin/cluster/peers/{node_id} -- remove a peer.

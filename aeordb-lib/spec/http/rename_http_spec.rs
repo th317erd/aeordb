@@ -82,7 +82,7 @@ async fn test_rename_file_basic() {
     let json = body_json(response.into_body()).await;
     assert_eq!(json["from"], "/docs/readme.txt");
     assert_eq!(json["to"], "/docs/readme2.txt");
-    assert_eq!(json["type"], "file");
+    assert_eq!(json["entry_type"], "file");
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ async fn test_move_file_cross_directory() {
     let json = body_json(response.into_body()).await;
     assert_eq!(json["from"], "/src/main.rs");
     assert_eq!(json["to"], "/archive/old_main.rs");
-    assert_eq!(json["type"], "file");
+    assert_eq!(json["entry_type"], "file");
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ async fn test_rename_symlink_basic() {
     let json = body_json(response.into_body()).await;
     assert_eq!(json["from"], "/link");
     assert_eq!(json["to"], "/renamed-link");
-    assert_eq!(json["type"], "symlink");
+    assert_eq!(json["entry_type"], "symlink");
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +538,7 @@ async fn test_rename_file_preserves_created_at() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let original_created = response.headers().get("X-Created-At")
+    let original_created = response.headers().get("X-AeorDB-Created")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<i64>().ok());
 
@@ -564,10 +564,10 @@ async fn test_rename_file_preserves_created_at() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let renamed_created = response.headers().get("X-Created-At")
+    let renamed_created = response.headers().get("X-AeorDB-Created")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<i64>().ok());
 
-    assert!(original_created.is_some(), "Expected X-Created-At header on original file");
+    assert!(original_created.is_some(), "Expected X-AeorDB-Created header on original file");
     assert_eq!(original_created, renamed_created, "created_at should be preserved across rename");
 }

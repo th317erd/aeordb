@@ -238,7 +238,7 @@ async fn test_list_deployed_plugins() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let plugins = json.as_array().expect("should be an array");
+  let plugins = json["items"].as_array().expect("should have items array");
   assert_eq!(plugins.len(), 2);
 }
 

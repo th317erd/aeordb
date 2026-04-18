@@ -500,7 +500,7 @@ async fn test_query_response_contains_metadata_fields() {
 
   let result = &results[0];
   assert!(result["path"].is_string());
-  assert!(result["total_size"].is_number());
+  assert!(result["size"].is_number());
   assert!(result["created_at"].is_number());
   assert!(result["updated_at"].is_number());
   // content_type may be null or a string

@@ -76,7 +76,7 @@ async fn test_engine_store_file_returns_201() {
 
   let json = body_json(response.into_body()).await;
   assert!(json["path"].is_string());
-  assert_eq!(json["total_size"], 12);
+  assert_eq!(json["size"], 12);
   assert_eq!(json["content_type"], "text/plain");
 }
 
@@ -201,7 +201,7 @@ async fn test_engine_get_directory_returns_listing() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("expected array");
+  let entries = json["items"].as_array().expect("expected items array");
   assert_eq!(entries.len(), 2);
 
   let names: Vec<&str> = entries
@@ -285,11 +285,11 @@ async fn test_engine_head_returns_metadata() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
   assert_eq!(
-    response.headers().get("X-Entry-Type").unwrap().to_str().unwrap(),
+    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
     "file"
   );
   assert_eq!(
-    response.headers().get("X-Total-Size").unwrap().to_str().unwrap(),
+    response.headers().get("X-AeorDB-Size").unwrap().to_str().unwrap(),
     "13"
   );
   assert_eq!(
@@ -334,7 +334,7 @@ async fn test_engine_head_on_directory_returns_directory_type() {
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
   assert_eq!(
-    response.headers().get("X-Entry-Type").unwrap().to_str().unwrap(),
+    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
     "directory"
   );
 
@@ -359,7 +359,7 @@ async fn test_engine_store_without_content_type() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["total_size"], 9);
+  assert_eq!(json["size"], 9);
   // content_type should be auto-detected as text/plain (magic byte sniffing for "some data")
   assert_eq!(
     json["content_type"].as_str(), Some("text/plain"),
@@ -585,10 +585,10 @@ async fn test_engine_get_file_returns_metadata_headers() {
   assert_eq!(response.status(), StatusCode::OK);
 
   // Verify metadata headers are present on GET file response
-  assert!(response.headers().get("X-Path").is_some());
-  assert!(response.headers().get("X-Total-Size").is_some());
-  assert!(response.headers().get("X-Created-At").is_some());
-  assert!(response.headers().get("X-Updated-At").is_some());
+  assert!(response.headers().get("X-AeorDB-Path").is_some());
+  assert!(response.headers().get("X-AeorDB-Size").is_some());
+  assert!(response.headers().get("X-AeorDB-Created").is_some());
+  assert!(response.headers().get("X-AeorDB-Updated").is_some());
   assert_eq!(
     response.headers().get("content-type").unwrap().to_str().unwrap(),
     "text/plain"
@@ -666,7 +666,7 @@ async fn test_engine_store_creates_intermediate_dirs() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let entries = json.as_array().expect("expected array");
+  let entries = json["items"].as_array().expect("expected items array");
   assert_eq!(entries.len(), 1);
   assert_eq!(entries[0]["name"], "deep.txt");
 }
@@ -785,7 +785,7 @@ async fn test_snapshot_list() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let snapshots = json.as_array().expect("expected array");
+  let snapshots = json["items"].as_array().expect("expected items array");
   assert_eq!(snapshots.len(), 2);
 }
 
@@ -865,7 +865,7 @@ async fn test_snapshot_delete() {
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
-  let snapshots = json.as_array().expect("expected array");
+  let snapshots = json["items"].as_array().expect("expected items array");
   assert!(snapshots.is_empty());
 }
 
@@ -924,7 +924,7 @@ async fn test_fork_list() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let forks = json.as_array().expect("expected array");
+  let forks = json["items"].as_array().expect("expected items array");
   assert_eq!(forks.len(), 1);
   assert_eq!(forks[0]["name"], "fork-a");
 }
@@ -972,7 +972,7 @@ async fn test_fork_promote() {
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
-  let forks = json.as_array().expect("expected array");
+  let forks = json["items"].as_array().expect("expected items array");
   assert!(forks.is_empty());
 }
 
@@ -1018,7 +1018,7 @@ async fn test_fork_abandon() {
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
-  let forks = json.as_array().expect("expected array");
+  let forks = json["items"].as_array().expect("expected items array");
   assert!(forks.is_empty());
 }
 
@@ -1046,7 +1046,7 @@ async fn test_engine_large_file() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["total_size"], 300_000);
+  assert_eq!(json["size"], 300_000);
 
   // Read it back and verify roundtrip
   let app = rebuild_app(&jwt_manager, &engine);
@@ -1239,7 +1239,7 @@ async fn test_engine_store_empty_file() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["total_size"], 0);
+  assert_eq!(json["size"], 0);
 
   // Read it back
   let app = rebuild_app(&jwt_manager, &engine);
@@ -1302,14 +1302,14 @@ async fn test_get_by_hash_returns_file_content() {
     response.headers().get("content-type").unwrap().to_str().unwrap(),
     "text/plain"
   );
-  // Verify x-hash echo header
+  // Verify X-AeorDB-Hash echo header
   assert_eq!(
-    response.headers().get("x-hash").unwrap().to_str().unwrap(),
+    response.headers().get("X-AeorDB-Hash").unwrap().to_str().unwrap(),
     hash
   );
-  // Verify x-entry-type header (FileRecord = 0x02)
+  // Verify X-AeorDB-Type header (FileRecord = 0x02)
   assert_eq!(
-    response.headers().get("x-entry-type").unwrap().to_str().unwrap(),
+    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
     "2"
   );
 

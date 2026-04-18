@@ -55,6 +55,7 @@ pub async fn auth_middleware(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
           error: "Missing or invalid Authorization header".to_string(),
+          code: None,
         }),
       )
         .into_response();
@@ -73,6 +74,7 @@ pub async fn auth_middleware(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
           error: "Invalid or expired token".to_string(),
+          code: None,
         }),
       )
         .into_response();

@@ -287,7 +287,7 @@ async fn test_system_directory_hidden_in_listing() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let listing = json.as_array().expect("listing should be an array");
+    let listing = json["items"].as_array().expect("listing should have items array");
     for entry in listing {
         let path = entry["path"].as_str().unwrap_or("");
         assert!(
@@ -332,7 +332,7 @@ async fn test_system_directory_visible_to_root() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let listing = json.as_array().expect("listing should be an array");
+    let listing = json["items"].as_array().expect("listing should have items array");
     assert!(
         !listing.is_empty(),
         "Root listing of /.system/ should have entries"
@@ -524,7 +524,7 @@ async fn test_system_recursive_listing_filtered_for_non_root() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let listing = json.as_array().expect("listing should be an array");
+    let listing = json["items"].as_array().expect("listing should have items array");
 
     for entry in listing {
         let path = entry["path"].as_str().unwrap_or("");
@@ -668,7 +668,7 @@ async fn test_system_listing_visible_for_root() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    let listing = json.as_array().expect("listing should be an array");
+    let listing = json["items"].as_array().expect("listing should have items array");
     assert!(
         listing.len() >= 2,
         "Root should see at least 2 files in /.system/config/"

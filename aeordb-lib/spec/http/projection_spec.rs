@@ -163,7 +163,7 @@ async fn test_select_filters_response() {
     // Should only have "path" and "score"
     assert!(obj.contains_key("path"), "expected 'path' field");
     assert!(obj.contains_key("score"), "expected 'score' field");
-    assert!(!obj.contains_key("total_size"), "should not have 'total_size'");
+    assert!(!obj.contains_key("size"), "should not have 'size'");
     assert!(!obj.contains_key("content_type"), "should not have 'content_type'");
     assert!(!obj.contains_key("created_at"), "should not have 'created_at'");
     assert!(!obj.contains_key("updated_at"), "should not have 'updated_at'");
@@ -192,7 +192,7 @@ async fn test_select_virtual_fields() {
     // @path maps to "path", @score maps to "score"
     assert!(obj.contains_key("path"), "expected 'path' field");
     assert!(obj.contains_key("score"), "expected 'score' field");
-    assert!(!obj.contains_key("total_size"), "should not have 'total_size'");
+    assert!(!obj.contains_key("size"), "should not have 'size'");
     assert!(!obj.contains_key("matched_by"), "should not have 'matched_by'");
   }
 }
@@ -214,7 +214,7 @@ async fn test_select_no_filter_without_select() {
     // Should have all standard fields
     assert!(obj.contains_key("path"));
     assert!(obj.contains_key("score"));
-    assert!(obj.contains_key("total_size"));
+    assert!(obj.contains_key("size"));
     assert!(obj.contains_key("content_type"));
     assert!(obj.contains_key("created_at"));
     assert!(obj.contains_key("updated_at"));
@@ -243,7 +243,7 @@ async fn test_select_empty_array() {
     // All fields should be present
     assert!(obj.contains_key("path"));
     assert!(obj.contains_key("score"));
-    assert!(obj.contains_key("total_size"));
+    assert!(obj.contains_key("size"));
   }
 }
 
@@ -318,7 +318,7 @@ async fn test_select_unknown_field() {
     // All known fields should be stripped, leaving empty objects
     assert!(!obj.contains_key("path"));
     assert!(!obj.contains_key("score"));
-    assert!(!obj.contains_key("total_size"));
+    assert!(!obj.contains_key("size"));
     assert!(obj.is_empty(), "objects should be empty when selecting nonexistent field");
   }
 }
@@ -330,7 +330,7 @@ async fn test_select_size_virtual_field() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  // @size maps to total_size
+  // @size maps to size
   let json = query_with_select(
     app,
     &auth,
@@ -341,8 +341,8 @@ async fn test_select_size_virtual_field() {
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
-    assert!(obj.contains_key("total_size"), "expected 'total_size' from @size mapping");
-    assert_eq!(obj.len(), 1, "should only have total_size");
+    assert!(obj.contains_key("size"), "expected 'size' from @size mapping");
+    assert_eq!(obj.len(), 1, "should only have size");
   }
 }
 

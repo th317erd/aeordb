@@ -147,7 +147,7 @@ pub async fn delete_symlink(
             (StatusCode::OK, Json(serde_json::json!({
                 "deleted": true,
                 "path": path,
-                "type": "symlink",
+                "entry_type": "symlink",
             }))).into_response()
         }
         Err(error) => {
