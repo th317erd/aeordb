@@ -164,3 +164,5 @@ pub const EVENT_TASK_STARTED: &str = "task_started";
 pub const EVENT_TASK_COMPLETED: &str = "task_completed";
 pub const EVENT_TASK_FAILED: &str = "task_failed";
 pub const EVENT_TASK_CANCELLED: &str = "task_cancelled";
+pub const EVENT_SYNC_SUCCEEDED: &str = "sync_succeeded";
+pub const EVENT_SYNC_FAILED: &str = "sync_failed";

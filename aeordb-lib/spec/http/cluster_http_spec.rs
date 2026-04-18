@@ -473,3 +473,109 @@ async fn test_trigger_sync_requires_root() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+// ===========================================================================
+// GET /admin/cluster -- sync_status in cluster status response
+// ===========================================================================
+
+#[tokio::test]
+async fn test_admin_cluster_includes_sync_status() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let token = root_bearer_token(&jwt_manager);
+
+    // Add a peer first
+    let add_response = app
+        .clone()
+        .oneshot(
+            Request::post("/admin/cluster/peers")
+                .header("authorization", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "address": "10.0.0.5:9000",
+                        "label": "sync-test-peer"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_response.status(), StatusCode::CREATED);
+
+    // Get cluster status
+    let response = app
+        .oneshot(
+            Request::get("/admin/cluster")
+                .header("authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response.into_body()).await;
+    let peers = json["peers"].as_array().expect("peers should be an array");
+    assert_eq!(peers.len(), 1);
+
+    let peer = &peers[0];
+    assert!(peer.get("sync_status").is_some(), "peer should have sync_status field");
+
+    let sync_status = &peer["sync_status"];
+    assert_eq!(sync_status["consecutive_failures"], 0);
+    assert_eq!(sync_status["total_syncs"], 0);
+    assert_eq!(sync_status["total_failures"], 0);
+    assert!(sync_status["last_success_at"].is_null());
+    assert!(sync_status["last_attempt_at"].is_null());
+    assert!(sync_status["last_error"].is_null());
+}
+
+#[tokio::test]
+async fn test_list_peers_includes_sync_status() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let token = root_bearer_token(&jwt_manager);
+
+    // Add a peer first
+    let add_response = app
+        .clone()
+        .oneshot(
+            Request::post("/admin/cluster/peers")
+                .header("authorization", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "address": "10.0.0.6:9000"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_response.status(), StatusCode::CREATED);
+
+    // List peers
+    let response = app
+        .oneshot(
+            Request::get("/admin/cluster/peers")
+                .header("authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response.into_body()).await;
+    let peers = json.as_array().expect("response should be an array");
+    assert_eq!(peers.len(), 1);
+
+    let peer = &peers[0];
+    assert!(peer.get("sync_status").is_some(), "peer should have sync_status field");
+
+    let sync_status = &peer["sync_status"];
+    assert_eq!(sync_status["consecutive_failures"], 0);
+    assert_eq!(sync_status["total_syncs"], 0);
+    assert_eq!(sync_status["total_failures"], 0);
+}

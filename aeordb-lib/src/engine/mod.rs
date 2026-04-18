@@ -136,7 +136,7 @@ pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use cluster_join::{has_signing_key, is_ready_for_traffic, get_cluster_mode};
-pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionState};
+pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionState, SyncStatus};
 pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
@@ -157,6 +157,7 @@ pub use engine_event::{
     EVENT_GC_COMPLETED, GcEventData,
     EVENT_TASK_CREATED, EVENT_TASK_STARTED, EVENT_TASK_COMPLETED,
     EVENT_TASK_FAILED, EVENT_TASK_CANCELLED,
+    EVENT_SYNC_SUCCEEDED, EVENT_SYNC_FAILED,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

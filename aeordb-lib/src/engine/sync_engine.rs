@@ -7,6 +7,8 @@ use tokio::sync::Mutex;
 use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::conflict_store::store_conflict;
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::engine_event::{EngineEvent, EVENT_SYNC_SUCCEEDED, EVENT_SYNC_FAILED};
+use crate::engine::event_bus::EventBus;
 use crate::engine::merge::three_way_merge;
 use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManager};
 use crate::engine::request_context::RequestContext;
@@ -659,15 +661,20 @@ fn filter_tree_diff_by_paths(mut diff: crate::engine::tree_walker::TreeDiff, pat
 /// Spawn a background sync task that periodically syncs with all active peers.
 ///
 /// The task runs indefinitely, ticking every `interval_secs` seconds. On each
-/// tick it calls `sync_all_peers()` and logs the results. Missed ticks (e.g.
-/// when a sync cycle takes longer than the interval) are skipped rather than
-/// queued.
+/// tick it iterates active peers, respects exponential backoff for previously
+/// failed peers, records sync status, and emits events via the EventBus.
+///
+/// Missed ticks (e.g. when a sync cycle takes longer than the interval) are
+/// skipped rather than queued.
 ///
 /// Returns a `JoinHandle` that can be used to abort the task on shutdown.
 pub fn spawn_sync_loop(
     sync_engine: Arc<SyncEngine>,
     interval_secs: u64,
+    event_bus: Option<Arc<EventBus>>,
 ) -> tokio::task::JoinHandle<()> {
+    let max_backoff_secs: u64 = 300;
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(
             tokio::time::Duration::from_secs(interval_secs),
@@ -676,24 +683,69 @@ pub fn spawn_sync_loop(
 
         loop {
             interval.tick().await;
-            let results = sync_engine.sync_all_peers().await;
-            for (peer_id, result) in &results {
-                match result {
-                    Ok(r) if r.changes_applied => {
-                        tracing::info!(
-                            "Sync with peer {}: {} operations applied, {} conflicts",
-                            peer_id,
-                            r.operations_applied,
-                            r.conflicts_detected
-                        );
-                    }
-                    Ok(_) => {
-                        // No changes — stay quiet to avoid log spam
-                    }
-                    Err(e) => {
-                        tracing::warn!("Sync with peer {} failed: {}", peer_id, e);
+            let peers = sync_engine.peer_manager().all_peers();
+            let mut results = Vec::new();
+
+            for peer in peers {
+                if peer.state != ConnectionState::Active {
+                    continue;
+                }
+
+                // Check backoff -- skip if too soon to retry
+                if let Some(status) = sync_engine.peer_manager().get_sync_status(peer.node_id) {
+                    if !status.should_retry(interval_secs, max_backoff_secs) {
+                        continue;
                     }
                 }
+
+                let result = sync_engine.sync_with_peer(peer.node_id).await;
+                match &result {
+                    Ok(r) => {
+                        sync_engine.peer_manager().record_sync_success(peer.node_id);
+                        if r.changes_applied {
+                            tracing::info!(
+                                "Sync with peer {}: {} operations applied, {} conflicts",
+                                peer.node_id,
+                                r.operations_applied,
+                                r.conflicts_detected
+                            );
+                        }
+                        if let Some(ref bus) = event_bus {
+                            let event = EngineEvent::new(
+                                EVENT_SYNC_SUCCEEDED,
+                                "sync",
+                                serde_json::json!({
+                                    "peer_node_id": peer.node_id,
+                                    "operations_applied": r.operations_applied,
+                                    "conflicts_detected": r.conflicts_detected,
+                                }),
+                            );
+                            bus.emit(event);
+                        }
+                    }
+                    Err(e) => {
+                        sync_engine.peer_manager().record_sync_failure(peer.node_id, e.clone());
+                        let status = sync_engine.peer_manager().get_sync_status(peer.node_id);
+                        let failures = status.map(|s| s.consecutive_failures).unwrap_or(0);
+                        tracing::warn!(
+                            "Sync with peer {} failed (attempt {}): {}",
+                            peer.node_id, failures, e
+                        );
+                        if let Some(ref bus) = event_bus {
+                            let event = EngineEvent::new(
+                                EVENT_SYNC_FAILED,
+                                "sync",
+                                serde_json::json!({
+                                    "peer_node_id": peer.node_id,
+                                    "error": e,
+                                    "consecutive_failures": failures,
+                                }),
+                            );
+                            bus.emit(event);
+                        }
+                    }
+                }
+                results.push((peer.node_id, result));
             }
         }
     })

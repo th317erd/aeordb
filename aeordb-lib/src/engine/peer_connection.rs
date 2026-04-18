@@ -14,6 +14,85 @@ pub enum ConnectionState {
     Active,
 }
 
+/// Per-peer sync health tracking.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStatus {
+    pub last_success_at: Option<u64>,
+    pub last_attempt_at: Option<u64>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: u32,
+    pub total_syncs: u64,
+    pub total_failures: u64,
+}
+
+impl SyncStatus {
+    pub fn new() -> Self {
+        SyncStatus {
+            last_success_at: None,
+            last_attempt_at: None,
+            last_error: None,
+            consecutive_failures: 0,
+            total_syncs: 0,
+            total_failures: 0,
+        }
+    }
+
+    pub fn record_success(&mut self) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.last_success_at = Some(now);
+        self.last_attempt_at = Some(now);
+        self.last_error = None;
+        self.consecutive_failures = 0;
+        self.total_syncs += 1;
+    }
+
+    pub fn record_failure(&mut self, error: String) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.last_attempt_at = Some(now);
+        self.last_error = Some(error);
+        self.consecutive_failures += 1;
+        self.total_failures += 1;
+        self.total_syncs += 1;
+    }
+
+    /// Calculate the next retry interval with exponential backoff and jitter.
+    pub fn next_retry_interval_secs(&self, base_secs: u64, max_secs: u64) -> u64 {
+        if self.consecutive_failures == 0 {
+            return base_secs;
+        }
+        let exponent = (self.consecutive_failures - 1).min(8) as u32;
+        let backoff = base_secs.saturating_mul(2u64.pow(exponent));
+        let capped = backoff.min(max_secs);
+        // Add +/-10% jitter
+        let jitter_range = (capped as f64 * 0.1) as u64;
+        if jitter_range > 0 {
+            let jitter = rand::random::<u64>() % (jitter_range * 2);
+            capped.saturating_sub(jitter_range).saturating_add(jitter)
+        } else {
+            capped
+        }
+    }
+
+    /// Check if enough time has elapsed for a retry.
+    pub fn should_retry(&self, base_secs: u64, max_secs: u64) -> bool {
+        if self.consecutive_failures == 0 {
+            return true;
+        }
+        let interval = self.next_retry_interval_secs(base_secs, max_secs);
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        match self.last_attempt_at {
+            Some(last) => now >= last + (interval * 1000),
+            None => true,
+        }
+    }
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Runtime state for a peer connection (NOT persisted -- rebuilt on startup).
 #[derive(Debug, Clone)]
 pub struct PeerConnection {
@@ -24,6 +103,7 @@ pub struct PeerConnection {
     pub clock_stats: Option<PeerClockStats>,
     pub last_synced_root_hash: Option<Vec<u8>>,
     pub last_sync_at: Option<u64>,
+    pub sync_status: SyncStatus,
 }
 
 /// Persistent peer configuration (stored in system tables).
@@ -61,6 +141,7 @@ impl PeerManager {
             clock_stats: None,
             last_synced_root_hash: None,
             last_sync_at: None,
+            sync_status: SyncStatus::new(),
         };
 
         if let Ok(mut connections) = self.connections.write() {
@@ -155,5 +236,28 @@ impl PeerManager {
                 peer.last_sync_at = Some(sync_time);
             }
         }
+    }
+
+    /// Record a successful sync for a peer.
+    pub fn record_sync_success(&self, node_id: u64) {
+        if let Ok(mut connections) = self.connections.write() {
+            if let Some(peer) = connections.get_mut(&node_id) {
+                peer.sync_status.record_success();
+            }
+        }
+    }
+
+    /// Record a failed sync for a peer.
+    pub fn record_sync_failure(&self, node_id: u64, error: String) {
+        if let Ok(mut connections) = self.connections.write() {
+            if let Some(peer) = connections.get_mut(&node_id) {
+                peer.sync_status.record_failure(error);
+            }
+        }
+    }
+
+    /// Get a snapshot of a peer's sync status.
+    pub fn get_sync_status(&self, node_id: u64) -> Option<SyncStatus> {
+        self.connections.read().ok()?.get(&node_id).map(|peer| peer.sync_status.clone())
     }
 }

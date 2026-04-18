@@ -67,12 +67,14 @@ pub async fn cluster_status(
                 crate::engine::ConnectionState::Honeymoon { .. } => "honeymoon",
                 crate::engine::ConnectionState::Active => "active",
             };
+            let sync_status = state.peer_manager.get_sync_status(peer.node_id);
             serde_json::json!({
                 "node_id": peer.node_id,
                 "address": peer.address,
                 "label": peer.label,
                 "state": state_string,
                 "last_sync_at": peer.last_sync_at,
+                "sync_status": sync_status,
             })
         })
         .collect();
@@ -181,12 +183,14 @@ pub async fn list_peers(
                 crate::engine::ConnectionState::Honeymoon { .. } => "honeymoon",
                 crate::engine::ConnectionState::Active => "active",
             };
+            let sync_status = state.peer_manager.get_sync_status(peer.node_id);
             serde_json::json!({
                 "node_id": peer.node_id,
                 "address": peer.address,
                 "label": peer.label,
                 "state": state_string,
                 "last_sync_at": peer.last_sync_at,
+                "sync_status": sync_status,
             })
         })
         .collect();

@@ -239,6 +239,10 @@ GET /admin/health
 - Don't crash — continue serving other requests
 - Consider: mark the entry as "suspect" in the KV store so it's flagged in future reads
 
+<!--
+If the node is part of a replication group, then the chunk could be marked for "refetch"... maybe your idea of marking it as "suspect" somehow is a good idea... suspect chunks can be checked against other nodes? 
+ -->
+
 ### Out of Memory
 **Current behavior:** Allocation panics (vec![0u8; huge_value]).
 **Fixed behavior (from audit):** Length validation prevents this.
