@@ -343,7 +343,7 @@ Every error response MUST include a specific, actionable `error` message. Prohib
 - "internal error" — log the details server-side, give the client a request ID or timestamp to reference
 
 Good examples:
-- `"Path '/docs/readme.md' already exists. Use DELETE first or rename with POST /files/{path}/rename"`
+- `"Path '/docs/readme.md' already exists. Use DELETE first or rename with PATCH /files/{path}"`
 - `"Snapshot 'v2.1' not found. Use GET /versions/snapshots to list available snapshots"`
 - `"Request body must be valid JSON. Received 'text/plain' content type"`
 - `"File exceeds 100 MB inline upload limit. Use the chunked upload protocol: PUT /blobs/chunks/{hash}"`
@@ -370,3 +370,6 @@ As part of implementation, audit every `ErrorResponse::new(...)` call across the
 | JSON | `total_size` → `size`, `type` → `entry_type`, wrap arrays, ms timestamps |
 | Plugins | 4 special routes eliminated, use `/files/` + `/invoke` |
 | Errors | 2 new codes, 1 dropped, message audit |
+| Client report | Full migration guide for client team |
+| Documentation | All 29 docs/src/ files updated to new routes/headers/fields |
+| Marketing site | aeordb-www examples updated to new routes |

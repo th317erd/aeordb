@@ -426,15 +426,114 @@ phases:
           - "Full test suite passes"
 
   # ===========================================================================
-  # PHASE 9 — Marketing site + docs
+  # PHASE 9 — Client change report
   # ===========================================================================
-  - name: "Marketing site + documentation"
-    description: "Update external-facing references to old routes."
+  - name: "Client change report"
+    description: |
+      Generate a comprehensive change report for the client team documenting
+      every breaking change: old route → new route, old header → new header,
+      old JSON field → new JSON field, old event name → new event name.
     parallelizable: true
-    depends_on: "Route restructuring"
+    depends_on: "all previous phases"
     tasks:
 
-      - name: "Update marketing site examples"
+      - name: "Write client migration guide"
+        files:
+          create:
+            - .claude/client-migration-report.md
+        contents: |
+          Complete migration table covering:
+          1. Route migration table (old → new, every single route)
+          2. Header renames (old → new)
+          3. JSON field changes (total_size → size, type → entry_type)
+          4. Collection response wrapping (bare arrays → {items: [...]})
+          5. Event name changes (task_* → tasks_*, sync_* → syncs_*)
+          6. Error code changes (SYSTEM_BOUNDARY removed, 3 new codes)
+          7. Config changes (auth.enabled → auth.mode, --cors → --cors-origins)
+          8. Symlink route changes (/engine-symlink/ → /links/)
+          9. Plugin route changes (/{db}/{schema}/{table}/ → /files/plugins/ + /plugins/)
+        acceptance:
+          - "Every breaking change has old → new mapping"
+          - "Report is in .claude/client-migration-report.md for client team"
+
+  # ===========================================================================
+  # PHASE 10 — Documentation update
+  # ===========================================================================
+  - name: "Documentation update"
+    description: |
+      Update all 29 documentation files in docs/src/ to reference new routes,
+      headers, config keys, and JSON shapes.
+    parallelizable: true
+    depends_on: "all previous phases"
+    tasks:
+
+      - name: "Update API documentation"
+        files:
+          modify:
+            - docs/src/api/files.md
+            - docs/src/api/querying.md
+            - docs/src/api/versioning.md
+            - docs/src/api/authentication.md
+            - docs/src/api/admin.md
+            - docs/src/api/events.md
+            - docs/src/api/plugins.md
+            - docs/src/api/cors.md
+            - docs/src/api/library.md
+        changes:
+          - "All /engine/ references → /files/"
+          - "All /admin/ references → /system/ or appropriate namespace"
+          - "All /upload/ references → /blobs/"
+          - "All /version/ references → /versions/"
+          - "All header names → X-AeorDB- prefix"
+          - "All JSON examples updated (size, entry_type, {items:[]})"
+        acceptance:
+          - "grep for /engine/, /admin/, /upload/ returns zero hits in docs/"
+          - "All code examples use new routes and field names"
+
+      - name: "Update operations documentation"
+        files:
+          modify:
+            - docs/src/operations/cluster.md
+            - docs/src/operations/tasks.md
+            - docs/src/operations/gc.md
+            - docs/src/operations/backup.md
+            - docs/src/operations/reindex.md
+        changes:
+          - "All /admin/ references → /system/ or /sync/"
+          - "Cluster docs reference /sync/peers instead of /admin/cluster/peers"
+          - "GC docs reference /system/gc instead of /admin/gc"
+        acceptance:
+          - "All operations docs use new route paths"
+
+      - name: "Update concepts and getting-started docs"
+        files:
+          modify:
+            - docs/src/concepts/architecture.md
+            - docs/src/concepts/versioning.md
+            - docs/src/concepts/replication.md
+            - docs/src/concepts/storage-engine.md
+            - docs/src/concepts/indexing.md
+            - docs/src/introduction.md
+            - docs/src/SUMMARY.md
+          also_check:
+            - docs/src/getting-started/
+            - docs/src/cli/
+        changes:
+          - "Any route references updated to new paths"
+          - "Architecture docs reference 8-namespace model"
+        acceptance:
+          - "No old route paths remain anywhere in docs/src/"
+
+  # ===========================================================================
+  # PHASE 11 — Marketing site update
+  # ===========================================================================
+  - name: "Marketing site update"
+    description: "Update aeordb-www with new routes and terminology."
+    parallelizable: true
+    depends_on: "all previous phases"
+    tasks:
+
+      - name: "Update marketing site"
         files:
           modify:
             - "../aeordb-www/index.html"
@@ -442,8 +541,10 @@ phases:
           - "/engine/assets/hero-video.mp4 → /files/assets/hero-video.mp4"
           - "/version/snapshot → /versions/snapshots"
           - "/query → /files/query"
+          - "Update any feature descriptions that reference old terminology"
         acceptance:
           - "All code examples in index.html use new route paths"
+          - "grep for /engine/, /version/snapshot, /query returns zero hits"
 
 testing_strategy:
   approach: |
@@ -458,10 +559,10 @@ testing_strategy:
     - "System path migration test for old → new /.system/ paths"
   execution_order:
     - "Phase 1 tasks can be parallelized (each namespace is independent)"
-    - "Phase 2-9 depend on Phase 1 (routes must be renamed first)"
+    - "Phase 2-7 after Phase 1 (routes must be renamed first)"
     - "Phases 3, 5, 6, 7 can run in parallel with each other"
-    - "Phase 8 runs last (needs final route names in error messages)"
-    - "Phase 9 runs last (needs final route names for examples)"
+    - "Phase 8 after all code changes (needs final route names in messages)"
+    - "Phases 9, 10, 11 run last in parallel (docs + client report + website)"
   full_suite_gates:
     - "cargo test after each phase — zero failures required"
     - "cargo check — zero warnings from changed files"
