@@ -313,6 +313,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/admin/cluster/sync", post(cluster_routes::trigger_sync))
     // Symlink routes
     .route("/engine-symlink/{*path}", post(symlink_routes::create_symlink))
+    // Rename / move routes
+    .route("/engine-rename/{*path}", post(engine_routes::engine_rename))
     // Plugin routes
     .route(
       "/{database}/{schema}/{table}/_deploy",

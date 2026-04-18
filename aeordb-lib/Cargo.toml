@@ -495,6 +495,10 @@ name = "symlink_http_spec"
 path = "spec/http/symlink_http_spec.rs"
 
 [[test]]
+name = "rename_http_spec"
+path = "spec/http/rename_http_spec.rs"
+
+[[test]]
 name = "symlink_ecosystem_spec"
 path = "spec/engine/symlink_ecosystem_spec.rs"
 

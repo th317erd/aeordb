@@ -1113,4 +1113,295 @@ impl<'a> DirectoryOps<'a> {
 
     Ok(())
   }
+
+  /// Rename (move) a file from one path to another.
+  ///
+  /// This is a metadata-only operation — no chunk data is copied.
+  /// The file's content (chunk_hashes), content_type, total_size, and
+  /// created_at are preserved. Only the path and updated_at change.
+  pub fn rename_file(
+    &self,
+    ctx: &RequestContext,
+    old_path: &str,
+    new_path: &str,
+  ) -> EngineResult<FileRecord> {
+    let old_normalized = normalize_path(old_path);
+    let new_normalized = normalize_path(new_path);
+
+    // Reject root paths
+    if old_normalized == "/" || new_normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot rename root path".to_string()));
+    }
+
+    // Reject same source/destination
+    if old_normalized == new_normalized {
+      return Err(EngineError::InvalidInput(
+        "Source and destination paths are the same".to_string(),
+      ));
+    }
+
+    // Reject cross-system-boundary renames
+    let old_is_system = is_system_path(&old_normalized);
+    let new_is_system = is_system_path(&new_normalized);
+    if old_is_system != new_is_system {
+      return Err(EngineError::InvalidInput(
+        "Cannot rename across system boundary".to_string(),
+      ));
+    }
+
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let sys_flags = if is_system_path(&new_normalized) { FLAG_SYSTEM } else { 0 };
+
+    // Read the source FileRecord
+    let old_file_key = file_path_hash(&old_normalized, &algo)?;
+    let old_record = match self.engine.get_entry(&old_file_key)? {
+      Some((header, _key, value)) => {
+        FileRecord::deserialize(&value, hash_length, header.entry_version)?
+      }
+      None => return Err(EngineError::NotFound(old_normalized)),
+    };
+
+    // Check destination doesn't already exist (file or symlink)
+    let new_file_key = file_path_hash(&new_normalized, &algo)?;
+    if self.engine.has_entry(&new_file_key)? {
+      return Err(EngineError::AlreadyExists(new_normalized));
+    }
+    let new_symlink_key = symlink_path_hash(&new_normalized, &algo)?;
+    if self.engine.has_entry(&new_symlink_key)? {
+      return Err(EngineError::AlreadyExists(new_normalized));
+    }
+
+    // Create a new FileRecord at the new path, preserving content fields
+    let mut new_record = FileRecord::new(
+      new_normalized.clone(),
+      old_record.content_type.clone(),
+      old_record.total_size,
+      old_record.chunk_hashes.clone(),
+    );
+    new_record.created_at = old_record.created_at;
+
+    let new_value = new_record.serialize(hash_length)?;
+
+    // Store at content-addressed key
+    let content_key = file_content_hash(&new_value, &algo)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &content_key, &new_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &content_key, &new_value)?;
+    }
+
+    // Store at identity hash
+    let identity_key = file_identity_hash(
+      &new_normalized,
+      new_record.content_type.as_deref(),
+      &new_record.chunk_hashes,
+      &algo,
+    )?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &new_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &identity_key, &new_value)?;
+    }
+
+    // Store at path-based key
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &new_file_key, &new_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &new_file_key, &new_value)?;
+    }
+
+    // Build child entry and update parent directories for the new path
+    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
+    let child = ChildEntry {
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: identity_key,
+      total_size: new_record.total_size,
+      created_at: new_record.created_at,
+      updated_at: new_record.updated_at,
+      name: file_name(&new_normalized).unwrap_or("").to_string(),
+      content_type: new_record.content_type.clone(),
+      virtual_time: now_vt,
+      node_id: 0,
+    };
+    self.update_parent_directories(&new_normalized, child)?;
+
+    // Delete old path: DeletionRecord + mark deleted + remove from parent
+    let deletion = DeletionRecord::new(old_normalized.clone(), None);
+    let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
+    let deletion_value = deletion.serialize();
+    let old_sys_flags = if is_system_path(&old_normalized) { FLAG_SYSTEM } else { 0 };
+    if old_sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+    }
+    self.engine.mark_entry_deleted(&old_file_key)?;
+    self.remove_from_parent_directory(&old_normalized)?;
+
+    // Emit events: deleted from old path, created at new path
+    let deleted_event = EntryEventData {
+      path: old_normalized,
+      entry_type: "file".to_string(),
+      content_type: old_record.content_type,
+      size: old_record.total_size,
+      hash: hex::encode(old_record.chunk_hashes.first().unwrap_or(&vec![])),
+      created_at: old_record.created_at,
+      updated_at: old_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
+
+    let created_event = EntryEventData {
+      path: new_normalized,
+      entry_type: "file".to_string(),
+      content_type: new_record.content_type.clone(),
+      size: new_record.total_size,
+      hash: hex::encode(new_record.chunk_hashes.first().unwrap_or(&vec![])),
+      created_at: new_record.created_at,
+      updated_at: new_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
+
+    Ok(new_record)
+  }
+
+  /// Rename (move) a symlink from one path to another.
+  ///
+  /// This is a metadata-only operation — the symlink's target does NOT change,
+  /// only its path. created_at is preserved.
+  pub fn rename_symlink(
+    &self,
+    ctx: &RequestContext,
+    old_path: &str,
+    new_path: &str,
+  ) -> EngineResult<SymlinkRecord> {
+    let old_normalized = normalize_path(old_path);
+    let new_normalized = normalize_path(new_path);
+
+    // Reject root paths
+    if old_normalized == "/" || new_normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot rename root path".to_string()));
+    }
+
+    // Reject same source/destination
+    if old_normalized == new_normalized {
+      return Err(EngineError::InvalidInput(
+        "Source and destination paths are the same".to_string(),
+      ));
+    }
+
+    // Reject cross-system-boundary renames
+    let old_is_system = is_system_path(&old_normalized);
+    let new_is_system = is_system_path(&new_normalized);
+    if old_is_system != new_is_system {
+      return Err(EngineError::InvalidInput(
+        "Cannot rename across system boundary".to_string(),
+      ));
+    }
+
+    let algo = self.engine.hash_algo();
+    let sys_flags = if is_system_path(&new_normalized) { FLAG_SYSTEM } else { 0 };
+
+    // Read the source SymlinkRecord
+    let old_symlink_key = symlink_path_hash(&old_normalized, &algo)?;
+    let old_record = match self.engine.get_entry(&old_symlink_key)? {
+      Some((header, _key, value)) => SymlinkRecord::deserialize(&value, header.entry_version)?,
+      None => return Err(EngineError::NotFound(old_normalized)),
+    };
+
+    // Check destination doesn't already exist (file or symlink)
+    let new_file_key = file_path_hash(&new_normalized, &algo)?;
+    if self.engine.has_entry(&new_file_key)? {
+      return Err(EngineError::AlreadyExists(new_normalized));
+    }
+    let new_symlink_key = symlink_path_hash(&new_normalized, &algo)?;
+    if self.engine.has_entry(&new_symlink_key)? {
+      return Err(EngineError::AlreadyExists(new_normalized));
+    }
+
+    // Create new SymlinkRecord at new path with same target, preserving created_at
+    let mut new_record = SymlinkRecord::new(new_normalized.clone(), old_record.target.clone());
+    new_record.created_at = old_record.created_at;
+
+    let serialized = new_record.serialize()?;
+
+    // Store at content-addressed key
+    let content_key = symlink_content_hash(&serialized, &algo)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &content_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
+    }
+
+    // Store at identity hash
+    let identity_key = symlink_identity_hash(&new_normalized, &new_record.target, &algo)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &identity_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
+    }
+
+    // Store at path-based key
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::Symlink, &new_symlink_key, &serialized, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::Symlink, &new_symlink_key, &serialized)?;
+    }
+
+    // Build child entry and update parent directories
+    let child = ChildEntry {
+      entry_type: EntryType::Symlink.to_u8(),
+      hash: identity_key,
+      total_size: 0,
+      created_at: new_record.created_at,
+      updated_at: new_record.updated_at,
+      name: file_name(&new_normalized).unwrap_or("").to_string(),
+      content_type: None,
+      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+      node_id: 0,
+    };
+    self.update_parent_directories(&new_normalized, child)?;
+
+    // Delete old path: DeletionRecord + mark deleted + remove from parent
+    let deletion = DeletionRecord::new(old_normalized.clone(), None);
+    let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
+    let deletion_value = deletion.serialize();
+    let old_sys_flags = if is_system_path(&old_normalized) { FLAG_SYSTEM } else { 0 };
+    if old_sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
+    }
+    self.engine.mark_entry_deleted(&old_symlink_key)?;
+    self.remove_from_parent_directory(&old_normalized)?;
+
+    // Emit events
+    let deleted_event = EntryEventData {
+      path: old_normalized,
+      entry_type: "symlink".to_string(),
+      content_type: None,
+      size: 0,
+      hash: hex::encode(&old_record.target),
+      created_at: old_record.created_at,
+      updated_at: old_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
+
+    let created_event = EntryEventData {
+      path: new_normalized,
+      entry_type: "symlink".to_string(),
+      content_type: None,
+      size: 0,
+      hash: hex::encode(&new_record.target),
+      created_at: new_record.created_at,
+      updated_at: new_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
+
+    Ok(new_record)
+  }
 }

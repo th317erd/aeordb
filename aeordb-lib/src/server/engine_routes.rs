@@ -1762,6 +1762,93 @@ pub async fn query_endpoint(
 }
 
 // ---------------------------------------------------------------------------
+// Rename / move
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /engine-rename/{*path}.
+#[derive(Deserialize)]
+pub struct RenameRequest {
+    pub to: Option<String>,
+}
+
+/// POST /engine-rename/{*path} -- rename (move) a file or symlink.
+pub async fn engine_rename(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Path(path): Path<String>,
+  Json(payload): Json<RenameRequest>,
+) -> Response {
+  let destination = match payload.to {
+    Some(ref t) if !t.is_empty() => t.as_str(),
+    _ => {
+      return ErrorResponse::new("Request must include non-empty 'to' field")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  // Block non-root users from renaming to/from /.system/ paths
+  if is_system_path(&path) || is_system_path(destination) {
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+      Ok(id) => id,
+      Err(_) => return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
+    if !is_root(&user_id) {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let ops = DirectoryOps::new(&state.engine);
+
+  // Try symlink first, then file
+  if ops.get_symlink(&path).ok().flatten().is_some() {
+    return match ops.rename_symlink(&ctx, &path, destination) {
+      Ok(_record) => {
+        let from_normalized = crate::engine::path_utils::normalize_path(&path);
+        let to_normalized = crate::engine::path_utils::normalize_path(destination);
+        (StatusCode::OK, Json(serde_json::json!({
+          "from": from_normalized,
+          "to": to_normalized,
+          "type": "symlink",
+        }))).into_response()
+      }
+      Err(ref error) => {
+        let status = engine_error_status(error);
+        let message = sanitize_engine_error("Rename failed", error);
+        tracing::error!("Engine: failed to rename symlink '{}': {}", path, error);
+        ErrorResponse::new(message)
+          .with_status(status)
+          .into_response()
+      }
+    };
+  }
+
+  match ops.rename_file(&ctx, &path, destination) {
+    Ok(_record) => {
+      let from_normalized = crate::engine::path_utils::normalize_path(&path);
+      let to_normalized = crate::engine::path_utils::normalize_path(destination);
+      (StatusCode::OK, Json(serde_json::json!({
+        "from": from_normalized,
+        "to": to_normalized,
+        "type": "file",
+      }))).into_response()
+    }
+    Err(ref error) => {
+      let status = engine_error_status(error);
+      let message = sanitize_engine_error("Rename failed", error);
+      tracing::error!("Engine: failed to rename file '{}': {}", path, error);
+      ErrorResponse::new(message)
+        .with_status(status)
+        .into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
