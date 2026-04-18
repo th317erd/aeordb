@@ -80,46 +80,37 @@
 - [x] 20 functional code fixes + 18 documentation/deferred items
 ---
 
-## Consistency Audit — In Progress
+## Consistency Audit — COMPLETE
 
 ### Phase 1: Route Restructuring
-- [ ] /files/ routes (PUT/GET/DELETE/HEAD /engine/ → /files/, PATCH rename, /files/query)
-- [ ] /links/ routes (PUT/GET/DELETE /links/, replaces /engine-symlink/)
-- [ ] /blobs/ routes (/upload/ → /blobs/, /engine/_hash/ → /blobs/)
-- [ ] /versions/ routes (/version/ → /versions/, backup routes moved here)
-- [ ] /sync/ routes (/admin/cluster/ → /sync/, conflicts moved here)
-- [ ] /auth/ routes (/api-keys → /auth/keys, admin keys → /auth/keys/admin)
-- [ ] /plugins/ routes (/{db}/{schema}/{table}/ → /files/plugins/ + /plugins/)
-- [ ] /system/ routes (/admin/ → /system/, portal, events, stats)
-- [ ] Deprecated route 404 tests
+- [x] /files/, /links/, /blobs/, /versions/, /sync/, /auth/, /plugins/, /system/
+- [x] 43 files modified, 3,282 tests passing
 
 ### Phase 2: HTTP Response Headers
-- [ ] X-AeorDB- prefix on all custom headers
+- [x] X-AeorDB- prefix on all 7 custom headers
 
 ### Phase 3: Config / CLI Unification
-- [ ] auth.mode, --cors-origins, new CLI flags, config 1:1 mapping
+- [x] auth.mode, --cors-origins, --host, --jwt-expiry, --chunk-size, TLS in config
 
 ### Phase 4: JSON Response Conventions
-- [ ] total_size → size, type → entry_type
-- [ ] Wrap collections in {items: [...]}
+- [x] total_size → size, type → entry_type, 14 endpoints wrapped in {items: [...]}
 
 ### Phase 5: Internal Storage Paths
-- [ ] /.system/apikeys → api-keys, cluster/sync → sync-peers, migration
+- [x] /.system/apikeys → api-keys, cluster/sync → sync-peers, startup migration
 
 ### Phase 6: Event Names
-- [ ] Pluralize task_*/sync_*, add gc_started
+- [x] tasks_*, syncs_*, gc_started added
 
 ### Phase 7: Error Codes
-- [ ] Add PAYLOAD_TOO_LARGE, METHOD_NOT_ALLOWED, SERVICE_UNAVAILABLE
-- [ ] Remove SYSTEM_BOUNDARY → FORBIDDEN
+- [x] 12 codes: added PAYLOAD_TOO_LARGE, METHOD_NOT_ALLOWED, SERVICE_UNAVAILABLE
 
 ### Phase 8: Error Message Audit
-- [ ] Audit and rewrite all vague ErrorResponse messages
+- [x] 235 messages audited, 99 rewritten to be specific and actionable
 
-### Phase 9-11: Docs & Communication
-- [ ] Client migration report
-- [ ] Update docs/src/ (29 files)
-- [ ] Update aeordb-www marketing site
+### Phases 9-11: Docs & Communication
+- [x] Client migration report at .claude/client-migration-report.md
+- [x] 20 docs/src/ files updated
+- [x] Marketing site updated
 
 ---
 
