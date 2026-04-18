@@ -7,10 +7,10 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::responses::ErrorResponse;
+use super::responses::{ErrorResponse, require_root};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::{RequestContext, is_root};
+use crate::engine::RequestContext;
 
 fn unique_temp_path(prefix: &str) -> String {
     let temp_file = tempfile::Builder::new()
@@ -31,19 +31,10 @@ pub async fn export_backup(
     Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<ExportParams>,
 ) -> Response {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    let _user_id = match require_root(&claims) {
         Ok(id) => id,
-        Err(_) => {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-                "error": "Invalid user ID"
-            }))).into_response();
-        }
+        Err(response) => return response,
     };
-    if !is_root(&user_id) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Only root user can perform this operation"
-        }))).into_response();
-    }
 
     let output_path = unique_temp_path("aeordb-export");
 
@@ -114,19 +105,10 @@ pub async fn diff_backup(
     Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<DiffParams>,
 ) -> Response {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    let _user_id = match require_root(&claims) {
         Ok(id) => id,
-        Err(_) => {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-                "error": "Invalid user ID"
-            }))).into_response();
-        }
+        Err(response) => return response,
     };
-    if !is_root(&user_id) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Only root user can perform this operation"
-        }))).into_response();
-    }
 
     let output_path = unique_temp_path("aeordb-patch");
 
@@ -203,19 +185,10 @@ pub async fn import_backup(
     params: axum::extract::Query<ImportParams>,
     body: axum::body::Bytes,
 ) -> Response {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    let _user_id = match require_root(&claims) {
         Ok(id) => id,
-        Err(_) => {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-                "error": "Invalid user ID"
-            }))).into_response();
-        }
+        Err(response) => return response,
     };
-    if !is_root(&user_id) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Only root user can perform this operation"
-        }))).into_response();
-    }
 
     // Write body to temp file
     let temp_path = unique_temp_path("aeordb-import");
@@ -265,19 +238,10 @@ pub async fn promote_head(
     Extension(claims): Extension<TokenClaims>,
     params: axum::extract::Query<PromoteParams>,
 ) -> Response {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    let _user_id = match require_root(&claims) {
         Ok(id) => id,
-        Err(_) => {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-                "error": "Invalid user ID"
-            }))).into_response();
-        }
+        Err(response) => return response,
     };
-    if !is_root(&user_id) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Only root user can perform this operation"
-        }))).into_response();
-    }
 
     let hash_bytes = match hex::decode(&params.hash) {
         Ok(b) => b,

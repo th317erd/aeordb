@@ -6,30 +6,12 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use uuid::Uuid;
 
-use super::responses::ErrorResponse;
+use super::responses::{ErrorResponse, require_root};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::{PeerConfig, is_root};
+use crate::engine::PeerConfig;
 use crate::engine::system_store;
-
-// ---------------------------------------------------------------------------
-// Authorization helper
-// ---------------------------------------------------------------------------
-
-fn require_root(claims: &TokenClaims) -> Result<(), Box<Response>> {
-    if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
-        if is_root(&user_id) {
-            return Ok(());
-        }
-    }
-    Err(Box::new(
-        ErrorResponse::new("Admin access required")
-            .with_status(StatusCode::FORBIDDEN)
-            .into_response(),
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -43,6 +25,31 @@ pub struct AddPeerRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize a PeerConnection into a JSON value with sync status.
+fn peer_to_json(
+    peer: &crate::engine::peer_connection::PeerConnection,
+    peer_manager: &crate::engine::PeerManager,
+) -> serde_json::Value {
+    let state_string = match &peer.state {
+        crate::engine::ConnectionState::Disconnected => "disconnected",
+        crate::engine::ConnectionState::Honeymoon { .. } => "honeymoon",
+        crate::engine::ConnectionState::Active => "active",
+    };
+    let sync_status = peer_manager.get_sync_status(peer.node_id);
+    serde_json::json!({
+        "node_id": peer.node_id,
+        "address": peer.address,
+        "label": peer.label,
+        "state": state_string,
+        "last_sync_at": peer.last_sync_at,
+        "sync_status": sync_status,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -51,9 +58,10 @@ pub async fn cluster_status(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return *response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let node_id = system_store::get_node_id(&state.engine).unwrap_or(None);
 
@@ -61,22 +69,7 @@ pub async fn cluster_status(
         .peer_manager
         .all_peers()
         .iter()
-        .map(|peer| {
-            let state_string = match &peer.state {
-                crate::engine::ConnectionState::Disconnected => "disconnected",
-                crate::engine::ConnectionState::Honeymoon { .. } => "honeymoon",
-                crate::engine::ConnectionState::Active => "active",
-            };
-            let sync_status = state.peer_manager.get_sync_status(peer.node_id);
-            serde_json::json!({
-                "node_id": peer.node_id,
-                "address": peer.address,
-                "label": peer.label,
-                "state": state_string,
-                "last_sync_at": peer.last_sync_at,
-                "sync_status": sync_status,
-            })
-        })
+        .map(|peer| peer_to_json(peer, &state.peer_manager))
         .collect();
 
     (
@@ -96,9 +89,10 @@ pub async fn add_peer(
     Extension(claims): Extension<TokenClaims>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return *response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let address = match payload.get("address").and_then(|value| value.as_str()) {
         Some(address) => address.to_string(),
@@ -169,30 +163,16 @@ pub async fn list_peers(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return *response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let peers: Vec<serde_json::Value> = state
         .peer_manager
         .all_peers()
         .iter()
-        .map(|peer| {
-            let state_string = match &peer.state {
-                crate::engine::ConnectionState::Disconnected => "disconnected",
-                crate::engine::ConnectionState::Honeymoon { .. } => "honeymoon",
-                crate::engine::ConnectionState::Active => "active",
-            };
-            let sync_status = state.peer_manager.get_sync_status(peer.node_id);
-            serde_json::json!({
-                "node_id": peer.node_id,
-                "address": peer.address,
-                "label": peer.label,
-                "state": state_string,
-                "last_sync_at": peer.last_sync_at,
-                "sync_status": sync_status,
-            })
-        })
+        .map(|peer| peer_to_json(peer, &state.peer_manager))
         .collect();
 
     (StatusCode::OK, Json(serde_json::json!(peers))).into_response()
@@ -204,9 +184,10 @@ pub async fn remove_peer(
     Extension(claims): Extension<TokenClaims>,
     Path(node_id_string): Path<String>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return *response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let node_id: u64 = match node_id_string.parse() {
         Ok(id) => id,
@@ -247,9 +228,10 @@ pub async fn trigger_sync(
     State(_state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return *response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     (
         StatusCode::NOT_IMPLEMENTED,

@@ -104,8 +104,6 @@ pub fn commit_files(
     // Collect (normalized_path, file_key, file_record, ChildEntry) for each file.
     struct FileInfo {
         normalized_path: String,
-        #[allow(dead_code)]
-        file_key: Vec<u8>,
         file_record: FileRecord,
         child_entry: ChildEntry,
     }
@@ -201,7 +199,6 @@ pub fn commit_files(
 
         file_infos.push(FileInfo {
             normalized_path: normalized,
-            file_key,
             file_record,
             child_entry: child,
         });

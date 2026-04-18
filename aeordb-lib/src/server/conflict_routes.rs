@@ -3,29 +3,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::auth::TokenClaims;
 use crate::engine::conflict_store;
-use crate::engine::{RequestContext, is_root};
+use crate::engine::RequestContext;
+use crate::server::responses::require_root;
 use crate::server::state::AppState;
-
-// ---------------------------------------------------------------------------
-// Authorization helper (mirrors admin_routes pattern)
-// ---------------------------------------------------------------------------
-
-fn require_root(claims: &TokenClaims) -> Result<(), Response> {
-    if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
-        if is_root(&user_id) {
-            return Ok(());
-        }
-    }
-    Err((
-        StatusCode::FORBIDDEN,
-        Json(serde_json::json!({"error": "Admin access required"})),
-    )
-        .into_response())
-}
 
 // ---------------------------------------------------------------------------
 // GET /admin/conflicts — list all unresolved conflicts
@@ -35,9 +18,10 @@ pub async fn list_conflicts(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let engine = state.engine.clone();
     let result =
@@ -67,9 +51,10 @@ pub async fn get_conflict(
     Extension(claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let full_path = format!("/{}", path);
     let engine = state.engine.clone();
@@ -113,9 +98,10 @@ pub async fn resolve_conflict(
     Path(path): Path<String>,
     Json(payload): Json<ResolveRequest>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let full_path = format!("/{}", path);
     let pick = payload.pick.clone();
@@ -167,9 +153,10 @@ pub async fn dismiss_conflict(
     Extension(claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
-    if let Err(response) = require_root(&claims) {
-        return response;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let full_path = format!("/{}", path);
     let engine = state.engine.clone();

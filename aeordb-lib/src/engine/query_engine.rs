@@ -328,6 +328,7 @@ pub fn should_use_bitmap_compositing(node: &QueryNode) -> bool {
 /// Create an NVTMask from a FieldQuery by mapping the query operation
 /// onto the NVT bucket space.
 /// Currently unused -- retained for future bitmap pruning optimization.
+/// TODO: Wire into execute_tier2 when NVT-based pre-filtering is implemented.
 #[allow(dead_code)]
 fn field_query_to_mask(
   field_index: &mut FieldIndex,
@@ -383,6 +384,7 @@ fn field_query_to_mask(
 /// Walk the QueryNode tree bottom-up, producing an NVTMask at each level.
 /// Currently unused -- retained for future bitmap pruning optimization in
 /// execute_tier2. See the execute_tier2 doc comment.
+/// TODO: Wire into execute_tier2 when NVT-based pre-filtering is implemented.
 #[allow(dead_code)]
 fn evaluate_node_as_mask(
   node: &QueryNode,

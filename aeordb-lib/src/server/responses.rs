@@ -5,6 +5,8 @@ use axum::{
 };
 use serde::Serialize;
 
+use crate::auth::TokenClaims;
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ErrorResponse {
   pub error: String,
@@ -26,6 +28,24 @@ impl IntoResponse for ErrorResponse {
   fn into_response(self) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
   }
+}
+
+/// Check that the caller is root. Returns the parsed UUID on success,
+/// or a 403 Forbidden Response on failure.
+pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
+  let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
+    ErrorResponse::new("Invalid user identity")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response()
+  })?;
+  if !crate::engine::user::is_root(&user_id) {
+    return Err(
+      ErrorResponse::new("root access required")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response(),
+    );
+  }
+  Ok(user_id)
 }
 
 // ---------------------------------------------------------------------------

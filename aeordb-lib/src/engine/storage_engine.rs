@@ -117,10 +117,16 @@ pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  /// Path to the `.kv` sidecar file, stored at construction time so that
+  /// `stats()` can read its metadata without locking `kv_writer`.
+  /// (Used in stats() — dead_code analysis misses it through RwLock indirection.)
+  #[allow(dead_code)]
+  kv_path: String,
   // The VoidManager tracks reclaimable space for future void-reuse optimization.
   // Currently, find_void is not called by any production code -- new entries always
   // append. When void reuse is implemented, store_entry will check find_void
   // before appending, writing into reclaimed space to reduce file growth.
+  // TODO: Wire into store_entry/delete_entry to reclaim void space before appending.
   #[allow(dead_code)]
   void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
@@ -154,6 +160,7 @@ impl StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
+      kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -359,6 +366,7 @@ impl StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
+      kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
     })
@@ -936,13 +944,10 @@ impl StorageEngine {
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
 
-    let kv_size_bytes = match self.kv_writer.lock() {
-      Ok(kv) => std::fs::metadata(kv.path()).map(|m| m.len()).unwrap_or(0),
-      Err(e) => {
-        tracing::error!("kv_writer lock poisoned in stats(): {}", e);
-        0
-      }
-    };
+    // L9: Use stored kv_path instead of locking kv_writer just to get the path.
+    let kv_size_bytes = std::fs::metadata(&self.kv_path)
+      .map(|m| m.len())
+      .unwrap_or(0);
 
     // PERF(M4): This iter_all() + type counting is O(n) over all KV entries.
     // For databases with millions of entries, consider maintaining atomic counters

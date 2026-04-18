@@ -83,6 +83,7 @@ pub enum SyncCaller {
     RootUser,
     /// Non-root JWT -- /.system/ filtered out, API key rules applied.
     ScopedUser {
+        // TODO: Use for per-user sync audit logging and rate limiting.
         #[allow(dead_code)]
         user_id: String,
         key_rules: Vec<KeyRule>,
@@ -297,6 +298,33 @@ fn build_full_sync_response(
     (changes, chunk_hashes)
 }
 
+/// Filter entries from a diff source, applying system-path and glob-pattern checks.
+/// Collects converted entries into `dest`. `path_fn` extracts the path from each item,
+/// and `convert_fn` produces the output entry.
+fn filter_and_collect<I, T, O>(
+    source: I,
+    include_system: bool,
+    path_filter: &Option<Vec<String>>,
+    path_fn: impl Fn(&T) -> &str,
+    convert_fn: impl Fn(T) -> O,
+    dest: &mut Vec<O>,
+) where
+    I: Iterator<Item = T>,
+{
+    for item in source {
+        let path = path_fn(&item);
+        if !include_system && crate::engine::directory_ops::is_system_path(path) {
+            continue;
+        }
+        if let Some(ref patterns) = path_filter {
+            if !path_matches_filter(path, patterns) {
+                continue;
+            }
+        }
+        dest.push(convert_fn(item));
+    }
+}
+
 /// Build a diff-based sync response from a TreeDiff.
 /// When `include_system` is false, entries under /.system/ are excluded.
 fn build_sync_response_from_diff(
@@ -311,82 +339,61 @@ fn build_sync_response_from_diff(
     let mut symlinks_added = Vec::new();
     let mut symlinks_modified = Vec::new();
     let mut symlinks_deleted = Vec::new();
+
+    // Files: added, modified
+    filter_and_collect(
+        diff.added.iter(),
+        include_system, path_filter,
+        |(path, _)| path.as_str(),
+        |(path, (hash, record))| file_record_to_sync_entry(path, hash, record),
+        &mut files_added,
+    );
+    filter_and_collect(
+        diff.modified.iter(),
+        include_system, path_filter,
+        |(path, _)| path.as_str(),
+        |(path, (hash, record))| file_record_to_sync_entry(path, hash, record),
+        &mut files_modified,
+    );
+
+    // Files: deleted
+    filter_and_collect(
+        diff.deleted.iter(),
+        include_system, path_filter,
+        |path| path.as_str(),
+        |path| SyncDeletedEntry { path: path.clone() },
+        &mut files_deleted,
+    );
+
+    // Symlinks: added, modified
+    filter_and_collect(
+        diff.symlinks_added.iter(),
+        include_system, path_filter,
+        |(path, _)| path.as_str(),
+        |(path, (hash, record))| symlink_record_to_sync_entry(path, hash, record),
+        &mut symlinks_added,
+    );
+    filter_and_collect(
+        diff.symlinks_modified.iter(),
+        include_system, path_filter,
+        |(path, _)| path.as_str(),
+        |(path, (hash, record))| symlink_record_to_sync_entry(path, hash, record),
+        &mut symlinks_modified,
+    );
+
+    // Symlinks: deleted
+    filter_and_collect(
+        diff.symlinks_deleted.iter(),
+        include_system, path_filter,
+        |path| path.as_str(),
+        |path| SyncDeletedEntry { path: path.clone() },
+        &mut symlinks_deleted,
+    );
+
+    // Collect chunk hashes from file entries
     let mut chunk_hashes: Vec<String> = Vec::new();
-
-    for (path, (hash, record)) in &diff.added {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        let entry = file_record_to_sync_entry(path, hash, record);
+    for entry in files_added.iter().chain(files_modified.iter()) {
         chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
-        files_added.push(entry);
-    }
-
-    for (path, (hash, record)) in &diff.modified {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        let entry = file_record_to_sync_entry(path, hash, record);
-        chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
-        files_modified.push(entry);
-    }
-
-    for path in &diff.deleted {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        files_deleted.push(SyncDeletedEntry { path: path.clone() });
-    }
-
-    for (path, (hash, record)) in &diff.symlinks_added {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        symlinks_added.push(symlink_record_to_sync_entry(path, hash, record));
-    }
-
-    for (path, (hash, record)) in &diff.symlinks_modified {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        symlinks_modified.push(symlink_record_to_sync_entry(path, hash, record));
-    }
-
-    for path in &diff.symlinks_deleted {
-        if !include_system && crate::engine::directory_ops::is_system_path(path) {
-            continue;
-        }
-        if let Some(ref patterns) = path_filter {
-            if !path_matches_filter(path, patterns) {
-                continue;
-            }
-        }
-        symlinks_deleted.push(SyncDeletedEntry { path: path.clone() });
     }
 
     // Sort for deterministic output
@@ -421,6 +428,15 @@ pub async fn sync_diff(
     headers: HeaderMap,
     Json(payload): Json<SyncDiffRequest>,
 ) -> Response {
+    // M3: Cap the number of path filters to prevent abuse.
+    if let Some(ref paths) = payload.paths {
+        if paths.len() > 100 {
+            return ErrorResponse::new("Too many paths (max 100)")
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+        }
+    }
+
     let caller = match determine_sync_caller(&headers, &state) {
         Ok(c) => c,
         Err(response) => return response,
@@ -499,6 +515,13 @@ pub async fn sync_chunks(
     headers: HeaderMap,
     Json(payload): Json<SyncChunksRequest>,
 ) -> Response {
+    // M3: Cap the number of chunk hashes to prevent abuse.
+    if payload.hashes.len() > 10_000 {
+        return ErrorResponse::new("Too many hashes (max 10000)")
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+
     let caller = match determine_sync_caller(&headers, &state) {
         Ok(c) => c,
         Err(response) => return response,

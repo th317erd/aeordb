@@ -8,29 +8,12 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::responses::{ErrorResponse, GroupResponse, UserResponse};
+use super::responses::{ErrorResponse, GroupResponse, UserResponse, require_root};
 use super::state::AppState;
-use crate::engine::{Group, RequestContext, User, is_root};
+use crate::engine::{Group, RequestContext, User};
 use crate::engine::user::SAFE_QUERY_FIELDS;
 use crate::engine::system_store;
 use crate::auth::TokenClaims;
-
-// ---------------------------------------------------------------------------
-// Authorization helper
-// ---------------------------------------------------------------------------
-
-fn require_root(claims: &TokenClaims) -> Result<(), Box<Response>> {
-  if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
-    if is_root(&user_id) {
-      return Ok(());
-    }
-  }
-  Err(Box::new(
-    ErrorResponse::new("Admin access required")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response(),
-  ))
-}
 
 // ---------------------------------------------------------------------------
 // User endpoints
@@ -55,9 +38,10 @@ pub async fn create_user(
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateUserRequest>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let user = User::new(&payload.username, payload.email.as_deref());
@@ -77,9 +61,10 @@ pub async fn list_users(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   match system_store::list_users(&state.engine) {
     Ok(users) => {
@@ -101,9 +86,10 @@ pub async fn get_user(
   Extension(claims): Extension<TokenClaims>,
   Path(user_id_string): Path<String>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
@@ -137,9 +123,10 @@ pub async fn update_user(
   Path(user_id_string): Path<String>,
   Json(payload): Json<UpdateUserRequest>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
@@ -193,9 +180,10 @@ pub async fn deactivate_user(
   Extension(claims): Extension<TokenClaims>,
   Path(user_id_string): Path<String>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
@@ -271,9 +259,10 @@ pub async fn create_group(
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateGroupRequest>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let group = match Group::new(
     &payload.name,
@@ -307,9 +296,10 @@ pub async fn list_groups(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   match system_store::list_groups(&state.engine) {
     Ok(groups) => {
@@ -331,9 +321,10 @@ pub async fn get_group(
   Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => (StatusCode::OK, Json(GroupResponse::from(&group))).into_response(),
@@ -358,9 +349,10 @@ pub async fn update_group(
   Path(name): Path<String>,
   Json(payload): Json<UpdateGroupRequest>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   let mut group = match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => group,
@@ -421,9 +413,10 @@ pub async fn delete_group(
   Extension(claims): Extension<TokenClaims>,
   Path(name): Path<String>,
 ) -> Response {
-  if let Err(response) = require_root(&claims) {
-    return *response;
-  }
+  let _user_id = match require_root(&claims) {
+    Ok(id) => id,
+    Err(response) => return response,
+  };
 
   // Check if the group exists first.
   match system_store::get_group(&state.engine, &name) {

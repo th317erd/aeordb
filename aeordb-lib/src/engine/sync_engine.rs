@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -60,10 +60,38 @@ pub struct SyncEngine {
     engine: Arc<StorageEngine>,
     peer_manager: Arc<PeerManager>,
     clock_tracker: Arc<PeerClockTracker>,
+    // TODO: Use for configurable sync intervals, retry policies, and chunk size limits.
     #[allow(dead_code)]
     config: SyncConfig,
     /// Per-peer sync lock to prevent concurrent syncs with the same peer.
-    sync_locks: Mutex<HashMap<u64, bool>>,
+    /// Presence in the set = locked. Absence = unlocked.
+    sync_locks: Arc<Mutex<HashSet<u64>>>,
+}
+
+/// RAII guard that removes a peer ID from the sync lock set on drop.
+/// Ensures the lock is released even if the sync panics.
+struct SyncLockGuard {
+    locks: Arc<Mutex<HashSet<u64>>>,
+    peer_id: u64,
+}
+
+impl Drop for SyncLockGuard {
+    fn drop(&mut self) {
+        // Use try_lock to avoid blocking in a panic unwind.
+        // If the mutex is already held (shouldn't happen in normal flow),
+        // spawn a task to clean up asynchronously.
+        if let Ok(mut locks) = self.locks.try_lock() {
+            locks.remove(&self.peer_id);
+        } else {
+            // Fallback: schedule cleanup. This handles the rare case where
+            // drop runs while another task holds the mutex.
+            let locks = Arc::clone(&self.locks);
+            let peer_id = self.peer_id;
+            tokio::spawn(async move {
+                locks.lock().await.remove(&peer_id);
+            });
+        }
+    }
 }
 
 impl SyncEngine {
@@ -78,7 +106,7 @@ impl SyncEngine {
             peer_manager,
             clock_tracker,
             config,
-            sync_locks: Mutex::new(HashMap::new()),
+            sync_locks: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -99,27 +127,25 @@ impl SyncEngine {
             ));
         }
 
-        // Acquire per-peer sync lock (prevent concurrent syncs)
-        {
+        // Acquire per-peer sync lock (prevent concurrent syncs).
+        // The SyncLockGuard ensures the lock is released even on panic.
+        let _lock_guard = {
             let mut locks = self.sync_locks.lock().await;
-            if *locks.get(&peer_node_id).unwrap_or(&false) {
+            if locks.contains(&peer_node_id) {
                 return Err(format!(
                     "Sync already in progress with peer {}",
                     peer_node_id
                 ));
             }
-            locks.insert(peer_node_id, true);
-        }
+            locks.insert(peer_node_id);
+            SyncLockGuard {
+                locks: Arc::clone(&self.sync_locks),
+                peer_id: peer_node_id,
+            }
+        };
 
-        let result = self.do_sync_cycle_remote(&peer).await;
-
-        // Release lock
-        {
-            let mut locks = self.sync_locks.lock().await;
-            locks.insert(peer_node_id, false);
-        }
-
-        result
+        self.do_sync_cycle_remote(&peer).await
+        // _lock_guard dropped here, removing peer_node_id from sync_locks
     }
 
     /// Perform a local sync cycle between this engine and a remote engine.

@@ -95,7 +95,7 @@ pub fn create_app_with_auth_mode(
 /// Build the application router with a specific JwtManager (useful for tests).
 /// Creates a FileAuthProvider backed by the given engine. No CORS.
 pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
-  let prometheus_handle = try_initialize_metrics();
+  let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
 }
@@ -106,7 +106,7 @@ pub fn create_app_with_jwt_and_engine(
   jwt_manager: Arc<JwtManager>,
   engine: Arc<StorageEngine>,
 ) -> Router {
-  let prometheus_handle = try_initialize_metrics();
+  let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
@@ -122,7 +122,7 @@ pub fn create_app_with_jwt_engine_and_task_queue(
   engine: Arc<StorageEngine>,
   task_queue: Arc<TaskQueue>,
 ) -> Router {
-  let prometheus_handle = try_initialize_metrics();
+  let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
@@ -138,7 +138,7 @@ pub fn create_app_with_jwt_engine_and_cors(
   engine: Arc<StorageEngine>,
   cors_state: CorsState,
 ) -> Router {
-  let prometheus_handle = try_initialize_metrics();
+  let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
@@ -280,9 +280,10 @@ pub fn create_app_with_all_and_task_queue(
     .route("/admin/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
     .route("/admin/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/admin/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
-    // Upload check and commit (small payloads)
+    // Upload check, commit, and config (small payloads)
     .route("/upload/check", post(upload_routes::upload_check))
     .route("/upload/commit", post(upload_routes::upload_commit))
+    .route("/upload/config", get(upload_routes::upload_config))
     // SSE event stream
     .route("/events/stream", get(sse_routes::event_stream))
     // Query route
@@ -346,8 +347,6 @@ pub fn create_app_with_all_and_task_queue(
     .route("/portal", get(portal_routes::portal_index))
     .route("/portal/", get(portal_routes::portal_index))
     .route("/portal/{filename}", get(portal_routes::portal_asset))
-    // Upload config (public, no auth)
-    .route("/upload/config", get(upload_routes::upload_config))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
@@ -369,11 +368,6 @@ pub fn create_app_with_all_and_task_queue(
   }
 }
 
-
-/// Initialize or retrieve the global Prometheus recorder handle.
-fn try_initialize_metrics() -> PrometheusHandle {
-  initialize_metrics()
-}
 
 use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
@@ -408,7 +402,7 @@ pub fn create_app_with_jwt_engine_and_event_bus(
   jwt_manager: Arc<JwtManager>,
   engine: Arc<StorageEngine>,
 ) -> (Router, Arc<EventBus>) {
-  let prometheus_handle = try_initialize_metrics();
+  let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());

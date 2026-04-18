@@ -43,7 +43,7 @@ pub struct ApiKeyRecord {
 pub fn generate_api_key(key_id: Uuid) -> String {
   let mut random_bytes = [0u8; 32];
   rand::RngCore::fill_bytes(&mut OsRng, &mut random_bytes);
-  let hex_string = hex_encode(&random_bytes);
+  let hex_string = hex::encode(&random_bytes);
   let key_id_prefix = &key_id.simple().to_string()[..16];
   format!("{}{}_{}", API_KEY_PREFIX, key_id_prefix, hex_string)
 }
@@ -87,13 +87,4 @@ pub fn verify_api_key(key: &str, hash: &str) -> Result<bool, argon2::password_ha
     Err(argon2::password_hash::Error::Password) => Ok(false),
     Err(error) => Err(error),
   }
-}
-
-/// Simple hex encoder (avoids pulling in the `hex` crate).
-fn hex_encode(bytes: &[u8]) -> String {
-  let mut output = String::with_capacity(bytes.len() * 2);
-  for byte in bytes {
-    output.push_str(&format!("{:02x}", byte));
-  }
-  output
 }

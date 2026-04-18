@@ -3,14 +3,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::auth::TokenClaims;
 use crate::engine::{
-    is_root, load_cron_config, save_cron_config, validate_cron_expression,
+    load_cron_config, save_cron_config, validate_cron_expression,
     CronConfig, CronSchedule, RequestContext,
 };
 use crate::engine::system_store;
+use crate::server::responses::{ErrorResponse, require_root};
 use crate::server::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -40,27 +40,11 @@ pub struct UpdateCronRequest {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_root(claims: &TokenClaims) -> Result<(), Response> {
-    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Invalid user ID"
-        }))).into_response()
-    })?;
-
-    if !is_root(&user_id) {
-        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Only root user can manage tasks"
-        }))).into_response());
-    }
-
-    Ok(())
-}
-
 fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine::TaskQueue>, Response> {
     state.task_queue.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": "Task queue not available"
-        }))).into_response()
+        ErrorResponse::new("Task queue not available")
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .into_response()
     })
 }
 
@@ -73,9 +57,10 @@ pub async fn list_tasks(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let queue = match require_task_queue(&state) {
         Ok(q) => q,
@@ -95,9 +80,9 @@ pub async fn list_tasks(
             (StatusCode::OK, Json(serde_json::json!(response))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to list tasks: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to list tasks: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -108,9 +93,10 @@ pub async fn trigger_reindex(
     Extension(claims): Extension<TokenClaims>,
     Json(body): Json<ReindexRequest>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let queue = match require_task_queue(&state) {
         Ok(q) => q,
@@ -126,9 +112,9 @@ pub async fn trigger_reindex(
             }))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to enqueue reindex: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to enqueue reindex: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -139,9 +125,10 @@ pub async fn trigger_gc(
     Extension(claims): Extension<TokenClaims>,
     Json(body): Json<GcTaskRequest>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let queue = match require_task_queue(&state) {
         Ok(q) => q,
@@ -157,9 +144,9 @@ pub async fn trigger_gc(
             }))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to enqueue gc: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to enqueue gc: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -172,9 +159,10 @@ pub async fn trigger_cleanup(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
     match system_store::cleanup_expired_tokens(&state.engine, &ctx) {
@@ -185,9 +173,9 @@ pub async fn trigger_cleanup(
             }))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Cleanup failed: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Cleanup failed: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -198,9 +186,10 @@ pub async fn get_task(
     Extension(claims): Extension<TokenClaims>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let queue = match require_task_queue(&state) {
         Ok(q) => q,
@@ -217,14 +206,14 @@ pub async fn get_task(
             (StatusCode::OK, Json(json)).into_response()
         }
         Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("Task '{}' not found", id)
-            }))).into_response()
+            ErrorResponse::new(format!("Task '{}' not found", id))
+                .with_status(StatusCode::NOT_FOUND)
+                .into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to get task: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to get task: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -235,9 +224,10 @@ pub async fn cancel_task(
     Extension(claims): Extension<TokenClaims>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let queue = match require_task_queue(&state) {
         Ok(q) => q,
@@ -252,9 +242,9 @@ pub async fn cancel_task(
             }))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to cancel task: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to cancel task: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -268,9 +258,10 @@ pub async fn list_cron(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let schedules = load_cron_config(&state.engine);
     (StatusCode::OK, Json(serde_json::json!(schedules))).into_response()
@@ -282,24 +273,25 @@ pub async fn create_cron(
     Extension(claims): Extension<TokenClaims>,
     Json(body): Json<CronSchedule>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     // Validate expression
     if let Err(msg) = validate_cron_expression(&body.schedule) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("Invalid cron expression: {}", msg)
-        }))).into_response();
+        return ErrorResponse::new(format!("Invalid cron expression: {}", msg))
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response();
     }
 
     let mut schedules = load_cron_config(&state.engine);
 
     // Check for duplicate ID
     if schedules.iter().any(|s| s.id == body.id) {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({
-            "error": format!("Cron schedule '{}' already exists", body.id)
-        }))).into_response();
+        return ErrorResponse::new(format!("Cron schedule '{}' already exists", body.id))
+            .with_status(StatusCode::CONFLICT)
+            .into_response();
     }
 
     schedules.push(body.clone());
@@ -309,9 +301,9 @@ pub async fn create_cron(
             (StatusCode::CREATED, Json(serde_json::to_value(&body).unwrap())).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to save cron config: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to save cron config: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -322,18 +314,19 @@ pub async fn delete_cron(
     Extension(claims): Extension<TokenClaims>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let mut schedules = load_cron_config(&state.engine);
     let original_len = schedules.len();
     schedules.retain(|s| s.id != id);
 
     if schedules.len() == original_len {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": format!("Cron schedule '{}' not found", id)
-        }))).into_response();
+        return ErrorResponse::new(format!("Cron schedule '{}' not found", id))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
     }
 
     let config = CronConfig { schedules };
@@ -345,9 +338,9 @@ pub async fn delete_cron(
             }))).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to save cron config: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to save cron config: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -359,17 +352,18 @@ pub async fn update_cron(
     Path(id): Path<String>,
     Json(body): Json<UpdateCronRequest>,
 ) -> Response {
-    if let Err(resp) = require_root(&claims) {
-        return resp;
-    }
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
 
     let mut schedules = load_cron_config(&state.engine);
     let schedule = match schedules.iter_mut().find(|s| s.id == id) {
         Some(s) => s,
         None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("Cron schedule '{}' not found", id)
-            }))).into_response();
+            return ErrorResponse::new(format!("Cron schedule '{}' not found", id))
+                .with_status(StatusCode::NOT_FOUND)
+                .into_response();
         }
     };
 
@@ -379,9 +373,9 @@ pub async fn update_cron(
     }
     if let Some(ref expression) = body.schedule {
         if let Err(msg) = validate_cron_expression(expression) {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": format!("Invalid cron expression: {}", msg)
-            }))).into_response();
+            return ErrorResponse::new(format!("Invalid cron expression: {}", msg))
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
         }
         schedule.schedule = expression.clone();
     }
@@ -399,9 +393,9 @@ pub async fn update_cron(
             (StatusCode::OK, Json(serde_json::to_value(&updated).unwrap())).into_response()
         }
         Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to save cron config: {}", e)
-            }))).into_response()
+            ErrorResponse::new(format!("Failed to save cron config: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
