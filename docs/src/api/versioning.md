@@ -6,24 +6,24 @@ AeorDB provides Git-like version control through snapshots (named points in time
 
 | Method | Path | Description | Auth | Root Required |
 |--------|------|-------------|------|---------------|
-| POST | `/version/snapshot` | Create a snapshot | Yes | No |
-| GET | `/version/snapshots` | List all snapshots | Yes | No |
-| POST | `/version/restore` | Restore a snapshot | Yes | Yes |
-| DELETE | `/version/snapshot/{name}` | Delete a snapshot | Yes | Yes |
-| POST | `/version/fork` | Create a fork | Yes | No |
-| GET | `/version/forks` | List all forks | Yes | No |
-| POST | `/version/fork/{name}/promote` | Promote fork to HEAD | Yes | Yes |
-| DELETE | `/version/fork/{name}` | Abandon a fork | Yes | Yes |
-| GET | `/engine/{path}?snapshot={name}` | Read file at a snapshot | Yes | No |
-| GET | `/engine/{path}?version={hash}` | Read file at a version hash | Yes | No |
-| GET | `/version/file-history/{path}` | File change history across snapshots | Yes | No |
-| POST | `/version/file-restore/{path}` | Restore file from a version | Yes | Yes |
+| POST | `/versions/snapshots` | Create a snapshot | Yes | No |
+| GET | `/versions/snapshots` | List all snapshots | Yes | No |
+| POST | `/versions/restore` | Restore a snapshot | Yes | Yes |
+| DELETE | `/versions/snapshots/{name}` | Delete a snapshot | Yes | Yes |
+| POST | `/versions/forks` | Create a fork | Yes | No |
+| GET | `/versions/forks` | List all forks | Yes | No |
+| POST | `/versions/forks/{name}/promote` | Promote fork to HEAD | Yes | Yes |
+| DELETE | `/versions/forks/{name}` | Abandon a fork | Yes | Yes |
+| GET | `/files/{path}?snapshot={name}` | Read file at a snapshot | Yes | No |
+| GET | `/files/{path}?version={hash}` | Read file at a version hash | Yes | No |
+| GET | `/versions/history/{path}` | File change history across snapshots | Yes | No |
+| POST | `/versions/restore/{path}` | Restore file from a version | Yes | Yes |
 
 ---
 
 ## Snapshots
 
-### POST /version/snapshot
+### POST /versions/snapshots
 
 Create a named snapshot of the current HEAD.
 
@@ -61,7 +61,7 @@ Create a named snapshot of the current HEAD.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/version/snapshot \
+curl -X POST http://localhost:3000/versions/snapshots \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0", "metadata": {"description": "First stable release"}}'
@@ -76,39 +76,41 @@ curl -X POST http://localhost:3000/version/snapshot \
 
 ---
 
-### GET /version/snapshots
+### GET /versions/snapshots
 
 List all snapshots.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "name": "v1.0",
-    "root_hash": "a1b2c3d4e5f6...",
-    "created_at": 1775968398000,
-    "metadata": {"description": "First stable release"}
-  },
-  {
-    "name": "v2.0",
-    "root_hash": "f6e5d4c3b2a1...",
-    "created_at": 1775969000000,
-    "metadata": {}
-  }
-]
+{
+  "items": [
+    {
+      "name": "v1.0",
+      "root_hash": "a1b2c3d4e5f6...",
+      "created_at": 1775968398000,
+      "metadata": {"description": "First stable release"}
+    },
+    {
+      "name": "v2.0",
+      "root_hash": "f6e5d4c3b2a1...",
+      "created_at": 1775969000000,
+      "metadata": {}
+    }
+  ]
+}
 ```
 
 **Example:**
 
 ```bash
-curl http://localhost:3000/version/snapshots \
+curl http://localhost:3000/versions/snapshots \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-### POST /version/restore
+### POST /versions/restore
 
 Restore a named snapshot, making it the current HEAD. **Requires root.**
 
@@ -132,7 +134,7 @@ Restore a named snapshot, making it the current HEAD. **Requires root.**
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/version/restore \
+curl -X POST http://localhost:3000/versions/restore \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0"}'
@@ -148,7 +150,7 @@ curl -X POST http://localhost:3000/version/restore \
 
 ---
 
-### DELETE /version/snapshot/{name}
+### DELETE /versions/snapshots/{name}
 
 Delete a named snapshot. **Requires root.**
 
@@ -164,7 +166,7 @@ Delete a named snapshot. **Requires root.**
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/version/snapshot/v1.0 \
+curl -X DELETE http://localhost:3000/versions/snapshots/v1.0 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -182,7 +184,7 @@ curl -X DELETE http://localhost:3000/version/snapshot/v1.0 \
 
 Forks create a divergent branch of the data, optionally based on a named snapshot.
 
-### POST /version/fork
+### POST /versions/forks
 
 Create a new fork.
 
@@ -213,7 +215,7 @@ Create a new fork.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/version/fork \
+curl -X POST http://localhost:3000/versions/forks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "experiment", "base": "v1.0"}'
@@ -228,32 +230,34 @@ curl -X POST http://localhost:3000/version/fork \
 
 ---
 
-### GET /version/forks
+### GET /versions/forks
 
 List all active forks.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "name": "experiment",
-    "root_hash": "a1b2c3d4e5f6...",
-    "created_at": 1775968398000
-  }
-]
+{
+  "items": [
+    {
+      "name": "experiment",
+      "root_hash": "a1b2c3d4e5f6...",
+      "created_at": 1775968398000
+    }
+  ]
+}
 ```
 
 **Example:**
 
 ```bash
-curl http://localhost:3000/version/forks \
+curl http://localhost:3000/versions/forks \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-### POST /version/fork/{name}/promote
+### POST /versions/forks/{name}/promote
 
 Promote a fork's state to HEAD, making it the active version. **Requires root.**
 
@@ -269,7 +273,7 @@ Promote a fork's state to HEAD, making it the active version. **Requires root.**
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/version/fork/experiment/promote \
+curl -X POST http://localhost:3000/versions/forks/experiment/promote \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -283,7 +287,7 @@ curl -X POST http://localhost:3000/version/fork/experiment/promote \
 
 ---
 
-### DELETE /version/fork/{name}
+### DELETE /versions/forks/{name}
 
 Abandon a fork (soft delete). **Requires root.**
 
@@ -299,7 +303,7 @@ Abandon a fork (soft delete). **Requires root.**
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/version/fork/experiment \
+curl -X DELETE http://localhost:3000/versions/forks/experiment \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -323,11 +327,11 @@ Use query parameters on the standard file read endpoint:
 
 ```bash
 # Read a file as it was at a named snapshot
-curl "http://localhost:3000/engine/assets/logo.psd?snapshot=v1.0" \
+curl "http://localhost:3000/files/assets/logo.psd?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN"
 
 # Read a file at a specific version hash
-curl "http://localhost:3000/engine/assets/logo.psd?version=a1b2c3d4..." \
+curl "http://localhost:3000/files/assets/logo.psd?version=a1b2c3d4..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -343,7 +347,7 @@ Returns the file content exactly as it was at that version, with the same header
 
 ---
 
-### GET /version/file-history/{path}
+### GET /versions/history/{path}
 
 View the change history of a single file across all snapshots. Returns entries ordered newest-first, each with a `change_type` indicating what happened to the file at that snapshot.
 
@@ -387,13 +391,13 @@ If the file has never existed in any snapshot, returns `200` with an empty `hist
 **Example:**
 
 ```bash
-curl http://localhost:3000/version/file-history/assets/logo.psd \
+curl http://localhost:3000/versions/history/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-### POST /version/file-restore/{path}
+### POST /versions/restore/{path}
 
 Restore a single file from a historical version to the current HEAD. **Requires root.**
 
@@ -439,7 +443,7 @@ The `auto_snapshot` field contains the name of the safety snapshot created befor
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/version/file-restore/assets/logo.psd \
+curl -X POST http://localhost:3000/versions/restore/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"snapshot": "v1.0"}'

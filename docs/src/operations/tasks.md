@@ -30,7 +30,7 @@ On server startup, any tasks left in `Running` state (from a previous crash) are
 ### List Tasks
 
 ```bash
-curl http://localhost:3000/admin/tasks \
+curl http://localhost:3000/system/tasks \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -69,7 +69,7 @@ Response:
 
 **Reindex:**
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/reindex \
+curl -X POST http://localhost:3000/system/tasks/reindex \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path": "/data/"}'
@@ -77,14 +77,14 @@ curl -X POST http://localhost:3000/admin/tasks/reindex \
 
 **Garbage Collection:**
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/gc \
+curl -X POST http://localhost:3000/system/tasks/gc \
   -H "Authorization: Bearer $API_KEY"
 ```
 
 ### Cancel a Task
 
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/{task_id}/cancel \
+curl -X POST http://localhost:3000/system/tasks/{task_id}/cancel \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -211,10 +211,11 @@ The task system emits events on the event bus:
 
 | Event | Description |
 |-------|-------------|
-| `task.started` | A task has begun execution |
-| `task.completed` | A task finished successfully |
-| `task.failed` | A task encountered an error |
-| `gc.completed` | GC-specific completion event with statistics |
+| `tasks_started` | A task has begun execution |
+| `tasks_completed` | A task finished successfully |
+| `tasks_failed` | A task encountered an error |
+| `gc_started` | GC has begun execution |
+| `gc_completed` | GC-specific completion event with statistics |
 
 ## See Also
 

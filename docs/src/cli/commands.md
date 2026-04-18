@@ -19,7 +19,7 @@ aeordb start [OPTIONS]
 | `--log-format` | | `pretty` | Log output format: `pretty` or `json` |
 | `--auth` | | (none) | Auth provider URI (see below) |
 | `--hot-dir` | | (database parent dir) | Directory for write-ahead hot files |
-| `--cors` | | (disabled) | CORS allowed origins |
+| `--cors-origins` | | (disabled) | CORS allowed origins |
 
 ### Auth Modes
 
@@ -52,7 +52,7 @@ aeordb start
 aeordb start --port 8080 --database /var/lib/aeordb/prod.aeordb --auth self --log-format json
 
 # Custom hot directory and CORS
-aeordb start --database data.aeordb --hot-dir /fast-ssd/hot --cors "*"
+aeordb start --database data.aeordb --hot-dir /fast-ssd/hot --cors-origins "*"
 ```
 
 ### What Happens on Start

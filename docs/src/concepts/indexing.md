@@ -7,7 +7,7 @@ AeorDB indexes are opt-in and configured per-directory. Nothing is indexed by de
 Create a `.config/indexes.json` file in any directory to define indexes for files in that directory:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/users/.config/indexes.json \
+curl -X PUT http://localhost:3000/files/users/.config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "indexes": [
@@ -184,7 +184,7 @@ When you store or update a `.config/indexes.json` file, the engine automatically
 1. Reads the current index config
 2. Lists all files in the directory
 3. Re-runs the indexing pipeline for each file (in batches of 50, yielding between batches)
-4. Reports progress via `GET /admin/tasks`
+4. Reports progress via `GET /system/tasks`
 
 During reindexing, queries still work but may return incomplete results. The query response includes a `meta.reindexing` field with the current progress:
 
@@ -202,7 +202,7 @@ During reindexing, queries still work but may return incomplete results. The que
 
 ## Query API
 
-Queries are submitted as `POST /query` with a JSON body:
+Queries are submitted as `POST /files/query` with a JSON body:
 
 ```json
 {

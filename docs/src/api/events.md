@@ -6,11 +6,11 @@ AeorDB publishes real-time events via Server-Sent Events (SSE). Clients can subs
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| GET | `/events/stream` | SSE event stream | Yes |
+| GET | `/system/events` | SSE event stream | Yes |
 
 ---
 
-## GET /events/stream
+## GET /system/events
 
 Open a persistent Server-Sent Events connection. The server pushes events as they occur and sends periodic keepalive pings.
 
@@ -24,7 +24,7 @@ Open a persistent Server-Sent Events connection. The server pushes events as the
 ### Request
 
 ```bash
-curl -N http://localhost:3000/events/stream \
+curl -N http://localhost:3000/system/events \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -33,21 +33,21 @@ curl -N http://localhost:3000/events/stream \
 Subscribe to only specific event types:
 
 ```bash
-curl -N "http://localhost:3000/events/stream?events=entries_created,entries_deleted" \
+curl -N "http://localhost:3000/system/events?events=entries_created,entries_deleted" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 Filter by path prefix:
 
 ```bash
-curl -N "http://localhost:3000/events/stream?path_prefix=/data/users" \
+curl -N "http://localhost:3000/system/events?path_prefix=/data/users" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 Combine both:
 
 ```bash
-curl -N "http://localhost:3000/events/stream?events=entries_created&path_prefix=/data/" \
+curl -N "http://localhost:3000/system/events?events=entries_created&path_prefix=/data/" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -109,7 +109,7 @@ The path prefix filter checks two locations in the event payload:
 
 ```javascript
 const evtSource = new EventSource(
-  'http://localhost:3000/events/stream?events=entries_created',
+  'http://localhost:3000/system/events?events=entries_created',
   { headers: { 'Authorization': 'Bearer ' + token } }
 );
 

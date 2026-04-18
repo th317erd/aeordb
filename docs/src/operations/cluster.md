@@ -19,7 +19,7 @@ Add peers at startup or at runtime:
 aeordb start -D data.aeordb --peers "node2:3000,node3:3000"
 
 # At runtime
-curl -X POST http://localhost:3000/admin/cluster/peers \
+curl -X POST http://localhost:3000/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"address": "https://node2:3000", "label": "US West"}'
@@ -42,7 +42,7 @@ Inter-node communication uses TLS by default:
 ### Cluster Status
 
 ```bash
-curl http://localhost:3000/admin/cluster \
+curl http://localhost:3000/sync/ \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -66,7 +66,7 @@ Sync happens automatically via SSE events and periodic fallback. You can also tr
 
 ```bash
 # Sync with all peers
-curl -X POST http://localhost:3000/admin/cluster/sync \
+curl -X POST http://localhost:3000/sync/trigger \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -75,7 +75,7 @@ curl -X POST http://localhost:3000/admin/cluster/sync \
 ### Listing Conflicts
 
 ```bash
-curl http://localhost:3000/admin/conflicts \
+curl http://localhost:3000/sync/conflicts \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -83,11 +83,11 @@ curl http://localhost:3000/admin/conflicts \
 
 ```bash
 # Pick the auto-winner (default — higher timestamp)
-curl -X POST http://localhost:3000/admin/conflict-dismiss/path/to/file \
+curl -X POST http://localhost:3000/sync/conflicts/path/to/file \
   -H "Authorization: Bearer $TOKEN"
 
 # Pick a specific version
-curl -X POST http://localhost:3000/admin/conflict-resolve/path/to/file \
+curl -X POST http://localhost:3000/sync/conflicts/path/to/file \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pick": "loser"}'
@@ -98,7 +98,7 @@ curl -X POST http://localhost:3000/admin/conflict-resolve/path/to/file \
 Configure per-peer path filters:
 
 ```bash
-curl -X POST http://localhost:3000/admin/cluster/peers \
+curl -X POST http://localhost:3000/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -153,7 +153,7 @@ curl -X POST http://localhost:3000/sync/chunks \
 Create a scoped API key for a client that should only sync specific paths:
 
 ```bash
-curl -X POST http://localhost:3000/api-keys \
+curl -X POST http://localhost:3000/auth/keys \
   -H "Authorization: Bearer $ROOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -178,13 +178,13 @@ The clock hasn't settled. Possible causes:
 
 ### Sync not happening
 
-- Check peer is in Active state: `GET /admin/cluster`
+- Check peer is in Active state: `GET /sync/`
 - Verify JWT tokens are valid and use the same signing key on both nodes
 - Verify network connectivity between nodes
-- Trigger manual sync: `POST /admin/cluster/sync`
+- Trigger manual sync: `POST /sync/trigger`
 
 ### Data inconsistency after sync
 
-- Check for unresolved conflicts: `GET /admin/conflicts`
+- Check for unresolved conflicts: `GET /sync/conflicts`
 - Conflicts are normal — they mean two nodes wrote the same file
 - Resolve conflicts to reconcile the data

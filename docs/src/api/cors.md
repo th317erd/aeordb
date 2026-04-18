@@ -6,17 +6,17 @@ AeorDB supports Cross-Origin Resource Sharing (CORS) through a CLI flag and per-
 
 ### CLI Flag
 
-Enable CORS at startup with the `--cors` flag:
+Enable CORS at startup with the `--cors-origins` flag:
 
 ```bash
 # Allow all origins
-aeordb --cors "*"
+aeordb --cors-origins "*"
 
 # Allow specific origins
-aeordb --cors "https://app.example.com,https://admin.example.com"
+aeordb --cors-origins "https://app.example.com,https://admin.example.com"
 ```
 
-The CLI flag sets the **default** CORS policy for all routes. When no `--cors` flag is provided, no CORS headers are sent.
+The CLI flag sets the **default** CORS policy for all routes. When no `--cors-origins` flag is provided, no CORS headers are sent.
 
 ### Per-Path Rules (Config File)
 
@@ -26,7 +26,7 @@ For fine-grained control, store per-path CORS rules at `/.config/cors.json` insi
 {
   "rules": [
     {
-      "path": "/engine/*",
+      "path": "/files/*",
       "origins": ["https://app.example.com"],
       "methods": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
       "allow_headers": ["Content-Type", "Authorization"],
@@ -34,7 +34,7 @@ For fine-grained control, store per-path CORS rules at `/.config/cors.json` insi
       "allow_credentials": false
     },
     {
-      "path": "/query",
+      "path": "/files/query",
       "origins": ["*"],
       "methods": ["POST"],
       "allow_headers": ["Content-Type", "Authorization"],
@@ -42,7 +42,7 @@ For fine-grained control, store per-path CORS rules at `/.config/cors.json` insi
       "allow_credentials": false
     },
     {
-      "path": "/events/stream",
+      "path": "/system/events",
       "origins": ["https://app.example.com"],
       "allow_credentials": true
     }
@@ -53,7 +53,7 @@ For fine-grained control, store per-path CORS rules at `/.config/cors.json` insi
 Upload the config file using the engine API:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/.config/cors.json \
+curl -X PUT http://localhost:3000/files/.config/cors.json \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d @cors.json
@@ -80,8 +80,8 @@ Each rule in the `rules` array supports:
 
 Per-path rules are checked in order (first match wins):
 
-- **Exact match:** `"/query"` matches only `/query`
-- **Prefix match:** `"/engine/*"` matches `/engine/data/file.json`, `/engine/images/photo.png`, etc.
+- **Exact match:** `"/files/query"` matches only `/files/query`
+- **Prefix match:** `"/files/*"` matches `/files/data/file.json`, `/files/images/photo.png`, etc.
 
 If no per-path rule matches, the CLI default (if any) is used.
 
@@ -90,7 +90,7 @@ If no per-path rule matches, the CLI default (if any) is used.
 ## Precedence
 
 1. Per-path rules from `/.config/cors.json` (first match wins)
-2. CLI `--cors` flag defaults
+2. CLI `--cors-origins` flag defaults
 3. No CORS headers (if neither is configured)
 
 ---
@@ -129,9 +129,9 @@ When origins include `"*"`, the `Access-Control-Allow-Origin` header is set to `
 
 ---
 
-## Default CORS Headers (CLI Flag)
+## Default CORS Headers (--cors-origins Flag)
 
-When only the `--cors` flag is used (no per-path rules), the defaults are:
+When only the `--cors-origins` flag is used (no per-path rules), the defaults are:
 
 | Header | Value |
 |--------|-------|
@@ -147,13 +147,13 @@ When only the `--cors` flag is used (no per-path rules), the defaults are:
 ### Development: Allow Everything
 
 ```bash
-aeordb --cors "*"
+aeordb --cors-origins "*"
 ```
 
 ### Production: Specific Origins
 
 ```bash
-aeordb --cors "https://app.example.com,https://admin.example.com"
+aeordb --cors-origins "https://app.example.com,https://admin.example.com"
 ```
 
 ### Per-Path with Credentials
@@ -164,13 +164,13 @@ Store in `/.config/cors.json`:
 {
   "rules": [
     {
-      "path": "/events/stream",
+      "path": "/system/events",
       "origins": ["https://app.example.com"],
       "allow_credentials": true,
       "max_age": 86400
     },
     {
-      "path": "/engine/*",
+      "path": "/files/*",
       "origins": ["https://app.example.com", "https://admin.example.com"],
       "methods": ["GET", "PUT", "DELETE", "HEAD", "OPTIONS"],
       "allow_headers": ["Content-Type", "Authorization", "X-Request-ID"]

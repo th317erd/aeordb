@@ -4,23 +4,23 @@ AeorDB provides a 4-phase upload protocol for efficient, deduplicated file trans
 
 ## Protocol Overview
 
-1. **Negotiate** -- GET `/upload/config` to learn the hash algorithm and chunk size.
-2. **Dedup check** -- POST `/upload/check` with a list of chunk hashes to find which are already stored.
-3. **Upload** -- PUT `/upload/chunks/{hash}` for each needed chunk.
-4. **Commit** -- POST `/upload/commit` to atomically assemble chunks into files.
+1. **Negotiate** -- GET `/blobs/config` to learn the hash algorithm and chunk size.
+2. **Dedup check** -- POST `/blobs/check` with a list of chunk hashes to find which are already stored.
+3. **Upload** -- PUT `/blobs/chunks/{hash}` for each needed chunk.
+4. **Commit** -- POST `/blobs/commit` to atomically assemble chunks into files.
 
 ## Endpoint Summary
 
 | Method | Path | Description | Auth | Body Limit |
 |--------|------|-------------|------|-----------|
-| GET | `/upload/config` | Negotiate hash algorithm and chunk size | No | -- |
-| POST | `/upload/check` | Check which chunks the server already has | Yes | 1 MB |
-| PUT | `/upload/chunks/{hash}` | Upload a single chunk | Yes | 10 GB |
-| POST | `/upload/commit` | Atomic multi-file commit from chunks | Yes | 1 MB |
+| GET | `/blobs/config` | Negotiate hash algorithm and chunk size | No | -- |
+| POST | `/blobs/check` | Check which chunks the server already has | Yes | 1 MB |
+| PUT | `/blobs/chunks/{hash}` | Upload a single chunk | Yes | 10 GB |
+| POST | `/blobs/commit` | Atomic multi-file commit from chunks | Yes | 1 MB |
 
 ---
 
-## Phase 1: GET /upload/config
+## Phase 1: GET /blobs/config
 
 Retrieve the server's hash algorithm, chunk size, and hash prefix. This endpoint is **public** (no authentication required).
 
@@ -55,12 +55,12 @@ Clients must use the same formula. The prefix (`"chunk:"`) is prepended to the r
 ### Example
 
 ```bash
-curl http://localhost:3000/upload/config
+curl http://localhost:3000/blobs/config
 ```
 
 ---
 
-## Phase 2: POST /upload/check
+## Phase 2: POST /blobs/check
 
 Send a list of chunk hashes to determine which ones the server already has (deduplication). Only upload the ones in the `needed` list.
 
@@ -102,7 +102,7 @@ Send a list of chunk hashes to determine which ones the server already has (dedu
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/upload/check \
+curl -X POST http://localhost:3000/blobs/check \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["a1b2c3...", "f6e5d4..."]}'
@@ -116,7 +116,7 @@ curl -X POST http://localhost:3000/upload/check \
 
 ---
 
-## Phase 3: PUT /upload/chunks/{hash}
+## Phase 3: PUT /blobs/chunks/{hash}
 
 Upload a single chunk. The server verifies the hash matches the content before storing.
 
@@ -164,7 +164,7 @@ The server automatically applies Zstd compression to chunks when beneficial (bas
 ### Example
 
 ```bash
-curl -X PUT http://localhost:3000/upload/chunks/f6e5d4c3b2a1... \
+curl -X PUT http://localhost:3000/blobs/chunks/f6e5d4c3b2a1... \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @chunk_001.bin
 ```
@@ -180,7 +180,7 @@ curl -X PUT http://localhost:3000/upload/chunks/f6e5d4c3b2a1... \
 
 ---
 
-## Phase 4: POST /upload/commit
+## Phase 4: POST /blobs/commit
 
 Atomically commit multiple files from previously uploaded chunks. Each file specifies its path, content type, and the ordered list of chunk hashes that compose it.
 
@@ -224,7 +224,7 @@ The response contains a summary of the commit operation.
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/upload/commit \
+curl -X POST http://localhost:3000/blobs/commit \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -253,7 +253,7 @@ Here is a complete workflow for uploading a file:
 
 ```bash
 # 1. Get server configuration
-CONFIG=$(curl -s http://localhost:3000/upload/config)
+CONFIG=$(curl -s http://localhost:3000/blobs/config)
 CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 
 # 2. Split file into chunks and hash them
@@ -261,20 +261,20 @@ CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 # chunk_hashes=["hash1", "hash2", ...]
 
 # 3. Check which chunks are needed
-DEDUP=$(curl -s -X POST http://localhost:3000/upload/check \
+DEDUP=$(curl -s -X POST http://localhost:3000/blobs/check \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["hash1", "hash2"]}')
 
 # 4. Upload only the needed chunks
 for hash in $(echo $DEDUP | jq -r '.needed[]'); do
-  curl -X PUT "http://localhost:3000/upload/chunks/$hash" \
+  curl -X PUT "http://localhost:3000/blobs/chunks/$hash" \
     -H "Authorization: Bearer $TOKEN" \
     --data-binary @"chunk_$hash.bin"
 done
 
 # 5. Commit the file
-curl -X POST http://localhost:3000/upload/commit \
+curl -X POST http://localhost:3000/blobs/commit \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

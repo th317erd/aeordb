@@ -33,7 +33,7 @@ A snapshot is a named reference to a root hash. Creating a snapshot saves the cu
 ### Create a Snapshot
 
 ```bash
-curl -X POST http://localhost:3000/version/snapshot \
+curl -X POST http://localhost:3000/versions/snapshots \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0"}'
 ```
@@ -41,7 +41,7 @@ curl -X POST http://localhost:3000/version/snapshot \
 ### List Snapshots
 
 ```bash
-curl http://localhost:3000/version/snapshots
+curl http://localhost:3000/versions/snapshots
 ```
 
 Response:
@@ -60,7 +60,7 @@ Response:
 Restoring a snapshot sets HEAD back to the snapshot's root hash. The current state is not lost -- you can snapshot it before restoring if you want to preserve it.
 
 ```bash
-curl -X POST http://localhost:3000/version/restore \
+curl -X POST http://localhost:3000/versions/restore \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0"}'
 ```
@@ -68,7 +68,7 @@ curl -X POST http://localhost:3000/version/restore \
 ### Delete a Snapshot
 
 ```bash
-curl -X DELETE http://localhost:3000/version/snapshot/v1.0
+curl -X DELETE http://localhost:3000/versions/snapshots/v1.0
 ```
 
 After deleting a snapshot, entries that were only reachable through that snapshot become eligible for garbage collection.
@@ -80,7 +80,7 @@ Forks are isolated branches of the database. Writes to a fork do not affect HEAD
 ### Create a Fork
 
 ```bash
-curl -X POST http://localhost:3000/version/fork \
+curl -X POST http://localhost:3000/versions/forks \
   -H "Content-Type: application/json" \
   -d '{"name": "experiment"}'
 ```
@@ -88,7 +88,7 @@ curl -X POST http://localhost:3000/version/fork \
 ### List Forks
 
 ```bash
-curl http://localhost:3000/version/forks
+curl http://localhost:3000/versions/forks
 ```
 
 ### Promote a Fork
@@ -96,13 +96,13 @@ curl http://localhost:3000/version/forks
 When you're satisfied with the changes in a fork, promote it to HEAD:
 
 ```bash
-curl -X POST http://localhost:3000/version/fork/experiment/promote
+curl -X POST http://localhost:3000/versions/forks/experiment/promote
 ```
 
 ### Abandon a Fork
 
 ```bash
-curl -X DELETE http://localhost:3000/version/fork/experiment
+curl -X DELETE http://localhost:3000/versions/forks/experiment
 ```
 
 ## Tree Walking
@@ -144,8 +144,8 @@ aeordb export --database data.aeordb --output backup.aeordb
 aeordb export --database data.aeordb --snapshot v1.0 --output v1.aeordb
 
 # Export via HTTP
-curl -X POST http://localhost:3000/admin/export --output backup.aeordb
-curl -X POST "http://localhost:3000/admin/export?snapshot=v1.0" --output v1.aeordb
+curl -X POST http://localhost:3000/versions/export --output backup.aeordb
+curl -X POST "http://localhost:3000/versions/export?snapshot=v1.0" --output v1.aeordb
 ```
 
 The exported file is a fully functional database that can be opened with `aeordb start`.
@@ -162,7 +162,7 @@ aeordb import --database target.aeordb --file backup.aeordb
 aeordb import --database target.aeordb --file backup.aeordb --promote
 
 # Import via HTTP
-curl -X POST http://localhost:3000/admin/import \
+curl -X POST http://localhost:3000/versions/import \
   -H "Content-Type: application/octet-stream" \
   --data-binary @backup.aeordb
 ```
@@ -181,7 +181,7 @@ aeordb diff --database data.aeordb --from v1.0 --to v2.0 --output patch.aeordb
 aeordb diff --database data.aeordb --from v1.0 --output patch.aeordb
 
 # Diff via HTTP
-curl -X POST "http://localhost:3000/admin/diff?from=v1.0&to=v2.0" --output patch.aeordb
+curl -X POST "http://localhost:3000/versions/diff?from=v1.0&to=v2.0" --output patch.aeordb
 ```
 
 A patch file contains only new/changed chunks, updated FileRecords, and deletion markers. Chunks shared between the two versions are not included, making patches much smaller than full exports.
@@ -210,7 +210,7 @@ Promote sets HEAD to a specific version hash. This is separate from import so yo
 aeordb promote --database data.aeordb --hash f6e5d4c3...
 
 # HTTP
-curl -X POST "http://localhost:3000/admin/promote" \
+curl -X POST "http://localhost:3000/versions/promote" \
   -H "Content-Type: application/json" \
   -d '{"hash": "f6e5d4c3..."}'
 ```

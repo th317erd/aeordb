@@ -14,7 +14,7 @@ aeordb start [OPTIONS]
 | `--database`, `-D` | `data.aeordb` | Path to the database file (created if it does not exist) |
 | `--auth` | self-contained | Auth provider URI (see [Auth Modes](#auth-modes)) |
 | `--hot-dir` | database parent dir | Directory for write-ahead hot files (crash recovery journal) |
-| `--cors` | disabled | CORS allowed origins (see [CORS](#cors)) |
+| `--cors-origins` | disabled | CORS allowed origins (see [CORS](#cors)) |
 | `--log-format` | `pretty` | Log output format: `pretty` or `json` |
 
 ### Examples
@@ -28,7 +28,7 @@ aeordb start \
   --database /var/lib/aeordb/prod.aeordb \
   --port 443 \
   --hot-dir /var/lib/aeordb/hot \
-  --cors "https://myapp.com,https://admin.myapp.com" \
+  --cors-origins "https://myapp.com,https://admin.myapp.com" \
   --log-format json
 ```
 
@@ -61,7 +61,7 @@ curl -X POST http://localhost:3000/auth/token \
   -d '{"api_key": "aeor_ak_7f3b2a1c..."}'
 
 # Use the token for subsequent requests
-curl http://localhost:3000/engine/users/ \
+curl http://localhost:3000/files/users/ \
   -H "Authorization: Bearer eyJhbG..."
 ```
 
@@ -69,24 +69,24 @@ curl http://localhost:3000/engine/users/ \
 
 ### Global CORS via CLI
 
-The `--cors` flag sets allowed origins for all routes:
+The `--cors-origins` flag sets allowed origins for all routes:
 
 ```bash
 # Allow all origins
-aeordb start --cors "*"
+aeordb start --cors-origins "*"
 
 # Allow specific origins (comma-separated)
-aeordb start --cors "https://myapp.com,https://admin.myapp.com"
+aeordb start --cors-origins "https://myapp.com,https://admin.myapp.com"
 ```
 
-Without `--cors`, no CORS headers are sent and cross-origin browser requests will fail.
+Without `--cors-origins`, no CORS headers are sent and cross-origin browser requests will fail.
 
 ### Per-Path CORS
 
 For fine-grained control, store a `/.config/cors.json` file in the database:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/.config/cors.json \
+curl -X PUT http://localhost:3000/files/.config/cors.json \
   -H "Content-Type: application/json" \
   -d '{
     "rules": [
@@ -106,7 +106,7 @@ curl -X PUT http://localhost:3000/engine/.config/cors.json \
   }'
 ```
 
-Per-path rules are checked first. If no rule matches the request path, the global `--cors` setting applies.
+Per-path rules are checked first. If no rule matches the request path, the global `--cors-origins` setting applies.
 
 ## Index Configuration
 
@@ -169,7 +169,7 @@ See [Indexing & Queries](../concepts/indexing.md) for the full indexing referenc
 Schedule recurring background tasks by storing `/.config/cron.json`:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/.config/cron.json \
+curl -X PUT http://localhost:3000/files/.config/cron.json \
   -H "Content-Type: application/json" \
   -d '{
     "schedules": [
@@ -191,7 +191,7 @@ curl -X PUT http://localhost:3000/engine/.config/cron.json \
   }'
 ```
 
-The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. Cron schedules can also be managed via the HTTP API at `/admin/cron`.
+The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. Cron schedules can also be managed via the HTTP API at `/system/cron`.
 
 ## Compression
 

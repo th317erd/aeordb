@@ -12,7 +12,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 
 **WASM plugin system.** Extend the database with WebAssembly plugins for two purposes: *parser plugins* that extract structured fields from non-JSON files (PDFs, images, XML) for indexing, and *query plugins* that run custom logic directly at the data layer. Plugins execute in a sandboxed WASM runtime with configurable memory limits.
 
-**Native HTTP API.** AeorDB exposes its full API over HTTP -- no separate proxy, no client library required. Store files with `PUT`, read them with `GET`, query with `POST /query`, and manage versions with the `/version/*` endpoints. Any HTTP client works.
+**Native HTTP API.** AeorDB exposes its full API over HTTP -- no separate proxy, no client library required. Store files with `PUT`, read them with `GET`, query with `POST /files/query`, and manage versions with the `/versions/*` endpoints. Any HTTP client works.
 
 **Embeddable.** A single `aeordb` binary with no external dependencies. Point it at a `.aeordb` file and you have a running database. Like SQLite, but for files with versioning and a built-in HTTP server.
 
@@ -27,7 +27,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 - **Plugins:** WASM parser plugins for any file format, WASM query plugins for custom data-layer logic
 - **Operations:** Background task system, cron scheduler, garbage collection, automatic reindexing
 - **Auth:** Self-contained JWT auth, API keys, user/group management, path-level permissions, or `--auth false` for local use
-- **Observability:** Prometheus metrics at `/admin/metrics`, SSE event stream at `/events/stream`, structured logging
+- **Observability:** Prometheus metrics at `/system/metrics`, SSE event stream at `/system/events`, structured logging
 
 ## Next Steps
 

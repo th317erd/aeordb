@@ -34,12 +34,12 @@ Identity is loaded from an external file at the specified path. On first startup
 | POST | `/auth/magic-link` | Request a magic link | No |
 | GET | `/auth/magic-link/verify` | Verify a magic link code | No |
 | POST | `/auth/refresh` | Refresh an expired JWT | No |
-| POST | `/admin/api-keys` | Create an API key | Yes (root) |
-| GET | `/admin/api-keys` | List API keys | Yes (root) |
-| DELETE | `/admin/api-keys/{key_id}` | Revoke an API key | Yes (root) |
-| POST | `/api-keys` | Create an API key (self-service) | Yes |
-| GET | `/api-keys` | List your own API keys | Yes |
-| DELETE | `/api-keys/{key_id}` | Revoke your own API key | Yes |
+| POST | `/auth/keys/admin` | Create an API key | Yes (root) |
+| GET | `/auth/keys/admin` | List API keys | Yes (root) |
+| DELETE | `/auth/keys/admin/{key_id}` | Revoke an API key | Yes (root) |
+| POST | `/auth/keys` | Create an API key (self-service) | Yes |
+| GET | `/auth/keys` | List your own API keys | Yes |
+| DELETE | `/auth/keys/{key_id}` | Revoke your own API key | Yes |
 
 ---
 
@@ -296,9 +296,9 @@ curl -X POST http://localhost:3000/auth/token \
 
 ## API Keys (Admin)
 
-The `/admin/api-keys` endpoints listed in the endpoint summary are for root administrators managing any user's keys.
+The `/auth/keys/admin` endpoints listed in the endpoint summary are for root administrators managing any user's keys.
 
-> **Note:** The `/admin/api-keys` endpoints are for root administrators managing any user's keys. For self-service key management, see [Self-Service API Keys](#self-service-api-keys) below.
+> **Note:** The `/auth/keys/admin` endpoints are for root administrators managing any user's keys. For self-service key management, see [Self-Service API Keys](#self-service-api-keys) below.
 
 ---
 
@@ -306,7 +306,7 @@ The `/admin/api-keys` endpoints listed in the endpoint summary are for root admi
 
 Any authenticated user can create, list, and revoke their own API keys. Root users can additionally create keys for other users.
 
-### POST /api-keys
+### POST /auth/keys
 
 Create an API key for yourself.
 
@@ -349,7 +349,7 @@ The `key` field (plaintext) is returned **once** and can never be retrieved agai
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/api-keys \
+curl -X POST http://localhost:3000/auth/keys \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -362,7 +362,7 @@ curl -X POST http://localhost:3000/api-keys \
   }'
 ```
 
-### GET /api-keys
+### GET /auth/keys
 
 List your own API keys (non-revoked). Root users see all keys.
 
@@ -383,7 +383,7 @@ List your own API keys (non-revoked). Root users see all keys.
 
 Never includes the key hash or plaintext.
 
-### DELETE /api-keys/{key_id}
+### DELETE /auth/keys/{key_id}
 
 Revoke one of your own API keys. Root users can revoke anyone's key.
 

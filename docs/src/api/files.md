@@ -1,20 +1,20 @@
 # Files & Directories
 
-AeorDB exposes a content-addressable filesystem through its engine routes. Every path under `/engine/` represents either a file or a directory.
+AeorDB exposes a content-addressable filesystem through its file routes. Every path under `/files/` represents either a file or a directory.
 
 ## Endpoint Summary
 
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
-| PUT | `/engine/{path}` | Store a file | Yes | 201, 400, 404, 409, 500 |
-| GET | `/engine/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
-| DELETE | `/engine/{path}` | Delete a file | Yes | 200, 404, 500 |
-| HEAD | `/engine/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
-| POST | `/engine-symlink/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
+| PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 500 |
+| GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
+| DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
+| HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
+| PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 ---
 
-## PUT /engine/{path}
+## PUT /files/{path}
 
 Store a file at the given path. Parent directories are created automatically. If a file already exists at the path, it is overwritten (creating a new version).
 
@@ -35,7 +35,7 @@ Store a file at the given path. Parent directories are created automatically. If
 {
   "path": "/data/report.pdf",
   "content_type": "application/pdf",
-  "total_size": 245678,
+  "size": 245678,
   "created_at": 1775968398000,
   "updated_at": 1775968398000
 }
@@ -50,7 +50,7 @@ Store a file at the given path. Parent directories are created automatically. If
 ### Example
 
 ```bash
-curl -X PUT http://localhost:3000/engine/data/report.pdf \
+curl -X PUT http://localhost:3000/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/pdf" \
   --data-binary @report.pdf
@@ -67,11 +67,11 @@ curl -X PUT http://localhost:3000/engine/data/report.pdf \
 
 ---
 
-## GET /engine/{path}
+## GET /files/{path}
 
 Read a file or list a directory. The server determines the type automatically:
 - If the path resolves to a **file**, the file content is streamed with appropriate headers.
-- If the path resolves to a **directory**, a JSON array of children is returned.
+- If the path resolves to a **directory**, a JSON object with an `items` array of children is returned.
 
 ### Request
 
@@ -96,10 +96,10 @@ Read a file or list a directory. The server determines the type automatically:
 
 | Header | Description |
 |--------|-------------|
-| `X-Path` | Canonical path of the file |
-| `X-Total-Size` | File size in bytes |
-| `X-Created-At` | Unix timestamp (milliseconds) |
-| `X-Updated-At` | Unix timestamp (milliseconds) |
+| `X-AeorDB-Path` | Canonical path of the file |
+| `X-AeorDB-Size` | File size in bytes |
+| `X-AeorDB-Created-At` | Unix timestamp (milliseconds) |
+| `X-AeorDB-Updated-At` | Unix timestamp (milliseconds) |
 | `Content-Type` | MIME type (if known) |
 
 **Body:** raw file bytes (streamed)
@@ -113,39 +113,41 @@ Each entry includes `path`, `hash`, and numeric `entry_type` fields. Symlink ent
 Entry types: `2` = file, `3` = directory, `8` = symlink.
 
 ```json
-[
-  {
-    "path": "/data/report.pdf",
-    "name": "report.pdf",
-    "entry_type": 2,
-    "hash": "a3f8c1...",
-    "total_size": 245678,
-    "created_at": 1775968398000,
-    "updated_at": 1775968398000,
-    "content_type": "application/pdf"
-  },
-  {
-    "path": "/data/images",
-    "name": "images",
-    "entry_type": 3,
-    "hash": "b2c4d5...",
-    "total_size": 0,
-    "created_at": 1775968000000,
-    "updated_at": 1775968000000,
-    "content_type": null
-  },
-  {
-    "path": "/data/latest",
-    "name": "latest",
-    "entry_type": 8,
-    "hash": "c3d5e6...",
-    "target": "/data/report.pdf",
-    "total_size": 0,
-    "created_at": 1775968500000,
-    "updated_at": 1775968500000,
-    "content_type": null
-  }
-]
+{
+  "items": [
+    {
+      "path": "/data/report.pdf",
+      "name": "report.pdf",
+      "entry_type": 2,
+      "hash": "a3f8c1...",
+      "size": 245678,
+      "created_at": 1775968398000,
+      "updated_at": 1775968398000,
+      "content_type": "application/pdf"
+    },
+    {
+      "path": "/data/images",
+      "name": "images",
+      "entry_type": 3,
+      "hash": "b2c4d5...",
+      "size": 0,
+      "created_at": 1775968000000,
+      "updated_at": 1775968000000,
+      "content_type": null
+    },
+    {
+      "path": "/data/latest",
+      "name": "latest",
+      "entry_type": 8,
+      "hash": "c3d5e6...",
+      "target": "/data/report.pdf",
+      "size": 0,
+      "created_at": 1775968500000,
+      "updated_at": 1775968500000,
+      "content_type": null
+    }
+  ]
+}
 ```
 
 ### Examples
@@ -153,7 +155,7 @@ Entry types: `2` = file, `3` = directory, `8` = symlink.
 Read a file:
 
 ```bash
-curl http://localhost:3000/engine/data/report.pdf \
+curl http://localhost:3000/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN" \
   -o report.pdf
 ```
@@ -161,7 +163,7 @@ curl http://localhost:3000/engine/data/report.pdf \
 List a directory:
 
 ```bash
-curl http://localhost:3000/engine/data/ \
+curl http://localhost:3000/files/data/ \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -171,15 +173,15 @@ Use the `depth` and `glob` query parameters to list files recursively:
 
 ```bash
 # List all files recursively
-curl http://localhost:3000/engine/data/?depth=-1 \
+curl http://localhost:3000/files/data/?depth=-1 \
   -H "Authorization: Bearer $TOKEN"
 
 # List only .psd files anywhere under /assets/
-curl "http://localhost:3000/engine/assets/?depth=-1&glob=*.psd" \
+curl "http://localhost:3000/files/assets/?depth=-1&glob=*.psd" \
   -H "Authorization: Bearer $TOKEN"
 
 # List one level deep
-curl http://localhost:3000/engine/data/?depth=1 \
+curl http://localhost:3000/files/data/?depth=1 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -191,11 +193,11 @@ Read a file as it was at a specific snapshot or version:
 
 ```bash
 # Read file at a named snapshot
-curl "http://localhost:3000/engine/data/report.pdf?snapshot=v1.0" \
+curl "http://localhost:3000/files/data/report.pdf?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN"
 
 # Read file at a specific version hash
-curl "http://localhost:3000/engine/data/report.pdf?version=a1b2c3..." \
+curl "http://localhost:3000/files/data/report.pdf?version=a1b2c3..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -210,7 +212,7 @@ If both `snapshot` and `version` are provided, `snapshot` takes precedence. Retu
 
 ---
 
-## DELETE /engine/{path}
+## DELETE /files/{path}
 
 Delete a file at the given path. Creates a `DeletionRecord` and removes the file from its parent directory listing. Directories cannot be deleted directly -- delete all files within first.
 
@@ -238,7 +240,7 @@ Delete a file at the given path. Creates a `DeletionRecord` and removes the file
 ### Example
 
 ```bash
-curl -X DELETE http://localhost:3000/engine/data/report.pdf \
+curl -X DELETE http://localhost:3000/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -255,7 +257,7 @@ curl -X DELETE http://localhost:3000/engine/data/report.pdf \
 
 AeorDB supports soft symlinks — entries that point to another path. Symlinks are transparent by default: reading a symlink path returns the target's content.
 
-### POST /engine-symlink/{path}
+### PUT /links/{path}
 
 Create or update a symlink.
 
@@ -283,18 +285,18 @@ The target path does not need to exist at creation time (dangling symlinks are a
 
 ### Reading Symlinks
 
-By default, `GET /engine/{path}` follows symlinks transparently:
+By default, `GET /files/{path}` follows symlinks transparently:
 
 ```bash
 # Returns the content of /assets/logo.psd
-curl http://localhost:3000/engine/latest-logo \
+curl http://localhost:3000/files/latest-logo \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 To inspect the symlink itself without following it, use `?nofollow=true`:
 
 ```bash
-curl "http://localhost:3000/engine/latest-logo?nofollow=true" \
+curl "http://localhost:3000/files/latest-logo?nofollow=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -306,31 +308,31 @@ Symlinks can point to other symlinks — chains are followed recursively. AeorDB
 
 | Scenario | Result |
 |----------|--------|
-| Symlink → file | Returns file content |
-| Symlink → directory | Returns directory listing |
-| Symlink → symlink → file | Follows chain, returns file content |
-| Symlink → nonexistent | 404 (dangling symlink) |
-| Symlink cycle (A → B → A) | 400 with cycle detection message |
+| Symlink -> file | Returns file content |
+| Symlink -> directory | Returns directory listing |
+| Symlink -> symlink -> file | Follows chain, returns file content |
+| Symlink -> nonexistent | 404 (dangling symlink) |
+| Symlink cycle (A -> B -> A) | 400 with cycle detection message |
 | Chain exceeds 32 hops | 400 with depth exceeded message |
 
 ### HEAD on Symlinks
 
-`HEAD /engine/{path}` returns symlink metadata as headers:
+`HEAD /files/{path}` returns symlink metadata as headers:
 
 ```
-X-Entry-Type: symlink
-X-Symlink-Target: /assets/logo.psd
-X-Path: /latest-logo
-X-Created-At: 1775968398000
-X-Updated-At: 1775968398000
+X-AeorDB-Entry-Type: symlink
+X-AeorDB-Symlink-Target: /assets/logo.psd
+X-AeorDB-Path: /latest-logo
+X-AeorDB-Created-At: 1775968398000
+X-AeorDB-Updated-At: 1775968398000
 ```
 
 ### Deleting Symlinks
 
-`DELETE /engine/{path}` on a symlink deletes the symlink itself, not the target:
+`DELETE /files/{path}` on a symlink deletes the symlink itself, not the target:
 
 ```bash
-curl -X DELETE http://localhost:3000/engine/latest-logo \
+curl -X DELETE http://localhost:3000/files/latest-logo \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -338,7 +340,7 @@ curl -X DELETE http://localhost:3000/engine/latest-logo \
 {
   "deleted": true,
   "path": "latest-logo",
-  "type": "symlink"
+  "entry_type": "symlink"
 }
 ```
 
@@ -353,7 +355,7 @@ Symlinks appear in directory listings with `entry_type: 8` and a `target` field:
   "entry_type": 8,
   "hash": "c3d5e6...",
   "target": "/data/report.pdf",
-  "total_size": 0,
+  "size": 0,
   "created_at": 1775968500000,
   "updated_at": 1775968500000,
   "content_type": null
@@ -366,7 +368,7 @@ Symlinks are versioned like files. Snapshots capture the symlink's target path a
 
 ---
 
-## HEAD /engine/{path}
+## HEAD /files/{path}
 
 Check whether a path exists and retrieve its metadata as response headers, without downloading the body. Works for both files and directories.
 
@@ -383,28 +385,28 @@ Check whether a path exists and retrieve its metadata as response headers, witho
 
 | Header | Value |
 |--------|-------|
-| `X-Entry-Type` | `file`, `directory`, or `symlink` |
-| `X-Path` | Canonical path |
-| `X-Total-Size` | File size in bytes (files only) |
-| `X-Created-At` | Unix timestamp in milliseconds (files only) |
-| `X-Updated-At` | Unix timestamp in milliseconds (files only) |
+| `X-AeorDB-Entry-Type` | `file`, `directory`, or `symlink` |
+| `X-AeorDB-Path` | Canonical path |
+| `X-AeorDB-Size` | File size in bytes (files only) |
+| `X-AeorDB-Created-At` | Unix timestamp in milliseconds (files only) |
+| `X-AeorDB-Updated-At` | Unix timestamp in milliseconds (files only) |
 | `Content-Type` | MIME type (files only, if known) |
-| `X-Symlink-Target` | Target path (symlinks only) |
+| `X-AeorDB-Symlink-Target` | Target path (symlinks only) |
 
 ### Example
 
 ```bash
-curl -I http://localhost:3000/engine/data/report.pdf \
+curl -I http://localhost:3000/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ```
 HTTP/1.1 200 OK
-X-Entry-Type: file
-X-Path: /data/report.pdf
-X-Total-Size: 245678
-X-Created-At: 1775968398000
-X-Updated-At: 1775968398000
+X-AeorDB-Entry-Type: file
+X-AeorDB-Path: /data/report.pdf
+X-AeorDB-Size: 245678
+X-AeorDB-Created-At: 1775968398000
+X-AeorDB-Updated-At: 1775968398000
 Content-Type: application/pdf
 ```
 

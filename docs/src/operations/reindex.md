@@ -18,7 +18,7 @@ Changing `indexes.json` via the API automatically triggers a background reindex 
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/reindex \
+curl -X POST http://localhost:3000/system/tasks/reindex \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path": "/data/"}'
@@ -47,7 +47,7 @@ During an active reindex, query responses include a `meta.reindexing` field indi
 You can also check progress through the task system:
 
 ```bash
-curl http://localhost:3000/admin/tasks \
+curl http://localhost:3000/system/tasks \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -95,7 +95,7 @@ The checkpoint is the name of the last successfully processed file (files are pr
 Cancel a running reindex task:
 
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/{task_id}/cancel \
+curl -X POST http://localhost:3000/system/tasks/{task_id}/cancel \
   -H "Authorization: Bearer $API_KEY"
 ```
 

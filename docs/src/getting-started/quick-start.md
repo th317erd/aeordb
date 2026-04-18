@@ -15,7 +15,7 @@ You should see log output indicating the server is listening on port 3000. The `
 Store a JSON file at the path `/users/alice.json`:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/users/alice.json \
+curl -X PUT http://localhost:3000/files/users/alice.json \
   -H "Content-Type: application/json" \
   -d '{"name":"Alice","age":30,"city":"Portland"}'
 ```
@@ -33,11 +33,11 @@ Expected response:
 Store a few more files to have data to query:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/users/bob.json \
+curl -X PUT http://localhost:3000/files/users/bob.json \
   -H "Content-Type: application/json" \
   -d '{"name":"Bob","age":25,"city":"Seattle"}'
 
-curl -X PUT http://localhost:3000/engine/users/carol.json \
+curl -X PUT http://localhost:3000/files/users/carol.json \
   -H "Content-Type: application/json" \
   -d '{"name":"Carol","age":35,"city":"Portland"}'
 ```
@@ -45,7 +45,7 @@ curl -X PUT http://localhost:3000/engine/users/carol.json \
 ## 3. Read a File
 
 ```bash
-curl http://localhost:3000/engine/users/alice.json
+curl http://localhost:3000/files/users/alice.json
 ```
 
 Expected response:
@@ -59,7 +59,7 @@ Expected response:
 Append a trailing slash to list directory contents:
 
 ```bash
-curl http://localhost:3000/engine/users/
+curl http://localhost:3000/files/users/
 ```
 
 Expected response:
@@ -80,7 +80,7 @@ Expected response:
 To query fields, you need to tell AeorDB which fields to index. Store an index configuration at `.config/indexes.json` inside the directory:
 
 ```bash
-curl -X PUT http://localhost:3000/engine/users/.config/indexes.json \
+curl -X PUT http://localhost:3000/files/users/.config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "indexes": [
@@ -98,7 +98,7 @@ This tells the engine to index the `age` field as a 64-bit unsigned integer, `ci
 Query for users older than 28 in Portland:
 
 ```bash
-curl -X POST http://localhost:3000/query \
+curl -X POST http://localhost:3000/files/query \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/users/",
@@ -141,7 +141,7 @@ Expected response:
 Save the current state as a named snapshot:
 
 ```bash
-curl -X POST http://localhost:3000/version/snapshot \
+curl -X POST http://localhost:3000/versions/snapshots \
   -H "Content-Type: application/json" \
   -d '{"name": "v1"}'
 ```
@@ -159,13 +159,13 @@ Expected response:
 You can list all snapshots:
 
 ```bash
-curl http://localhost:3000/version/snapshots
+curl http://localhost:3000/versions/snapshots
 ```
 
 ## 8. Delete a File
 
 ```bash
-curl -X DELETE http://localhost:3000/engine/users/alice.json
+curl -X DELETE http://localhost:3000/files/users/alice.json
 ```
 
 Expected response:
@@ -184,7 +184,7 @@ The file is removed from the current state (HEAD), but the snapshot `v1` still c
 Over time, deleted and overwritten data accumulates in the database file. Run GC to reclaim unreachable entries:
 
 ```bash
-curl -X POST http://localhost:3000/admin/gc
+curl -X POST http://localhost:3000/system/gc
 ```
 
 Expected response:
@@ -203,7 +203,7 @@ Expected response:
 To preview what would be collected without actually deleting:
 
 ```bash
-curl -X POST "http://localhost:3000/admin/gc?dry_run=true"
+curl -X POST "http://localhost:3000/system/gc?dry_run=true"
 ```
 
 ## Next Steps

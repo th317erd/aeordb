@@ -6,11 +6,11 @@ The query engine supports indexed field queries with boolean combinators, pagina
 
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
-| POST | `/query` | Execute a query | Yes | 200, 400, 404, 500 |
+| POST | `/files/query` | Execute a query | Yes | 200, 400, 404, 500 |
 
 ---
 
-## POST /query
+## POST /files/query
 
 Execute a query against indexed fields within a directory path.
 
@@ -207,7 +207,7 @@ An array at the top level is sugar for AND:
   "results": [
     {
       "path": "/users/alice.json",
-      "total_size": 256,
+      "size": 256,
       "content_type": "application/json",
       "created_at": 1775968398000,
       "updated_at": 1775968398000,
@@ -247,7 +247,7 @@ Each result object contains:
 | Field | Type | Description |
 |-------|------|-------------|
 | `path` | string | Full path to the matched file |
-| `total_size` | integer | File size in bytes |
+| `size` | integer | File size in bytes |
 | `content_type` | string | MIME type (nullable) |
 | `created_at` | integer | Creation timestamp (ms) |
 | `updated_at` | integer | Last update timestamp (ms) |
@@ -314,7 +314,7 @@ Return only specific fields in each result. Use `@`-prefixed names for built-in 
 |---------------|---------|
 | `@path` | `path` |
 | `@score` | `score` |
-| `@size` | `total_size` |
+| `@size` | `size` |
 | `@content_type` | `content_type` |
 | `@created_at` | `created_at` |
 | `@updated_at` | `updated_at` |
@@ -384,7 +384,7 @@ Inspect the query execution plan without running the full query. Useful for debu
 ### Simple equality query
 
 ```bash
-curl -X POST http://localhost:3000/query \
+curl -X POST http://localhost:3000/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -397,7 +397,7 @@ curl -X POST http://localhost:3000/query \
 ### Fuzzy name search with pagination
 
 ```bash
-curl -X POST http://localhost:3000/query \
+curl -X POST http://localhost:3000/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -412,7 +412,7 @@ curl -X POST http://localhost:3000/query \
 ### Complex boolean query
 
 ```bash
-curl -X POST http://localhost:3000/query \
+curl -X POST http://localhost:3000/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -437,7 +437,7 @@ curl -X POST http://localhost:3000/query \
 ### Aggregation with grouping
 
 ```bash
-curl -X POST http://localhost:3000/query \
+curl -X POST http://localhost:3000/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

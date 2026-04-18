@@ -1,6 +1,6 @@
-# Admin Operations
+# System Operations
 
-Administrative endpoints for garbage collection, background tasks, cron scheduling, metrics, health checks, backup/restore, and user/group management. Most admin endpoints require **root** access.
+Administrative endpoints for garbage collection, background tasks, cron scheduling, metrics, health checks, backup/restore, and user/group management. Most system endpoints require **root** access.
 
 ## Endpoint Summary
 
@@ -8,76 +8,76 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/gc` | Run synchronous garbage collection | Yes |
+| POST | `/system/gc` | Run synchronous garbage collection | Yes |
 
 ### Background Tasks
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/tasks/reindex` | Trigger a reindex task | Yes |
-| POST | `/admin/tasks/gc` | Trigger a background GC task | Yes |
-| GET | `/admin/tasks` | List all tasks with progress | Yes |
-| GET | `/admin/tasks/{id}` | Get a single task | Yes |
-| DELETE | `/admin/tasks/{id}` | Cancel a task | Yes |
+| POST | `/system/tasks/reindex` | Trigger a reindex task | Yes |
+| POST | `/system/tasks/gc` | Trigger a background GC task | Yes |
+| GET | `/system/tasks` | List all tasks with progress | Yes |
+| GET | `/system/tasks/{id}` | Get a single task | Yes |
+| DELETE | `/system/tasks/{id}` | Cancel a task | Yes |
 
 ### Cron Scheduling
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| GET | `/admin/cron` | List cron schedules | Yes |
-| POST | `/admin/cron` | Create a cron schedule | Yes |
-| PATCH | `/admin/cron/{id}` | Update a cron schedule | Yes |
-| DELETE | `/admin/cron/{id}` | Delete a cron schedule | Yes |
+| GET | `/system/cron` | List cron schedules | Yes |
+| POST | `/system/cron` | Create a cron schedule | Yes |
+| PATCH | `/system/cron/{id}` | Update a cron schedule | Yes |
+| DELETE | `/system/cron/{id}` | Delete a cron schedule | Yes |
 
 ### Backup & Restore
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/export` | Export database as `.aeordb` | Yes |
-| POST | `/admin/diff` | Create patch between versions | Yes |
-| POST | `/admin/import` | Import a backup or patch | Yes |
-| POST | `/admin/promote` | Promote a version hash to HEAD | Yes |
+| POST | `/versions/export` | Export database as `.aeordb` | Yes |
+| POST | `/versions/diff` | Create patch between versions | Yes |
+| POST | `/versions/import` | Import a backup or patch | Yes |
+| POST | `/versions/promote` | Promote a version hash to HEAD | Yes |
 
 ### Monitoring
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| GET | `/admin/metrics` | Prometheus metrics | Yes (auth required) |
-| GET | `/admin/health` | Health check | No (public) |
+| GET | `/system/metrics` | Prometheus metrics | Yes (auth required) |
+| GET | `/system/health` | Health check | No (public) |
 
 ### API Key Management
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/api-keys` | Create an API key | Yes |
-| GET | `/admin/api-keys` | List all API keys | Yes |
-| DELETE | `/admin/api-keys/{key_id}` | Revoke an API key | Yes |
+| POST | `/auth/keys/admin` | Create an API key | Yes |
+| GET | `/auth/keys/admin` | List all API keys | Yes |
+| DELETE | `/auth/keys/admin/{key_id}` | Revoke an API key | Yes |
 
 ### User Management
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/users` | Create a user | Yes |
-| GET | `/admin/users` | List all users | Yes |
-| GET | `/admin/users/{user_id}` | Get a user | Yes |
-| PATCH | `/admin/users/{user_id}` | Update a user | Yes |
-| DELETE | `/admin/users/{user_id}` | Deactivate a user (soft delete) | Yes |
+| POST | `/system/users` | Create a user | Yes |
+| GET | `/system/users` | List all users | Yes |
+| GET | `/system/users/{user_id}` | Get a user | Yes |
+| PATCH | `/system/users/{user_id}` | Update a user | Yes |
+| DELETE | `/system/users/{user_id}` | Deactivate a user (soft delete) | Yes |
 
 ### Group Management
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| POST | `/admin/groups` | Create a group | Yes |
-| GET | `/admin/groups` | List all groups | Yes |
-| GET | `/admin/groups/{name}` | Get a group | Yes |
-| PATCH | `/admin/groups/{name}` | Update a group | Yes |
-| DELETE | `/admin/groups/{name}` | Delete a group | Yes |
+| POST | `/system/groups` | Create a group | Yes |
+| GET | `/system/groups` | List all groups | Yes |
+| GET | `/system/groups/{name}` | Get a group | Yes |
+| PATCH | `/system/groups/{name}` | Update a group | Yes |
+| DELETE | `/system/groups/{name}` | Delete a group | Yes |
 
 ---
 
 ## Garbage Collection
 
-### POST /admin/gc
+### POST /system/gc
 
 Run garbage collection synchronously. Identifies and removes orphaned entries not reachable from the current HEAD.
 
@@ -95,11 +95,11 @@ The response contains GC statistics (entries scanned, reclaimed bytes, etc.).
 
 ```bash
 # Dry run
-curl -X POST "http://localhost:3000/admin/gc?dry_run=true" \
+curl -X POST "http://localhost:3000/system/gc?dry_run=true" \
   -H "Authorization: Bearer $TOKEN"
 
 # Actual GC
-curl -X POST http://localhost:3000/admin/gc \
+curl -X POST http://localhost:3000/system/gc \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -114,7 +114,7 @@ curl -X POST http://localhost:3000/admin/gc \
 
 ## Background Tasks
 
-### POST /admin/tasks/reindex
+### POST /system/tasks/reindex
 
 Enqueue a reindex task for a directory path. Re-scans all files and rebuilds index entries.
 
@@ -139,7 +139,7 @@ Enqueue a reindex task for a directory path. Re-scans all files and rebuilds ind
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/reindex \
+curl -X POST http://localhost:3000/system/tasks/reindex \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"path": "/data/"}'
@@ -147,7 +147,7 @@ curl -X POST http://localhost:3000/admin/tasks/reindex \
 
 ---
 
-### POST /admin/tasks/gc
+### POST /system/tasks/gc
 
 Enqueue a background GC task (non-blocking).
 
@@ -172,7 +172,7 @@ Enqueue a background GC task (non-blocking).
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/admin/tasks/gc \
+curl -X POST http://localhost:3000/system/tasks/gc \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"dry_run": false}'
@@ -180,23 +180,25 @@ curl -X POST http://localhost:3000/admin/tasks/gc \
 
 ---
 
-### GET /admin/tasks
+### GET /system/tasks
 
 List all tasks with their current progress.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "id": "task-uuid-here",
-    "task_type": "reindex",
-    "status": "running",
-    "args": {"path": "/data/"},
-    "progress": 0.45,
-    "eta_ms": 1775968500000
-  }
-]
+{
+  "items": [
+    {
+      "id": "task-uuid-here",
+      "task_type": "reindex",
+      "status": "running",
+      "args": {"path": "/data/"},
+      "progress": 0.45,
+      "eta_ms": 1775968500000
+    }
+  ]
+}
 ```
 
 Each task includes `progress` (0.0-1.0) and `eta_ms` (estimated completion timestamp) if available.
@@ -204,13 +206,13 @@ Each task includes `progress` (0.0-1.0) and `eta_ms` (estimated completion times
 **Example:**
 
 ```bash
-curl http://localhost:3000/admin/tasks \
+curl http://localhost:3000/system/tasks \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-### GET /admin/tasks/{id}
+### GET /system/tasks/{id}
 
 Get a single task by ID.
 
@@ -235,7 +237,7 @@ Get a single task by ID.
 
 ---
 
-### DELETE /admin/tasks/{id}
+### DELETE /system/tasks/{id}
 
 Cancel a task.
 
@@ -251,7 +253,7 @@ Cancel a task.
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/admin/tasks/task-uuid-here \
+curl -X DELETE http://localhost:3000/system/tasks/task-uuid-here \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -259,27 +261,29 @@ curl -X DELETE http://localhost:3000/admin/tasks/task-uuid-here \
 
 ## Cron Scheduling
 
-### GET /admin/cron
+### GET /system/cron
 
 List all cron schedules.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "id": "nightly-gc",
-    "schedule": "0 2 * * *",
-    "task_type": "gc",
-    "args": {"dry_run": false},
-    "enabled": true
-  }
-]
+{
+  "items": [
+    {
+      "id": "nightly-gc",
+      "schedule": "0 2 * * *",
+      "task_type": "gc",
+      "args": {"dry_run": false},
+      "enabled": true
+    }
+  ]
+}
 ```
 
 ---
 
-### POST /admin/cron
+### POST /system/cron
 
 Create a new cron schedule.
 
@@ -308,7 +312,7 @@ Create a new cron schedule.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/admin/cron \
+curl -X POST http://localhost:3000/system/cron \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -329,7 +333,7 @@ curl -X POST http://localhost:3000/admin/cron \
 
 ---
 
-### PATCH /admin/cron/{id}
+### PATCH /system/cron/{id}
 
 Update a cron schedule. All fields are optional -- only provided fields are changed.
 
@@ -362,7 +366,7 @@ Returns the updated schedule.
 
 ---
 
-### DELETE /admin/cron/{id}
+### DELETE /system/cron/{id}
 
 Delete a cron schedule.
 
@@ -385,7 +389,7 @@ Delete a cron schedule.
 
 ## Backup & Restore
 
-### POST /admin/export
+### POST /versions/export
 
 Export the database (or a specific version) as an `.aeordb` archive file.
 
@@ -406,24 +410,24 @@ Export the database (or a specific version) as an `.aeordb` archive file.
 
 ```bash
 # Export HEAD
-curl -X POST http://localhost:3000/admin/export \
+curl -X POST http://localhost:3000/versions/export \
   -H "Authorization: Bearer $TOKEN" \
   -o backup.aeordb
 
 # Export a specific snapshot
-curl -X POST "http://localhost:3000/admin/export?snapshot=v1.0" \
+curl -X POST "http://localhost:3000/versions/export?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN" \
   -o backup-v1.aeordb
 
 # Export by hash
-curl -X POST "http://localhost:3000/admin/export?hash=a1b2c3d4..." \
+curl -X POST "http://localhost:3000/versions/export?hash=a1b2c3d4..." \
   -H "Authorization: Bearer $TOKEN" \
   -o backup.aeordb
 ```
 
 ---
 
-### POST /admin/diff
+### POST /versions/diff
 
 Create a patch file representing the difference between two versions.
 
@@ -443,14 +447,14 @@ Create a patch file representing the difference between two versions.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/admin/diff?from=v1.0&to=v2.0" \
+curl -X POST "http://localhost:3000/versions/diff?from=v1.0&to=v2.0" \
   -H "Authorization: Bearer $TOKEN" \
   -o patch-v1-v2.aeordb
 ```
 
 ---
 
-### POST /admin/import
+### POST /versions/import
 
 Import a backup or patch file. Body limit: **10 MB**.
 
@@ -486,7 +490,7 @@ Import a backup or patch file. Body limit: **10 MB**.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/admin/import?promote=true" \
+curl -X POST "http://localhost:3000/versions/import?promote=true" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @backup.aeordb
 ```
@@ -500,7 +504,7 @@ curl -X POST "http://localhost:3000/admin/import?promote=true" \
 
 ---
 
-### POST /admin/promote
+### POST /versions/promote
 
 Promote an arbitrary version hash to HEAD.
 
@@ -522,7 +526,7 @@ Promote an arbitrary version hash to HEAD.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/admin/promote?hash=a1b2c3d4e5f6..." \
+curl -X POST "http://localhost:3000/versions/promote?hash=a1b2c3d4e5f6..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -537,7 +541,7 @@ curl -X POST "http://localhost:3000/admin/promote?hash=a1b2c3d4e5f6..." \
 
 ## Monitoring
 
-### GET /admin/health
+### GET /system/health
 
 Public health check endpoint. No authentication required.
 
@@ -552,12 +556,12 @@ Public health check endpoint. No authentication required.
 **Example:**
 
 ```bash
-curl http://localhost:3000/admin/health
+curl http://localhost:3000/system/health
 ```
 
 ---
 
-### GET /admin/metrics
+### GET /system/metrics
 
 Prometheus-format metrics endpoint. Requires authentication.
 
@@ -569,7 +573,7 @@ Prometheus-format metrics endpoint. Requires authentication.
 **Example:**
 
 ```bash
-curl http://localhost:3000/admin/metrics \
+curl http://localhost:3000/system/metrics \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -577,7 +581,7 @@ curl http://localhost:3000/admin/metrics \
 
 ## API Key Management
 
-### POST /admin/api-keys
+### POST /auth/keys/admin
 
 Create a new API key. The plaintext key is returned **only once** -- store it securely. Requires root.
 
@@ -607,7 +611,7 @@ Create a new API key. The plaintext key is returned **only once** -- store it se
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/admin/api-keys \
+curl -X POST http://localhost:3000/auth/keys/admin \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "550e8400-e29b-41d4-a716-446655440000"}'
@@ -615,26 +619,28 @@ curl -X POST http://localhost:3000/admin/api-keys \
 
 ---
 
-### GET /admin/api-keys
+### GET /auth/keys/admin
 
 List all API keys (metadata only -- no secrets). Requires root.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "key_id": "660e8400-e29b-41d4-a716-446655440001",
-    "user_id": "550e8400-e29b-41d4-a716-446655440000",
-    "created_at": "2026-04-13T10:00:00Z",
-    "is_revoked": false
-  }
-]
+{
+  "items": [
+    {
+      "key_id": "660e8400-e29b-41d4-a716-446655440001",
+      "user_id": "550e8400-e29b-41d4-a716-446655440000",
+      "created_at": "2026-04-13T10:00:00Z",
+      "is_revoked": false
+    }
+  ]
+}
 ```
 
 ---
 
-### DELETE /admin/api-keys/{key_id}
+### DELETE /auth/keys/admin/{key_id}
 
 Revoke an API key. Revoked keys cannot be used to obtain tokens. Requires root.
 
@@ -658,7 +664,7 @@ Revoke an API key. Revoked keys cannot be used to obtain tokens. Requires root.
 
 ## User Management
 
-### POST /admin/users
+### POST /system/users
 
 Create a new user. Requires root.
 
@@ -691,28 +697,30 @@ Create a new user. Requires root.
 
 ---
 
-### GET /admin/users
+### GET /system/users
 
 List all users. Requires root.
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "user_id": "550e8400-e29b-41d4-a716-446655440000",
-    "username": "alice",
-    "email": "alice@example.com",
-    "is_active": true,
-    "created_at": 1775968398000,
-    "updated_at": 1775968398000
-  }
-]
+{
+  "items": [
+    {
+      "user_id": "550e8400-e29b-41d4-a716-446655440000",
+      "username": "alice",
+      "email": "alice@example.com",
+      "is_active": true,
+      "created_at": 1775968398000,
+      "updated_at": 1775968398000
+    }
+  ]
+}
 ```
 
 ---
 
-### GET /admin/users/{user_id}
+### GET /system/users/{user_id}
 
 Get a single user. Requires root.
 
@@ -727,7 +735,7 @@ Get a single user. Requires root.
 
 ---
 
-### PATCH /admin/users/{user_id}
+### PATCH /system/users/{user_id}
 
 Update a user. All fields are optional. Requires root.
 
@@ -745,7 +753,7 @@ Update a user. All fields are optional. Requires root.
 
 ---
 
-### DELETE /admin/users/{user_id}
+### DELETE /system/users/{user_id}
 
 Deactivate a user (soft delete -- sets `is_active` to false). Requires root.
 
@@ -764,7 +772,7 @@ Deactivate a user (soft delete -- sets `is_active` to false). Requires root.
 
 Groups define path-level access control rules using query-based membership.
 
-### POST /admin/groups
+### POST /system/groups
 
 Create a new group. Requires root.
 
@@ -774,7 +782,7 @@ Create a new group. Requires root.
 {
   "name": "editors",
   "default_allow": "/content/*",
-  "default_deny": "/admin/*",
+  "default_deny": "/system/*",
   "query_field": "role",
   "query_operator": "eq",
   "query_value": "editor"
@@ -796,7 +804,7 @@ Create a new group. Requires root.
 {
   "name": "editors",
   "default_allow": "/content/*",
-  "default_deny": "/admin/*",
+  "default_deny": "/system/*",
   "query_field": "role",
   "query_operator": "eq",
   "query_value": "editor",
@@ -807,15 +815,15 @@ Create a new group. Requires root.
 
 ---
 
-### GET /admin/groups
+### GET /system/groups
 
 List all groups. Requires root.
 
-**Response:** `200 OK` (array of group objects)
+**Response:** `200 OK` (object with `items` array of group objects)
 
 ---
 
-### GET /admin/groups/{name}
+### GET /system/groups/{name}
 
 Get a single group. Requires root.
 
@@ -827,7 +835,7 @@ Get a single group. Requires root.
 
 ---
 
-### PATCH /admin/groups/{name}
+### PATCH /system/groups/{name}
 
 Update a group. All fields are optional. Requires root.
 
@@ -851,7 +859,7 @@ The `query_field` value is validated against a whitelist of safe fields. Attempt
 
 ---
 
-### DELETE /admin/groups/{name}
+### DELETE /system/groups/{name}
 
 Delete a group. Requires root.
 
