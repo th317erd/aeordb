@@ -23,6 +23,20 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
 
   let auth_mode = resolve_auth_mode(auth_flag);
 
+  let auth_mode_str = match &auth_mode {
+    AuthMode::Disabled => "disabled (dev mode)".to_string(),
+    AuthMode::SelfContained => "self-contained".to_string(),
+    AuthMode::File(path) => format!("file://{}", path),
+  };
+
+  tracing::info!(
+    port = %port,
+    auth_mode = %auth_mode_str,
+    db_path = %database,
+    version = env!("CARGO_PKG_VERSION"),
+    "AeorDB starting",
+  );
+
   println!("AeorDB v{}", env!("CARGO_PKG_VERSION"));
   println!("Database: {database}");
   println!("Port: {port}");
@@ -107,6 +121,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   // Start the webhook dispatcher (delivers matching events to registered URLs).
   let webhook_handle = spawn_webhook_dispatcher(event_bus, engine.clone(), cancel.clone());
 
+  let startup_instant = std::time::Instant::now();
   let address = SocketAddr::from(([0, 0, 0, 0], port));
   println!("Listening on http://{address}");
 
@@ -149,6 +164,8 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
 
   // Flush engine buffers and sync to disk.
   engine.shutdown().ok();
+  let uptime = startup_instant.elapsed().as_secs();
+  tracing::info!(uptime_seconds = uptime, "AeorDB shutting down");
   println!("Server shut down gracefully.");
 }
 

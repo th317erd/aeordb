@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::auth::TokenClaims;
 use crate::engine::{
     is_root, load_cron_config, save_cron_config, validate_cron_expression,
-    CronConfig, CronSchedule,
+    CronConfig, CronSchedule, RequestContext,
 };
+use crate::engine::system_store;
 use crate::server::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -158,6 +159,34 @@ pub async fn trigger_gc(
         Err(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                 "error": format!("Failed to enqueue gc: {}", e)
+            }))).into_response()
+        }
+    }
+}
+
+/// POST /admin/tasks/cleanup -- run expired token and magic link cleanup.
+///
+/// Returns the number of tokens and magic links cleaned up. This operation
+/// is synchronous and runs inline (no task queue needed).
+pub async fn trigger_cleanup(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+) -> Response {
+    if let Err(resp) = require_root(&claims) {
+        return resp;
+    }
+
+    let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+    match system_store::cleanup_expired_tokens(&state.engine, &ctx) {
+        Ok((tokens, links)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "tokens_cleaned": tokens,
+                "links_cleaned": links,
+            }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "error": format!("Cleanup failed: {}", e)
             }))).into_response()
         }
     }

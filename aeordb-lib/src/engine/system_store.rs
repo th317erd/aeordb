@@ -519,6 +519,78 @@ pub fn revoke_refresh_token(
 }
 
 // ---------------------------------------------------------------------------
+// Cleanup: Expired Tokens & Used/Expired Magic Links
+// ---------------------------------------------------------------------------
+
+/// Clean up expired/revoked refresh tokens and used/expired magic links.
+/// Returns `(tokens_cleaned, links_cleaned)`.
+///
+/// This function is idempotent and safe to run concurrently — each iteration
+/// independently scans the directory and deletes qualifying entries.
+pub fn cleanup_expired_tokens(
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+) -> EngineResult<(usize, usize)> {
+    let ops = DirectoryOps::new(engine);
+    let now = chrono::Utc::now();
+    let mut tokens_cleaned = 0;
+    let mut links_cleaned = 0;
+
+    // Clean up refresh tokens
+    let token_entries = match ops.list_directory("/.system/refresh-tokens") {
+        Ok(entries) => entries,
+        Err(EngineError::NotFound(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+
+    for entry in &token_entries {
+        let path = format!("/.system/refresh-tokens/{}", entry.name);
+        if let Ok(data) = ops.read_file(&path) {
+            if let Ok(record) = serde_json::from_slice::<RefreshTokenRecord>(&data) {
+                if record.is_revoked || record.expires_at < now {
+                    let _ = ops.delete_file(ctx, &path);
+                    tokens_cleaned += 1;
+                }
+            }
+        }
+    }
+
+    // Clean up magic links
+    let link_entries = match ops.list_directory("/.system/magic-links") {
+        Ok(entries) => entries,
+        Err(EngineError::NotFound(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+
+    for entry in &link_entries {
+        let path = format!("/.system/magic-links/{}", entry.name);
+        if let Ok(data) = ops.read_file(&path) {
+            if let Ok(record) = serde_json::from_slice::<MagicLinkRecord>(&data) {
+                if record.is_used || record.expires_at < now {
+                    let _ = ops.delete_file(ctx, &path);
+                    links_cleaned += 1;
+                }
+            }
+        }
+    }
+
+    if tokens_cleaned > 0 || links_cleaned > 0 {
+        tracing::info!(
+            tokens_cleaned = tokens_cleaned,
+            links_cleaned = links_cleaned,
+            "Cleaned up expired tokens and used/expired magic links",
+        );
+    }
+
+    metrics::counter!(crate::metrics::definitions::CLEANUP_TOKENS_TOTAL)
+        .increment(tokens_cleaned as u64);
+    metrics::counter!(crate::metrics::definitions::CLEANUP_LINKS_TOTAL)
+        .increment(links_cleaned as u64);
+
+    Ok((tokens_cleaned, links_cleaned))
+}
+
+// ---------------------------------------------------------------------------
 // Cluster / Replication
 // ---------------------------------------------------------------------------
 

@@ -36,6 +36,14 @@ pub const PLUGIN_INVOCATIONS_TOTAL: &str = "aeordb_plugin_invocations_total";
 pub const PLUGIN_DURATION: &str = "aeordb_plugin_duration_seconds";
 pub const PLUGIN_ERRORS_TOTAL: &str = "aeordb_plugin_errors_total";
 
+// Sync
+pub const SYNC_CYCLES_TOTAL: &str = "aeordb_sync_cycles_total";
+pub const SYNC_CONSECUTIVE_FAILURES: &str = "aeordb_sync_consecutive_failures";
+
+// Cleanup
+pub const CLEANUP_TOKENS_TOTAL: &str = "aeordb_cleanup_tokens_total";
+pub const CLEANUP_LINKS_TOTAL: &str = "aeordb_cleanup_links_total";
+
 // Versions
 pub const VERSION_SNAPSHOTS_TOTAL: &str = "aeordb_version_snapshots_total";
 pub const VERSION_RESTORES_TOTAL: &str = "aeordb_version_restores_total";

@@ -276,6 +276,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/admin/tasks", get(task_routes::list_tasks))
     .route("/admin/tasks/reindex", post(task_routes::trigger_reindex))
     .route("/admin/tasks/gc", post(task_routes::trigger_gc))
+    .route("/admin/tasks/cleanup", post(task_routes::trigger_cleanup))
     .route("/admin/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
     .route("/admin/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/admin/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))

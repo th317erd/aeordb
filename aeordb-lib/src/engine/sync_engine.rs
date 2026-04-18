@@ -711,15 +711,25 @@ pub fn spawn_sync_loop(
                 }
 
                 let result = sync_engine.sync_with_peer(peer.node_id).await;
+                let peer_id_str = peer.node_id.to_string();
                 match &result {
                     Ok(r) => {
                         sync_engine.peer_manager().record_sync_success(peer.node_id);
+                        metrics::counter!(
+                            crate::metrics::definitions::SYNC_CYCLES_TOTAL,
+                            "peer" => peer_id_str.clone(),
+                            "result" => "success"
+                        ).increment(1);
+                        metrics::gauge!(
+                            crate::metrics::definitions::SYNC_CONSECUTIVE_FAILURES,
+                            "peer" => peer_id_str.clone()
+                        ).set(0.0);
                         if r.changes_applied {
                             tracing::info!(
-                                "Sync with peer {}: {} operations applied, {} conflicts",
-                                peer.node_id,
-                                r.operations_applied,
-                                r.conflicts_detected
+                                peer = peer.node_id,
+                                operations = r.operations_applied,
+                                conflicts = r.conflicts_detected,
+                                "Sync with peer completed",
                             );
                         }
                         if let Some(ref bus) = event_bus {
@@ -739,9 +749,20 @@ pub fn spawn_sync_loop(
                         sync_engine.peer_manager().record_sync_failure(peer.node_id, e.clone());
                         let status = sync_engine.peer_manager().get_sync_status(peer.node_id);
                         let failures = status.map(|s| s.consecutive_failures).unwrap_or(0);
+                        metrics::counter!(
+                            crate::metrics::definitions::SYNC_CYCLES_TOTAL,
+                            "peer" => peer_id_str.clone(),
+                            "result" => "failure"
+                        ).increment(1);
+                        metrics::gauge!(
+                            crate::metrics::definitions::SYNC_CONSECUTIVE_FAILURES,
+                            "peer" => peer_id_str.clone()
+                        ).set(failures as f64);
                         tracing::warn!(
-                            "Sync with peer {} failed (attempt {}): {}",
-                            peer.node_id, failures, e
+                            peer = peer.node_id,
+                            attempt = failures,
+                            error = %e,
+                            "Sync with peer failed",
                         );
                         if let Some(ref bus) = event_bus {
                             let event = EngineEvent::new(
