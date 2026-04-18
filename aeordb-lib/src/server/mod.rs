@@ -75,8 +75,13 @@ pub fn create_app_with_auth_mode(
       (Arc::new(provider), None)
     }
     AuthMode::File(path) => {
-      let (provider, key) = FileAuthProvider::from_identity_file(path)
-        .expect("failed to create auth provider from identity file");
+      let (provider, key) = match FileAuthProvider::from_identity_file(path) {
+        Ok(result) => result,
+        Err(error) => {
+          eprintln!("Fatal: failed to create auth provider from identity file '{}': {}", path, error);
+          std::process::exit(1);
+        }
+      };
       (Arc::new(provider), key)
     }
   };

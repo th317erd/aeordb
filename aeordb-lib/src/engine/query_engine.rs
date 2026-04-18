@@ -1809,8 +1809,11 @@ fn compute_aggregates(
         for field_name in &agg.min {
             if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
                 if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    let current = min_map.get(field_name.as_str());
-                    if current.is_none() || bytes.as_slice() < current.unwrap().1.as_slice() {
+                    let should_replace = match min_map.get(field_name.as_str()) {
+                        None => true,
+                        Some((_, current_bytes)) => bytes.as_slice() < current_bytes.as_slice(),
+                    };
+                    if should_replace {
                         min_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
                     }
                 }
@@ -1821,8 +1824,11 @@ fn compute_aggregates(
         for field_name in &agg.max {
             if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
                 if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    let current = max_map.get(field_name.as_str());
-                    if current.is_none() || bytes.as_slice() > current.unwrap().1.as_slice() {
+                    let should_replace = match max_map.get(field_name.as_str()) {
+                        None => true,
+                        Some((_, current_bytes)) => bytes.as_slice() > current_bytes.as_slice(),
+                    };
+                    if should_replace {
                         max_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
                     }
                 }

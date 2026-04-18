@@ -69,13 +69,13 @@ pub async fn list_tasks(
 
     match queue.list_tasks() {
         Ok(tasks) => {
-            let response: Vec<serde_json::Value> = tasks.iter().map(|task| {
-                let mut json = serde_json::to_value(task).unwrap();
+            let response: Vec<serde_json::Value> = tasks.iter().filter_map(|task| {
+                let mut json = serde_json::to_value(task).ok()?;
                 if let Some(progress) = queue.get_progress(&task.id) {
                     json["progress"] = serde_json::json!(progress.progress);
                     json["eta_ms"] = serde_json::json!(progress.eta_ms);
                 }
-                json
+                Some(json)
             }).collect();
             (StatusCode::OK, Json(serde_json::json!(response))).into_response()
         }
@@ -198,12 +198,18 @@ pub async fn get_task(
 
     match queue.get_task(&id) {
         Ok(Some(task)) => {
-            let mut json = serde_json::to_value(&task).unwrap();
-            if let Some(progress) = queue.get_progress(&task.id) {
-                json["progress"] = serde_json::json!(progress.progress);
-                json["eta_ms"] = serde_json::json!(progress.eta_ms);
+            match serde_json::to_value(&task) {
+                Ok(mut json) => {
+                    if let Some(progress) = queue.get_progress(&task.id) {
+                        json["progress"] = serde_json::json!(progress.progress);
+                        json["eta_ms"] = serde_json::json!(progress.eta_ms);
+                    }
+                    (StatusCode::OK, Json(json)).into_response()
+                }
+                Err(e) => ErrorResponse::new(format!("Failed to serialize task: {}", e))
+                    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response(),
             }
-            (StatusCode::OK, Json(json)).into_response()
         }
         Ok(None) => {
             ErrorResponse::new(format!("Task '{}' not found", id))
@@ -298,7 +304,12 @@ pub async fn create_cron(
     let config = CronConfig { schedules };
     match save_cron_config(&state.engine, &config) {
         Ok(()) => {
-            (StatusCode::CREATED, Json(serde_json::to_value(&body).unwrap())).into_response()
+            match serde_json::to_value(&body) {
+                Ok(value) => (StatusCode::CREATED, Json(value)).into_response(),
+                Err(e) => ErrorResponse::new(format!("Failed to serialize cron schedule: {}", e))
+                    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response(),
+            }
         }
         Err(e) => {
             ErrorResponse::new(format!("Failed to save cron config: {}", e))
@@ -390,7 +401,12 @@ pub async fn update_cron(
     let config = CronConfig { schedules };
     match save_cron_config(&state.engine, &config) {
         Ok(()) => {
-            (StatusCode::OK, Json(serde_json::to_value(&updated).unwrap())).into_response()
+            match serde_json::to_value(&updated) {
+                Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+                Err(e) => ErrorResponse::new(format!("Failed to serialize cron schedule: {}", e))
+                    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response(),
+            }
         }
         Err(e) => {
             ErrorResponse::new(format!("Failed to save cron config: {}", e))

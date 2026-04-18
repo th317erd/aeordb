@@ -22,20 +22,25 @@ use crate::engine::{RequestContext, StorageEngine, ROOT_USER_ID};
 use crate::engine::system_store;
 
 /// Bootstrap a root API key if no keys exist yet.
+///
+/// Returns `Ok(Some(plaintext_key))` on success, `Ok(None)` if keys already
+/// exist, or `Err` if hashing or storage fails.
 pub fn bootstrap_root_key(
   engine: &StorageEngine,
-) -> Option<String> {
+) -> Result<Option<String>, crate::engine::errors::EngineError> {
   let existing_keys = system_store::list_api_keys(engine)
     .unwrap_or_default();
 
   if !existing_keys.is_empty() {
-    return None;
+    return Ok(None);
   }
 
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key)
-    .expect("failed to hash root API key");
+    .map_err(|error| crate::engine::errors::EngineError::IoError(
+      std::io::Error::new(std::io::ErrorKind::Other, format!("failed to hash root API key: {}", error)),
+    ))?;
 
   let record = ApiKeyRecord {
     key_id,
@@ -50,8 +55,7 @@ pub fn bootstrap_root_key(
   };
 
   let ctx = RequestContext::system();
-  system_store::store_api_key_for_bootstrap(engine, &ctx, &record)
-    .expect("failed to store root API key");
+  system_store::store_api_key_for_bootstrap(engine, &ctx, &record)?;
 
-  Some(plaintext_key)
+  Ok(Some(plaintext_key))
 }

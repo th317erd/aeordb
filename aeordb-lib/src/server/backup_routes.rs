@@ -12,16 +12,15 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::RequestContext;
 
-fn unique_temp_path(prefix: &str) -> String {
+fn unique_temp_path(prefix: &str) -> Result<String, std::io::Error> {
     let temp_file = tempfile::Builder::new()
         .prefix(&format!("{}-", prefix))
         .suffix(".aeordb")
-        .tempfile()
-        .expect("failed to create temp file");
+        .tempfile()?;
     let path = temp_file.path().to_string_lossy().to_string();
     // Keep the path but drop the file handle so the caller can write to it
     let _ = temp_file.into_temp_path();
-    path
+    Ok(path)
 }
 
 /// POST /admin/export -- export a version as .aeordb
@@ -36,7 +35,12 @@ pub async fn export_backup(
         Err(response) => return response,
     };
 
-    let output_path = unique_temp_path("aeordb-export");
+    let output_path = match unique_temp_path("aeordb-export") {
+        Ok(path) => path,
+        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response(),
+    };
 
     let result = if let Some(ref hash) = params.hash {
         let hash_bytes = match hex::decode(hash) {
@@ -110,7 +114,12 @@ pub async fn diff_backup(
         Err(response) => return response,
     };
 
-    let output_path = unique_temp_path("aeordb-patch");
+    let output_path = match unique_temp_path("aeordb-patch") {
+        Ok(path) => path,
+        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response(),
+    };
 
     let result = crate::engine::backup::create_patch_from_snapshots(
         &state.engine,
@@ -191,7 +200,12 @@ pub async fn import_backup(
     };
 
     // Write body to temp file
-    let temp_path = unique_temp_path("aeordb-import");
+    let temp_path = match unique_temp_path("aeordb-import") {
+        Ok(path) => path,
+        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response(),
+    };
 
     if let Err(e) = std::fs::write(&temp_path, &body) {
         return ErrorResponse::new(format!("Failed to write temp file: {}", e))

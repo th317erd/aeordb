@@ -546,7 +546,7 @@ async fn test_file_auth_provider_token_exchange_works() {
   );
 
   // Bootstrap a root key.
-  let root_key = bootstrap_root_key(&engine).expect("should bootstrap");
+  let root_key = bootstrap_root_key(&engine).expect("bootstrap should succeed").expect("should bootstrap");
 
   let plugin_manager = Arc::new(aeordb::plugins::PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(aeordb::auth::RateLimiter::default_config());

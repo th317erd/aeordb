@@ -68,7 +68,7 @@ pub async fn run(port: u16, database: &str, log_format: &str, auth_flag: Option<
   // building the app (preserves existing behavior).
   if auth_mode == AuthMode::SelfContained {
     let engine = create_engine_with_hot_dir(database, Some(hot_dir_ref));
-    if let Some(root_key) = bootstrap_root_key(&engine) {
+    if let Some(root_key) = bootstrap_root_key(&engine).unwrap_or(None) {
       println!("==========================================================");
       println!("  ROOT API KEY (shown once, save it now!):");
       println!("  {root_key}");

@@ -79,7 +79,12 @@ pub async fn deploy_plugin(
   {
     Ok(record) => {
       let metadata = record.to_metadata();
-      (StatusCode::OK, Json(serde_json::to_value(metadata).unwrap())).into_response()
+      match serde_json::to_value(metadata) {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(e) => ErrorResponse::new(format!("Failed to serialize plugin metadata: {}", e))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response(),
+      }
     }
     Err(crate::plugins::plugin_manager::PluginManagerError::InvalidPlugin(message)) => {
       ErrorResponse::new(format!("Invalid plugin: {}", message))
@@ -203,7 +208,15 @@ pub async fn list_plugins(
   Path(_database): Path<String>,
 ) -> Response {
   match state.plugin_manager.list_plugins() {
-    Ok(plugins) => (StatusCode::OK, Json(serde_json::to_value(plugins).unwrap())).into_response(),
+    Ok(plugins) => match serde_json::to_value(plugins) {
+      Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+      Err(e) => {
+        tracing::error!("Failed to serialize plugins: {}", e);
+        ErrorResponse::new(format!("Failed to serialize plugins: {}", e))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response()
+      }
+    },
     Err(error) => {
       tracing::error!("Failed to list plugins: {}", error);
       ErrorResponse::new(format!("Failed to list plugins: {}", error))

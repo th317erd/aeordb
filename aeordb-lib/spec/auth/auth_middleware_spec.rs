@@ -395,7 +395,7 @@ async fn test_revoked_api_key_cannot_get_token() {
 async fn test_bootstrap_creates_root_key_on_first_run() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
 
-  let result = bootstrap_root_key(&engine);
+  let result = bootstrap_root_key(&engine).expect("bootstrap should succeed");
   assert!(result.is_some(), "should return a plaintext key on first run");
 
   let plaintext_key = result.unwrap();
@@ -414,11 +414,11 @@ async fn test_bootstrap_returns_none_on_subsequent_runs() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
 
   // First run creates the key
-  let first_result = bootstrap_root_key(&engine);
+  let first_result = bootstrap_root_key(&engine).expect("bootstrap should succeed");
   assert!(first_result.is_some());
 
   // Second run should return None
-  let second_result = bootstrap_root_key(&engine);
+  let second_result = bootstrap_root_key(&engine).expect("second bootstrap should succeed");
   assert!(second_result.is_none(), "should return None when keys already exist");
 
   // Still only one key in storage
@@ -524,6 +524,7 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
 
   // Step 1: Bootstrap root key
   let plaintext_key = bootstrap_root_key(&engine)
+    .expect("bootstrap should succeed")
     .expect("should create root key on first run");
 
   // Step 2: Exchange API key for JWT

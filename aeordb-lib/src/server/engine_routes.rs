@@ -8,7 +8,7 @@ use axum::{
   response::{IntoResponse, Response},
   Json,
 };
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
@@ -53,13 +53,24 @@ fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[cr
 // Engine file routes
 // ---------------------------------------------------------------------------
 
+/// Maximum body size for inline PUT /engine/{path} uploads (100 MB).
+/// Files larger than this should use the chunked upload protocol
+/// (PUT /upload/chunks/{hash} + POST /upload/commit) which streams
+/// each 256 KB chunk individually and avoids buffering the full file.
+pub const MAX_INLINE_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+
 /// PUT /engine/*path -- store a file via the custom storage engine.
+///
+/// Accepts the request body as a stream and buffers up to
+/// `MAX_INLINE_UPLOAD_BYTES` (100 MB). Payloads exceeding this limit
+/// receive a 413 Payload Too Large response directing the caller to
+/// use the chunked upload protocol instead.
 pub async fn engine_store_file(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
   headers: HeaderMap,
-  body: axum::body::Bytes,
+  body: Body,
 ) -> Response {
   // Block non-root access to /.system/
   if is_system_path(&path) {
@@ -75,6 +86,35 @@ pub async fn engine_store_file(
     }
   }
 
+  // Stream the body into memory with a hard cap to prevent OOM.
+  // The router-level body limit is 10 GB (shared with chunk uploads),
+  // but this handler enforces a tighter 100 MB limit for inline files.
+  let mut collected = Vec::new();
+  let mut data_stream = body.into_data_stream();
+  while let Some(chunk_result) = data_stream.next().await {
+    match chunk_result {
+      Ok(chunk) => {
+        if collected.len() + chunk.len() > MAX_INLINE_UPLOAD_BYTES {
+          return ErrorResponse::new(format!(
+            "Payload exceeds maximum inline upload size of {} bytes. \
+             Use the chunked upload protocol (PUT /upload/chunks/{{hash}} + \
+             POST /upload/commit) for files larger than {} MB.",
+            MAX_INLINE_UPLOAD_BYTES,
+            MAX_INLINE_UPLOAD_BYTES / (1024 * 1024),
+          ))
+            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+            .into_response();
+        }
+        collected.extend_from_slice(&chunk);
+      }
+      Err(_error) => {
+        return ErrorResponse::new("Failed to read request body")
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
+      }
+    }
+  }
+
   let content_type = headers
     .get("content-type")
     .and_then(|value| value.to_str().ok());
@@ -83,7 +123,7 @@ pub async fn engine_store_file(
   let directory_ops = DirectoryOps::new(&state.engine);
 
   let file_record = match directory_ops.store_file_with_full_pipeline(
-    &ctx, &path, &body, content_type, Some(&*state.plugin_manager)
+    &ctx, &path, &collected, content_type, Some(&*state.plugin_manager)
   ) {
     Ok(record) => record,
     Err(error) => {
@@ -138,6 +178,397 @@ pub async fn engine_store_file(
   (StatusCode::CREATED, Json(response_body)).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// engine_get helper functions
+// ---------------------------------------------------------------------------
+
+/// Build a streaming HTTP response from a file's chunk hashes.
+///
+/// Constructs the standard response with X-Path, X-Total-Size, X-Created-At,
+/// X-Updated-At headers. If `symlink_target` is provided, adds an
+/// X-Symlink-Target header as well.
+fn build_file_streaming_response(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  file_record: &FileRecord,
+  symlink_target: Option<&str>,
+) -> Response {
+  let file_stream = match EngineFileStream::from_chunk_hashes(
+    file_record.chunk_hashes.clone(), engine,
+  ) {
+    Ok(s) => s,
+    Err(error) => {
+      tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
+      return ErrorResponse::new("Failed to read file")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
+    chunk_result
+      .map(axum::body::Bytes::from)
+      .map_err(|error| std::io::Error::other(error.to_string()))
+  }));
+
+  let body = Body::from_stream(chunk_stream);
+
+  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let mut response_builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-Path", safe_path)
+    .header("X-Total-Size", file_record.total_size.to_string())
+    .header("X-Created-At", file_record.created_at.to_string())
+    .header("X-Updated-At", file_record.updated_at.to_string());
+
+  if let Some(target) = symlink_target {
+    response_builder = response_builder
+      .header("X-Symlink-Target", target.replace('\n', "").replace('\r', ""));
+  }
+
+  if let Some(ref content_type) = file_record.content_type {
+    response_builder = response_builder.header("content-type", content_type.as_str());
+  }
+
+  response_builder
+    .body(body)
+    .unwrap_or_else(|_| {
+      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+    })
+}
+
+/// Convert a flat directory listing (ChildEntry vec) to JSON values.
+///
+/// Each entry is enriched with its full path and, for symlink entries,
+/// the symlink target is included.
+fn build_directory_listing(
+  entries: &[crate::engine::ChildEntry],
+  base_path: &str,
+  directory_ops: &DirectoryOps,
+) -> Vec<serde_json::Value> {
+  let normalized = crate::engine::path_utils::normalize_path(base_path);
+  entries
+    .iter()
+    .map(|child| {
+      let child_path = if normalized == "/" {
+        format!("/{}", child.name)
+      } else {
+        format!("{}/{}", normalized, child.name)
+      };
+      let mut entry_json = serde_json::json!({
+        "path": child_path,
+        "name": child.name,
+        "entry_type": child.entry_type,
+        "hash": hex::encode(&child.hash),
+        "total_size": child.total_size,
+        "created_at": child.created_at,
+        "updated_at": child.updated_at,
+        "content_type": child.content_type,
+      });
+
+      // Include symlink target in listing
+      if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+        if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&child_path) {
+          entry_json["target"] = serde_json::json!(symlink_record.target);
+        }
+      }
+
+      entry_json
+    })
+    .collect()
+}
+
+/// Apply API key rules and system-path filtering to a listing.
+///
+/// Returns `Err(Response)` if the user identity is invalid; otherwise mutates
+/// the listing in place and returns `Ok(())`.
+fn apply_listing_filters(
+  listing: &mut Vec<serde_json::Value>,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  user_id_str: &str,
+) -> Result<(), Response> {
+  if let Some(rules) = key_rules {
+    if !rules.is_empty() {
+      filter_listing_by_key_rules(listing, rules, 'l');
+    }
+  }
+
+  // Filter /.system/ from listings for non-root
+  let user_id = match uuid::Uuid::parse_str(user_id_str) {
+    Ok(id) => id,
+    Err(_) => return Err(
+      ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response()
+    ),
+  };
+  if !is_root(&user_id) {
+    listing.retain(|entry| {
+      let path = entry["path"].as_str().unwrap_or("");
+      !path.starts_with("/.system")
+    });
+  }
+
+  Ok(())
+}
+
+/// Handle a symlink path: resolve and produce the appropriate file or
+/// directory response, or return an error for dangling / cyclic symlinks.
+fn handle_symlink_resolution(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  path: &str,
+  symlink_target: &str,
+  user_id_str: &str,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+) -> Response {
+  let directory_ops = DirectoryOps::new(engine);
+
+  match resolve_symlink(engine, path) {
+    Ok(ResolvedTarget::File(ref file_record)) => {
+      // Block non-root access to symlinks resolving to /.system/ paths
+      if is_system_path(&file_record.path) {
+        let user_id = uuid::Uuid::parse_str(user_id_str).unwrap_or(uuid::Uuid::new_v4());
+        if !is_root(&user_id) {
+          return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+        }
+      }
+
+      // Check if the resolved target path is allowed by API key rules
+      if let Some(rules) = key_rules {
+        if !rules.is_empty() {
+          let target_path = &file_record.path;
+          let normalized_target = if target_path.starts_with('/') {
+            target_path.to_string()
+          } else {
+            format!("/{}", target_path)
+          };
+          match match_rules(rules, &normalized_target) {
+            Some(rule) => {
+              if !check_operation_permitted(&rule.permitted, 'r') {
+                return ErrorResponse::new(format!("Not found: {}", path))
+                  .with_status(StatusCode::NOT_FOUND)
+                  .into_response();
+              }
+            }
+            None => {
+              return ErrorResponse::new(format!("Not found: {}", path))
+                .with_status(StatusCode::NOT_FOUND)
+                .into_response();
+            }
+          }
+        }
+      }
+
+      build_file_streaming_response(engine, file_record, Some(symlink_target))
+    }
+    Ok(ResolvedTarget::Directory(dir_path)) => {
+      // Block non-root access to symlinks resolving to /.system/ directories
+      if is_system_path(&dir_path) {
+        let user_id = uuid::Uuid::parse_str(user_id_str).unwrap_or(uuid::Uuid::new_v4());
+        if !is_root(&user_id) {
+          return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+        }
+      }
+
+      match directory_ops.list_directory(&dir_path) {
+        Ok(entries) => {
+          let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
+          match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+            Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+            Err(response) => response,
+          }
+        }
+        Err(error) => {
+          tracing::error!("Engine: failed to list resolved directory: {}", error);
+          ErrorResponse::new("Failed to list resolved directory")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response()
+        }
+      }
+    }
+    Err(EngineError::NotFound(msg)) => {
+      ErrorResponse::new(format!("Dangling symlink: {}", msg))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(EngineError::CyclicSymlink(msg)) => {
+      ErrorResponse::new(format!("Symlink cycle detected: {}", msg))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response()
+    }
+    Err(EngineError::SymlinkDepthExceeded(msg)) => {
+      ErrorResponse::new(msg)
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Engine: failed to resolve symlink '{}': {}", path, error);
+      ErrorResponse::new("Failed to resolve symlink")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+/// Handle a direct file read: stream the file content as an HTTP response.
+fn handle_file_response(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  path: &str,
+) -> Response {
+  let directory_ops = DirectoryOps::new(engine);
+
+  let file_record = match directory_ops.get_metadata(path) {
+    Ok(Some(record)) => record,
+    Ok(None) => {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
+      return ErrorResponse::new("Failed to read path")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  // Use read_file_streaming for direct file reads (reads via path, not chunk hashes)
+  let file_stream = match directory_ops.read_file_streaming(path) {
+    Ok(s) => s,
+    Err(error) => {
+      tracing::error!("Engine: failed to read file '{}': {}", path, error);
+      return ErrorResponse::new("Failed to read file")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
+    chunk_result
+      .map(axum::body::Bytes::from)
+      .map_err(|error| std::io::Error::other(error.to_string()))
+  }));
+
+  let body = Body::from_stream(chunk_stream);
+
+  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let mut response_builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-Path", safe_path)
+    .header("X-Total-Size", file_record.total_size.to_string())
+    .header("X-Created-At", file_record.created_at.to_string())
+    .header("X-Updated-At", file_record.updated_at.to_string());
+
+  if let Some(ref content_type) = file_record.content_type {
+    response_builder = response_builder.header("content-type", content_type.as_str());
+  }
+
+  response_builder
+    .body(body)
+    .unwrap_or_else(|_| {
+      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+    })
+}
+
+/// Handle recursive directory listing with depth and/or glob parameters.
+fn handle_recursive_listing(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  path: &str,
+  version_query: &EngineGetQuery,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  user_id_str: &str,
+) -> Response {
+  let directory_ops = DirectoryOps::new(engine);
+
+  let depth = version_query.depth.unwrap_or(0);
+  // M17: Clamp recursive listing depth to prevent runaway traversals.
+  let depth = if depth < 0 { -1 } else { depth.min(256) };
+  let glob = version_query.glob.as_deref();
+
+  match list_directory_recursive(engine, path, depth, glob) {
+    Ok(entries) => {
+      let mut listing: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+          let mut entry_json = serde_json::json!({
+            "path": entry.path,
+            "name": entry.name,
+            "entry_type": entry.entry_type,
+            "hash": hex::encode(&entry.hash),
+            "total_size": entry.total_size,
+            "created_at": entry.created_at,
+            "updated_at": entry.updated_at,
+            "content_type": entry.content_type,
+          });
+
+          // Include symlink target in listing
+          if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+            if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&entry.path) {
+              entry_json["target"] = serde_json::json!(symlink_record.target);
+            }
+          }
+
+          entry_json
+        })
+        .collect();
+
+      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+        Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+        Err(response) => response,
+      }
+    }
+    Err(EngineError::NotFound(_)) => {
+      ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Engine: failed to list directory '{}': {}", path, error);
+      ErrorResponse::new("Failed to list directory")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+/// Handle default (flat) directory listing without depth/glob parameters.
+fn handle_directory_listing(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  path: &str,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  user_id_str: &str,
+) -> Response {
+  let directory_ops = DirectoryOps::new(engine);
+
+  match directory_ops.list_directory(path) {
+    Ok(entries) => {
+      let mut listing = build_directory_listing(&entries, path, &directory_ops);
+      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+        Ok(()) => (StatusCode::OK, Json(listing)).into_response(),
+        Err(response) => response,
+      }
+    }
+    Err(EngineError::NotFound(_)) => {
+      ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Engine: failed to list directory '{}': {}", path, error);
+      ErrorResponse::new("Failed to list directory")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// engine_get: dispatcher
+// ---------------------------------------------------------------------------
+
 /// GET /engine/*path -- read a file (streaming) or list a directory.
 pub async fn engine_get(
   State(state): State<AppState>,
@@ -165,6 +596,10 @@ pub async fn engine_get(
     return engine_get_at_version(&state, &path, &version_query).await;
   }
 
+  // Extract key rules slice for helpers (avoids passing axum Extension around)
+  let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> =
+    active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+
   let directory_ops = DirectoryOps::new(&state.engine);
 
   // Check for symlink first
@@ -180,216 +615,18 @@ pub async fn engine_get(
       }))).into_response();
     }
 
-    // Follow the symlink
-    match resolve_symlink(&state.engine, &path) {
-      Ok(ResolvedTarget::File(ref file_record)) => {
-        // Block non-root access to symlinks resolving to /.system/ paths
-        if is_system_path(&file_record.path) {
-          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
-          if !is_root(&user_id) {
-            return ErrorResponse::new(format!("Not found: {}", path))
-              .with_status(StatusCode::NOT_FOUND)
-              .into_response();
-          }
-        }
-
-        // Check if the resolved target path is allowed by API key rules
-        if let Some(Extension(ref rules)) = active_key_rules {
-          if !rules.0.is_empty() {
-            let target_path = &file_record.path;
-            let normalized_target = if target_path.starts_with('/') {
-              target_path.to_string()
-            } else {
-              format!("/{}", target_path)
-            };
-            match match_rules(&rules.0, &normalized_target) {
-              Some(rule) => {
-                if !check_operation_permitted(&rule.permitted, 'r') {
-                  return ErrorResponse::new(format!("Not found: {}", path))
-                    .with_status(StatusCode::NOT_FOUND)
-                    .into_response();
-                }
-              }
-              None => {
-                return ErrorResponse::new(format!("Not found: {}", path))
-                  .with_status(StatusCode::NOT_FOUND)
-                  .into_response();
-              }
-            }
-          }
-        }
-
-        // Stream the resolved file — reuse the same streaming pattern
-        let resolved_stream = match EngineFileStream::from_chunk_hashes(
-          file_record.chunk_hashes.clone(), &state.engine,
-        ) {
-          Ok(s) => s,
-          Err(error) => {
-            tracing::error!("Engine: failed to read resolved file via symlink: {}", error);
-            return ErrorResponse::new("Failed to read resolved file")
-              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-              .into_response();
-          }
-        };
-
-        let chunk_stream = stream::iter(resolved_stream.map(|chunk_result| {
-          chunk_result
-            .map(axum::body::Bytes::from)
-            .map_err(|error| std::io::Error::other(error.to_string()))
-        }));
-
-        let body = Body::from_stream(chunk_stream);
-
-        let safe_path = file_record.path.replace('\n', "").replace('\r', "");
-        let mut response_builder = axum::http::Response::builder()
-          .status(StatusCode::OK)
-          .header("X-Path", safe_path)
-          .header("X-Total-Size", file_record.total_size.to_string())
-          .header("X-Created-At", file_record.created_at.to_string())
-          .header("X-Updated-At", file_record.updated_at.to_string())
-          .header("X-Symlink-Target", symlink_record.target.replace('\n', "").replace('\r', ""));
-
-        if let Some(ref content_type) = file_record.content_type {
-          response_builder = response_builder.header("content-type", content_type.as_str());
-        }
-
-        return response_builder
-          .body(body)
-          .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-          });
-      }
-      Ok(ResolvedTarget::Directory(dir_path)) => {
-        // Block non-root access to symlinks resolving to /.system/ directories
-        if is_system_path(&dir_path) {
-          let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
-          if !is_root(&user_id) {
-            return ErrorResponse::new(format!("Not found: {}", path))
-              .with_status(StatusCode::NOT_FOUND)
-              .into_response();
-          }
-        }
-
-        // List the resolved directory
-        match directory_ops.list_directory(&dir_path) {
-          Ok(entries) => {
-            let normalized = crate::engine::path_utils::normalize_path(&dir_path);
-            let listing: Vec<serde_json::Value> = entries
-              .iter()
-              .map(|child| {
-                let child_path = if normalized == "/" {
-                  format!("/{}", child.name)
-                } else {
-                  format!("{}/{}", normalized, child.name)
-                };
-                serde_json::json!({
-                  "path": child_path,
-                  "name": child.name,
-                  "entry_type": child.entry_type,
-                  "hash": hex::encode(&child.hash),
-                  "total_size": child.total_size,
-                  "created_at": child.created_at,
-                  "updated_at": child.updated_at,
-                  "content_type": child.content_type,
-                })
-              })
-              .collect();
-            let mut listing = listing;
-            if let Some(Extension(ref rules)) = active_key_rules {
-              if !rules.0.is_empty() {
-                filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
-              }
-            }
-            // Filter /.system/ from listings for non-root
-            {
-              let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
-                Ok(id) => id,
-                Err(_) => return ErrorResponse::new("Invalid user identity")
-                  .with_status(StatusCode::FORBIDDEN).into_response(),
-              };
-              if !is_root(&user_id) {
-                listing.retain(|entry| {
-                  let path = entry["path"].as_str().unwrap_or("");
-                  !path.starts_with("/.system")
-                });
-              }
-            }
-            return (StatusCode::OK, Json(listing)).into_response();
-          }
-          Err(error) => {
-            tracing::error!("Engine: failed to list resolved directory: {}", error);
-            return ErrorResponse::new("Failed to list resolved directory")
-              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-              .into_response();
-          }
-        }
-      }
-      Err(EngineError::NotFound(msg)) => {
-        return ErrorResponse::new(format!("Dangling symlink: {}", msg))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
-      }
-      Err(EngineError::CyclicSymlink(msg)) => {
-        return ErrorResponse::new(format!("Symlink cycle detected: {}", msg))
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-      Err(EngineError::SymlinkDepthExceeded(msg)) => {
-        return ErrorResponse::new(msg)
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-      Err(error) => {
-        tracing::error!("Engine: failed to resolve symlink '{}': {}", path, error);
-        return ErrorResponse::new("Failed to resolve symlink")
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-    }
+    return handle_symlink_resolution(
+      &state.engine, &path, &symlink_record.target, &_claims.sub, key_rules,
+    );
   }
 
   // Try as file first
   match directory_ops.get_metadata(&path) {
-    Ok(Some(file_record)) => {
-      // It is a file -- stream the chunks.
-      let file_stream = match directory_ops.read_file_streaming(&path) {
-        Ok(file_stream) => file_stream,
-        Err(error) => {
-          tracing::error!("Engine: failed to read file '{}': {}", path, error);
-          return ErrorResponse::new("Failed to read file")
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
-        }
-      };
-
-      let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-        chunk_result
-          .map(axum::body::Bytes::from)
-          .map_err(|error| std::io::Error::other(error.to_string()))
-      }));
-
-      let body = Body::from_stream(chunk_stream);
-
-      let safe_path = file_record.path.replace('\n', "").replace('\r', "");
-      let mut response_builder = axum::http::Response::builder()
-        .status(StatusCode::OK)
-        .header("X-Path", safe_path)
-        .header("X-Total-Size", file_record.total_size.to_string())
-        .header("X-Created-At", file_record.created_at.to_string())
-        .header("X-Updated-At", file_record.updated_at.to_string());
-
-      if let Some(ref content_type) = file_record.content_type {
-        response_builder = response_builder.header("content-type", content_type.as_str());
-      }
-
-      return response_builder
-        .body(body)
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        });
+    Ok(Some(_file_record)) => {
+      return handle_file_response(&state.engine, &path);
     }
     Ok(None) => {
-      // Not a file -- try as directory
+      // Not a file -- fall through to directory listing
     }
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
@@ -399,144 +636,17 @@ pub async fn engine_get(
     }
   }
 
-  // Try as directory
-
-  // If depth or glob is specified, use recursive listing
+  // Try as directory -- recursive listing if depth/glob specified
   if version_query.depth.is_some() || version_query.glob.is_some() {
-    let depth = version_query.depth.unwrap_or(0);
-    // M17: Clamp recursive listing depth to prevent runaway traversals.
-    let depth = if depth < 0 { -1 } else { depth.min(256) };
-    let glob = version_query.glob.as_deref();
-    match list_directory_recursive(&state.engine, &path, depth, glob) {
-      Ok(entries) => {
-        let listing: Vec<serde_json::Value> = entries
-          .iter()
-          .map(|entry| {
-            let mut entry_json = serde_json::json!({
-              "path": entry.path,
-              "name": entry.name,
-              "entry_type": entry.entry_type,
-              "hash": hex::encode(&entry.hash),
-              "total_size": entry.total_size,
-              "created_at": entry.created_at,
-              "updated_at": entry.updated_at,
-              "content_type": entry.content_type,
-            });
-
-            // Include symlink target in listing
-            if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-              if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&entry.path) {
-                entry_json["target"] = serde_json::json!(symlink_record.target);
-              }
-            }
-
-            entry_json
-          })
-          .collect();
-        let mut listing = listing;
-        if let Some(Extension(ref rules)) = active_key_rules {
-          if !rules.0.is_empty() {
-            filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
-          }
-        }
-        // Filter /.system/ from listings for non-root
-        {
-          let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
-            Ok(id) => id,
-            Err(_) => return ErrorResponse::new("Invalid user identity")
-              .with_status(StatusCode::FORBIDDEN).into_response(),
-          };
-          if !is_root(&user_id) {
-            listing.retain(|entry| {
-              let path = entry["path"].as_str().unwrap_or("");
-              !path.starts_with("/.system")
-            });
-          }
-        }
-        return (StatusCode::OK, Json(listing)).into_response();
-      }
-      Err(EngineError::NotFound(_)) => {
-        return ErrorResponse::new(format!("Not found: {}", path))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
-      }
-      Err(error) => {
-        tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-        return ErrorResponse::new("Failed to list directory")
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-    }
+    return handle_recursive_listing(
+      &state.engine, &path, &version_query, key_rules, &_claims.sub,
+    );
   }
 
-  // Default listing (no depth/glob params) - use existing list_directory
-  match directory_ops.list_directory(&path) {
-    Ok(entries) => {
-      let normalized = crate::engine::path_utils::normalize_path(&path);
-      let listing: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|child| {
-          let child_path = if normalized == "/" {
-            format!("/{}", child.name)
-          } else {
-            format!("{}/{}", normalized, child.name)
-          };
-          let mut entry_json = serde_json::json!({
-            "path": child_path,
-            "name": child.name,
-            "entry_type": child.entry_type,
-            "hash": hex::encode(&child.hash),
-            "total_size": child.total_size,
-            "created_at": child.created_at,
-            "updated_at": child.updated_at,
-            "content_type": child.content_type,
-          });
-
-          // Include symlink target in listing
-          if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-            if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&child_path) {
-              entry_json["target"] = serde_json::json!(symlink_record.target);
-            }
-          }
-
-          entry_json
-        })
-        .collect();
-      let mut listing = listing;
-      if let Some(Extension(ref rules)) = active_key_rules {
-        if !rules.0.is_empty() {
-          filter_listing_by_key_rules(&mut listing, &rules.0, 'l');
-        }
-      }
-      // Filter /.system/ from listings for non-root
-      {
-        let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
-          Ok(id) => id,
-          Err(_) => return ErrorResponse::new("Invalid user identity")
-            .with_status(StatusCode::FORBIDDEN).into_response(),
-        };
-        if !is_root(&user_id) {
-          listing.retain(|entry| {
-            let path = entry["path"].as_str().unwrap_or("");
-            !path.starts_with("/.system")
-          });
-        }
-      }
-      (StatusCode::OK, Json(listing)).into_response()
-    }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-      ErrorResponse::new("Failed to list directory")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
+  // Default flat directory listing
+  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub)
 }
+
 
 /// Read a file at a historical version (snapshot or explicit root hash).
 async fn engine_get_at_version(
