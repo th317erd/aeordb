@@ -1,0 +1,22 @@
+# AeorDB Configuration
+#
+# Copy this file to aeordb.toml (or any name) and pass it to the server:
+#
+#   aeordb start --config aeordb.toml
+#
+# CLI flags always take precedence over values in this file.
+# Omit any key to use the built-in default.
+
+[server]
+port = 3000
+host = "0.0.0.0"
+# cors_origins = ["*"]
+# cors_origins = ["https://app.example.com", "https://admin.example.com"]
+
+[auth]
+enabled = true
+jwt_expiry_seconds = 3600
+
+[storage]
+database = "data.aeordb"
+chunk_size = 262144

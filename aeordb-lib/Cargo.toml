@@ -598,6 +598,31 @@ path = "spec/engine/cleanup_spec.rs"
 name = "cleanup_http_spec"
 path = "spec/http/cleanup_http_spec.rs"
 
+
+[[test]]
+name = "api_key_cache_spec"
+path = "spec/engine/api_key_cache_spec.rs"
+
+[[test]]
+name = "entry_header_spec"
+path = "spec/engine/entry_header_spec.rs"
+
+[[test]]
+name = "path_utils_spec"
+path = "spec/engine/path_utils_spec.rs"
+
+[[test]]
+name = "file_record_spec"
+path = "spec/engine/file_record_spec.rs"
+
+[[test]]
+name = "deletion_record_spec"
+path = "spec/engine/deletion_record_spec.rs"
+
+[[test]]
+name = "cron_scheduler_spec"
+path = "spec/engine/cron_scheduler_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
