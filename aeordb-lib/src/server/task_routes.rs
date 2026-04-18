@@ -42,7 +42,7 @@ pub struct UpdateCronRequest {
 
 fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine::TaskQueue>, Response> {
     state.task_queue.as_ref().ok_or_else(|| {
-        ErrorResponse::new("Task queue not available")
+        ErrorResponse::new("Task queue not available. The task system may not be enabled in this configuration")
             .with_code(error_codes::SERVICE_UNAVAILABLE)
             .with_status(StatusCode::SERVICE_UNAVAILABLE)
             .into_response()
@@ -213,7 +213,7 @@ pub async fn get_task(
             }
         }
         Ok(None) => {
-            ErrorResponse::new(format!("Task '{}' not found", id))
+            ErrorResponse::new(format!("Task '{}' not found. Use GET /admin/tasks to list all tasks", id))
                 .with_status(StatusCode::NOT_FOUND)
                 .into_response()
         }
@@ -296,7 +296,7 @@ pub async fn create_cron(
 
     // Check for duplicate ID
     if schedules.iter().any(|s| s.id == body.id) {
-        return ErrorResponse::new(format!("Cron schedule '{}' already exists", body.id))
+        return ErrorResponse::new(format!("Cron schedule '{}' already exists. Use PATCH /admin/cron/{} to update it, or choose a different ID", body.id, body.id))
             .with_status(StatusCode::CONFLICT)
             .into_response();
     }
@@ -336,7 +336,7 @@ pub async fn delete_cron(
     schedules.retain(|s| s.id != id);
 
     if schedules.len() == original_len {
-        return ErrorResponse::new(format!("Cron schedule '{}' not found", id))
+        return ErrorResponse::new(format!("Cron schedule '{}' not found. Use GET /admin/cron to list all schedules", id))
             .with_status(StatusCode::NOT_FOUND)
             .into_response();
     }
@@ -373,7 +373,7 @@ pub async fn update_cron(
     let schedule = match schedules.iter_mut().find(|s| s.id == id) {
         Some(s) => s,
         None => {
-            return ErrorResponse::new(format!("Cron schedule '{}' not found", id))
+            return ErrorResponse::new(format!("Cron schedule '{}' not found. Use GET /admin/cron to list all schedules", id))
                 .with_status(StatusCode::NOT_FOUND)
                 .into_response();
         }

@@ -276,7 +276,7 @@ pub async fn auth_token(
     Ok(parsed) => parsed,
     Err(_) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-      return ErrorResponse::new("Invalid API key".to_string())
+      return ErrorResponse::new("Invalid API key: the key format is not recognized. Keys use the format 'aeor_<key_id>_<secret>'".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
@@ -286,14 +286,14 @@ pub async fn auth_token(
     Ok(Some(record)) => record,
     Ok(None) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "not_found").increment(1);
-      return ErrorResponse::new("Invalid API key".to_string())
+      return ErrorResponse::new("Invalid API key: no key found matching the provided key ID prefix".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up API key: {}", error);
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "error").increment(1);
-      return ErrorResponse::new("Internal server error".to_string())
+      return ErrorResponse::new("An unexpected error occurred while looking up the API key. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -301,7 +301,7 @@ pub async fn auth_token(
 
   if record.is_revoked {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "revoked").increment(1);
-    return ErrorResponse::new("Invalid API key".to_string())
+    return ErrorResponse::new("Invalid API key: this key has been revoked".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -310,7 +310,7 @@ pub async fn auth_token(
     Ok(valid) => valid,
     Err(_) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-      return ErrorResponse::new("Invalid API key".to_string())
+      return ErrorResponse::new("Invalid API key: key verification failed".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
@@ -318,7 +318,7 @@ pub async fn auth_token(
 
   if !key_valid {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-    return ErrorResponse::new("Invalid API key".to_string())
+    return ErrorResponse::new("Invalid API key: the secret does not match. Check that you are using the full key string".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -327,7 +327,7 @@ pub async fn auth_token(
   let now_millis = chrono::Utc::now().timestamp_millis();
   if record.expires_at <= now_millis {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "expired").increment(1);
-    return ErrorResponse::new("API key expired".to_string())
+    return ErrorResponse::new("API key expired. Create a new key via POST /auth/api-keys".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -350,7 +350,7 @@ pub async fn auth_token(
     Ok(token) => token,
     Err(error) => {
       tracing::error!("Failed to create JWT: {}", error);
-      return ErrorResponse::new("Failed to create token".to_string())
+      return ErrorResponse::new("Failed to create JWT during token exchange. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -372,7 +372,7 @@ pub async fn auth_token(
   };
   if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &refresh_record) {
     tracing::error!("Failed to store refresh token: {}", error);
-    return ErrorResponse::new("Failed to create token".to_string())
+    return ErrorResponse::new("Failed to store refresh token during token exchange. If this persists, check GET /system/health for system status".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
@@ -397,7 +397,7 @@ pub async fn create_api_key(
   Json(payload): Json<CreateApiKeyRequest>,
 ) -> Response {
   if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new("Root access required".to_string())
+    return ErrorResponse::new("root access required. Only the root user can create admin API keys via POST /admin/api-keys".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
@@ -407,7 +407,7 @@ pub async fn create_api_key(
     Some(ref id_string) => match Uuid::parse_str(id_string) {
       Ok(id) => id,
       Err(_) => {
-        return ErrorResponse::new(format!("Invalid user_id: {}", id_string))
+        return ErrorResponse::new(format!("Invalid user_id '{}': must be a valid UUID", id_string))
           .with_status(StatusCode::BAD_REQUEST)
           .into_response();
       }
@@ -417,7 +417,7 @@ pub async fn create_api_key(
       match Uuid::parse_str(&claims.sub) {
         Ok(id) => id,
         Err(_) => {
-          return ErrorResponse::new("Invalid sub claim".to_string())
+          return ErrorResponse::new("Invalid sub claim in JWT: token 'sub' is not a valid UUID".to_string())
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -431,7 +431,7 @@ pub async fn create_api_key(
     Ok(hash) => hash,
     Err(error) => {
       tracing::error!("Failed to hash API key: {}", error);
-      return ErrorResponse::new("Failed to create API key".to_string())
+      return ErrorResponse::new("Failed to create API key: could not hash the generated key. If this persists, contact your administrator".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -451,7 +451,7 @@ pub async fn create_api_key(
 
   if let Err(error) = state.auth_provider.store_api_key(&record) {
     tracing::error!("Failed to store API key: {}", error);
-    return ErrorResponse::new("Failed to store API key".to_string())
+    return ErrorResponse::new("Failed to store API key: could not persist to storage. If this persists, check GET /system/health for system status".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
@@ -474,7 +474,7 @@ pub async fn list_api_keys(
   Extension(claims): Extension<TokenClaims>,
 ) -> Response {
   if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new("Root access required".to_string())
+    return ErrorResponse::new("root access required. Only the root user can list admin API keys via GET /admin/api-keys".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
@@ -496,7 +496,7 @@ pub async fn list_api_keys(
     }
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);
-      ErrorResponse::new("Failed to list API keys".to_string())
+      ErrorResponse::new("Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -510,7 +510,7 @@ pub async fn revoke_api_key(
   Path(key_id): Path<String>,
 ) -> Response {
   if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new("Root access required".to_string())
+    return ErrorResponse::new("root access required. Only the root user can revoke admin API keys via DELETE /admin/api-keys/:key_id".to_string())
       .with_status(StatusCode::FORBIDDEN)
       .into_response();
   }
@@ -518,7 +518,7 @@ pub async fn revoke_api_key(
   let parsed_key_id = match Uuid::parse_str(&key_id) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new(format!("Invalid key ID: {}", key_id))
+      return ErrorResponse::new(format!("Invalid key ID '{}': must be a valid UUID", key_id))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -543,7 +543,7 @@ pub async fn revoke_api_key(
     }
     Err(error) => {
       tracing::error!("Failed to revoke API key: {}", error);
-      ErrorResponse::new("Failed to revoke API key".to_string())
+      ErrorResponse::new("Failed to revoke API key: could not persist revocation to storage. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -628,26 +628,26 @@ pub async fn verify_magic_link(
   let record = match system_store::get_magic_link(&state.engine, &code_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
-      return ErrorResponse::new("Invalid or expired magic link".to_string())
+      return ErrorResponse::new("Invalid or expired magic link. Request a new one via POST /auth/magic-link".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up magic link: {}", error);
-      return ErrorResponse::new("Invalid or expired magic link".to_string())
+      return ErrorResponse::new("Failed to verify magic link. Request a new one via POST /auth/magic-link".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
   };
 
   if record.is_used {
-    return ErrorResponse::new("Magic link already used".to_string())
+    return ErrorResponse::new("Magic link already used. Each link can only be used once — request a new one via POST /auth/magic-link".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
 
   if record.expires_at < chrono::Utc::now() {
-    return ErrorResponse::new("Magic link expired".to_string())
+    return ErrorResponse::new("Magic link expired. Request a new one via POST /auth/magic-link".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -656,7 +656,7 @@ pub async fn verify_magic_link(
   let ctx = RequestContext::with_bus(state.event_bus.clone());
   if let Err(error) = system_store::mark_magic_link_used(&state.engine, &ctx, &code_hash) {
     tracing::error!("Failed to mark magic link as used: {}", error);
-    return ErrorResponse::new("Internal server error".to_string())
+    return ErrorResponse::new("An unexpected error occurred while processing the magic link. If this persists, check GET /system/health for system status".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
@@ -668,13 +668,13 @@ pub async fn verify_magic_link(
     Ok(Some(user)) => user.user_id.to_string(),
     Ok(None) => {
       tracing::warn!("Magic link verified for '{}' but no user record found", record.email);
-      return ErrorResponse::new("No user account for this email".to_string())
+      return ErrorResponse::new("No user account exists for this email address. Contact your administrator to create an account".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up user by email '{}': {}", record.email, error);
-      return ErrorResponse::new("Internal server error".to_string())
+      return ErrorResponse::new("An unexpected error occurred while looking up the user account. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -702,7 +702,7 @@ pub async fn verify_magic_link(
       .into_response(),
     Err(error) => {
       tracing::error!("Failed to create JWT: {}", error);
-      ErrorResponse::new("Failed to create token".to_string())
+      ErrorResponse::new("Failed to create JWT after magic link verification. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -730,26 +730,26 @@ pub async fn refresh_token(
   let record = match system_store::get_refresh_token(&state.engine, &old_token_hash) {
     Ok(Some(record)) => record,
     Ok(None) => {
-      return ErrorResponse::new("Invalid refresh token".to_string())
+      return ErrorResponse::new("Invalid refresh token: no matching token found. Re-authenticate via POST /auth/token".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up refresh token: {}", error);
-      return ErrorResponse::new("Invalid refresh token".to_string())
+      return ErrorResponse::new("Failed to look up refresh token. Re-authenticate via POST /auth/token".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
   };
 
   if record.is_revoked {
-    return ErrorResponse::new("Refresh token revoked".to_string())
+    return ErrorResponse::new("Refresh token has been revoked. Re-authenticate via POST /auth/token".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
 
   if record.expires_at < chrono::Utc::now() {
-    return ErrorResponse::new("Refresh token expired".to_string())
+    return ErrorResponse::new("Refresh token expired. Re-authenticate via POST /auth/token".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -758,7 +758,7 @@ pub async fn refresh_token(
   let ctx = RequestContext::with_bus(state.event_bus.clone());
   if let Err(error) = system_store::revoke_refresh_token(&state.engine, &ctx, &old_token_hash) {
     tracing::error!("Failed to revoke old refresh token: {}", error);
-    return ErrorResponse::new("Internal server error".to_string())
+    return ErrorResponse::new("An unexpected error occurred while rotating the refresh token. If this persists, check GET /system/health for system status".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
@@ -779,7 +779,7 @@ pub async fn refresh_token(
     Ok(token) => token,
     Err(error) => {
       tracing::error!("Failed to create JWT: {}", error);
-      return ErrorResponse::new("Failed to create token".to_string())
+      return ErrorResponse::new("Failed to create JWT during token refresh. If this persists, check GET /system/health for system status".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -800,7 +800,7 @@ pub async fn refresh_token(
   };
   if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &new_refresh_record) {
     tracing::error!("Failed to store new refresh token: {}", error);
-    return ErrorResponse::new("Internal server error".to_string())
+    return ErrorResponse::new("Failed to store new refresh token during rotation. If this persists, check GET /system/health for system status".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }

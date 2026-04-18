@@ -76,7 +76,7 @@ pub async fn engine_store_file(
   if is_system_path(&path) {
     let user_id = match uuid::Uuid::parse_str(&claims.sub) {
       Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity")
+      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN).into_response(),
     };
     if !is_root(&user_id) {
@@ -109,7 +109,7 @@ pub async fn engine_store_file(
         collected.extend_from_slice(&chunk);
       }
       Err(_error) => {
-        return ErrorResponse::new("Failed to read request body")
+        return ErrorResponse::new("Failed to read request body: the upload stream was interrupted or contained invalid data")
           .with_status(StatusCode::BAD_REQUEST)
           .into_response();
       }
@@ -168,7 +168,7 @@ pub async fn engine_store_file(
   let hash_length = algo.hash_length();
   let file_value = match file_record.serialize(hash_length) {
     Ok(v) => v,
-    Err(_) => return ErrorResponse::new("Failed to serialize file record".to_string())
+    Err(_) => return ErrorResponse::new("Failed to serialize file record after storing. The file was saved but the response could not be built — contact your administrator".to_string())
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response(),
   };
@@ -199,7 +199,7 @@ fn build_file_streaming_response(
     Ok(s) => s,
     Err(error) => {
       tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
-      return ErrorResponse::new("Failed to read file")
+      return ErrorResponse::new(format!("Failed to stream file '{}': the file data may be corrupted. Contact your administrator", file_record.path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -297,7 +297,7 @@ fn apply_listing_filters(
   let user_id = match uuid::Uuid::parse_str(user_id_str) {
     Ok(id) => id,
     Err(_) => return Err(
-      ErrorResponse::new("Invalid user identity")
+      ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN)
         .into_response()
     ),
@@ -384,7 +384,7 @@ fn handle_symlink_resolution(
         }
         Err(error) => {
           tracing::error!("Engine: failed to list resolved directory: {}", error);
-          ErrorResponse::new("Failed to list resolved directory")
+          ErrorResponse::new(format!("Failed to list directory after resolving symlink '{}'. If this persists, check GET /system/health for system status", path))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response()
         }
@@ -407,7 +407,7 @@ fn handle_symlink_resolution(
     }
     Err(error) => {
       tracing::error!("Engine: failed to resolve symlink '{}': {}", path, error);
-      ErrorResponse::new("Failed to resolve symlink")
+      ErrorResponse::new(format!("Failed to resolve symlink '{}'. The symlink or its target may be corrupted — contact your administrator", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -430,7 +430,7 @@ fn handle_file_response(
     }
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new("Failed to read path")
+      return ErrorResponse::new(format!("Failed to read metadata for '{}'. The file may be corrupted — contact your administrator", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -441,7 +441,7 @@ fn handle_file_response(
     Ok(s) => s,
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}': {}", path, error);
-      return ErrorResponse::new("Failed to read file")
+      return ErrorResponse::new(format!("Failed to read file '{}'. The file data may be corrupted — contact your administrator", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -528,7 +528,7 @@ fn handle_recursive_listing(
     }
     Err(error) => {
       tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-      ErrorResponse::new("Failed to list directory")
+      ErrorResponse::new(format!("Failed to list directory '{}' with recursive traversal. If this persists, check GET /system/health for system status", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -559,7 +559,7 @@ fn handle_directory_listing(
     }
     Err(error) => {
       tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-      ErrorResponse::new("Failed to list directory")
+      ErrorResponse::new(format!("Failed to list directory '{}'. If this persists, check GET /system/health for system status", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -582,7 +582,7 @@ pub async fn engine_get(
   if is_system_path(&path) {
     let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
       Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity")
+      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN).into_response(),
     };
     if !is_root(&user_id) {
@@ -631,7 +631,7 @@ pub async fn engine_get(
     }
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new("Failed to read path")
+      return ErrorResponse::new(format!("Failed to read path '{}'. If this persists, check GET /system/health for system status", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -671,13 +671,13 @@ async fn engine_get_at_version(
     match hex::decode(version_hex) {
       Ok(hash) => hash,
       Err(_) => {
-        return ErrorResponse::new("Invalid version hash (not valid hex)")
+        return ErrorResponse::new("Invalid version hash: value is not valid hex. Use the root_hash from a snapshot or version response")
           .with_status(StatusCode::BAD_REQUEST)
           .into_response();
       }
     }
   } else {
-    return ErrorResponse::new("No snapshot or version specified")
+    return ErrorResponse::new("No snapshot or version specified. Use ?snapshot=<name> or ?version=<hex_hash> to read a historical version")
       .with_status(StatusCode::BAD_REQUEST)
       .into_response();
   };
@@ -694,7 +694,7 @@ async fn engine_get_at_version(
     }
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}' at version: {}", path, error);
-      return ErrorResponse::new("Failed to read file at version")
+      return ErrorResponse::new(format!("Failed to read file '{}' at historical version. If this persists, check GET /system/health for system status", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -707,7 +707,7 @@ async fn engine_get_at_version(
     Ok(stream) => stream,
     Err(error) => {
       tracing::error!("Engine: failed to stream file '{}' at version: {}", path, error);
-      return ErrorResponse::new("Failed to stream file")
+      return ErrorResponse::new(format!("Failed to stream file '{}' from historical version. The file data may be corrupted — contact your administrator", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -749,7 +749,7 @@ pub async fn engine_delete_file(
   if is_system_path(&path) {
     let user_id = match uuid::Uuid::parse_str(&claims.sub) {
       Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity")
+      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN).into_response(),
     };
     if !is_root(&user_id) {
@@ -771,7 +771,7 @@ pub async fn engine_delete_file(
       }
       Err(error) => {
         tracing::error!("Engine: failed to delete symlink '{}': {}", path, error);
-        ErrorResponse::new("Failed to delete symlink")
+        ErrorResponse::new(format!("Failed to delete symlink '{}'. If this persists, check GET /system/health for system status", path))
           .with_status(StatusCode::INTERNAL_SERVER_ERROR)
           .into_response()
       }
@@ -793,7 +793,7 @@ pub async fn engine_delete_file(
     }
     Err(error) => {
       tracing::error!("Engine: failed to delete file '{}': {}", path, error);
-      ErrorResponse::new("Failed to delete file")
+      ErrorResponse::new(format!("Failed to delete file '{}'. If this persists, check GET /system/health for system status", path))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -810,7 +810,7 @@ pub async fn engine_head(
   if is_system_path(&path) {
     let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
       Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity")
+      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN).into_response(),
     };
     if !is_root(&user_id) {
@@ -894,7 +894,7 @@ pub async fn engine_get_by_hash(
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
-      return ErrorResponse::new("Invalid hex hash")
+      return ErrorResponse::new(format!("Invalid hex hash '{}': must be a valid hexadecimal string", hex_hash))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -935,7 +935,7 @@ pub async fn engine_get_by_hash(
         Ok(r) => r,
         Err(e) => {
           tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new("Corrupt or unreadable entry")
+          return ErrorResponse::new(format!("Corrupt or unreadable file record at hash '{}'. The entry may need to be re-uploaded — contact your administrator", hex_hash))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -945,7 +945,7 @@ pub async fn engine_get_by_hash(
         Ok(s) => s,
         Err(e) => {
           tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new("Failed to read file chunks")
+          return ErrorResponse::new(format!("Failed to read file chunks for hash '{}'. The file data may be corrupted — contact your administrator", hex_hash))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
@@ -1125,7 +1125,7 @@ pub async fn snapshot_restore(
         .into_response()
     }
     Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Snapshot not found: {}", payload.name))
+      ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", payload.name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -1170,7 +1170,7 @@ pub async fn snapshot_delete(
         .into_response()
     }
     Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Snapshot not found: {}", name))
+      ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -1277,7 +1277,7 @@ pub async fn fork_promote(
         .into_response()
     }
     Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Fork not found: {}", name))
+      ErrorResponse::new(format!("Fork not found: '{}'. Use GET /versions/forks to list active forks", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -1322,7 +1322,7 @@ pub async fn fork_abandon(
         .into_response()
     }
     Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Fork not found: {}", name))
+      ErrorResponse::new(format!("Fork not found: '{}'. Use GET /versions/forks to list active forks", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -1892,7 +1892,7 @@ pub async fn engine_rename(
   let destination = match payload.to {
     Some(ref t) if !t.is_empty() => t.as_str(),
     _ => {
-      return ErrorResponse::new("Request must include non-empty 'to' field")
+      return ErrorResponse::new("Request must include non-empty 'to' field. Rename requires {\"to\": \"/new/path\"}")
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -1902,7 +1902,7 @@ pub async fn engine_rename(
   if is_system_path(&path) || is_system_path(destination) {
     let user_id = match uuid::Uuid::parse_str(&claims.sub) {
       Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity")
+      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
         .with_status(StatusCode::FORBIDDEN).into_response(),
     };
     if !is_root(&user_id) {

@@ -33,7 +33,7 @@ pub async fn create_own_key(
   let caller_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid sub claim")
+      return ErrorResponse::new("Invalid sub claim in JWT: token 'sub' is not a valid UUID. Re-authenticate via POST /auth/token")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -43,14 +43,14 @@ pub async fn create_own_key(
   let target_user_id = if let Some(ref uid_string) = payload.user_id {
     // Only root can create keys for other users.
     if !is_root(&caller_id) {
-      return ErrorResponse::new("Only root can create keys for other users")
+      return ErrorResponse::new("Only root can create keys for other users. Omit the 'user_id' field to create a key for yourself")
         .with_status(StatusCode::FORBIDDEN)
         .into_response();
     }
     match Uuid::parse_str(uid_string) {
       Ok(id) => id,
       Err(_) => {
-        return ErrorResponse::new(format!("Invalid user_id: {}", uid_string))
+        return ErrorResponse::new(format!("Invalid user_id '{}': must be a valid UUID", uid_string))
           .with_status(StatusCode::BAD_REQUEST)
           .into_response();
       }
@@ -64,14 +64,14 @@ pub async fn create_own_key(
     match parse_rules_from_json(rules_json) {
       Ok(parsed) => {
         if let Err(err) = validate_rules(&parsed) {
-          return ErrorResponse::new(format!("Invalid rules: {}", err))
+          return ErrorResponse::new(format!("Invalid rules: {}. Rules must include 'path_pattern' and 'permitted' fields", err))
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
         }
         parsed
       }
       Err(err) => {
-        return ErrorResponse::new(format!("Invalid rules: {}", err))
+        return ErrorResponse::new(format!("Invalid rules JSON: {}. Expected an array of {{\"path_pattern\": \"...\", \"permitted\": \"rwld\"}}", err))
           .with_status(StatusCode::BAD_REQUEST)
           .into_response();
       }
@@ -93,7 +93,7 @@ pub async fn create_own_key(
     Ok(hash) => hash,
     Err(error) => {
       tracing::error!("Failed to hash API key: {}", error);
-      return ErrorResponse::new("Failed to create API key")
+      return ErrorResponse::new("Failed to create API key: could not hash the generated key. If this persists, contact your administrator")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -119,7 +119,7 @@ pub async fn create_own_key(
 
   if let Err(error) = store_result {
     tracing::error!("Failed to store API key: {}", error);
-    return ErrorResponse::new("Failed to store API key")
+    return ErrorResponse::new("Failed to store API key: could not persist to storage. If this persists, check GET /system/health for system status")
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }
@@ -148,7 +148,7 @@ pub async fn list_own_keys(
   let caller_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid sub claim")
+      return ErrorResponse::new("Invalid sub claim in JWT: token 'sub' is not a valid UUID. Re-authenticate via POST /auth/token")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -175,7 +175,7 @@ pub async fn list_own_keys(
     }
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);
-      ErrorResponse::new("Failed to list API keys")
+      ErrorResponse::new("Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -191,7 +191,7 @@ pub async fn revoke_own_key(
   let caller_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid sub claim")
+      return ErrorResponse::new("Invalid sub claim in JWT: token 'sub' is not a valid UUID. Re-authenticate via POST /auth/token")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -200,7 +200,7 @@ pub async fn revoke_own_key(
   let parsed_key_id = match Uuid::parse_str(&key_id) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new(format!("Invalid key ID: {}", key_id))
+      return ErrorResponse::new(format!("Invalid key ID '{}': must be a valid UUID", key_id))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -211,7 +211,7 @@ pub async fn revoke_own_key(
     Ok(keys) => keys,
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);
-      return ErrorResponse::new("Failed to look up API key")
+      return ErrorResponse::new("Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -228,7 +228,7 @@ pub async fn revoke_own_key(
     Some(record) => {
       // Non-root users can only revoke their own keys.
       if record.user_id != caller_id && !is_root(&caller_id) {
-        return ErrorResponse::new("Cannot revoke another user's key")
+        return ErrorResponse::new("Cannot revoke another user's key. You can only revoke keys you own")
           .with_status(StatusCode::FORBIDDEN)
           .into_response();
       }
@@ -252,7 +252,7 @@ pub async fn revoke_own_key(
         }
         Err(error) => {
           tracing::error!("Failed to revoke API key: {}", error);
-          ErrorResponse::new("Failed to revoke API key")
+          ErrorResponse::new("Failed to revoke API key: could not persist revocation to storage. If this persists, check GET /system/health for system status")
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response()
         }

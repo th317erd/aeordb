@@ -46,7 +46,7 @@ pub async fn run_gc_endpoint(
                 .into_response()
         }
         Err(e) => {
-            ErrorResponse::new(format!("GC task panicked: {}", e))
+            ErrorResponse::new(format!("GC task panicked unexpectedly: {}. This is a bug — please report it", e))
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response()
         }

@@ -63,13 +63,13 @@ impl IntoResponse for ErrorResponse {
 /// or a 403 Forbidden Response on failure.
 pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
   let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
-    ErrorResponse::new("Invalid user identity")
+    ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
       .with_status(StatusCode::FORBIDDEN)
       .into_response()
   })?;
   if !crate::engine::user::is_root(&user_id) {
     return Err(
-      ErrorResponse::new("root access required")
+      ErrorResponse::new("root access required. This endpoint is restricted to the root user")
         .with_status(StatusCode::FORBIDDEN)
         .into_response(),
     );

@@ -176,7 +176,7 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(json["error"], "Invalid API key");
+  assert!(json["error"].as_str().unwrap().contains("Invalid API key"), "Expected error to contain 'Invalid API key', got: {}", json["error"]);
 }
 
 #[tokio::test]

@@ -97,7 +97,7 @@ pub async fn add_peer(
     let address = match payload.get("address").and_then(|value| value.as_str()) {
         Some(address) => address.to_string(),
         None => {
-            return ErrorResponse::new("Missing required field: address")
+            return ErrorResponse::new("Missing required field 'address' in request body. Provide {\"address\": \"<host:port>\"}")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
         }
@@ -192,7 +192,7 @@ pub async fn remove_peer(
     let node_id: u64 = match node_id_string.parse() {
         Ok(id) => id,
         Err(_) => {
-            return ErrorResponse::new(format!("Invalid node_id: {}", node_id_string))
+            return ErrorResponse::new(format!("Invalid node_id '{}': must be a numeric value", node_id_string))
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
         }
@@ -200,7 +200,7 @@ pub async fn remove_peer(
 
     let removed = state.peer_manager.remove_peer(node_id);
     if !removed {
-        return ErrorResponse::new(format!("Peer not found: {}", node_id))
+        return ErrorResponse::new(format!("Peer not found: {}. Use GET /admin/cluster/peers to list active peers", node_id))
             .with_status(StatusCode::NOT_FOUND)
             .into_response();
     }

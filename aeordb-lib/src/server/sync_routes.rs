@@ -123,19 +123,19 @@ fn determine_sync_caller(
             .ok()
             .and_then(|s| s.strip_prefix("Bearer "))
             .ok_or_else(|| {
-                ErrorResponse::new("Invalid authorization header")
+                ErrorResponse::new("Invalid authorization header: expected 'Bearer <token>' format")
                     .with_status(StatusCode::UNAUTHORIZED)
                     .into_response()
             })?;
 
         let claims = state.jwt_manager.verify_token(token).map_err(|_| {
-            ErrorResponse::new("Invalid or expired JWT")
+            ErrorResponse::new("Invalid or expired JWT. Re-authenticate via POST /auth/token")
                 .with_status(StatusCode::UNAUTHORIZED)
                 .into_response()
         })?;
 
         let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
-            ErrorResponse::new("Invalid user ID in token")
+            ErrorResponse::new("Invalid user ID in token: 'sub' claim is not a valid UUID")
                 .with_status(StatusCode::UNAUTHORIZED)
                 .into_response()
         })?;
@@ -149,24 +149,24 @@ fn determine_sync_caller(
             match state.api_key_cache.get_key(key_id, &state.engine) {
                 Ok(Some(key_record)) => {
                     if key_record.is_revoked {
-                        return Err(ErrorResponse::new("API key revoked")
+                        return Err(ErrorResponse::new("API key has been revoked. Create a new key via POST /auth/api-keys")
                             .with_status(StatusCode::UNAUTHORIZED)
                             .into_response());
                     }
                     if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
-                        return Err(ErrorResponse::new("API key expired")
+                        return Err(ErrorResponse::new("API key expired. Create a new key via POST /auth/api-keys")
                             .with_status(StatusCode::UNAUTHORIZED)
                             .into_response());
                     }
                     key_record.rules
                 }
                 Ok(None) => {
-                    return Err(ErrorResponse::new("API key not found")
+                    return Err(ErrorResponse::new("API key not found: the key referenced in the token no longer exists")
                         .with_status(StatusCode::UNAUTHORIZED)
                         .into_response());
                 }
                 Err(_) => {
-                    return Err(ErrorResponse::new("Failed to look up API key")
+                    return Err(ErrorResponse::new("Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status")
                         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                         .into_response());
                 }
@@ -181,7 +181,7 @@ fn determine_sync_caller(
         });
     }
 
-    Err(ErrorResponse::new("Authentication required")
+    Err(ErrorResponse::new("Authentication required. Provide a Bearer token via the Authorization header")
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response())
 }
@@ -431,7 +431,7 @@ pub async fn sync_diff(
     // M3: Cap the number of path filters to prevent abuse.
     if let Some(ref paths) = payload.paths {
         if paths.len() > 100 {
-            return ErrorResponse::new("Too many paths (max 100)")
+            return ErrorResponse::new("Too many path filters (max 100). Reduce the number of entries in the 'paths' array")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
         }
@@ -459,7 +459,7 @@ pub async fn sync_diff(
         let since_hash = match hex::decode(since_hex) {
             Ok(h) => h,
             Err(_) => {
-                return ErrorResponse::new("Invalid since_root_hash hex")
+                return ErrorResponse::new("Invalid since_root_hash: value is not valid hex. Use the root_hash from a previous sync response")
                     .with_status(StatusCode::BAD_REQUEST)
                     .into_response()
             }
@@ -529,7 +529,7 @@ pub async fn sync_chunks(
 ) -> Response {
     // M3: Cap the number of chunk hashes to prevent abuse.
     if payload.hashes.len() > 10_000 {
-        return ErrorResponse::new("Too many hashes (max 10000)")
+        return ErrorResponse::new("Too many chunk hashes (max 10000). Split the request into multiple batches")
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
     }

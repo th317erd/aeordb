@@ -30,7 +30,7 @@ pub async fn create_symlink(
     let target = match payload.target {
         Some(ref t) if !t.is_empty() => t.as_str(),
         _ => {
-            return ErrorResponse::new("Request must include non-empty 'target' field")
+            return ErrorResponse::new("Missing required field 'target' in request body. Symlink creation requires {\"target\": \"/path/to/target\"}")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
         }
@@ -41,7 +41,7 @@ pub async fn create_symlink(
     if is_system_path(&normalized_target) {
         let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
         if !is_root(&user_id) {
-            return ErrorResponse::new("Cannot create symlink to system path")
+            return ErrorResponse::new("Cannot create symlink targeting a system path. System paths (/.system/) are restricted to the root user")
                 .with_status(StatusCode::NOT_FOUND)
                 .into_response();
         }
@@ -110,7 +110,7 @@ pub async fn get_symlink(
             }))).into_response()
         }
         Ok(None) => {
-            ErrorResponse::new(format!("Symlink not found: {}", path))
+            ErrorResponse::new(format!("Symlink not found at '{}'. Verify the path or use GET /files/ to browse", path))
                 .with_status(StatusCode::NOT_FOUND)
                 .into_response()
         }

@@ -162,13 +162,13 @@ pub async fn file_restore(
     let user_id = match uuid::Uuid::parse_str(&claims.sub) {
         Ok(id) => id,
         Err(_) => {
-            return ErrorResponse::new("Invalid user ID")
+            return ErrorResponse::new("Invalid user ID: token 'sub' claim is not a valid UUID")
                 .with_status(StatusCode::FORBIDDEN)
                 .into_response();
         }
     };
     if !is_root(&user_id) {
-        return ErrorResponse::new("Restore requires root permissions (snapshot + write)")
+        return ErrorResponse::new("root access required. File restore requires root permissions (snapshot + write access)")
             .with_status(StatusCode::FORBIDDEN)
             .into_response();
     }
@@ -180,7 +180,7 @@ pub async fn file_restore(
         match vm.resolve_root_hash(Some(snapshot_name)) {
             Ok(hash) => (hash, format!("snapshot '{}'", snapshot_name)),
             Err(_) => {
-                return ErrorResponse::new(format!("Snapshot '{}' not found", snapshot_name))
+                return ErrorResponse::new(format!("Snapshot '{}' not found. Use GET /versions/snapshots to list available snapshots", snapshot_name))
                     .with_status(StatusCode::NOT_FOUND)
                     .into_response();
             }
@@ -189,13 +189,13 @@ pub async fn file_restore(
         match hex::decode(version_hex) {
             Ok(hash) => (hash, format!("version '{}'", version_hex)),
             Err(_) => {
-                return ErrorResponse::new("Invalid version hash (not valid hex)")
+                return ErrorResponse::new("Invalid version hash: value is not valid hex. Use the root_hash from a snapshot or version response")
                     .with_status(StatusCode::BAD_REQUEST)
                     .into_response();
             }
         }
     } else {
-        return ErrorResponse::new("Request must include 'snapshot' or 'version' field")
+        return ErrorResponse::new("Request must include 'snapshot' or 'version' field. Provide {\"snapshot\": \"<name>\"} or {\"version\": \"<hex_hash>\"}")
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
     };

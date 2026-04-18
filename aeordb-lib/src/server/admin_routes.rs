@@ -94,7 +94,7 @@ pub async fn get_user(
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new(format!("Invalid user_id: {}", user_id_string))
+      return ErrorResponse::new(format!("Invalid user_id '{}': must be a valid UUID", user_id_string))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -103,7 +103,7 @@ pub async fn get_user(
   match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => (StatusCode::OK, Json(UserResponse::from(&user))).into_response(),
     Ok(None) => {
-      ErrorResponse::new(format!("User not found: {}", user_id))
+      ErrorResponse::new(format!("User not found: {}. Use GET /admin/users to list all users", user_id))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -131,7 +131,7 @@ pub async fn update_user(
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new(format!("Invalid user_id: {}", user_id_string))
+      return ErrorResponse::new(format!("Invalid user_id '{}': must be a valid UUID", user_id_string))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -140,7 +140,7 @@ pub async fn update_user(
   let mut user = match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => user,
     Ok(None) => {
-      return ErrorResponse::new(format!("User not found: {}", user_id))
+      return ErrorResponse::new(format!("User not found: {}. Use GET /admin/users to list all users", user_id))
         .with_status(StatusCode::NOT_FOUND)
         .into_response();
     }
@@ -188,7 +188,7 @@ pub async fn deactivate_user(
   let user_id = match Uuid::parse_str(&user_id_string) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new(format!("Invalid user_id: {}", user_id_string))
+      return ErrorResponse::new(format!("Invalid user_id '{}': must be a valid UUID", user_id_string))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -197,7 +197,7 @@ pub async fn deactivate_user(
   let mut user = match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => user,
     Ok(None) => {
-      return ErrorResponse::new(format!("User not found: {}", user_id))
+      return ErrorResponse::new(format!("User not found: {}. Use GET /admin/users to list all users", user_id))
         .with_status(StatusCode::NOT_FOUND)
         .into_response();
     }
@@ -329,7 +329,7 @@ pub async fn get_group(
   match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => (StatusCode::OK, Json(GroupResponse::from(&group))).into_response(),
     Ok(None) => {
-      ErrorResponse::new(format!("Group not found: {}", name))
+      ErrorResponse::new(format!("Group not found: '{}'. Use GET /admin/groups to list all groups", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
@@ -357,7 +357,7 @@ pub async fn update_group(
   let mut group = match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => group,
     Ok(None) => {
-      return ErrorResponse::new(format!("Group not found: {}", name))
+      return ErrorResponse::new(format!("Group not found: '{}'. Use GET /admin/groups to list all groups", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response();
     }
@@ -422,7 +422,7 @@ pub async fn delete_group(
   match system_store::get_group(&state.engine, &name) {
     Ok(Some(_)) => {}
     Ok(None) => {
-      return ErrorResponse::new(format!("Group not found: {}", name))
+      return ErrorResponse::new(format!("Group not found: '{}'. Use GET /admin/groups to list all groups", name))
         .with_status(StatusCode::NOT_FOUND)
         .into_response();
     }

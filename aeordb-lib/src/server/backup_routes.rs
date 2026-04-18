@@ -37,7 +37,7 @@ pub async fn export_backup(
 
     let output_path = match unique_temp_path("aeordb-export") {
         Ok(path) => path,
-        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+        Err(e) => return ErrorResponse::new(format!("Failed to create temporary file for backup operation: {}. Check disk space and permissions", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response(),
     };
@@ -88,7 +88,7 @@ pub async fn export_backup(
                 }
                 Err(e) => {
                     let _ = std::fs::remove_file(&output_path);
-                    ErrorResponse::new(format!("Failed to read export: {}", e))
+                    ErrorResponse::new(format!("Failed to read exported backup file: {}. The export completed but the file could not be read", e))
                         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                         .into_response()
                 }
@@ -116,7 +116,7 @@ pub async fn diff_backup(
 
     let output_path = match unique_temp_path("aeordb-patch") {
         Ok(path) => path,
-        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+        Err(e) => return ErrorResponse::new(format!("Failed to create temporary file for backup operation: {}. Check disk space and permissions", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response(),
     };
@@ -173,7 +173,7 @@ pub async fn diff_backup(
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&output_path);
-                ErrorResponse::new(format!("Failed to read patch: {}", e))
+                ErrorResponse::new(format!("Failed to read generated patch file: {}. The diff completed but the file could not be read", e))
                     .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                     .into_response()
             }
@@ -202,13 +202,13 @@ pub async fn import_backup(
     // Write body to temp file
     let temp_path = match unique_temp_path("aeordb-import") {
         Ok(path) => path,
-        Err(e) => return ErrorResponse::new(format!("Failed to create temp file: {}", e))
+        Err(e) => return ErrorResponse::new(format!("Failed to create temporary file for backup operation: {}. Check disk space and permissions", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response(),
     };
 
     if let Err(e) = std::fs::write(&temp_path, &body) {
-        return ErrorResponse::new(format!("Failed to write temp file: {}", e))
+        return ErrorResponse::new(format!("Failed to write uploaded backup to temp file: {}. Check disk space", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
     }
@@ -269,12 +269,12 @@ pub async fn promote_head(
     match state.engine.has_entry(&hash_bytes) {
         Ok(true) => {}
         Ok(false) => {
-            return ErrorResponse::new(format!("Version hash {} not found", params.hash))
+            return ErrorResponse::new(format!("Version hash '{}' not found. Use GET /versions/snapshots to find valid version hashes", params.hash))
                 .with_status(StatusCode::NOT_FOUND)
                 .into_response()
         }
         Err(e) => {
-            return ErrorResponse::new(format!("Error: {}", e))
+            return ErrorResponse::new(format!("Failed to verify version hash '{}': {}", params.hash, e))
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response()
         }
