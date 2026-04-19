@@ -149,12 +149,14 @@ All custom headers now use the `X-AeorDB-` prefix for clarity and to avoid colli
 
 ## 3. JSON Field Changes
 
-Two fields were renamed in JSON response bodies for consistency:
+These fields were renamed in JSON response bodies for consistency:
 
 | Old Field | New Field | Where It Appears |
 |-----------|-----------|------------------|
 | `total_size` | `size` | File metadata, directory listings, query results |
 | `type` | `entry_type` | Symlink delete response (`"type": "symlink"` -> `"entry_type": "symlink"`) |
+| `results` | `items` | Query responses (`POST /files/query`) — now matches all other collection endpoints |
+| `total_count` | `total` | Query pagination — now matches directory listing pagination |
 
 ### Before
 
@@ -180,7 +182,7 @@ Two fields were renamed in JSON response bodies for consistency:
 
 ## 4. Collection Response Wrapping
 
-All endpoints that previously returned bare JSON arrays now return objects with an `items` key.
+All endpoints that previously returned bare JSON arrays now return objects with an `items` key. Directory listings also include pagination metadata.
 
 ### Before
 
@@ -191,15 +193,38 @@ All endpoints that previously returned bare JSON arrays now return objects with 
 ]
 ```
 
-### After
+### After (directory listing with pagination)
 
 ```json
 {
   "items": [
     {"path": "/data/report.pdf", "name": "report.pdf", "entry_type": 2},
     {"path": "/data/images", "name": "images", "entry_type": 3}
-  ]
+  ],
+  "total": 50,
+  "limit": 10,
+  "offset": 0
 }
+```
+
+### After (query response)
+
+```json
+{
+  "items": [...],
+  "total": 50,
+  "has_more": true,
+  "next_cursor": "...",
+  "prev_cursor": "..."
+}
+```
+
+### Pagination support
+
+Directory listings now support `?limit=N&offset=M` query parameters:
+
+```
+GET /files/my-dir?limit=10&offset=20
 ```
 
 **Affected endpoints:**
@@ -365,7 +390,10 @@ curl -X PATCH http://localhost:3000/files/ \
 - [ ] Update all `X-Path` headers to `X-AeorDB-Path` (and all other header renames)
 - [ ] Replace `total_size` with `size` in JSON parsing
 - [ ] Replace `"type"` with `"entry_type"` in symlink delete response parsing
+- [ ] Replace `"results"` with `"items"` in query response parsing
+- [ ] Replace `"total_count"` with `"total"` in query pagination parsing
 - [ ] Wrap array response parsing to expect `{items: [...]}` objects
+- [ ] Directory listings now include `total`, `limit`, `offset` metadata
 - [ ] Update event listener names (`task.*` -> `tasks_*`, `sync.*` -> `syncs_*`)
 - [ ] Replace `--cors` CLI flag with `--cors-origins`
 - [ ] Handle new error codes: `PAYLOAD_TOO_LARGE`, `METHOD_NOT_ALLOWED`, `SERVICE_UNAVAILABLE`
