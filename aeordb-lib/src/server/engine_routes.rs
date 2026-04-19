@@ -1646,7 +1646,7 @@ fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::Hash
 
 /// POST /query -- execute an index query and return matching file metadata.
 /// Supports both legacy array format and nested boolean object format.
-/// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total_count? }
+/// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total? }
 pub async fn query_endpoint(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
@@ -1834,7 +1834,7 @@ pub async fn query_endpoint(
       });
 
       if let Some(total) = paginated.total_count {
-        response["total_count"] = serde_json::json!(total);
+        response["total"] = serde_json::json!(total);
       }
       if let Some(ref cursor) = paginated.next_cursor {
         response["next_cursor"] = serde_json::json!(cursor);

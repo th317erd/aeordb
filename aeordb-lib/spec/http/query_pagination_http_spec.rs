@@ -284,7 +284,7 @@ async fn test_query_include_total() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  assert_eq!(json["total_count"], 15);
+  assert_eq!(json["total"], 15);
   assert_eq!(json["results"].as_array().unwrap().len(), 5);
   assert_eq!(json["has_more"], true);
 }

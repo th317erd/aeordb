@@ -562,7 +562,7 @@ impl WasmPluginRuntime {
     // -----------------------------------------------------------------------
     // aeordb_query(ptr, len) -> i64
     // Executes a query. Args: same JSON format as POST /query.
-    // Returns: {"results": [...], "total_count": N, "has_more": bool}
+    // Returns: {"results": [...], "total": N, "has_more": bool}
     // -----------------------------------------------------------------------
     linker
       .func_wrap(
@@ -609,7 +609,7 @@ impl WasmPluginRuntime {
               });
 
               if let Some(total) = paginated.total_count {
-                response["total_count"] = serde_json::json!(total);
+                response["total"] = serde_json::json!(total);
               }
 
               write_json_response(&mut caller, &response)
