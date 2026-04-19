@@ -1,0 +1,341 @@
+title: "AeorDB Enhanced Metrics — Implementation Plan"
+spec: docs/superpowers/specs/2026-04-19-metrics-design.md
+date: 2026-04-19
+status: ready
+
+overview: |
+  Add O(1) atomic counters, rolling rate computation, metrics SSE event,
+  and strip the heartbeat down to clock sync only. In-memory counters
+  initialized from KV snapshot on startup, reconciled by GC.
+
+  Key constraint: counters are in-memory only — no versioned storage.
+  Heartbeat must stay lightweight (3 fields, no engine.stats() call).
+
+phases:
+
+  # ===========================================================================
+  # PHASE 1 — Core counters infrastructure
+  # ===========================================================================
+  - name: "Core counters and rate tracking"
+    description: |
+      Create the EngineCounters struct (AtomicU64 fields), RateTracker
+      (rolling averages), and wire into StorageEngine. Initialize counters
+      from KV snapshot on startup.
+    tasks:
+
+      - name: "Create EngineCounters struct"
+        files:
+          create:
+            - aeordb-lib/src/engine/engine_counters.rs
+        implementation: |
+          - AtomicU64 fields for all counts, sizes, and throughput
+          - Methods: increment_files(), decrement_files(), add_bytes_written(), etc.
+          - snapshot() method returns a plain struct with all current values (for serialization)
+          - reconcile() method accepts authoritative counts and resets atomics
+          - initialize_from_kv() classmethod scans KV snapshot once, sets all counters
+        tests:
+          - "Unit tests: increment, decrement, snapshot, reconcile"
+          - "Concurrent increment from multiple threads"
+          - "Reconcile overwrites drifted values"
+
+      - name: "Create RateTracker"
+        files:
+          create:
+            - aeordb-lib/src/engine/rate_tracker.rs
+        implementation: |
+          - Ring buffer of (timestamp_ms, counter_value) samples
+          - record(count) pushes a new sample
+          - rate_1m(), rate_5m(), rate_15m() compute ops/sec over window
+          - peak_1m() returns max instantaneous rate in last 60 samples
+          - Background sampler: 1-second tokio task reads monotonic counters
+        tests:
+          - "rate_1m returns correct average over 60 samples"
+          - "peak_1m returns the max single-second rate"
+          - "Empty tracker returns 0.0"
+          - "Partial window (< 60 samples) computes correctly"
+
+      - name: "Wire counters into StorageEngine"
+        files:
+          modify:
+            - aeordb-lib/src/engine/storage_engine.rs
+            - aeordb-lib/src/engine/mod.rs
+        implementation: |
+          - Add Arc<EngineCounters> field to StorageEngine
+          - On create/open: call EngineCounters::initialize_from_kv()
+          - Expose counters() method returning Arc<EngineCounters>
+          - Re-export from engine mod.rs
+        tests:
+          - "New engine has correct initial counts (root dir = 0 files)"
+          - "Engine with pre-existing files has correct counts on open"
+
+  # ===========================================================================
+  # PHASE 2 — Instrument engine operations
+  # ===========================================================================
+  - name: "Instrument file/directory/symlink operations"
+    description: |
+      Add counter increment/decrement calls to every engine operation
+      that creates, reads, or deletes content.
+    depends_on: "Core counters and rate tracking"
+    tasks:
+
+      - name: "Instrument directory_ops.rs"
+        files:
+          modify:
+            - aeordb-lib/src/engine/directory_ops.rs
+        instrumentation:
+          - "store_file_internal: files++, logical_data_size += file_size, writes_total++, bytes_written_total += file_size"
+          - "store_file_internal: for each new chunk, chunks++, chunk_data_size += chunk_bytes, chunks_deduped_total++ if dedup hit"
+          - "read_file / read_file_streaming: reads_total++, bytes_read_total += file_size"
+          - "delete_file: files--, logical_data_size -= file_size"
+          - "store_symlink: symlinks++"
+          - "delete_symlink: symlinks--"
+          - "rename_file: no count change (same file, different path)"
+          - "rename_symlink: no count change"
+          - "update_parent_directories: directories++ when creating new dir"
+          - "remove_from_parent_directory: directories-- when dir becomes empty (if applicable)"
+        tests:
+          - "Store 10 files, counters.files == 10"
+          - "Delete 3, counters.files == 7"
+          - "Store duplicate content, chunks_deduped_total incremented"
+          - "Read file, reads_total and bytes_read_total incremented"
+
+      - name: "Instrument version_manager.rs"
+        files:
+          modify:
+            - aeordb-lib/src/engine/version_manager.rs
+        instrumentation:
+          - "create_snapshot: snapshots++"
+          - "delete_snapshot: snapshots--"
+          - "create_fork: forks++"
+          - "abandon_fork: forks--"
+        tests:
+          - "Create 3 snapshots, counters.snapshots == 3"
+          - "Delete 1, counters.snapshots == 2"
+
+      - name: "Instrument disk_kv_store.rs"
+        files:
+          modify:
+            - aeordb-lib/src/engine/disk_kv_store.rs
+        instrumentation:
+          - "insert: write_buffer_depth = write_buffer.len()"
+          - "flush: write_buffer_depth = 0"
+        tests:
+          - "After 100 inserts without flush, write_buffer_depth > 0"
+          - "After flush, write_buffer_depth == 0"
+
+      - name: "Instrument GC reconciliation"
+        files:
+          modify:
+            - aeordb-lib/src/engine/gc.rs
+        implementation: |
+          After GC sweep completes, call counters.reconcile() with
+          authoritative counts from the post-GC KV snapshot. This
+          corrects any drift from crashes or bugs.
+        tests:
+          - "After GC, counters match actual KV entry counts"
+
+  # ===========================================================================
+  # PHASE 3 — Heartbeat separation + metrics event
+  # ===========================================================================
+  - name: "Heartbeat separation and metrics event"
+    description: |
+      Strip heartbeat to clock sync only. Create new metrics pulse event.
+    depends_on: "Instrument file/directory/symlink operations"
+    tasks:
+
+      - name: "Strip heartbeat to clock sync"
+        files:
+          modify:
+            - aeordb-lib/src/engine/heartbeat.rs
+            - aeordb-lib/src/engine/engine_event.rs
+        changes:
+          - "Remove engine.stats() call from heartbeat"
+          - "HeartbeatData stripped to: intent_time, construct_time, node_id"
+          - "Remove all stats fields from HeartbeatData"
+        tests:
+          - "Heartbeat event contains only 3 fields"
+          - "Heartbeat does NOT call engine.stats()"
+
+      - name: "Create metrics pulse"
+        files:
+          create:
+            - aeordb-lib/src/engine/metrics_pulse.rs
+          modify:
+            - aeordb-lib/src/engine/engine_event.rs
+            - aeordb-lib/src/engine/mod.rs
+        implementation: |
+          - Add EVENT_METRICS constant ("metrics")
+          - spawn_metrics_pulse(bus, counters, rate_trackers, cancel)
+          - 15-second interval (independent of heartbeat)
+          - Reads from Arc<EngineCounters> and Arc<RateTracker> — all O(1)
+          - Emits structured JSON matching spec section 5
+          - Does NOT read from engine or KV store
+        tests:
+          - "Metrics event contains counts, sizes, throughput, health sections"
+          - "Metrics event does NOT contain intent_time/construct_time"
+
+      - name: "Wire metrics pulse into server startup"
+        files:
+          modify:
+            - aeordb-lib/src/server/mod.rs
+            - aeordb-cli/src/commands/start.rs
+        implementation: |
+          - Create RateTracker instances for writes, reads, bytes_written, bytes_read
+          - Spawn background sampler task (1-second interval)
+          - Spawn metrics pulse task (15-second interval)
+          - Pass counters + rate trackers through AppState or directly
+        tests:
+          - "Server starts with metrics pulse active"
+
+  # ===========================================================================
+  # PHASE 4 — Stats API and Prometheus
+  # ===========================================================================
+  - name: "Stats API and Prometheus"
+    description: |
+      Rewrite stats endpoint to use O(1) counters. Instrument Prometheus
+      gauges from atomic counters. Wire latency histograms.
+    depends_on: "Heartbeat separation and metrics event"
+    tasks:
+
+      - name: "Rewrite stats endpoint"
+        files:
+          modify:
+            - aeordb-lib/src/server/portal_routes.rs
+        implementation: |
+          - GET /system/stats reads from Arc<EngineCounters> + Arc<RateTracker>
+          - Returns structured JSON matching spec section 4
+          - Identity section: version, db_path, hash_algo, chunk_size, node_id, uptime
+          - Counts, sizes, throughput, latency, health, sync sections
+          - O(1) — no engine.stats() call, no KV iteration
+          - Note: uptime computed from startup_time stored in AppState
+        tests:
+          - "Stats response has all required sections"
+          - "Stats response counts match actual stored files"
+          - "Stats response is O(1) (no iteration)"
+
+      - name: "Wire Prometheus gauges"
+        files:
+          modify:
+            - aeordb-lib/src/metrics/definitions.rs
+            - aeordb-lib/src/engine/engine_counters.rs
+        implementation: |
+          - On each counter increment, also update the corresponding Prometheus gauge
+          - Use metrics::gauge!() for counts and sizes
+          - Monotonic counters (writes_total, reads_total) use metrics::counter!()
+        tests:
+          - "Prometheus endpoint includes aeordb_files_total gauge"
+
+      - name: "Instrument latency histograms"
+        files:
+          modify:
+            - aeordb-lib/src/engine/directory_ops.rs
+            - aeordb-lib/src/engine/query_engine.rs
+            - aeordb-lib/src/engine/disk_kv_store.rs
+        implementation: |
+          - Wrap store_file, read_file, execute_query, flush with Instant::now() timing
+          - Record to metrics::histogram!() with pre-defined metric names
+          - Store recent p50/p95/p99 in a LatencyTracker for stats API
+        tests:
+          - "After writes, write latency histogram has samples"
+          - "Stats API returns non-zero latency values"
+
+  # ===========================================================================
+  # PHASE 5 — Dashboard update
+  # ===========================================================================
+  - name: "Dashboard update"
+    description: |
+      Update the portal dashboard to subscribe to metrics events
+      and display the full set of metrics.
+    depends_on: "Stats API and Prometheus"
+    tasks:
+
+      - name: "Update dashboard JS"
+        files:
+          modify:
+            - aeordb-lib/src/portal/dashboard.mjs
+        changes:
+          - "Subscribe to ?events=metrics instead of ?events=heartbeat"
+          - "Add identity bar: version, db path, uptime, hash algorithm"
+          - "Add size cards: disk total, logical data, chunk data, dedup savings, void space"
+          - "Add symlink count to stat cards"
+          - "Add throughput section: writes/sec and reads/sec (1m rates)"
+          - "Add latency display: write/read/query p50/p95/p99"
+          - "Add health indicators: disk usage bar, KV fill ratio, dedup hit rate"
+          - "Update activity chart to use throughput data instead of kv_entries"
+          - "Fallback: poll /system/stats instead of /api/stats"
+        tests:
+          - "Manual: start server, open portal, verify all sections render"
+          - "Manual: store files while watching, verify throughput chart updates"
+
+      - name: "Update health endpoint"
+        files:
+          modify:
+            - aeordb-lib/src/engine/health.rs
+        changes:
+          - "Use counters for entry_count and db_file_size instead of engine.stats()"
+          - "Add kv_fill_ratio to health response"
+        tests:
+          - "Health check returns correct entry count from counters"
+
+  # ===========================================================================
+  # PHASE 6 — Documentation
+  # ===========================================================================
+  - name: "Documentation"
+    description: "Update docs and client migration report."
+    depends_on: "Dashboard update"
+    tasks:
+
+      - name: "Update documentation"
+        files:
+          modify:
+            - docs/src/api/events.md
+            - docs/src/api/admin.md
+            - .claude/client-migration-report.md
+        changes:
+          - "Document metrics event format and subscription"
+          - "Document heartbeat is now clock-sync only"
+          - "Document new stats API response shape"
+          - "Add breaking change: heartbeat no longer contains stats"
+          - "Add breaking change: stats response restructured"
+
+testing_strategy:
+  approach: |
+    Unit tests for EngineCounters and RateTracker (pure logic, no I/O).
+    Integration tests for counter accuracy after file operations.
+    HTTP tests for stats API response shape.
+    SSE tests for metrics event format.
+    Manual verification of dashboard rendering.
+
+  key_tests:
+    - "EngineCounters: increment/decrement/snapshot/reconcile"
+    - "RateTracker: rolling averages with known input data"
+    - "Store N files → counters.files == N"
+    - "Delete M files → counters.files == N-M"
+    - "Stats API returns all sections with correct types"
+    - "Metrics SSE event has counts/sizes/throughput/health"
+    - "Heartbeat SSE event has only intent_time/construct_time/node_id"
+    - "GC reconciliation corrects drifted counters"
+    - "Startup initializes counters from existing data"
+
+  timeout_discipline: |
+    All tests must complete in <10 seconds. No background timer tests —
+    test the snapshot/emit functions directly, not the interval loop.
+
+implementation_notes:
+  parallelism: |
+    Phase 1 tasks are independent (counters struct vs rate tracker).
+    Phase 2 tasks can be parallelized (directory_ops, version_manager,
+    kv_store, gc all touch different files).
+    Phases 3-6 are sequential.
+
+  memory_model: |
+    All counters are in-memory only. No persistence, no versioning.
+    Initialized from KV snapshot on startup (one-time O(n) scan).
+    GC reconciles counters against authoritative KV state.
+    Rates and latency are ephemeral — reset to zero on restart.
+
+  ordering: |
+    AtomicU64 operations use Ordering::Relaxed for all counters.
+    Exact consistency is not required — stats are approximate and
+    GC reconciles periodically. Relaxed ordering is the cheapest
+    and sufficient for our use case.
