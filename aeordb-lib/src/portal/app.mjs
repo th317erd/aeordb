@@ -280,17 +280,37 @@ document.getElementById('logout-button').addEventListener('click', () => {
 window.addEventListener('popstate', navigate);
 
 // Detect no-auth mode: probe /system/stats without a token.
-// If it succeeds, auth is disabled and we skip the login screen.
-// We use /system/health (public) first, then try /system/stats.
+// Detect no-auth mode by probing /system/stats (behind auth middleware).
+// If it succeeds without a token, auth is disabled — skip the login screen.
+// Falls back to /system/health (always public) to distinguish "auth disabled"
+// from "server unreachable".
 async function init() {
   if (!AUTH.token) {
     try {
-      const res = await fetch('/system/stats');
-      if (res.ok) {
+      const statsRes = await fetch('/system/stats');
+      if (statsRes.ok) {
+        // Stats endpoint responded without auth — auth is disabled
         authDisabled = true;
       }
     } catch (_) {
-      // Auth required — show login
+      // Network error — server may be unreachable
+    }
+
+    if (!authDisabled) {
+      try {
+        // If stats failed, check if the server is even reachable
+        const healthRes = await fetch('/system/health');
+        if (healthRes.ok) {
+          const health = await healthRes.json();
+          // If signing_key_present is false AND mode is standalone,
+          // auth is disabled (--auth=false sets no signing key)
+          if (health.checks?.auth?.signing_key_present === false) {
+            authDisabled = true;
+          }
+        }
+      } catch (_) {
+        // Server unreachable
+      }
     }
   }
   navigate();
