@@ -751,7 +751,7 @@ async fn test_query_filters_denied_results() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let results = json["results"].as_array().expect("results should be array");
+    let results = json["items"].as_array().expect("results should be array");
 
     // All results should be under /allowed/
     let denied_paths: Vec<&str> = results
@@ -831,7 +831,7 @@ async fn test_query_unscoped_no_filtering() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
-    let results = json["results"].as_array().expect("results should be array");
+    let results = json["items"].as_array().expect("results should be array");
 
     let paths: Vec<&str> = results.iter().filter_map(|r| r["path"].as_str()).collect();
     assert!(paths.iter().any(|p| p.contains("/a/")), "Should contain /a/ path, got: {:?}", paths);

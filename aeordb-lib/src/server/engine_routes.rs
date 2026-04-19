@@ -1605,7 +1605,7 @@ fn map_select_fields(select: &[String]) -> Vec<String> {
 
 /// Filter a JSON response to include only selected fields.
 /// For arrays of objects (results), filters each object.
-/// For objects with a "results" array (envelope), filters each result inside.
+/// For objects with an "items" array (envelope), filters each item inside.
 /// Envelope fields (has_more, next_cursor, etc.) are never stripped.
 fn apply_projection(response: &mut serde_json::Value, select: &[String]) {
   if select.is_empty() {
@@ -1616,8 +1616,8 @@ fn apply_projection(response: &mut serde_json::Value, select: &[String]) {
   let allowed: std::collections::HashSet<&str> = select.iter().map(|s| s.as_str()).collect();
 
   if let Some(obj) = response.as_object_mut() {
-    // Check if this is an envelope with "results" array
-    if let Some(results) = obj.get_mut("results") {
+    // Check if this is an envelope with "items" array
+    if let Some(results) = obj.get_mut("items") {
       if let Some(arr) = results.as_array_mut() {
         for item in arr.iter_mut() {
           filter_object(item, &allowed);
@@ -1829,7 +1829,7 @@ pub async fn query_endpoint(
       };
 
       let mut response = serde_json::json!({
-        "results": response_items,
+        "items": response_items,
         "has_more": paginated.has_more,
       });
 

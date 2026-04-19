@@ -138,9 +138,9 @@ async fn test_query_response_has_envelope() {
   assert_eq!(status, StatusCode::OK);
 
   // Envelope fields
-  assert!(json["results"].is_array(), "Response must have results array");
+  assert!(json["items"].is_array(), "Response must have results array");
   assert!(json["has_more"].is_boolean(), "Response must have has_more boolean");
-  assert_eq!(json["results"].as_array().unwrap().len(), 5);
+  assert_eq!(json["items"].as_array().unwrap().len(), 5);
   assert_eq!(json["has_more"], false);
 }
 
@@ -161,7 +161,7 @@ async fn test_query_with_order_by() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 10);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -184,7 +184,7 @@ async fn test_query_with_offset() {
     "limit": 5
   });
   let (_, json1) = query_post(app1, &auth, &body1).await;
-  let paths1: Vec<&str> = json1["results"].as_array().unwrap()
+  let paths1: Vec<&str> = json1["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   let app2 = rebuild_app(&jwt_manager, &engine);
@@ -196,7 +196,7 @@ async fn test_query_with_offset() {
     "offset": 5
   });
   let (_, json2) = query_post(app2, &auth, &body2).await;
-  let paths2: Vec<&str> = json2["results"].as_array().unwrap()
+  let paths2: Vec<&str> = json2["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   assert_eq!(paths1.len(), 5);
@@ -235,12 +235,12 @@ async fn test_query_with_cursor() {
     "after": next_cursor
   });
   let (_, json2) = query_post(app2, &auth, &body2).await;
-  assert_eq!(json2["results"].as_array().unwrap().len(), 5);
+  assert_eq!(json2["items"].as_array().unwrap().len(), 5);
 
   // No overlap
-  let paths1: Vec<&str> = json1["results"].as_array().unwrap()
+  let paths1: Vec<&str> = json1["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
-  let paths2: Vec<&str> = json2["results"].as_array().unwrap()
+  let paths2: Vec<&str> = json2["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
   for p in &paths1 {
     assert!(!paths2.contains(p), "Overlap: {}", p);
@@ -265,7 +265,7 @@ async fn test_query_default_limit_in_response() {
   assert_eq!(json["has_more"], true);
   assert_eq!(json["default_limit_hit"], true);
   assert!(json["default_limit"].is_number());
-  assert_eq!(json["results"].as_array().unwrap().len(), json["default_limit"].as_u64().unwrap() as usize);
+  assert_eq!(json["items"].as_array().unwrap().len(), json["default_limit"].as_u64().unwrap() as usize);
 }
 
 #[tokio::test]
@@ -285,7 +285,7 @@ async fn test_query_include_total() {
   assert_eq!(status, StatusCode::OK);
 
   assert_eq!(json["total"], 15);
-  assert_eq!(json["results"].as_array().unwrap().len(), 5);
+  assert_eq!(json["items"].as_array().unwrap().len(), 5);
   assert_eq!(json["has_more"], true);
 }
 
@@ -304,7 +304,7 @@ async fn test_query_sort_direction() {
     "limit": 10
   });
   let (_, json_asc) = query_post(app1, &auth, &body_asc).await;
-  let paths_asc: Vec<&str> = json_asc["results"].as_array().unwrap()
+  let paths_asc: Vec<&str> = json_asc["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   // DESC
@@ -316,7 +316,7 @@ async fn test_query_sort_direction() {
     "limit": 10
   });
   let (_, json_desc) = query_post(app2, &auth, &body_desc).await;
-  let paths_desc: Vec<&str> = json_desc["results"].as_array().unwrap()
+  let paths_desc: Vec<&str> = json_desc["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   // Verify they are reversed
@@ -341,7 +341,7 @@ async fn test_query_virtual_field_sort() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  let paths: Vec<&str> = json["results"].as_array().unwrap()
+  let paths: Vec<&str> = json["items"].as_array().unwrap()
     .iter().map(|r| r["path"].as_str().unwrap()).collect();
   for i in 1..paths.len() {
     assert!(paths[i - 1] <= paths[i]);
@@ -379,7 +379,7 @@ async fn test_query_explicit_limit_no_default_hit() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  assert_eq!(json["results"].as_array().unwrap().len(), 5);
+  assert_eq!(json["items"].as_array().unwrap().len(), 5);
   assert_eq!(json["has_more"], true);
   // default_limit_hit should NOT be present (explicit limit used)
   assert!(json.get("default_limit_hit").is_none() || json["default_limit_hit"].is_null(),

@@ -562,7 +562,7 @@ impl WasmPluginRuntime {
     // -----------------------------------------------------------------------
     // aeordb_query(ptr, len) -> i64
     // Executes a query. Args: same JSON format as POST /query.
-    // Returns: {"results": [...], "total": N, "has_more": bool}
+    // Returns: {"items": [...], "total": N, "has_more": bool}
     // -----------------------------------------------------------------------
     linker
       .func_wrap(
@@ -604,7 +604,7 @@ impl WasmPluginRuntime {
                 .collect();
 
               let mut response = serde_json::json!({
-                "results": result_items,
+                "items": result_items,
                 "has_more": paginated.has_more,
               });
 

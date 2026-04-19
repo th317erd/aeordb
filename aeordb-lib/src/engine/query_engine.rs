@@ -638,7 +638,7 @@ impl<'a> QueryEngine<'a> {
       let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
       let returned = paginated.results.len();
       let results_value = serde_json::json!({
-        "results": paginated.results.iter().map(|r| {
+        "items": paginated.results.iter().map(|r| {
           serde_json::json!({
             "path": r.file_record.path,
             "score": r.score,

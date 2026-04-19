@@ -402,7 +402,7 @@ async fn test_regular_query_still_works_without_aggregate() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let json = body_json(response.into_body()).await;
-    // Regular query returns "results" array, not aggregation
-    assert!(json["results"].is_array(), "regular query should return results array");
-    assert_eq!(json["results"].as_array().unwrap().len(), 10);
+    // Regular query returns "items" array, not aggregation
+    assert!(json["items"].is_array(), "regular query should return results array");
+    assert_eq!(json["items"].as_array().unwrap().len(), 10);
 }

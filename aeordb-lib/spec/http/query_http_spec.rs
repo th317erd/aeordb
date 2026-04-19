@@ -153,7 +153,7 @@ async fn test_query_exact_match() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/alice.json");
 }
@@ -184,7 +184,7 @@ async fn test_query_gt() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -218,7 +218,7 @@ async fn test_query_lt() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/bob.json");
 }
@@ -249,7 +249,7 @@ async fn test_query_between() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -284,7 +284,7 @@ async fn test_query_multiple_fields() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/alice.json");
 }
@@ -316,7 +316,7 @@ async fn test_query_with_limit() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(results.len() <= 2);
 }
 
@@ -346,7 +346,7 @@ async fn test_query_empty_results() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(results.is_empty());
 }
 
@@ -495,7 +495,7 @@ async fn test_query_response_contains_metadata_fields() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
 
   let result = &results[0];
@@ -533,7 +533,7 @@ async fn test_query_with_string_value() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/bob.json");
 }
@@ -588,7 +588,7 @@ async fn test_query_empty_where_returns_empty_array() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(results.is_empty());
 }
 
@@ -625,7 +625,7 @@ async fn test_query_json_boolean_and() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/alice.json");
 }
@@ -659,7 +659,7 @@ async fn test_query_json_boolean_or() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -693,7 +693,7 @@ async fn test_query_json_boolean_not() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 3);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -739,7 +739,7 @@ async fn test_query_json_nested_boolean() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/alice.json");
 }
@@ -771,7 +771,7 @@ async fn test_query_json_backward_compatible_array() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -805,7 +805,7 @@ async fn test_query_json_in_operation() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -864,7 +864,7 @@ async fn test_query_json_in_with_string_values() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 2);
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();

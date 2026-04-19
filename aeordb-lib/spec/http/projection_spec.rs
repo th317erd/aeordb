@@ -156,7 +156,7 @@ async fn test_select_filters_response() {
     Some(serde_json::json!(["path", "score"])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -185,7 +185,7 @@ async fn test_select_virtual_fields() {
     Some(serde_json::json!(["@path", "@score"])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -207,7 +207,7 @@ async fn test_select_no_filter_without_select() {
   // No select -> full response
   let json = query_with_select(app, &auth, None).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -236,7 +236,7 @@ async fn test_select_empty_array() {
     Some(serde_json::json!([])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -261,7 +261,7 @@ async fn test_select_preserves_envelope() {
   ).await;
 
   // Envelope fields are never stripped
-  assert!(json.get("results").is_some(), "envelope 'results' should be present");
+  assert!(json.get("items").is_some(), "envelope 'items' should be present");
   assert!(json.get("has_more").is_some(), "envelope 'has_more' should be present");
 }
 
@@ -311,7 +311,7 @@ async fn test_select_unknown_field() {
     Some(serde_json::json!(["nonexistent"])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -337,7 +337,7 @@ async fn test_select_size_virtual_field() {
     Some(serde_json::json!(["@size"])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();
@@ -360,7 +360,7 @@ async fn test_select_mixed_virtual_and_regular() {
     Some(serde_json::json!(["@path", "score", "@content_type"])),
   ).await;
 
-  let results = json["results"].as_array().unwrap();
+  let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
   for result in results {
     let obj = result.as_object().unwrap();

@@ -159,7 +159,7 @@ fn test_explain_result_serializes() {
   let result = ExplainResult {
     plan: serde_json::json!({"type": "test"}),
     execution: Some(serde_json::json!({"total_duration_ms": 1.5})),
-    results: Some(serde_json::json!({"results": []})),
+    results: Some(serde_json::json!({"items": []})),
   };
 
   let json = serde_json::to_value(&result).unwrap();
@@ -316,7 +316,7 @@ fn test_explain_analyze_returns_actual_results() {
 
   let result = qe.execute_explain(&query).unwrap();
   let results = result.results.unwrap();
-  let result_array = results["results"].as_array().unwrap();
+  let result_array = results["items"].as_array().unwrap();
   assert_eq!(result_array.len(), 1, "Alice (age 30) should be the only match");
   assert_eq!(result_array[0]["path"], "/users/alice.json");
 }
