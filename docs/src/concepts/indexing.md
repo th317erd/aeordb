@@ -7,7 +7,7 @@ AeorDB indexes are opt-in and configured per-directory. Nothing is indexed by de
 Create a `.config/indexes.json` file in any directory to define indexes for files in that directory:
 
 ```bash
-curl -X PUT http://localhost:3000/files/users/.config/indexes.json \
+curl -X PUT http://localhost:6830/files/users/.config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "indexes": [

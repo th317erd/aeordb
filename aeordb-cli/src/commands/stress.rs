@@ -10,7 +10,7 @@ use uuid::Uuid;
 #[derive(Args)]
 pub struct StressArgs {
   /// Target server URL
-  #[arg(short, long, default_value = "http://localhost:3000")]
+  #[arg(short, long, default_value = "http://localhost:6830")]
   pub target: String,
 
   /// API key for authentication

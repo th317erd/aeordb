@@ -64,11 +64,11 @@ Database: data.aeordb
 
 ```bash
 # Run GC
-curl -X POST http://localhost:3000/system/gc \
+curl -X POST http://localhost:6830/system/gc \
   -H "Authorization: Bearer $API_KEY"
 
 # Dry run
-curl -X POST http://localhost:3000/system/gc?dry_run=true \
+curl -X POST http://localhost:6830/system/gc?dry_run=true \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -87,7 +87,7 @@ Response:
 **Background GC (returns immediately, runs as a task):**
 
 ```bash
-curl -X POST http://localhost:3000/system/tasks/gc \
+curl -X POST http://localhost:6830/system/tasks/gc \
   -H "Authorization: Bearer $API_KEY"
 ```
 

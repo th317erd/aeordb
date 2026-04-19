@@ -101,7 +101,7 @@ API keys follow the format `aeor_{key_id_prefix}_{secret}`. The `key_id_prefix` 
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/auth/token \
+curl -X POST http://localhost:6830/auth/token \
   -H "Content-Type: application/json" \
   -d '{"api_key": "aeor_660e8400_a1b2c3d4e5f6..."}'
 ```
@@ -146,7 +146,7 @@ This endpoint is rate-limited per email address. Exceeding the limit returns `42
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/auth/magic-link \
+curl -X POST http://localhost:6830/auth/magic-link \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com"}'
 ```
@@ -183,7 +183,7 @@ Verify a magic link code and receive a JWT. Each code can only be used once.
 ### Example
 
 ```bash
-curl "http://localhost:3000/auth/magic-link/verify?code=abc123..."
+curl "http://localhost:6830/auth/magic-link/verify?code=abc123..."
 ```
 
 ### Error Responses
@@ -222,7 +222,7 @@ Exchange a refresh token for a new JWT and a new refresh token. Implements **tok
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/auth/refresh \
+curl -X POST http://localhost:6830/auth/refresh \
   -H "Content-Type: application/json" \
   -d '{"refresh_token": "rt_a1b2c3d4e5f6..."}'
 ```
@@ -257,7 +257,7 @@ When using `file://` auth mode, a bootstrap API key is printed to stdout on firs
 aeordb --auth file:///path/to/identity.json
 
 # Exchange the bootstrap key for a token
-curl -X POST http://localhost:3000/auth/token \
+curl -X POST http://localhost:6830/auth/token \
   -H "Content-Type: application/json" \
   -d '{"api_key": "<bootstrap-key>"}'
 ```
@@ -349,7 +349,7 @@ The `key` field (plaintext) is returned **once** and can never be retrieved agai
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/auth/keys \
+curl -X POST http://localhost:6830/auth/keys \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

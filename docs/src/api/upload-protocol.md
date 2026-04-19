@@ -57,7 +57,7 @@ Clients must use the same formula. The prefix (`"chunk:"`) is prepended to the r
 ### Example
 
 ```bash
-curl http://localhost:3000/blobs/config
+curl http://localhost:6830/blobs/config
 ```
 
 ---
@@ -104,7 +104,7 @@ Send a list of chunk hashes to determine which ones the server already has (dedu
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/blobs/check \
+curl -X POST http://localhost:6830/blobs/check \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["a1b2c3...", "f6e5d4..."]}'
@@ -166,7 +166,7 @@ The server automatically applies Zstd compression to chunks when beneficial (bas
 ### Example
 
 ```bash
-curl -X PUT http://localhost:3000/blobs/chunks/f6e5d4c3b2a1... \
+curl -X PUT http://localhost:6830/blobs/chunks/f6e5d4c3b2a1... \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @chunk_001.bin
 ```
@@ -226,7 +226,7 @@ The response contains a summary of the commit operation.
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/blobs/commit \
+curl -X POST http://localhost:6830/blobs/commit \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -255,7 +255,7 @@ Here is a complete workflow for uploading a file:
 
 ```bash
 # 1. Get server configuration
-CONFIG=$(curl -s http://localhost:3000/blobs/config)
+CONFIG=$(curl -s http://localhost:6830/blobs/config)
 CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 
 # 2. Split file into chunks and hash them
@@ -263,20 +263,20 @@ CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 # chunk_hashes=["hash1", "hash2", ...]
 
 # 3. Check which chunks are needed
-DEDUP=$(curl -s -X POST http://localhost:3000/blobs/check \
+DEDUP=$(curl -s -X POST http://localhost:6830/blobs/check \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["hash1", "hash2"]}')
 
 # 4. Upload only the needed chunks
 for hash in $(echo $DEDUP | jq -r '.needed[]'); do
-  curl -X PUT "http://localhost:3000/blobs/chunks/$hash" \
+  curl -X PUT "http://localhost:6830/blobs/chunks/$hash" \
     -H "Authorization: Bearer $TOKEN" \
     --data-binary @"chunk_$hash.bin"
 done
 
 # 5. Commit the file
-curl -X POST http://localhost:3000/blobs/commit \
+curl -X POST http://localhost:6830/blobs/commit \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

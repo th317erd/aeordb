@@ -61,7 +61,7 @@ Create a named snapshot of the current HEAD.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/versions/snapshots \
+curl -X POST http://localhost:6830/versions/snapshots \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0", "metadata": {"description": "First stable release"}}'
@@ -104,7 +104,7 @@ List all snapshots.
 **Example:**
 
 ```bash
-curl http://localhost:3000/versions/snapshots \
+curl http://localhost:6830/versions/snapshots \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -134,7 +134,7 @@ Restore a named snapshot, making it the current HEAD. **Requires root.**
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/versions/restore \
+curl -X POST http://localhost:6830/versions/restore \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "v1.0"}'
@@ -166,7 +166,7 @@ Delete a named snapshot. **Requires root.**
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/versions/snapshots/v1.0 \
+curl -X DELETE http://localhost:6830/versions/snapshots/v1.0 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -215,7 +215,7 @@ Create a new fork.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/versions/forks \
+curl -X POST http://localhost:6830/versions/forks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "experiment", "base": "v1.0"}'
@@ -251,7 +251,7 @@ List all active forks.
 **Example:**
 
 ```bash
-curl http://localhost:3000/versions/forks \
+curl http://localhost:6830/versions/forks \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -273,7 +273,7 @@ Promote a fork's state to HEAD, making it the active version. **Requires root.**
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/versions/forks/experiment/promote \
+curl -X POST http://localhost:6830/versions/forks/experiment/promote \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -303,7 +303,7 @@ Abandon a fork (soft delete). **Requires root.**
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/versions/forks/experiment \
+curl -X DELETE http://localhost:6830/versions/forks/experiment \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -327,11 +327,11 @@ Use query parameters on the standard file read endpoint:
 
 ```bash
 # Read a file as it was at a named snapshot
-curl "http://localhost:3000/files/assets/logo.psd?snapshot=v1.0" \
+curl "http://localhost:6830/files/assets/logo.psd?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN"
 
 # Read a file at a specific version hash
-curl "http://localhost:3000/files/assets/logo.psd?version=a1b2c3d4..." \
+curl "http://localhost:6830/files/assets/logo.psd?version=a1b2c3d4..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -391,7 +391,7 @@ If the file has never existed in any snapshot, returns `200` with an empty `hist
 **Example:**
 
 ```bash
-curl http://localhost:3000/versions/history/assets/logo.psd \
+curl http://localhost:6830/versions/history/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -443,7 +443,7 @@ The `auto_snapshot` field contains the name of the safety snapshot created befor
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/versions/restore/assets/logo.psd \
+curl -X POST http://localhost:6830/versions/restore/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"snapshot": "v1.0"}'

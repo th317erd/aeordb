@@ -18,7 +18,7 @@ pub struct AeorConfig {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ServerConfig {
-  /// TCP port the HTTP server listens on (default: 3000).
+  /// TCP port the HTTP server listens on (default: 6830).
   pub port: Option<u16>,
   /// Bind address (default: "0.0.0.0").
   pub host: Option<String>,

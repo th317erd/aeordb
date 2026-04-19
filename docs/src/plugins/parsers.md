@@ -84,7 +84,7 @@ Upload the WASM binary to a table's plugin deployment endpoint:
 
 ```bash
 curl -X PUT \
-  http://localhost:3000/mydb/myschema/mytable/_deploy \
+  http://localhost:6830/mydb/myschema/mytable/_deploy \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/wasm" \
   --data-binary @target/wasm32-unknown-unknown/release/my_parser.wasm

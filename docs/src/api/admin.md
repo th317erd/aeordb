@@ -96,11 +96,11 @@ The response contains GC statistics (entries scanned, reclaimed bytes, etc.).
 
 ```bash
 # Dry run
-curl -X POST "http://localhost:3000/system/gc?dry_run=true" \
+curl -X POST "http://localhost:6830/system/gc?dry_run=true" \
   -H "Authorization: Bearer $TOKEN"
 
 # Actual GC
-curl -X POST http://localhost:3000/system/gc \
+curl -X POST http://localhost:6830/system/gc \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -140,7 +140,7 @@ Enqueue a reindex task for a directory path. Re-scans all files and rebuilds ind
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/system/tasks/reindex \
+curl -X POST http://localhost:6830/system/tasks/reindex \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"path": "/data/"}'
@@ -173,7 +173,7 @@ Enqueue a background GC task (non-blocking).
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/system/tasks/gc \
+curl -X POST http://localhost:6830/system/tasks/gc \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"dry_run": false}'
@@ -207,7 +207,7 @@ Each task includes `progress` (0.0-1.0) and `eta_ms` (estimated completion times
 **Example:**
 
 ```bash
-curl http://localhost:3000/system/tasks \
+curl http://localhost:6830/system/tasks \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -254,7 +254,7 @@ Cancel a task.
 **Example:**
 
 ```bash
-curl -X DELETE http://localhost:3000/system/tasks/task-uuid-here \
+curl -X DELETE http://localhost:6830/system/tasks/task-uuid-here \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -313,7 +313,7 @@ Create a new cron schedule.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/system/cron \
+curl -X POST http://localhost:6830/system/cron \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -411,17 +411,17 @@ Export the database (or a specific version) as an `.aeordb` archive file.
 
 ```bash
 # Export HEAD
-curl -X POST http://localhost:3000/versions/export \
+curl -X POST http://localhost:6830/versions/export \
   -H "Authorization: Bearer $TOKEN" \
   -o backup.aeordb
 
 # Export a specific snapshot
-curl -X POST "http://localhost:3000/versions/export?snapshot=v1.0" \
+curl -X POST "http://localhost:6830/versions/export?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN" \
   -o backup-v1.aeordb
 
 # Export by hash
-curl -X POST "http://localhost:3000/versions/export?hash=a1b2c3d4..." \
+curl -X POST "http://localhost:6830/versions/export?hash=a1b2c3d4..." \
   -H "Authorization: Bearer $TOKEN" \
   -o backup.aeordb
 ```
@@ -448,7 +448,7 @@ Create a patch file representing the difference between two versions.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/versions/diff?from=v1.0&to=v2.0" \
+curl -X POST "http://localhost:6830/versions/diff?from=v1.0&to=v2.0" \
   -H "Authorization: Bearer $TOKEN" \
   -o patch-v1-v2.aeordb
 ```
@@ -491,7 +491,7 @@ Import a backup or patch file. Body limit: **10 MB**.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/versions/import?promote=true" \
+curl -X POST "http://localhost:6830/versions/import?promote=true" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @backup.aeordb
 ```
@@ -527,7 +527,7 @@ Promote an arbitrary version hash to HEAD.
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/versions/promote?hash=a1b2c3d4e5f6..." \
+curl -X POST "http://localhost:6830/versions/promote?hash=a1b2c3d4e5f6..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -619,7 +619,7 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 **Example:**
 
 ```bash
-curl http://localhost:3000/system/stats \
+curl http://localhost:6830/system/stats \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -640,7 +640,7 @@ Public health check endpoint. No authentication required.
 **Example:**
 
 ```bash
-curl http://localhost:3000/system/health
+curl http://localhost:6830/system/health
 ```
 
 ---
@@ -657,7 +657,7 @@ Prometheus-format metrics endpoint. Requires authentication.
 **Example:**
 
 ```bash
-curl http://localhost:3000/system/metrics \
+curl http://localhost:6830/system/metrics \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -695,7 +695,7 @@ Create a new API key. The plaintext key is returned **only once** -- store it se
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/auth/keys/admin \
+curl -X POST http://localhost:6830/auth/keys/admin \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "550e8400-e29b-41d4-a716-446655440000"}'

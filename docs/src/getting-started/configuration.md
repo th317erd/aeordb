@@ -115,12 +115,12 @@ Use this key to create additional users and API keys via the admin API. If you l
 
 ```bash
 # Exchange API key for a JWT token
-curl -X POST http://localhost:3000/auth/token \
+curl -X POST http://localhost:6830/auth/token \
   -H "Content-Type: application/json" \
   -d '{"api_key": "aeor_ak_7f3b2a1c..."}'
 
 # Use the token for subsequent requests
-curl http://localhost:3000/files/users/ \
+curl http://localhost:6830/files/users/ \
   -H "Authorization: Bearer eyJhbG..."
 ```
 
@@ -145,7 +145,7 @@ Without `--cors-origins`, no CORS headers are sent and cross-origin browser requ
 For fine-grained control, store a `/.config/cors.json` file in the database:
 
 ```bash
-curl -X PUT http://localhost:3000/files/.config/cors.json \
+curl -X PUT http://localhost:6830/files/.config/cors.json \
   -H "Content-Type: application/json" \
   -d '{
     "rules": [
@@ -228,7 +228,7 @@ See [Indexing & Queries](../concepts/indexing.md) for the full indexing referenc
 Schedule recurring background tasks by storing `/.config/cron.json`:
 
 ```bash
-curl -X PUT http://localhost:3000/files/.config/cron.json \
+curl -X PUT http://localhost:6830/files/.config/cron.json \
   -H "Content-Type: application/json" \
   -d '{
     "schedules": [

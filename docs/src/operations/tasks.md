@@ -31,7 +31,7 @@ On server startup, any tasks left in `Running` state (from a previous crash) are
 ### List Tasks
 
 ```bash
-curl http://localhost:3000/system/tasks \
+curl http://localhost:6830/system/tasks \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -70,7 +70,7 @@ Response:
 
 **Reindex:**
 ```bash
-curl -X POST http://localhost:3000/system/tasks/reindex \
+curl -X POST http://localhost:6830/system/tasks/reindex \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path": "/data/"}'
@@ -78,14 +78,14 @@ curl -X POST http://localhost:3000/system/tasks/reindex \
 
 **Garbage Collection:**
 ```bash
-curl -X POST http://localhost:3000/system/tasks/gc \
+curl -X POST http://localhost:6830/system/tasks/gc \
   -H "Authorization: Bearer $API_KEY"
 ```
 
 ### Cancel a Task
 
 ```bash
-curl -X POST http://localhost:3000/system/tasks/{task_id}/cancel \
+curl -X POST http://localhost:6830/system/tasks/{task_id}/cancel \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -157,7 +157,7 @@ Examples:
 
 **Create/update the schedule:**
 ```bash
-curl -X PUT http://localhost:3000/.config/cron.json \
+curl -X PUT http://localhost:6830/.config/cron.json \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -175,7 +175,7 @@ curl -X PUT http://localhost:3000/.config/cron.json \
 
 **Read the schedule:**
 ```bash
-curl http://localhost:3000/.config/cron.json \
+curl http://localhost:6830/.config/cron.json \
   -H "Authorization: Bearer $API_KEY"
 ```
 

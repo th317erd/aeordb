@@ -51,7 +51,7 @@ Store a file at the given path. Parent directories are created automatically. If
 ### Example
 
 ```bash
-curl -X PUT http://localhost:3000/files/data/report.pdf \
+curl -X PUT http://localhost:6830/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/pdf" \
   --data-binary @report.pdf
@@ -159,7 +159,7 @@ Entry types: `2` = file, `3` = directory, `8` = symlink.
 Use `limit` and `offset` to paginate directory listings:
 
 ```bash
-curl "http://localhost:3000/files/data/?limit=10&offset=20" \
+curl "http://localhost:6830/files/data/?limit=10&offset=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -185,7 +185,7 @@ When `limit` or `offset` is provided, the response includes pagination metadata:
 Read a file:
 
 ```bash
-curl http://localhost:3000/files/data/report.pdf \
+curl http://localhost:6830/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN" \
   -o report.pdf
 ```
@@ -193,7 +193,7 @@ curl http://localhost:3000/files/data/report.pdf \
 List a directory:
 
 ```bash
-curl http://localhost:3000/files/data/ \
+curl http://localhost:6830/files/data/ \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -203,15 +203,15 @@ Use the `depth` and `glob` query parameters to list files recursively:
 
 ```bash
 # List all files recursively
-curl http://localhost:3000/files/data/?depth=-1 \
+curl http://localhost:6830/files/data/?depth=-1 \
   -H "Authorization: Bearer $TOKEN"
 
 # List only .psd files anywhere under /assets/
-curl "http://localhost:3000/files/assets/?depth=-1&glob=*.psd" \
+curl "http://localhost:6830/files/assets/?depth=-1&glob=*.psd" \
   -H "Authorization: Bearer $TOKEN"
 
 # List one level deep
-curl http://localhost:3000/files/data/?depth=1 \
+curl http://localhost:6830/files/data/?depth=1 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -223,11 +223,11 @@ Read a file as it was at a specific snapshot or version:
 
 ```bash
 # Read file at a named snapshot
-curl "http://localhost:3000/files/data/report.pdf?snapshot=v1.0" \
+curl "http://localhost:6830/files/data/report.pdf?snapshot=v1.0" \
   -H "Authorization: Bearer $TOKEN"
 
 # Read file at a specific version hash
-curl "http://localhost:3000/files/data/report.pdf?version=a1b2c3..." \
+curl "http://localhost:6830/files/data/report.pdf?version=a1b2c3..." \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -270,7 +270,7 @@ Delete a file at the given path. Creates a `DeletionRecord` and removes the file
 ### Example
 
 ```bash
-curl -X DELETE http://localhost:3000/files/data/report.pdf \
+curl -X DELETE http://localhost:6830/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -325,13 +325,13 @@ Rename or move a file or symlink to a new path. This is a metadata-only operatio
 
 ```bash
 # Move a file
-curl -X PATCH http://localhost:3000/files/data/report.pdf \
+curl -X PATCH http://localhost:6830/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"to": "/archive/report.pdf"}'
 
 # Rename a symlink
-curl -X PATCH http://localhost:3000/files/latest-logo \
+curl -X PATCH http://localhost:6830/files/latest-logo \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"to": "/current-logo"}'
@@ -383,14 +383,14 @@ By default, `GET /files/{path}` follows symlinks transparently:
 
 ```bash
 # Returns the content of /assets/logo.psd
-curl http://localhost:3000/files/latest-logo \
+curl http://localhost:6830/files/latest-logo \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 To inspect the symlink itself without following it, use `?nofollow=true`:
 
 ```bash
-curl "http://localhost:3000/files/latest-logo?nofollow=true" \
+curl "http://localhost:6830/files/latest-logo?nofollow=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -426,7 +426,7 @@ X-AeorDB-Updated-At: 1775968398000
 `DELETE /files/{path}` on a symlink deletes the symlink itself, not the target:
 
 ```bash
-curl -X DELETE http://localhost:3000/files/latest-logo \
+curl -X DELETE http://localhost:6830/files/latest-logo \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -490,7 +490,7 @@ Check whether a path exists and retrieve its metadata as response headers, witho
 ### Example
 
 ```bash
-curl -I http://localhost:3000/files/data/report.pdf \
+curl -I http://localhost:6830/files/data/report.pdf \
   -H "Authorization: Bearer $TOKEN"
 ```
 

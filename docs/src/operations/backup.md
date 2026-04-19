@@ -31,7 +31,7 @@ The output file must not already exist -- the command will refuse to overwrite.
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:3000/versions/export \
+curl -X POST http://localhost:6830/versions/export \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"output": "backup.aeordb"}'
@@ -39,7 +39,7 @@ curl -X POST http://localhost:3000/versions/export \
 
 With a snapshot:
 ```bash
-curl -X POST http://localhost:3000/versions/export \
+curl -X POST http://localhost:6830/versions/export \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"output": "backup.aeordb", "snapshot": "v1"}'
@@ -77,7 +77,7 @@ The `--from` and `--to` arguments accept either snapshot names or hex-encoded ve
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:3000/versions/diff \
+curl -X POST http://localhost:6830/versions/diff \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"output": "patch.aeordb", "from": "v1", "to": "v2"}'
@@ -128,7 +128,7 @@ aeordb import --database data.aeordb --file patch.aeordb --force
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:3000/versions/import \
+curl -X POST http://localhost:6830/versions/import \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"file": "backup.aeordb", "promote": true}'
@@ -180,7 +180,7 @@ The command verifies that the hash exists in the database before promoting.
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:3000/versions/promote \
+curl -X POST http://localhost:6830/versions/promote \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"hash": "abc123def456..."}'
@@ -192,7 +192,7 @@ curl -X POST http://localhost:3000/versions/promote \
 
 ```bash
 # Create a snapshot first
-curl -X POST http://localhost:3000/versions/snapshots \
+curl -X POST http://localhost:6830/versions/snapshots \
   -H "Authorization: Bearer $API_KEY" \
   -d '{"name": "daily-2024-01-15"}'
 
@@ -271,7 +271,7 @@ The task creates a timestamped filename (e.g., `backup-head-20260419T030000.000Z
 ### Example: Weekly Backups with 4-Week Retention
 
 ```bash
-curl -X POST http://localhost:3000/system/cron \
+curl -X POST http://localhost:6830/system/cron \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

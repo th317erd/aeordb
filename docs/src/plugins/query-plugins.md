@@ -66,7 +66,7 @@ The `aeordb_query_plugin!` macro generates:
 cargo build --target wasm32-unknown-unknown --release
 
 curl -X PUT \
-  http://localhost:3000/mydb/myschema/mytable/_deploy \
+  http://localhost:6830/mydb/myschema/mytable/_deploy \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/wasm" \
   --data-binary @target/wasm32-unknown-unknown/release/my_plugin.wasm
@@ -76,7 +76,7 @@ curl -X PUT \
 
 ```bash
 curl -X POST \
-  http://localhost:3000/mydb/myschema/mytable/_invoke/my-plugin \
+  http://localhost:6830/mydb/myschema/mytable/_invoke/my-plugin \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query": "Alice"}'

@@ -39,11 +39,11 @@ Conflicts are stored as regular database entries, which means they sync to all n
 
 ```bash
 # List all unresolved conflicts
-curl http://localhost:3000/sync/conflicts \
+curl http://localhost:6830/sync/conflicts \
   -H "Authorization: Bearer $TOKEN"
 
 # Resolve a conflict (pick the winner)
-curl -X POST http://localhost:3000/sync/conflicts/assets/logo.psd \
+curl -X POST http://localhost:6830/sync/conflicts/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pick": "winner"}'

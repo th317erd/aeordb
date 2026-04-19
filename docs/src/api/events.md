@@ -24,7 +24,7 @@ Open a persistent Server-Sent Events connection. The server pushes events as the
 ### Request
 
 ```bash
-curl -N http://localhost:3000/system/events \
+curl -N http://localhost:6830/system/events \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -33,21 +33,21 @@ curl -N http://localhost:3000/system/events \
 Subscribe to only specific event types:
 
 ```bash
-curl -N "http://localhost:3000/system/events?events=entries_created,entries_deleted" \
+curl -N "http://localhost:6830/system/events?events=entries_created,entries_deleted" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 Filter by path prefix:
 
 ```bash
-curl -N "http://localhost:3000/system/events?path_prefix=/data/users" \
+curl -N "http://localhost:6830/system/events?path_prefix=/data/users" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 Combine both:
 
 ```bash
-curl -N "http://localhost:3000/system/events?events=entries_created&path_prefix=/data/" \
+curl -N "http://localhost:6830/system/events?events=entries_created&path_prefix=/data/" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -118,7 +118,7 @@ The `metrics` event delivers system metrics to connected clients every 15 second
 **Subscribe to metrics:**
 
 ```bash
-curl -N "http://localhost:3000/system/events?events=metrics" \
+curl -N "http://localhost:6830/system/events?events=metrics" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -194,7 +194,7 @@ The path prefix filter checks two locations in the event payload:
 
 ```javascript
 const evtSource = new EventSource(
-  'http://localhost:3000/system/events?events=entries_created',
+  'http://localhost:6830/system/events?events=entries_created',
   { headers: { 'Authorization': 'Bearer ' + token } }
 );
 

@@ -76,7 +76,7 @@ Returns the plugin metadata:
 ### Example
 
 ```bash
-curl -X PUT "http://localhost:3000/mydb/public/users/_deploy?name=my-plugin" \
+curl -X PUT "http://localhost:6830/mydb/public/users/_deploy?name=my-plugin" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @plugin.wasm
 ```
@@ -154,7 +154,7 @@ Plugins have access to the following host functions for interacting with the dat
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/mydb/public/users/compute/_invoke \
+curl -X POST http://localhost:6830/mydb/public/users/compute/_invoke \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input": "hello"}'
@@ -197,7 +197,7 @@ List all deployed plugins.
 ### Example
 
 ```bash
-curl http://localhost:3000/mydb/_plugins \
+curl http://localhost:6830/mydb/_plugins \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -231,7 +231,7 @@ Remove a deployed plugin.
 ### Example
 
 ```bash
-curl -X DELETE http://localhost:3000/mydb/public/users/compute/_remove \
+curl -X DELETE http://localhost:6830/mydb/public/users/compute/_remove \
   -H "Authorization: Bearer $TOKEN"
 ```
 

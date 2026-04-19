@@ -155,7 +155,7 @@ async fn main() {
       // Merge: CLI flag > config file > built-in default.
       let merged_port = port
         .or(file_config.server.port)
-        .unwrap_or(3000);
+        .unwrap_or(6830);
 
       let merged_host = host
         .or(file_config.server.host)

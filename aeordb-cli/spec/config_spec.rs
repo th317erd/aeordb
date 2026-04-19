@@ -450,7 +450,7 @@ fn load_config_tls_section_absent() {
     file,
     r#"
 [server]
-port = 3000
+port = 6830
 "#
   )
   .unwrap();
@@ -538,7 +538,7 @@ fn load_config_log_format_omitted_is_none() {
     file,
     r#"
 [server]
-port = 3000
+port = 6830
 "#
   )
   .unwrap();
@@ -557,7 +557,7 @@ fn merge_cli_overrides_config_port() {
   let cli_port: Option<u16> = Some(9090);
   let config_port: Option<u16> = Some(8080);
 
-  let merged = cli_port.or(config_port).unwrap_or(3000);
+  let merged = cli_port.or(config_port).unwrap_or(6830);
   assert_eq!(merged, 9090);
 }
 
@@ -566,7 +566,7 @@ fn merge_config_overrides_default_port() {
   let cli_port: Option<u16> = None;
   let config_port: Option<u16> = Some(8080);
 
-  let merged = cli_port.or(config_port).unwrap_or(3000);
+  let merged = cli_port.or(config_port).unwrap_or(6830);
   assert_eq!(merged, 8080);
 }
 
@@ -575,8 +575,8 @@ fn merge_falls_back_to_default_when_both_absent() {
   let cli_port: Option<u16> = None;
   let config_port: Option<u16> = None;
 
-  let merged = cli_port.or(config_port).unwrap_or(3000);
-  assert_eq!(merged, 3000);
+  let merged = cli_port.or(config_port).unwrap_or(6830);
+  assert_eq!(merged, 6830);
 }
 
 #[test]
@@ -864,7 +864,7 @@ fn example_config_parses_successfully() {
     file,
     r#"
 [server]
-port = 3000
+port = 6830
 host = "0.0.0.0"
 log_format = "pretty"
 
@@ -883,7 +883,7 @@ chunk_size = 262144
   .unwrap();
 
   let config = load_config(file.path().to_str().unwrap()).unwrap();
-  assert_eq!(config.server.port, Some(3000));
+  assert_eq!(config.server.port, Some(6830));
   assert_eq!(config.server.host.as_deref(), Some("0.0.0.0"));
   assert_eq!(config.server.log_format.as_deref(), Some("pretty"));
   assert_eq!(config.auth.mode.as_deref(), Some("self"));

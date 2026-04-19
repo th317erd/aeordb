@@ -280,7 +280,7 @@ aeordb stress [OPTIONS]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--target` | `-t` | `http://localhost:3000` | Target server URL |
+| `--target` | `-t` | `http://localhost:6830` | Target server URL |
 | `--api-key` | `-a` | (required) | API key for authentication |
 | `--concurrency` | `-c` | `10` | Number of concurrent workers |
 | `--duration` | `-d` | `10s` | Test duration (e.g., `30s`, `5m`) |

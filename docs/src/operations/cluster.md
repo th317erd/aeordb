@@ -19,7 +19,7 @@ Add peers at startup or at runtime:
 aeordb start -D data.aeordb --peers "node2:3000,node3:3000"
 
 # At runtime
-curl -X POST http://localhost:3000/sync/peers \
+curl -X POST http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"address": "https://node2:3000", "label": "US West"}'
@@ -42,7 +42,7 @@ Inter-node communication uses TLS by default:
 ### Cluster Status
 
 ```bash
-curl http://localhost:3000/sync/ \
+curl http://localhost:6830/sync/ \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -66,7 +66,7 @@ Sync happens automatically via SSE events and periodic fallback. You can also tr
 
 ```bash
 # Sync with all peers
-curl -X POST http://localhost:3000/sync/trigger \
+curl -X POST http://localhost:6830/sync/trigger \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -75,7 +75,7 @@ curl -X POST http://localhost:3000/sync/trigger \
 ### Listing Conflicts
 
 ```bash
-curl http://localhost:3000/sync/conflicts \
+curl http://localhost:6830/sync/conflicts \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -83,11 +83,11 @@ curl http://localhost:3000/sync/conflicts \
 
 ```bash
 # Pick the auto-winner (default — higher timestamp)
-curl -X POST http://localhost:3000/sync/conflicts/path/to/file \
+curl -X POST http://localhost:6830/sync/conflicts/path/to/file \
   -H "Authorization: Bearer $TOKEN"
 
 # Pick a specific version
-curl -X POST http://localhost:3000/sync/conflicts/path/to/file \
+curl -X POST http://localhost:6830/sync/conflicts/path/to/file \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pick": "loser"}'
@@ -98,7 +98,7 @@ curl -X POST http://localhost:3000/sync/conflicts/path/to/file \
 Configure per-peer path filters:
 
 ```bash
-curl -X POST http://localhost:3000/sync/peers \
+curl -X POST http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -131,18 +131,18 @@ Root JWT tokens get full access. Non-root tokens get filtered results:
 
 ```bash
 # Get a JWT token
-TOKEN=$(curl -s -X POST http://localhost:3000/auth/token \
+TOKEN=$(curl -s -X POST http://localhost:6830/auth/token \
   -H "Content-Type: application/json" \
   -d '{"api_key": "aeor_k_..."}' | jq -r .token)
 
 # Sync diff — only see changes for allowed paths
-curl -X POST http://localhost:3000/sync/diff \
+curl -X POST http://localhost:6830/sync/diff \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"paths": ["/assets/**"]}'
 
 # Fetch needed chunks
-curl -X POST http://localhost:3000/sync/chunks \
+curl -X POST http://localhost:6830/sync/chunks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["abc123...", "def456..."]}'
@@ -153,7 +153,7 @@ curl -X POST http://localhost:3000/sync/chunks \
 Create a scoped API key for a client that should only sync specific paths:
 
 ```bash
-curl -X POST http://localhost:3000/auth/keys \
+curl -X POST http://localhost:6830/auth/keys \
   -H "Authorization: Bearer $ROOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

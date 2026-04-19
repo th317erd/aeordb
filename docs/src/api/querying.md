@@ -384,7 +384,7 @@ Inspect the query execution plan without running the full query. Useful for debu
 ### Simple equality query
 
 ```bash
-curl -X POST http://localhost:3000/files/query \
+curl -X POST http://localhost:6830/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -397,7 +397,7 @@ curl -X POST http://localhost:3000/files/query \
 ### Fuzzy name search with pagination
 
 ```bash
-curl -X POST http://localhost:3000/files/query \
+curl -X POST http://localhost:6830/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -412,7 +412,7 @@ curl -X POST http://localhost:3000/files/query \
 ### Complex boolean query
 
 ```bash
-curl -X POST http://localhost:3000/files/query \
+curl -X POST http://localhost:6830/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -437,7 +437,7 @@ curl -X POST http://localhost:3000/files/query \
 ### Aggregation with grouping
 
 ```bash
-curl -X POST http://localhost:3000/files/query \
+curl -X POST http://localhost:6830/files/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

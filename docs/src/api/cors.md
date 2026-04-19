@@ -53,7 +53,7 @@ For fine-grained control, store per-path CORS rules at `/.config/cors.json` insi
 Upload the config file using the engine API:
 
 ```bash
-curl -X PUT http://localhost:3000/files/.config/cors.json \
+curl -X PUT http://localhost:6830/files/.config/cors.json \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d @cors.json
