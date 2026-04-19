@@ -44,6 +44,12 @@ pub const SYNC_CONSECUTIVE_FAILURES: &str = "aeordb_sync_consecutive_failures";
 pub const CLEANUP_TOKENS_TOTAL: &str = "aeordb_cleanup_tokens_total";
 pub const CLEANUP_LINKS_TOTAL: &str = "aeordb_cleanup_links_total";
 
+// Query
+pub const QUERY_DURATION: &str = "aeordb_query_duration_seconds";
+
+// KV Store
+pub const KV_FLUSH_DURATION: &str = "aeordb_kv_flush_duration_seconds";
+
 // Versions
 pub const VERSION_SNAPSHOTS_TOTAL: &str = "aeordb_version_snapshots_total";
 pub const VERSION_RESTORES_TOTAL: &str = "aeordb_version_restores_total";

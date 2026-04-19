@@ -398,6 +398,7 @@ impl DiskKVStore {
         if self.write_buffer.is_empty() {
             return Ok(());
         }
+        let timer_start = std::time::Instant::now();
 
         let hash_length = self.hash_algo.hash_length();
         let mut overflow_entries: Vec<KVEntry> = Vec::new();
@@ -462,6 +463,10 @@ impl DiskKVStore {
             }
             return self.flush();
         }
+
+        // Record flush latency (only on non-overflow path to avoid double counting)
+        let elapsed = timer_start.elapsed().as_secs_f64();
+        metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
 
         Ok(())
     }

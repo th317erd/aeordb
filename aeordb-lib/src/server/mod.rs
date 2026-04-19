@@ -224,7 +224,9 @@ pub fn create_app_with_all_and_task_queue(
     task_queue,
     peer_manager,
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
+    startup_instant: std::time::Instant::now(),
     db_path: String::new(),
+    rate_trackers: None,
   };
 
   // Routes with large body limits (file uploads: 10 GB)

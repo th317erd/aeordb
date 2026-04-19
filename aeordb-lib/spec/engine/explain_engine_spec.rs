@@ -166,7 +166,7 @@ fn test_explain_result_serializes() {
   assert!(json.is_object());
   assert!(json.get("plan").is_some());
   assert!(json.get("execution").is_some());
-  assert!(json.get("results").is_some());
+  assert!(json.get("items").is_some());
 }
 
 #[test]

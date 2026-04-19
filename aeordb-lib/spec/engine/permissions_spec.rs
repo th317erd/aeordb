@@ -833,7 +833,9 @@ fn test_crudlify_op_from_http_method() {
     api_key_cache: Arc::new(aeordb::engine::ApiKeyCache::new(Duration::from_secs(60))),
     peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
+    startup_instant: std::time::Instant::now(),
     db_path: String::new(),
+    rate_trackers: None,
   };
 
   // GET file -> Read

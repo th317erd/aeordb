@@ -285,6 +285,22 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
+    let timer_start = std::time::Instant::now();
+    let result = self.store_file_internal_inner(ctx, path, data, content_type, compression_algo);
+    let elapsed = timer_start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
+    result
+  }
+
+  /// Inner implementation of store_file_internal, separated for timing.
+  fn store_file_internal_inner(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -449,6 +465,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Read a file as a streaming iterator of chunk data.
   pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream> {
+    let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -463,6 +480,9 @@ impl<'a> DirectoryOps<'a> {
     let counters = self.engine.counters();
     counters.increment_reads();
     counters.add_bytes_read(file_record.total_size);
+
+    let elapsed = timer_start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(elapsed);
 
     EngineFileStream::new(file_record.chunk_hashes, self.engine)
   }

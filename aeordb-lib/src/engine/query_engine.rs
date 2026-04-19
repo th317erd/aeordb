@@ -198,7 +198,7 @@ pub struct ExplainResult {
   pub plan: serde_json::Value,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub execution: Option<serde_json::Value>,
-  #[serde(skip_serializing_if = "Option::is_none")]
+  #[serde(skip_serializing_if = "Option::is_none", rename = "items")]
   pub results: Option<serde_json::Value>,
 }
 
@@ -498,11 +498,15 @@ impl<'a> QueryEngine<'a> {
   /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use index-based candidate
   /// generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
+    let timer_start = std::time::Instant::now();
     let mut results = self.execute_internal(query)?;
 
     // Apply limit (use DEFAULT_QUERY_LIMIT when no explicit limit).
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
     results.truncate(effective_limit);
+
+    let elapsed = timer_start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::QUERY_DURATION).record(elapsed);
 
     Ok(results)
   }

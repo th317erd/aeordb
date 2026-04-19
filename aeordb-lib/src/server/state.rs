@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use metrics_exporter_prometheus::PrometheusHandle;
 
@@ -12,6 +13,7 @@ use crate::engine::PermissionsCache;
 use crate::engine::StorageEngine;
 use crate::engine::EventBus;
 use crate::engine::TaskQueue;
+use crate::engine::RateTrackerSet;
 use crate::plugins::PluginManager;
 
 #[derive(Clone)]
@@ -29,5 +31,9 @@ pub struct AppState {
   pub task_queue: Option<Arc<TaskQueue>>,
   pub peer_manager: Arc<PeerManager>,
   pub startup_time: u64,
+  pub startup_instant: Instant,
   pub db_path: String,
+  /// Rate trackers for throughput calculations (writes/sec, reads/sec, etc.).
+  /// Populated during server startup; None in test/legacy contexts.
+  pub rate_trackers: Option<Arc<RateTrackerSet>>,
 }

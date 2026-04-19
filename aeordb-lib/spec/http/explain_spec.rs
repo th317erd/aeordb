@@ -157,7 +157,7 @@ async fn test_explain_plan_returns_plan() {
   // Should have plan, no execution, no results
   assert!(json.get("plan").is_some(), "should have 'plan'");
   assert!(json.get("execution").is_none(), "plan mode should not have 'execution'");
-  assert!(json.get("results").is_none(), "plan mode should not have 'results'");
+  assert!(json.get("items").is_none(), "plan mode should not have 'results'");
 }
 
 #[tokio::test]
@@ -177,7 +177,7 @@ async fn test_explain_analyze_returns_plan_and_results() {
   // Should have plan, execution, and results
   assert!(json.get("plan").is_some(), "should have 'plan'");
   assert!(json.get("execution").is_some(), "analyze mode should have 'execution'");
-  assert!(json.get("results").is_some(), "analyze mode should have 'results'");
+  assert!(json.get("items").is_some(), "analyze mode should have 'results'");
 }
 
 #[tokio::test]
@@ -377,7 +377,7 @@ async fn test_explain_off_returns_normal() {
 
   let json = body_json(response.into_body()).await;
   // Normal response has results array, not plan
-  assert!(json.get("results").is_some());
+  assert!(json.get("items").is_some());
   assert!(json.get("plan").is_none());
 }
 
@@ -398,7 +398,7 @@ async fn test_explain_plan_string_mode() {
 
   assert!(json.get("plan").is_some());
   assert!(json.get("execution").is_none());
-  assert!(json.get("results").is_none());
+  assert!(json.get("items").is_none());
 }
 
 #[tokio::test]
@@ -427,7 +427,7 @@ async fn test_explain_false_returns_normal() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  assert!(json.get("results").is_some(), "explain:false should return normal results");
+  assert!(json.get("items").is_some(), "explain:false should return normal results");
   assert!(json.get("plan").is_none(), "explain:false should not return plan");
 }
 
