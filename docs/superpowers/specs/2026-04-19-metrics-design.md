@@ -198,18 +198,82 @@ Computed from Prometheus histograms: p50, p95, p99. Exposed in stats API as pre-
 
 ---
 
-## 5. Heartbeat Enhancement
+## 5. Heartbeat / Metrics Event Separation
 
-The heartbeat event (every 15 seconds) should include a subset of the stats for real-time dashboard updates without requiring a full stats poll:
+The heartbeat is a clock synchronization system and must stay lightweight. Stats data moves to a separate `metrics` SSE event.
+
+### Heartbeat event (stays as-is, but stripped down)
+
+**Event name:** `heartbeat`
+**Interval:** 15 seconds, wall-clock aligned
+**Purpose:** Clock synchronization between nodes
+**Payload:**
 
 ```json
 {
-  "counts": { "files": 150000, "chunks": 420000, ... },
-  "sizes": { "disk_total": 2147483648, ... },
-  "throughput": { "writes_per_sec": { "1m": 42.3 }, "reads_per_sec": { "1m": 156.2 } },
-  "write_buffer_depth": 42
+  "intent_time": 1776563925000,
+  "construct_time": 1776563925003,
+  "node_id": 1
 }
 ```
+
+The heartbeat no longer calls `engine.stats()`. It emits three fields and nothing else. This makes it dirt cheap — two timestamp reads and an emit.
+
+### Metrics event (new)
+
+**Event name:** `metrics`
+**Interval:** 15 seconds (configurable, independent of heartbeat)
+**Purpose:** Dashboard updates, monitoring, auto-tuning signals
+**Payload:**
+
+```json
+{
+  "counts": {
+    "files": 150000,
+    "directories": 23000,
+    "symlinks": 500,
+    "chunks": 420000,
+    "snapshots": 12,
+    "forks": 2
+  },
+  "sizes": {
+    "disk_total": 2147483648,
+    "kv_file": 86114304,
+    "logical_data": 1800000000,
+    "chunk_data": 1200000000,
+    "void_space": 5242880,
+    "dedup_savings": 600000000
+  },
+  "throughput": {
+    "writes_per_sec": { "1m": 42.3, "5m": 38.1, "15m": 35.7, "peak_1m": 120.0 },
+    "reads_per_sec": { "1m": 156.2, "5m": 140.5, "15m": 138.0, "peak_1m": 450.0 },
+    "bytes_written_per_sec": { "1m": 435200, "5m": 392000, "15m": 367000 },
+    "bytes_read_per_sec": { "1m": 16065536, "5m": 14450000, "15m": 14200000 }
+  },
+  "health": {
+    "disk_usage_percent": 48.5,
+    "kv_fill_ratio": 0.72,
+    "dedup_hit_rate": 0.33,
+    "write_buffer_depth": 42
+  }
+}
+```
+
+All reads are O(1) — atomic counter loads + rate tracker reads. No KV iteration.
+
+### Dashboard migration
+
+The dashboard currently subscribes to `?events=heartbeat`. It should switch to `?events=metrics` for stats data. If it needs both (unlikely), it can subscribe to `?events=heartbeat,metrics`.
+
+### Implementation
+
+A new `spawn_metrics_pulse` function, similar to `spawn_heartbeat` but:
+- Reads from `Arc<EngineCounters>` and `Arc<RateTracker>` (O(1))
+- Does NOT call `engine.stats()`
+- Emits via `EventBus` with event type `EVENT_METRICS` ("metrics")
+- Accepts its own `CancellationToken` for graceful shutdown
+
+The existing `spawn_heartbeat` is simplified: remove the `engine.stats()` call and all stats fields from `HeartbeatData`, keeping only `intent_time`, `construct_time`, `node_id`.
 
 ---
 
@@ -264,8 +328,8 @@ The portal dashboard should show:
 - Disk total, Logical data, Chunk data, Dedup savings, Void space
 
 ### Throughput charts (live, rolling)
-- Writes/sec line chart (1m rate from heartbeat)
-- Reads/sec line chart (1m rate from heartbeat)
+- Writes/sec line chart (1m rate from metrics event)
+- Reads/sec line chart (1m rate from metrics event)
 - Bytes written/sec
 - Bytes read/sec
 
@@ -286,7 +350,8 @@ The portal dashboard should show:
 ### What NOT to change
 - The `HealthReport` from `GET /system/health` stays as-is — it's a status check, not metrics
 - Prometheus histogram mechanics stay as-is — we just ensure they're instrumented
-- The heartbeat interval stays at 15 seconds
+- The heartbeat interval and purpose stays as-is — clock sync only
+- The heartbeat is STRIPPED DOWN: remove stats, keep only intent_time/construct_time/node_id
 
 ### Performance budget
 - `GET /system/stats` must be O(1) — no iteration, just atomic loads + rate tracker reads
