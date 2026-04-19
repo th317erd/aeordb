@@ -607,6 +607,11 @@ impl DiskKVStore {
         self.entry_count == 0
     }
 
+    /// Number of entries currently buffered in the write buffer.
+    pub fn write_buffer_len(&self) -> usize {
+        self.write_buffer.len()
+    }
+
     /// Update type_flags for an entry identified by hash.
     /// Returns true if the entry was found and updated.
     pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> bool {

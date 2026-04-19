@@ -336,6 +336,10 @@ impl<'a> DirectoryOps<'a> {
               EntryType::Chunk, &chunk_key, chunk_data,
             )?;
           }
+          self.engine.counters().increment_chunks();
+          self.engine.counters().add_chunk_data_size(chunk_data.len() as u64);
+        } else {
+          self.engine.counters().increment_chunks_deduped();
         }
 
         chunk_hashes.push(chunk_key);
@@ -345,12 +349,12 @@ impl<'a> DirectoryOps<'a> {
 
     // Check if file already exists (for preserving created_at on overwrite)
     let file_key = file_path_hash(&normalized, &algo)?;
-    let existing_created_at = match self.engine.get_entry(&file_key)? {
+    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
       Some((header, _key, value)) => {
         let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        Some(existing.created_at)
+        (Some(existing.created_at), Some(existing.total_size))
       }
-      None => None,
+      None => (None, None),
     };
 
     // Create the FileRecord with detected content type
@@ -407,6 +411,25 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
+    // Update counters
+    let counters = self.engine.counters();
+    counters.increment_writes();
+    counters.add_bytes_written(data.len() as u64);
+    if existing_created_at.is_none() {
+      // New file
+      counters.increment_files();
+      counters.add_logical_data_size(data.len() as u64);
+    } else {
+      // Overwrite — adjust logical_data_size by delta
+      let old_size = existing_total_size.unwrap_or(0);
+      let new_size = data.len() as u64;
+      if new_size >= old_size {
+        counters.add_logical_data_size(new_size - old_size);
+      } else {
+        counters.sub_logical_data_size(old_size - new_size);
+      }
+    }
+
     // Emit entry event after successful store
     let event_type = EVENT_ENTRIES_CREATED;
     let entry_data = EntryEventData {
@@ -437,12 +460,17 @@ impl<'a> DirectoryOps<'a> {
     let (header, _key, value) = entry;
     let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
+    let counters = self.engine.counters();
+    counters.increment_reads();
+    counters.add_bytes_read(file_record.total_size);
+
     EngineFileStream::new(file_record.chunk_hashes, self.engine)
   }
 
   /// Read a file's full content into memory.
   pub fn read_file(&self, path: &str) -> EngineResult<Vec<u8>> {
-    self.read_file_streaming(path)?.collect_to_vec()
+    let result = self.read_file_streaming(path)?.collect_to_vec()?;
+    Ok(result)
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.
@@ -482,6 +510,13 @@ impl<'a> DirectoryOps<'a> {
 
     // Remove child from parent directory
     self.remove_from_parent_directory(&normalized)?;
+
+    // Update counters
+    if let Some(ref record) = file_record_opt {
+      let counters = self.engine.counters();
+      counters.decrement_files();
+      counters.sub_logical_data_size(record.total_size);
+    }
 
     // Emit deletion event with captured metadata
     if let Some(record) = file_record_opt {
@@ -1038,6 +1073,11 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
+    // Update counters: only increment for new symlinks, not updates
+    if existing_created_at.is_none() {
+      self.engine.counters().increment_symlinks();
+    }
+
     // Emit event
     let entry_data = EntryEventData {
       path: normalized,
@@ -1097,6 +1137,9 @@ impl<'a> DirectoryOps<'a> {
 
     // Remove from parent directory
     self.remove_from_parent_directory(&normalized)?;
+
+    // Update counters
+    self.engine.counters().decrement_symlinks();
 
     // Emit deletion event
     let entry_data = EntryEventData {

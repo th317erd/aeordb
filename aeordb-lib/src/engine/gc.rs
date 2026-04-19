@@ -7,7 +7,11 @@ use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
-use crate::engine::kv_store::KV_TYPE_DELETION;
+use crate::engine::engine_counters::CountersSnapshot;
+use crate::engine::kv_store::{
+    KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
+    KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
+};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
@@ -496,6 +500,12 @@ pub fn run_gc(
 
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
 
+  // Reconcile counters from authoritative KV state after sweep
+  if !dry_run {
+    let authoritative = build_authoritative_snapshot(engine)?;
+    engine.counters().reconcile(&authoritative);
+  }
+
   let duration_ms = start.elapsed().as_millis() as u64;
 
   let result = GcResult {
@@ -518,4 +528,71 @@ pub fn run_gc(
   }));
 
   Ok(result)
+}
+
+/// Build an authoritative CountersSnapshot by scanning the current KV state.
+/// Used by GC to reconcile counters after sweep.
+fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<CountersSnapshot> {
+  let all_entries = engine.iter_kv_entries()?;
+  let hash_length = engine.hash_algo().hash_length();
+
+  let mut files: u64 = 0;
+  let mut directories: u64 = 0;
+  let mut symlinks: u64 = 0;
+  let mut chunks: u64 = 0;
+  let mut snapshots: u64 = 0;
+  let mut forks: u64 = 0;
+  let mut logical_data_size: u64 = 0;
+  let mut chunk_data_size: u64 = 0;
+
+  for entry in &all_entries {
+    match entry.entry_type() {
+      KV_TYPE_FILE_RECORD => {
+        files += 1;
+        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
+          if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
+            logical_data_size += record.total_size;
+          }
+        }
+      }
+      KV_TYPE_DIRECTORY => { directories += 1; }
+      KV_TYPE_SYMLINK => { symlinks += 1; }
+      KV_TYPE_CHUNK => {
+        chunks += 1;
+        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
+          chunk_data_size += value.len() as u64;
+        }
+      }
+      KV_TYPE_SNAPSHOT => { snapshots += 1; }
+      KV_TYPE_FORK => { forks += 1; }
+      _ => {}
+    }
+  }
+
+  let void_space = if let Ok(vm) = engine.void_manager.read() {
+    vm.total_void_space()
+  } else {
+    0
+  };
+
+  // Preserve current throughput counters (they are monotonic, not reconciled)
+  let current = engine.counters().snapshot();
+
+  Ok(CountersSnapshot {
+    files,
+    directories,
+    symlinks,
+    chunks,
+    snapshots,
+    forks,
+    logical_data_size,
+    chunk_data_size,
+    void_space,
+    writes_total: current.writes_total,
+    reads_total: current.reads_total,
+    bytes_written_total: current.bytes_written_total,
+    bytes_read_total: current.bytes_read_total,
+    chunks_deduped_total: current.chunks_deduped_total,
+    write_buffer_depth: current.write_buffer_depth,
+  })
 }

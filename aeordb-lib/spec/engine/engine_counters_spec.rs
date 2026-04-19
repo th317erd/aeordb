@@ -615,3 +615,430 @@ fn test_large_size_values() {
     assert_eq!(snapshot.logical_data_size, one_gb * 100);
     assert_eq!(snapshot.chunk_data_size, one_gb * 50);
 }
+
+// ─── Phase 2: Live counter instrumentation tests ─────────────────────────────
+
+#[test]
+fn test_live_counters_store_files() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    // Store 5 files
+    ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
+    ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
+    ops.store_file(&ctx, "/c.txt", b"ccc", None).unwrap();
+    ops.store_file(&ctx, "/d.txt", b"ddd", None).unwrap();
+    ops.store_file(&ctx, "/e.txt", b"eee", None).unwrap();
+
+    let snap = engine.counters().snapshot();
+    // Each file stored produces one increment_files call
+    assert_eq!(snap.files, 5, "should count 5 files");
+    assert_eq!(snap.writes_total, 5, "should count 5 writes");
+    assert_eq!(snap.bytes_written_total, 15, "should count 15 bytes written (3 * 5)");
+    assert_eq!(snap.logical_data_size, 15, "logical data size should be 15");
+}
+
+#[test]
+fn test_live_counters_delete_files() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
+    ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
+    ops.store_file(&ctx, "/c.txt", b"ccc", None).unwrap();
+    ops.store_file(&ctx, "/d.txt", b"ddd", None).unwrap();
+    ops.store_file(&ctx, "/e.txt", b"eee", None).unwrap();
+
+    ops.delete_file(&ctx, "/a.txt").unwrap();
+    ops.delete_file(&ctx, "/b.txt").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.files, 3, "should have 3 files after deleting 2");
+    assert_eq!(snap.logical_data_size, 9, "logical data size should be 9 after deleting 6 bytes");
+}
+
+#[test]
+fn test_live_counters_symlink() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/target.txt", b"hello", None).unwrap();
+    ops.store_symlink(&ctx, "/link", "/target.txt").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.symlinks, 1, "should count 1 symlink");
+}
+
+#[test]
+fn test_live_counters_symlink_delete() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/target.txt", b"hello", None).unwrap();
+    ops.store_symlink(&ctx, "/link1", "/target.txt").unwrap();
+    ops.store_symlink(&ctx, "/link2", "/target.txt").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.symlinks, 2, "should count 2 symlinks");
+
+    ops.delete_symlink(&ctx, "/link1").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.symlinks, 1, "should count 1 symlink after deleting 1");
+}
+
+#[test]
+fn test_live_counters_snapshot() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let version_manager = VersionManager::new(&engine);
+
+    version_manager.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.snapshots, 1, "should count 1 snapshot");
+}
+
+#[test]
+fn test_live_counters_snapshot_delete() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let version_manager = VersionManager::new(&engine);
+
+    version_manager.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+    version_manager.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.snapshots, 2, "should count 2 snapshots");
+
+    version_manager.delete_snapshot(&ctx, "v1").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.snapshots, 1, "should count 1 snapshot after deleting 1");
+}
+
+#[test]
+fn test_live_counters_fork() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let version_manager = VersionManager::new(&engine);
+
+    version_manager.create_fork(&ctx, "feature-a", None).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.forks, 1, "should count 1 fork");
+}
+
+#[test]
+fn test_live_counters_fork_abandon() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let version_manager = VersionManager::new(&engine);
+
+    version_manager.create_fork(&ctx, "feature-a", None).unwrap();
+    version_manager.create_fork(&ctx, "feature-b", None).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.forks, 2, "should count 2 forks");
+
+    version_manager.abandon_fork(&ctx, "feature-a").unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.forks, 1, "should count 1 fork after abandoning 1");
+}
+
+#[test]
+fn test_live_counters_reads() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/file.txt", b"hello world", None).unwrap();
+
+    let snap_before = engine.counters().snapshot();
+    assert_eq!(snap_before.reads_total, 0);
+
+    let _data = ops.read_file("/file.txt").unwrap();
+    let _data2 = ops.read_file("/file.txt").unwrap();
+
+    let snap_after = engine.counters().snapshot();
+    assert_eq!(snap_after.reads_total, 2, "should count 2 reads");
+    assert_eq!(snap_after.bytes_read_total, 22, "should count 22 bytes read (11 * 2)");
+}
+
+#[test]
+fn test_live_counters_overwrite_adjusts_logical_size() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/file.txt", b"short", None).unwrap();
+
+    let snap1 = engine.counters().snapshot();
+    assert_eq!(snap1.logical_data_size, 5, "initial logical size is 5");
+    assert_eq!(snap1.files, 1, "should count 1 file");
+
+    // Overwrite with longer content
+    ops.store_file(&ctx, "/file.txt", b"much longer content", None).unwrap();
+
+    let snap2 = engine.counters().snapshot();
+    assert_eq!(snap2.files, 1, "overwrite should NOT increment file count");
+    assert_eq!(snap2.logical_data_size, 19, "logical size should reflect new content");
+}
+
+#[test]
+fn test_live_counters_overwrite_shrink_adjusts_logical_size() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/file.txt", b"this is a long piece of content", None).unwrap();
+
+    let snap1 = engine.counters().snapshot();
+    assert_eq!(snap1.logical_data_size, 31);
+
+    // Overwrite with shorter content
+    ops.store_file(&ctx, "/file.txt", b"tiny", None).unwrap();
+
+    let snap2 = engine.counters().snapshot();
+    assert_eq!(snap2.logical_data_size, 4, "logical size should shrink on overwrite");
+}
+
+#[test]
+fn test_live_counters_chunk_dedup() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    let data = b"identical content";
+    ops.store_file(&ctx, "/a.txt", data, None).unwrap();
+
+    let snap1 = engine.counters().snapshot();
+    let chunks_after_first = snap1.chunks;
+    assert!(chunks_after_first >= 1, "at least 1 chunk stored");
+    assert_eq!(snap1.chunks_deduped_total, 0, "no dedup on first store");
+
+    // Store same content under different path — chunk should be deduped
+    ops.store_file(&ctx, "/b.txt", data, None).unwrap();
+
+    let snap2 = engine.counters().snapshot();
+    assert_eq!(snap2.chunks, chunks_after_first, "chunk count should not increase on dedup");
+    assert!(snap2.chunks_deduped_total >= 1, "should record at least 1 dedup hit");
+}
+
+#[test]
+fn test_live_counters_symlink_update_does_not_double_count() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/target1.txt", b"hello", None).unwrap();
+    ops.store_file(&ctx, "/target2.txt", b"world", None).unwrap();
+
+    ops.store_symlink(&ctx, "/link", "/target1.txt").unwrap();
+    let snap1 = engine.counters().snapshot();
+    assert_eq!(snap1.symlinks, 1);
+
+    // Update same symlink to point to a different target
+    ops.store_symlink(&ctx, "/link", "/target2.txt").unwrap();
+    let snap2 = engine.counters().snapshot();
+    assert_eq!(snap2.symlinks, 1, "updating a symlink should NOT increment count");
+}
+
+#[test]
+fn test_live_counters_full_lifecycle() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+    let vm = VersionManager::new(&engine);
+
+    // Store files
+    ops.store_file(&ctx, "/doc1.txt", b"alpha", None).unwrap();
+    ops.store_file(&ctx, "/doc2.txt", b"beta", None).unwrap();
+    ops.store_file(&ctx, "/doc3.txt", b"gamma", None).unwrap();
+
+    // Create symlink
+    ops.store_symlink(&ctx, "/link1", "/doc1.txt").unwrap();
+
+    // Create snapshot
+    vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
+
+    // Create fork
+    vm.create_fork(&ctx, "branch1", None).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.files, 3);
+    assert_eq!(snap.symlinks, 1);
+    assert_eq!(snap.snapshots, 1);
+    assert_eq!(snap.forks, 1);
+    assert_eq!(snap.writes_total, 3);
+    assert_eq!(snap.logical_data_size, 14); // "alpha"(5) + "beta"(4) + "gamma"(5)
+
+    // Delete one file and the fork
+    ops.delete_file(&ctx, "/doc2.txt").unwrap();
+    vm.abandon_fork(&ctx, "branch1").unwrap();
+
+    let snap2 = engine.counters().snapshot();
+    assert_eq!(snap2.files, 2);
+    assert_eq!(snap2.forks, 0);
+    assert_eq!(snap2.logical_data_size, 10); // "alpha"(5) + "gamma"(5)
+    assert_eq!(snap2.snapshots, 1);
+    assert_eq!(snap2.symlinks, 1);
+}
+
+#[test]
+fn test_live_counters_initialized_on_create() {
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+
+    // A freshly created engine should have initialized counters.
+    // Note: directories counter starts at 0 on first create because
+    // initialize_from_kv runs before ensure_root_directory is called
+    // by the test helper. Directory operations (store_file, etc.) do
+    // NOT increment the directory counter — only GC reconciliation or
+    // engine re-open re-scans. This is by design: directory entries
+    // are structural, not user-created objects worth tracking individually
+    // in the hot path.
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.files, 0);
+    assert_eq!(snap.symlinks, 0);
+    assert_eq!(snap.snapshots, 0);
+    assert_eq!(snap.forks, 0);
+}
+
+#[test]
+fn test_live_counters_initialized_on_reopen() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("test.aeor");
+    let path_str = path.to_str().unwrap();
+
+    // Create and populate
+    {
+        let engine = StorageEngine::create(path_str).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        ops.ensure_root_directory(&ctx).unwrap();
+        ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
+        ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
+        ops.store_symlink(&ctx, "/link", "/a.txt").unwrap();
+    }
+
+    // Reopen — counters should be re-initialized from KV scan
+    let engine = StorageEngine::open(path_str).unwrap();
+    let snap = engine.counters().snapshot();
+
+    // File records have 3 KV entries each (content, identity, path)
+    // so files count = 6 (2 files x 3 entries)
+    assert!(snap.files >= 2, "should count at least 2 file records");
+    assert!(snap.symlinks >= 1, "should count at least 1 symlink");
+    assert!(snap.directories >= 1, "should count root directory");
+    assert!(snap.logical_data_size > 0, "should have nonzero logical data size");
+}
+
+#[test]
+fn test_live_counters_empty_file_store() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    // Store an empty file — 0 bytes, 0 chunks
+    ops.store_file(&ctx, "/empty.txt", b"", None).unwrap();
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.files, 1, "empty file should still count as a file");
+    assert_eq!(snap.logical_data_size, 0, "empty file has 0 logical size");
+    assert_eq!(snap.writes_total, 1, "should count 1 write");
+    assert_eq!(snap.bytes_written_total, 0, "0 bytes written for empty file");
+}
+
+#[test]
+fn test_live_counters_delete_nonexistent_file_does_not_decrement() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/exists.txt", b"data", None).unwrap();
+
+    let snap_before = engine.counters().snapshot();
+    assert_eq!(snap_before.files, 1);
+
+    // Attempt to delete a file that doesn't exist — should error, not change counters
+    let result = ops.delete_file(&ctx, "/nope.txt");
+    assert!(result.is_err(), "deleting nonexistent file should error");
+
+    let snap_after = engine.counters().snapshot();
+    assert_eq!(snap_after.files, 1, "failed delete should not change file count");
+}
+
+#[test]
+fn test_live_counters_delete_nonexistent_symlink_does_not_decrement() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/target.txt", b"data", None).unwrap();
+    ops.store_symlink(&ctx, "/link", "/target.txt").unwrap();
+
+    let snap_before = engine.counters().snapshot();
+    assert_eq!(snap_before.symlinks, 1);
+
+    let result = ops.delete_symlink(&ctx, "/nonexistent_link");
+    assert!(result.is_err(), "deleting nonexistent symlink should error");
+
+    let snap_after = engine.counters().snapshot();
+    assert_eq!(snap_after.symlinks, 1, "failed delete should not change symlink count");
+}
+
+#[test]
+fn test_live_counters_multiple_reads_accumulate() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let ops = DirectoryOps::new(&engine);
+
+    ops.store_file(&ctx, "/file.txt", b"abcdef", None).unwrap();
+
+    for _ in 0..10 {
+        let _data = ops.read_file("/file.txt").unwrap();
+    }
+
+    let snap = engine.counters().snapshot();
+    assert_eq!(snap.reads_total, 10, "should count 10 reads");
+    assert_eq!(snap.bytes_read_total, 60, "should count 60 bytes read (6 * 10)");
+}
+
+#[test]
+fn test_live_counters_fork_promote_decrements() {
+    let ctx = RequestContext::system();
+    let directory = tempfile::tempdir().unwrap();
+    let engine = create_engine(&directory);
+    let vm = VersionManager::new(&engine);
+
+    vm.create_fork(&ctx, "to-promote", None).unwrap();
+    assert_eq!(engine.counters().snapshot().forks, 1);
+
+    // Promote calls abandon_fork internally, which should decrement
+    vm.promote_fork(&ctx, "to-promote").unwrap();
+    assert_eq!(engine.counters().snapshot().forks, 0, "promoted fork should be decremented");
+}

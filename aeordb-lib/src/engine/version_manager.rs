@@ -381,6 +381,8 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_SNAPSHOT,
     )?;
 
+    self.engine.counters().increment_snapshots();
+
     // Emit version created event
     let version_data = VersionEventData {
       name: name.to_string(),
@@ -445,6 +447,8 @@ impl<'a> VersionManager<'a> {
     let key_string = format!("snap:{}", name);
     Self::persist_deletion(self.engine, &key_string)?;
 
+    self.engine.counters().decrement_snapshots();
+
     // Emit version deleted event
     ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {
       name: name.to_string(),
@@ -500,6 +504,8 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_FORK,
     )?;
 
+    self.engine.counters().increment_forks();
+
     // Emit version created event
     let version_data = VersionEventData {
       name: name.to_string(),
@@ -550,6 +556,8 @@ impl<'a> VersionManager<'a> {
     // Persist the deletion to disk so it survives restart.
     let key_string = format!("::aeordb:fork:{}", name);
     Self::persist_deletion(self.engine, &key_string)?;
+
+    self.engine.counters().decrement_forks();
 
     // Emit version deleted event
     ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {

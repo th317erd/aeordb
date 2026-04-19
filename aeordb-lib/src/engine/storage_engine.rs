@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use crate::engine::append_writer::AppendWriter;
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
+use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -130,6 +131,8 @@ pub struct StorageEngine {
   #[allow(dead_code)]
   pub(crate) void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
+  /// Atomic counters for O(1) database statistics, maintained in-memory.
+  counters: ArcSwap<EngineCounters>,
 }
 
 impl StorageEngine {
@@ -156,14 +159,18 @@ impl StorageEngine {
 
     let void_manager = VoidManager::new(hash_algo);
 
-    Ok(StorageEngine {
+    let engine = StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
       kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
-    })
+      counters: ArcSwap::from_pointee(EngineCounters::new()),
+    };
+    let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
+    engine.counters.store(initialized);
+    Ok(engine)
   }
 
   /// Internal open logic shared by `open` and `open_for_import`.
@@ -362,14 +369,18 @@ impl StorageEngine {
 
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
-    Ok(StorageEngine {
+    let engine = StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
       kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
-    })
+      counters: ArcSwap::from_pointee(EngineCounters::new()),
+    };
+    let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
+    engine.counters.store(initialized);
+    Ok(engine)
   }
 
   /// Open an existing database file.
@@ -464,6 +475,7 @@ impl StorageEngine {
       offset,
     };
     kv.insert(kv_entry)?;
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offset)
   }
@@ -500,6 +512,7 @@ impl StorageEngine {
       offset,
     };
     kv.insert(kv_entry)?;
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offset)
   }
@@ -544,6 +557,7 @@ impl StorageEngine {
       offset,
     };
     kv.insert(kv_entry)?;
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offset)
   }
@@ -582,6 +596,7 @@ impl StorageEngine {
       offset,
     };
     kv.insert(kv_entry)?;
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offset)
   }
@@ -627,6 +642,11 @@ impl StorageEngine {
   /// Convenience wrapper to compute a hash using the database's algorithm.
   pub fn compute_hash(&self, data: &[u8]) -> EngineResult<Vec<u8>> {
     self.hash_algo.compute_hash(data)
+  }
+
+  /// Return a reference to the atomic engine counters.
+  pub fn counters(&self) -> arc_swap::Guard<Arc<EngineCounters>> {
+    self.counters.load()
   }
 
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
@@ -703,6 +723,7 @@ impl StorageEngine {
       offset,
     };
     kv.insert(kv_entry)?;
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offset)
   }
@@ -750,6 +771,7 @@ impl StorageEngine {
       };
       kv.insert(kv_entry)?;
     }
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offsets)
   }
