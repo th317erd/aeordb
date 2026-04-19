@@ -298,6 +298,27 @@ phases:
           - "Add breaking change: heartbeat no longer contains stats"
           - "Add breaking change: stats response restructured"
 
+  # ===========================================================================
+  # PHASE 7 — Marketing site update
+  # ===========================================================================
+  - name: "Marketing site update"
+    description: |
+      Update aeordb-www to reflect the enhanced metrics capabilities.
+    depends_on: "Documentation"
+    tasks:
+
+      - name: "Update marketing site"
+        files:
+          modify:
+            - "../aeordb-www/index.html"
+        changes:
+          - "Update 'Under The Hood' features section to mention real-time metrics and monitoring"
+          - "Update any API examples that reference old stats/heartbeat endpoints"
+          - "Consider adding metrics/monitoring as a feature highlight if not already present"
+        acceptance:
+          - "No stale API references in aeordb-www"
+          - "Metrics/monitoring capability is visible to potential users"
+
 testing_strategy:
   approach: |
     Unit tests for EngineCounters and RateTracker (pure logic, no I/O).
