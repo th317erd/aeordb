@@ -59,19 +59,39 @@ impl Group {
   /// Evaluate whether a user is a member of this group by running
   /// the group's query against the user's fields.
   pub fn evaluate_membership(&self, user: &User) -> bool {
+    // Tag-based operators work against Vec<String>, not a single field value.
+    if self.query_field == "tags" {
+      return match self.query_operator.as_str() {
+        "has" => user.tags.iter().any(|t| t == &self.query_value),
+        "has_any" => self.query_value.split(',')
+          .any(|v| user.tags.iter().any(|t| t == v.trim())),
+        "has_all" => self.query_value.split(',')
+          .all(|v| user.tags.iter().any(|t| t == v.trim())),
+        // Allow standard operators too (they match against comma-joined tags)
+        _ => {
+          let joined = user.tags.join(",");
+          self.evaluate_string_match(&joined)
+        }
+      };
+    }
+
     let user_value = user.get_field(&self.query_field);
     if user_value.is_empty() && self.query_field != "email" {
       return false;
     }
 
+    self.evaluate_string_match(&user_value)
+  }
+
+  fn evaluate_string_match(&self, user_value: &str) -> bool {
     match self.query_operator.as_str() {
       "eq" => user_value == self.query_value,
       "neq" => user_value != self.query_value,
       "contains" => user_value.contains(&self.query_value),
       "starts_with" => user_value.starts_with(&self.query_value),
       "in" => self.query_value.split(',').any(|v| v.trim() == user_value),
-      "lt" => user_value < self.query_value,
-      "gt" => user_value > self.query_value,
+      "lt" => user_value < self.query_value.as_str(),
+      "gt" => user_value > self.query_value.as_str(),
       _ => false,
     }
   }

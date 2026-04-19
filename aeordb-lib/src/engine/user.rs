@@ -10,7 +10,7 @@ pub const ROOT_USER_ID: Uuid = Uuid::nil();
 /// Immutable/admin-only fields that are safe for group query evaluation.
 /// User-mutable fields like `username` and `email` are excluded to prevent
 /// privilege escalation via self-modification.
-pub const SAFE_QUERY_FIELDS: &[&str] = &["user_id", "created_at", "updated_at", "is_active"];
+pub const SAFE_QUERY_FIELDS: &[&str] = &["user_id", "created_at", "updated_at", "is_active", "tags"];
 
 /// A user entity in the aeordb identity system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +21,10 @@ pub struct User {
   pub is_active: bool,
   pub created_at: i64,
   pub updated_at: i64,
+  /// Admin-assigned tags for group membership queries.
+  /// Only admins can set tags — users cannot self-modify, preventing escalation.
+  #[serde(default)]
+  pub tags: Vec<String>,
 }
 
 impl User {
@@ -34,6 +38,7 @@ impl User {
       is_active: true,
       created_at: now,
       updated_at: now,
+      tags: Vec::new(),
     }
   }
 

@@ -154,6 +154,7 @@ pub struct UserResponse {
   pub is_active: bool,
   pub created_at: i64,
   pub updated_at: i64,
+  pub tags: Vec<String>,
 }
 
 impl From<&crate::engine::User> for UserResponse {
@@ -165,6 +166,7 @@ impl From<&crate::engine::User> for UserResponse {
       is_active: user.is_active,
       created_at: user.created_at,
       updated_at: user.updated_at,
+      tags: user.tags.clone(),
     }
   }
 }

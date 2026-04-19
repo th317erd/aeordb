@@ -148,8 +148,9 @@ class AeorGroups extends HTMLElement {
             <div class="form-group">
               <label class="form-label" for="create-query-field">Query Field</label>
               <select class="form-input" id="create-query-field">
+                <option value="tags" selected>tags</option>
                 <option value="user_id">user_id</option>
-                <option value="is_active" selected>is_active</option>
+                <option value="is_active">is_active</option>
                 <option value="created_at">created_at</option>
                 <option value="updated_at">updated_at</option>
               </select>
@@ -157,7 +158,10 @@ class AeorGroups extends HTMLElement {
             <div class="form-group">
               <label class="form-label" for="create-query-operator">Query Operator</label>
               <select class="form-input" id="create-query-operator">
-                <option value="eq" selected>eq — equals</option>
+                <option value="has" selected>has — user has this tag</option>
+                <option value="has_any">has_any — user has at least one of these tags</option>
+                <option value="has_all">has_all — user has all of these tags</option>
+                <option value="eq">eq — equals</option>
                 <option value="neq">neq — not equals</option>
                 <option value="contains">contains</option>
                 <option value="starts_with">starts_with</option>
