@@ -88,6 +88,7 @@ fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
     ]))
 }
 
+#[allow(dead_code)]
 fn read_u16_be(data: &[u8], offset: usize) -> Option<u16> {
     if offset + 2 > data.len() {
         return None;

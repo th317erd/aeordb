@@ -80,6 +80,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 futures-util = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-util = "0.7"
 http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
@@ -641,6 +642,10 @@ path = "spec/engine/rate_tracker_spec.rs"
 [[test]]
 name = "engine_counters_spec"
 path = "spec/engine/engine_counters_spec.rs"
+
+[[test]]
+name = "native_parsers_spec"
+path = "spec/engine/native_parsers_spec.rs"
 
 [[bin]]
 name = "stress-benchmark"
