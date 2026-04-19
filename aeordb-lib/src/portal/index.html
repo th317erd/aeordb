@@ -8,17 +8,21 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --background:  #0f1117;
+      --background:  #0d1117;
       --sidebar:     #161b22;
-      --card:        #1c2128;
+      --card:        #161b22;
+      --card-hover:  #21262d;
       --text:        #e6edf3;
       --text-muted:  #8b949e;
-      --accent:      #f0883e;
+      --accent:      #f97316;
+      --accent-hover:#fb923c;
       --border:      #30363d;
       --danger:      #f85149;
       --success:     #3fb950;
-      --font-sans:   system-ui, -apple-system, sans-serif;
-      --font-mono:   'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      --warning:     #d29922;
+      --font-sans:   'Inter', system-ui, -apple-system, sans-serif;
+      --font-mono:   'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+      --radius:      6px;
     }
 
     body {
@@ -113,7 +117,7 @@
     .stat-card:hover {
       transform: translateY(-3px);
       border-color: var(--accent);
-      box-shadow: 0 4px 20px rgba(240, 136, 62, 0.12), 0 0 0 1px rgba(240, 136, 62, 0.08);
+      box-shadow: 0 4px 20px rgba(249, 115, 22, 0.12), 0 0 0 1px rgba(249, 115, 22, 0.08);
     }
 
     .stat-card:hover .stat-value {
@@ -159,7 +163,7 @@
     .chart-card:hover {
       transform: translateY(-3px);
       border-color: var(--accent);
-      box-shadow: 0 4px 20px rgba(240, 136, 62, 0.12), 0 0 0 1px rgba(240, 136, 62, 0.08);
+      box-shadow: 0 4px 20px rgba(249, 115, 22, 0.12), 0 0 0 1px rgba(249, 115, 22, 0.08);
     }
 
     .chart-title {
@@ -234,7 +238,7 @@
       font-weight: 600;
     }
 
-    .button-primary:hover { background: #d97a35; }
+    .button-primary:hover { background: var(--accent-hover); }
 
     .button-danger { color: var(--danger); border-color: var(--danger); }
     .button-danger:hover { background: rgba(248, 81, 73, 0.1); }
@@ -455,9 +459,9 @@
   <aside class="sidebar">
     <div class="sidebar-logo">AeorDB</div>
     <nav class="sidebar-nav">
-      <a class="nav-link active" data-page="dashboard" href="#dashboard">Dashboard</a>
-      <a class="nav-link" data-page="users" href="#users">Users</a>
-      <a class="nav-link" data-page="groups" href="#groups">Groups</a>
+      <a class="nav-link active" data-page="dashboard" href="?page=dashboard">Dashboard</a>
+      <a class="nav-link" data-page="users" href="?page=users">Users</a>
+      <a class="nav-link" data-page="groups" href="?page=groups">Groups</a>
     </nav>
     <div class="sidebar-footer">
       <button class="nav-link logout-button" id="logout-button">Logout</button>

@@ -41,12 +41,30 @@ impl<'a> IndexingPipeline<'a> {
       None => return Ok(()),
     };
 
+    // Try native parser first (no WASM overhead)
+    let ct = content_type.unwrap_or("application/octet-stream");
+    let filename = crate::engine::path_utils::file_name(path).unwrap_or_default();
+    let native_result = crate::engine::native_parsers::parse_native(
+      data, ct, &filename, path, data.len() as u64,
+    );
+
     // Determine parser name: explicit config or content-type registry fallback
     let parser_name = config.parser.clone()
       .or_else(|| self.lookup_parser_by_content_type(content_type));
 
-    // Get JSON data
-    let json_data = if let Some(ref parser) = parser_name {
+    // Get JSON data: native parser > WASM plugin > raw JSON
+    let json_data = if let Some(result) = native_result {
+      match result {
+        Ok(json) => json,
+        Err(e) => {
+          if config.logging {
+            self.log_system(&parent, "parsing.log",
+              &format!("native parser failed for {}: {}", path, e));
+          }
+          return Ok(());
+        }
+      }
+    } else if let Some(ref parser) = parser_name {
       match self.invoke_parser(parser, data, path, content_type, &config) {
         Ok(json) => json,
         Err(e) => {

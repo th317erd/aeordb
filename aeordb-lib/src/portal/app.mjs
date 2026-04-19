@@ -196,10 +196,41 @@ function getOrCreatePage(tag) {
   return pageCache[tag];
 }
 
+// URL parameter helpers
+function getPageParam() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('page') || 'dashboard';
+}
+
+function isFrameMode() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('frame') === 'true';
+}
+
+function setPageParam(page) {
+  const params = new URLSearchParams(window.location.search);
+  params.set('page', page);
+  const newUrl = `${window.location.pathname}?${params.toString()}`;
+  window.history.pushState({}, '', newUrl);
+  navigate();
+}
+
 // Router
 function navigate() {
-  const page = location.hash.slice(1) || 'dashboard';
+  const page = getPageParam();
   const main = document.getElementById('main-content');
+  const sidebar = document.querySelector('.sidebar');
+
+  // Frame mode: hide sidebar
+  if (sidebar) {
+    if (isFrameMode()) {
+      sidebar.style.display = 'none';
+      main.style.marginLeft = '0';
+    } else {
+      sidebar.style.display = '';
+      main.style.marginLeft = '';
+    }
+  }
 
   // Remove current child without destroying cached elements
   while (main.firstChild) main.removeChild(main.firstChild);
@@ -230,11 +261,11 @@ function updateNavLinks(activePage) {
   });
 }
 
-// Wire up nav click handlers
+// Wire up nav click handlers — use URL params instead of hash
 document.querySelectorAll('.nav-link').forEach((element) => {
   element.addEventListener('click', (event) => {
     event.preventDefault();
-    location.hash = element.dataset.page;
+    setPageParam(element.dataset.page);
   });
 });
 
@@ -242,12 +273,11 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 document.getElementById('logout-button').addEventListener('click', () => {
   AUTH.clear();
   authDisabled = false;
-  location.hash = '';
-  navigate();
+  setPageParam('dashboard');
 });
 
-// Listen for hash changes
-window.addEventListener('hashchange', navigate);
+// Listen for browser back/forward navigation
+window.addEventListener('popstate', navigate);
 
 // Detect no-auth mode: probe /system/stats without a token.
 // If it succeeds, auth is disabled and we skip the login screen.

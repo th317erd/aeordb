@@ -34,6 +34,7 @@ pub mod hash_algorithm;
 pub mod index_config;
 pub mod index_store;
 pub mod indexing_pipeline;
+pub mod native_parsers;
 pub mod json_parser;
 pub mod kv_pages;
 pub mod kv_resize;

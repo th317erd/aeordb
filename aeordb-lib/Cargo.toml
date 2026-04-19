@@ -58,6 +58,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Content-type detection
 file-format = "0.29"
 
+# ZIP archive reading (for native Office/ODF parsers)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Glob matching
 glob-match = "0.2"
 
