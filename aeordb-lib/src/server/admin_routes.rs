@@ -23,6 +23,8 @@ use crate::auth::TokenClaims;
 pub struct CreateUserRequest {
   pub username: String,
   pub email: Option<String>,
+  #[serde(default)]
+  pub tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +32,7 @@ pub struct UpdateUserRequest {
   pub username: Option<String>,
   pub email: Option<String>,
   pub is_active: Option<bool>,
+  pub tags: Option<Vec<String>>,
 }
 
 /// POST /admin/users -- create a new user.
@@ -44,7 +47,8 @@ pub async fn create_user(
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let user = User::new(&payload.username, payload.email.as_deref());
+  let mut user = User::new(&payload.username, payload.email.as_deref());
+  user.tags = payload.tags;
 
   if let Err(error) = system_store::store_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to create user: {}", error);
@@ -161,6 +165,9 @@ pub async fn update_user(
   }
   if let Some(is_active) = payload.is_active {
     user.is_active = is_active;
+  }
+  if let Some(ref tags) = payload.tags {
+    user.tags = tags.clone();
   }
   user.updated_at = chrono::Utc::now().timestamp_millis();
 
