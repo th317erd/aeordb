@@ -19,6 +19,10 @@ AeorDB is a single-file database built on an append-only write-ahead log (WAL). 
         | Engine   |  | Manager  |  | Manager     |
         +-----+----+  +-----+----+  +------+------+
               |              |              |
+              |         +----+----+         |
+              |         | Native  |         |
+              |         | Parsers |         |
+              |         +---------+         |
               +--------------+--------------+
                              |
                     +--------+--------+
@@ -38,6 +42,14 @@ AeorDB is a single-file database built on an append-only write-ahead log (WAL). 
             [  mydb.aeordb  ]    <-- single file on disk
             [ mydb.aeordb.kv ]   <-- KV index file
 ```
+
+## Native Parsers
+
+AeorDB ships with 8 built-in format parsers (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) that run as compiled Rust code during indexing. Native parsers are tried first for recognized content types; unrecognized formats fall through to the WASM plugin system. This means common file types are indexable out of the box with zero deployment overhead. See [Plugin Endpoints](../api/plugins.md#native-parsers) for the full format list.
+
+## Metrics Counters
+
+System metrics (file counts, disk sizes, throughput rates) are tracked via O(1) atomic counters that are updated inline during normal operations. The `GET /system/stats` endpoint and the `metrics` SSE event read directly from these counters -- there is no O(n) scan at query time. Rolling rate computation (1-minute, 5-minute, 15-minute averages) is maintained continuously, so monitoring data is always available at near-zero cost.
 
 ## The Database File (`.aeordb`)
 

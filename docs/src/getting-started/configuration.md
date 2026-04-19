@@ -1,6 +1,41 @@
 # Configuration
 
-AeorDB is configured through CLI flags at startup and through configuration files stored inside the database itself.
+AeorDB is configured through CLI flags, a TOML configuration file, and through configuration files stored inside the database itself. CLI flags always take precedence over config file values.
+
+## Configuration File
+
+AeorDB supports a TOML configuration file for all server settings. Pass it with `--config`:
+
+```bash
+aeordb start --config aeordb.toml
+```
+
+Every config key has a 1:1 mapping to a CLI flag. CLI flags override config file values. Omit any key to use the built-in default.
+
+```toml
+[server]
+port = 3000
+host = "0.0.0.0"
+log_format = "pretty"
+
+[server.tls]
+cert = "/path/to/cert.pem"
+key = "/path/to/key.pem"
+
+[server.cors]
+origins = ["https://app.example.com"]
+
+[auth]
+mode = "self"
+jwt_expiry_seconds = 3600
+
+[storage]
+database = "data.aeordb"
+chunk_size = 262144
+# hot_dir = "./hot"
+```
+
+An example config file is included in the repository as `aeordb.example.toml`.
 
 ## CLI Flags
 
@@ -10,12 +45,31 @@ aeordb start [OPTIONS]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--config`, `-c` | — | Path to a TOML configuration file |
 | `--port`, `-p` | `3000` | HTTP listen port |
+| `--host` | `0.0.0.0` | Bind address |
 | `--database`, `-D` | `data.aeordb` | Path to the database file (created if it does not exist) |
 | `--auth` | self-contained | Auth provider URI (see [Auth Modes](#auth-modes)) |
 | `--hot-dir` | database parent dir | Directory for write-ahead hot files (crash recovery journal) |
 | `--cors-origins` | disabled | CORS allowed origins (see [CORS](#cors)) |
 | `--log-format` | `pretty` | Log output format: `pretty` or `json` |
+| `--tls-cert` | — | Path to TLS certificate PEM file (requires `--tls-key`) |
+| `--tls-key` | — | Path to TLS private key PEM file (requires `--tls-cert`) |
+| `--jwt-expiry` | `3600` | JWT token lifetime in seconds |
+| `--chunk-size` | `262144` | Write chunk size in bytes (256 KiB default) |
+
+### TLS
+
+AeorDB supports native HTTPS via rustls. Provide both a certificate and private key:
+
+```bash
+aeordb start \
+  --tls-cert /etc/ssl/certs/aeordb.pem \
+  --tls-key /etc/ssl/private/aeordb.key \
+  --port 443
+```
+
+Both `--tls-cert` and `--tls-key` must be provided together -- supplying only one is an error. When TLS is configured, the server listens for HTTPS connections instead of plain HTTP.
 
 ### Examples
 
@@ -23,13 +77,18 @@ aeordb start [OPTIONS]
 # Minimal: local development with no auth
 aeordb start --database dev.aeordb --port 8080 --auth false
 
-# Production: custom port, explicit hot directory, CORS for your frontend
+# Production: HTTPS with auth, CORS for your frontend
 aeordb start \
   --database /var/lib/aeordb/prod.aeordb \
   --port 443 \
+  --tls-cert /etc/ssl/certs/aeordb.pem \
+  --tls-key /etc/ssl/private/aeordb.key \
   --hot-dir /var/lib/aeordb/hot \
   --cors-origins "https://myapp.com,https://admin.myapp.com" \
   --log-format json
+
+# Using a config file with CLI overrides
+aeordb start --config aeordb.toml --port 8080
 ```
 
 ## Auth Modes
@@ -190,6 +249,8 @@ curl -X PUT http://localhost:3000/files/.config/cron.json \
     ]
   }'
 ```
+
+Supported task types: `"gc"`, `"reindex"`, and `"backup"`. The `"backup"` type accepts `backup_dir`, `retention_count`, and `snapshot` arguments (see [Backup & Restore](../operations/backup.md#automated-backup-scheduling)).
 
 The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. Cron schedules can also be managed via the HTTP API at `/system/cron`.
 

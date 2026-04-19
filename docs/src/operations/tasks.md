@@ -8,6 +8,7 @@ AeorDB runs long-running operations (reindexing, garbage collection) as backgrou
 |-----------|-------------|
 | `reindex` | Re-run the indexing pipeline on all files under a directory |
 | `gc` | Run garbage collection (mark-and-sweep) |
+| `backup` | Export HEAD (or a named snapshot) as a timestamped `.aeordb` file |
 
 ## Task Lifecycle
 

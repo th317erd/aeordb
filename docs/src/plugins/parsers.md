@@ -1,10 +1,15 @@
 # Parser Plugins
 
-Parser plugins let you transform non-JSON files (plaintext, CSV, PDF, images, etc.) into structured, queryable JSON when they are stored in AeorDB. Parsers are compiled to WebAssembly and deployed per-table, so each data collection can have its own parsing logic.
+Parser plugins let you transform non-JSON files into structured, queryable JSON when they are stored in AeorDB. AeorDB provides two parser mechanisms:
 
-## How It Works
+1. **Native parsers** (built-in) -- 8 parsers for common formats (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) that run automatically with zero deployment. See [Plugin Endpoints -- Native Parsers](../api/plugins.md#native-parsers) for the full format list.
+2. **WASM parser plugins** -- custom parsers compiled to WebAssembly, deployed per-table for proprietary or specialized formats.
 
-When a file is written to a table that has a parser configured, AeorDB automatically routes the raw bytes through the parser's WASM module. The parser receives the file data plus metadata and returns a JSON value. That JSON is then indexed by AeorDB's query engine, making the original non-JSON file fully searchable.
+Native parsers are tried first. If no native parser handles the content type, the engine falls through to any configured WASM parser.
+
+## How WASM Parsers Work
+
+When a file is written to a table that has a WASM parser configured, AeorDB automatically routes the raw bytes through the parser's WASM module. The parser receives the file data plus metadata and returns a JSON value. That JSON is then indexed by AeorDB's query engine, making the original non-JSON file fully searchable.
 
 ## Writing a Parser: Step by Step
 

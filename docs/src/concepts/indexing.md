@@ -124,9 +124,19 @@ For complex extraction logic, delegate to a WASM plugin:
 
 The plugin receives the parsed JSON and the `args` object, and returns the extracted field value.
 
-## WASM Parser Integration
+## Parser Integration
 
-For non-JSON files (PDFs, images, XML, etc.), a parser plugin converts raw bytes into a JSON object that the indexing pipeline can work with.
+For non-JSON files (PDFs, images, XML, etc.), a parser converts raw bytes into a JSON object that the indexing pipeline can work with.
+
+### Native Parsers (Built-In)
+
+AeorDB ships with 8 native parsers that handle common formats automatically -- no deployment required. During indexing, the engine tries native parsers first based on content type (with extension-based fallback for `application/octet-stream`). Supported formats include text, HTML/XML, PDF, images (JPEG/PNG/GIF/BMP/WebP/TIFF/SVG), audio (MP3/WAV/OGG), video (MP4/AVI/WebM/MKV/FLV), MS Office (DOCX/XLSX), and ODF (ODT/ODS). See [Plugin Endpoints -- Native Parsers](../api/plugins.md#native-parsers) for the full list.
+
+If no native parser handles the content type, the engine falls through to the WASM plugin system.
+
+### WASM Parser Plugins
+
+For custom or proprietary formats not covered by the built-in parsers, deploy a WASM parser plugin. WASM parsers receive the same input envelope and return the same JSON structure as native parsers.
 
 ### Configuration
 

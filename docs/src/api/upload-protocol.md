@@ -2,6 +2,8 @@
 
 AeorDB provides a 4-phase upload protocol for efficient, deduplicated file transfers. Clients split files into chunks, hash them locally, and only upload chunks the server does not already have.
 
+> **When to use this protocol:** Inline uploads via `PUT /files/{path}` are capped at 100 MB. Files larger than 100 MB must use this chunked upload protocol. It is also beneficial for large batches of files because the dedup check (phase 2) skips chunks already on the server.
+
 ## Protocol Overview
 
 1. **Negotiate** -- GET `/blobs/config` to learn the hash algorithm and chunk size.

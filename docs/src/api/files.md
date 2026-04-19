@@ -6,10 +6,11 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
-| PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 500 |
+| PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 413, 500 |
 | GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
+| PATCH | `/files/{path}` | Rename or move a file or symlink | Yes | 200, 400, 404, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 ---
@@ -18,7 +19,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 
 Store a file at the given path. Parent directories are created automatically. If a file already exists at the path, it is overwritten (creating a new version).
 
-**Body limit:** 10 GB
+**Body limit:** 100 MB (inline uploads). For files larger than 100 MB, use the [chunked upload protocol](./upload-protocol.md).
 
 ### Request
 
@@ -63,6 +64,7 @@ curl -X PUT http://localhost:3000/files/data/report.pdf \
 | 400 | Invalid input (e.g., empty path) |
 | 404 | Parent path references a non-existent entity |
 | 409 | Path conflict (e.g., file exists where directory expected) |
+| 413 | Payload exceeds 100 MB inline upload limit (use chunked upload protocol) |
 | 500 | Internal storage failure |
 
 ---
@@ -87,6 +89,8 @@ Read a file or list a directory. The server determines the type automatically:
 | `nofollow` | boolean | `false` | If the path is a symlink, return metadata instead of following |
 | `depth` | integer | `0` | Directory listing depth: `0` = immediate children, `-1` = unlimited recursion |
 | `glob` | string | — | Filter directory listing by file name glob pattern (`*`, `?`, `[abc]`) |
+| `limit` | integer | — | Maximum number of entries to return in a directory listing |
+| `offset` | integer | — | Number of entries to skip before returning results |
 
 ### File Response
 
@@ -149,6 +153,32 @@ Entry types: `2` = file, `3` = directory, `8` = symlink.
   ]
 }
 ```
+
+### Paginated Directory Listing
+
+Use `limit` and `offset` to paginate directory listings:
+
+```bash
+curl "http://localhost:3000/files/data/?limit=10&offset=20" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+When `limit` or `offset` is provided, the response includes pagination metadata:
+
+```json
+{
+  "items": [...],
+  "total": 150,
+  "limit": 10,
+  "offset": 20
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total` | integer | Total number of entries (before pagination) |
+| `limit` | integer | The limit that was applied |
+| `offset` | integer | The offset that was applied |
 
 ### Examples
 
@@ -250,6 +280,70 @@ curl -X DELETE http://localhost:3000/files/data/report.pdf \
 |--------|-----------|
 | 404 | File not found |
 | 500 | Internal deletion failure |
+
+---
+
+## PATCH /files/{path}
+
+Rename or move a file or symlink to a new path. This is a metadata-only operation -- no data is copied in the content-addressed store. The file's content hash remains the same; only the path mapping changes.
+
+### Request
+
+- **Headers:**
+  - `Authorization: Bearer <token>` (required)
+  - `Content-Type: application/json` (required)
+- **Body:**
+
+```json
+{
+  "to": "/new/path/report.pdf"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `to` | string | Yes | Destination path for the file or symlink |
+
+### Response
+
+**Status:** `200 OK`
+
+```json
+{
+  "from": "/data/report.pdf",
+  "to": "/archive/report.pdf"
+}
+```
+
+### Side Effects
+
+- Triggers `entries_created` and `entries_deleted` events on the event bus.
+- If the path is a symlink, the symlink itself is moved (not the target).
+- If a file already exists at the destination path, the operation fails.
+
+### Example
+
+```bash
+# Move a file
+curl -X PATCH http://localhost:3000/files/data/report.pdf \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"to": "/archive/report.pdf"}'
+
+# Rename a symlink
+curl -X PATCH http://localhost:3000/files/latest-logo \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"to": "/current-logo"}'
+```
+
+### Error Responses
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Missing `to` field or invalid destination path |
+| 404 | Source file or symlink not found |
+| 500 | Internal rename failure |
 
 ---
 

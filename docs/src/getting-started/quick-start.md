@@ -66,11 +66,10 @@ Expected response:
 
 ```json
 {
-  "path": "/users/",
-  "entries": [
-    {"name": "alice.json", "type": "file"},
-    {"name": "bob.json", "type": "file"},
-    {"name": "carol.json", "type": "file"}
+  "items": [
+    {"path": "/users/alice.json", "name": "alice.json", "entry_type": 2, "hash": "a1b2c3..."},
+    {"path": "/users/bob.json", "name": "bob.json", "entry_type": 2, "hash": "d4e5f6..."},
+    {"path": "/users/carol.json", "name": "carol.json", "entry_type": 2, "hash": "a7b8c9..."}
   ]
 }
 ```

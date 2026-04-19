@@ -10,7 +10,9 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 
 **Built-in versioning.** Create named snapshots, fork your database into isolated branches, diff between any two versions, and export/import self-contained `.aeordb` files. The content-addressed Merkle tree means historical reads resolve the exact data at the time of the snapshot, not the latest overwrite.
 
-**WASM plugin system.** Extend the database with WebAssembly plugins for two purposes: *parser plugins* that extract structured fields from non-JSON files (PDFs, images, XML) for indexing, and *query plugins* that run custom logic directly at the data layer. Plugins execute in a sandboxed WASM runtime with configurable memory limits.
+**Native parsers for common formats.** AeorDB includes 8 built-in parsers (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) that run automatically during indexing with zero deployment overhead. Common file types are searchable out of the box.
+
+**WASM plugin system.** Extend the database with WebAssembly plugins for two purposes: *parser plugins* that extract structured fields from custom file formats for indexing, and *query plugins* that run custom logic directly at the data layer. Plugins execute in a sandboxed WASM runtime with configurable memory limits. Native parsers handle common formats; WASM plugins extend to anything else.
 
 **Native HTTP API.** AeorDB exposes its full API over HTTP -- no separate proxy, no client library required. Store files with `PUT`, read them with `GET`, query with `POST /files/query`, and manage versions with the `/versions/*` endpoints. Any HTTP client works.
 
@@ -22,11 +24,14 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 
 - **Storage:** Append-only WAL file, content-addressed BLAKE3 hashing, automatic zstd compression, 256KB chunking for dedup
 - **Indexing:** Scalar bucketing (NVT) with u64, i64, f64, string, timestamp, trigram, phonetic/soundex/dmetaphone index types
+- **Native parsers:** 8 built-in parsers (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) -- no WASM deployment needed
 - **Querying:** JSON query API with boolean logic (`and`, `or`, `not`), comparison operators, sorting, pagination, projections, and aggregations
-- **Versioning:** Snapshots, forks, diff/patch, export/import as self-contained `.aeordb` files
-- **Plugins:** WASM parser plugins for any file format, WASM query plugins for custom data-layer logic
-- **Operations:** Background task system, cron scheduler, garbage collection, automatic reindexing
-- **Auth:** Self-contained JWT auth, API keys, user/group management, path-level permissions, or `--auth false` for local use
+- **Versioning:** Snapshots, forks, diff/patch, export/import as self-contained `.aeordb` files, file-level history and restore
+- **Plugins:** WASM parser plugins for custom formats, WASM query plugins for server-side logic
+- **Operations:** Background task system, cron scheduler (including automated backups), garbage collection, automatic reindexing
+- **Auth:** Self-contained JWT auth, API keys, user/group management with tags, path-level permissions, or `--auth false` for local use
+- **TLS:** Native HTTPS via rustls with `--tls-cert` and `--tls-key` flags
+- **Configuration:** TOML config file support (`--config`) with 1:1 CLI flag mapping
 - **Observability:** O(1) stats at `/system/stats`, Prometheus metrics at `/system/metrics`, real-time `metrics` SSE event, structured logging
 
 ## Next Steps

@@ -14,12 +14,18 @@ aeordb start [OPTIONS]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
+| `--config` | `-c` | -- | Path to a TOML configuration file |
 | `--port` | `-p` | `3000` | TCP port to listen on |
+| `--host` | | `0.0.0.0` | Bind address |
 | `--database` | `-D` | `data.aeordb` | Path to the `.aeordb` database file |
 | `--log-format` | | `pretty` | Log output format: `pretty` or `json` |
 | `--auth` | | (none) | Auth provider URI (see below) |
 | `--hot-dir` | | (database parent dir) | Directory for write-ahead hot files |
 | `--cors-origins` | | (disabled) | CORS allowed origins |
+| `--tls-cert` | | -- | Path to TLS certificate PEM file (requires `--tls-key`) |
+| `--tls-key` | | -- | Path to TLS private key PEM file (requires `--tls-cert`) |
+| `--jwt-expiry` | | `3600` | JWT token lifetime in seconds |
+| `--chunk-size` | | `262144` | Write chunk size in bytes (256 KiB) |
 
 ### Auth Modes
 
@@ -53,6 +59,18 @@ aeordb start --port 8080 --database /var/lib/aeordb/prod.aeordb --auth self --lo
 
 # Custom hot directory and CORS
 aeordb start --database data.aeordb --hot-dir /fast-ssd/hot --cors-origins "*"
+
+# HTTPS with TLS
+aeordb start --tls-cert /etc/ssl/cert.pem --tls-key /etc/ssl/key.pem --port 443
+
+# Using a config file
+aeordb start --config aeordb.toml
+
+# Config file with CLI overrides
+aeordb start --config aeordb.toml --port 8080 --auth false
+
+# Show version
+aeordb --version
 ```
 
 ### What Happens on Start
@@ -61,7 +79,8 @@ aeordb start --database data.aeordb --hot-dir /fast-ssd/hot --cors-origins "*"
 2. Bootstraps root API key (if `--auth self` and no key exists yet)
 3. Resets any tasks left in `Running` state from a previous crash to `Pending`
 4. Starts background workers:
-   - **Heartbeat**: emits `DatabaseStats` every 15 seconds
+   - **Heartbeat**: emits clock-sync pulses every 15 seconds
+   - **Metrics**: emits system metrics snapshots every 15 seconds
    - **Cron scheduler**: checks `/.config/cron.json` every 60 seconds
    - **Task worker**: dequeues and executes background tasks
    - **Webhook dispatcher**: delivers events to registered webhook URLs

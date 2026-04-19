@@ -304,7 +304,7 @@ Create a new cron schedule.
 |-------|------|----------|-------------|
 | `id` | string | Yes | Unique schedule identifier |
 | `schedule` | string | Yes | Cron expression |
-| `task_type` | string | Yes | Task type to enqueue (`"gc"`, `"reindex"`) |
+| `task_type` | string | Yes | Task type to enqueue (`"gc"`, `"reindex"`, `"backup"`) |
 | `args` | object | Yes | Arguments passed to the task |
 | `enabled` | boolean | Yes | Whether the schedule is active |
 
@@ -757,7 +757,8 @@ Create a new user. Requires root.
 ```json
 {
   "username": "alice",
-  "email": "alice@example.com"
+  "email": "alice@example.com",
+  "tags": ["editor", "us-west"]
 }
 ```
 
@@ -765,6 +766,7 @@ Create a new user. Requires root.
 |-------|------|----------|-------------|
 | `username` | string | Yes | Unique username |
 | `email` | string | No | User email address |
+| `tags` | array of strings | No | Admin-assigned tags for group membership queries (default: empty) |
 
 **Response:** `201 Created`
 
@@ -774,6 +776,7 @@ Create a new user. Requires root.
   "username": "alice",
   "email": "alice@example.com",
   "is_active": true,
+  "tags": ["editor", "us-west"],
   "created_at": 1775968398000,
   "updated_at": 1775968398000
 }
@@ -829,9 +832,12 @@ Update a user. All fields are optional. Requires root.
 {
   "username": "alice_updated",
   "email": "newemail@example.com",
-  "is_active": true
+  "is_active": true,
+  "tags": ["editor", "us-west", "senior"]
 }
 ```
+
+Tags are admin-only -- users cannot modify their own tags, preventing privilege escalation through self-assigned group membership.
 
 **Response:** `200 OK` (returns the updated user)
 
@@ -854,7 +860,19 @@ Deactivate a user (soft delete -- sets `is_active` to false). Requires root.
 
 ## Group Management
 
-Groups define path-level access control rules using query-based membership.
+Groups define path-level access control rules using query-based membership. Users are matched into groups by querying safe fields on their user record, including `tags`.
+
+### Tag-Based Group Membership
+
+When `query_field` is set to `"tags"`, three special operators are available:
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `has` | User has this exact tag | `"query_value": "editor"` |
+| `has_any` | User has at least one of these tags (comma-separated) | `"query_value": "editor,admin"` |
+| `has_all` | User has all of these tags (comma-separated) | `"query_value": "editor,us-west"` |
+
+Standard operators (`eq`, `gt`, etc.) also work with tags -- they match against the comma-joined tag string.
 
 ### POST /system/groups
 
@@ -867,8 +885,8 @@ Create a new group. Requires root.
   "name": "editors",
   "default_allow": "/content/*",
   "default_deny": "/system/*",
-  "query_field": "role",
-  "query_operator": "eq",
+  "query_field": "tags",
+  "query_operator": "has",
   "query_value": "editor"
 }
 ```

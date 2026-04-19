@@ -235,6 +235,57 @@ scp transfer.aeordb target-server:/data/
 aeordb import --database data.aeordb --file transfer.aeordb --promote
 ```
 
+## Automated Backup Scheduling
+
+Use the `"backup"` task type with the cron scheduler to run automated backups on a schedule. The backup task exports HEAD (or a named snapshot) as a timestamped `.aeordb` file and optionally enforces a retention policy.
+
+### Cron Configuration
+
+```json
+{
+  "schedules": [
+    {
+      "id": "nightly-backup",
+      "task_type": "backup",
+      "schedule": "0 1 * * *",
+      "args": {
+        "backup_dir": "/var/backups/aeordb/",
+        "retention_count": 7
+      },
+      "enabled": true
+    }
+  ]
+}
+```
+
+### Backup Task Arguments
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `backup_dir` | string | `"./backups/"` | Destination directory for backup files |
+| `retention_count` | integer | `0` | Keep at most this many `.aeordb` files in the backup directory. `0` means unlimited. |
+| `snapshot` | string | -- | Export a named snapshot instead of HEAD |
+
+The task creates a timestamped filename (e.g., `backup-head-20260419T030000.000Z.aeordb`) to avoid collisions. When `retention_count` is set, the oldest `.aeordb` files in `backup_dir` are deleted after each backup to stay within the limit.
+
+### Example: Weekly Backups with 4-Week Retention
+
+```bash
+curl -X POST http://localhost:3000/system/cron \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "weekly-backup",
+    "schedule": "0 2 * * 0",
+    "task_type": "backup",
+    "args": {
+      "backup_dir": "/var/backups/aeordb/",
+      "retention_count": 4
+    },
+    "enabled": true
+  }'
+```
+
 ## See Also
 
 - [CLI Commands](../cli/commands.md) -- full command reference with all flags
