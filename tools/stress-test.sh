@@ -53,7 +53,7 @@ trap "echo 'Stopping server...'; kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 
 sleep 3
 
 # Verify
-if ! curl -sf "$SERVER/admin/health" > /dev/null; then
+if ! curl -sf "$SERVER/system/health" > /dev/null; then
   echo "Server failed to start! Log:"
   cat /tmp/aeordb-stress-server.log
   exit 1
@@ -91,7 +91,7 @@ for FILE in "${IMAGES[@]}"; do
   SIZE=$(stat -c%s "$FILE")
 
   CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-    -X PUT "$SERVER/fs/stress/images/$UNIQUE_NAME" \
+    -X PUT "$SERVER/files/stress/images/$UNIQUE_NAME" \
     -H "Authorization: Bearer $JWT" \
     -H "Content-Type: $CONTENT_TYPE" \
     --data-binary "@$FILE" 2>/dev/null || echo "000")
@@ -134,7 +134,7 @@ if [ -d "$VIDEOS_DIR" ] && [ "$VIDEO_COUNT" -gt 0 ]; then
 
     START_V=$(now_ms)
     CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-      -X PUT "$SERVER/fs/stress/videos/$BASENAME" \
+      -X PUT "$SERVER/files/stress/videos/$BASENAME" \
       -H "Authorization: Bearer $JWT" \
       -H "Content-Type: video/mp4" \
       --data-binary "@$VIDEO" 2>/dev/null || echo "000")
@@ -158,7 +158,7 @@ echo "  PHASE 3: Read 50 random images"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Get list of stored files
-STORED_FILES=$(curl -sf "$SERVER/fs/stress/images/" -H "Authorization: Bearer $JWT" | \
+STORED_FILES=$(curl -sf "$SERVER/files/stress/images/" -H "Authorization: Bearer $JWT" | \
   python3 -c "import sys,json; [print(e['name']) for e in json.load(sys.stdin)]" 2>/dev/null)
 mapfile -t STORED < <(echo "$STORED_FILES" | shuf | head -50)
 
@@ -166,7 +166,7 @@ READ_BYTES=0
 START=$(now_ms)
 for NAME in "${STORED[@]}"; do
   SIZE=$(curl -sf -o /dev/null -w "%{size_download}" \
-    "$SERVER/fs/stress/images/$NAME" \
+    "$SERVER/files/stress/images/$NAME" \
     -H "Authorization: Bearer $JWT" 2>/dev/null || echo "0")
   READ_BYTES=$((READ_BYTES + SIZE))
 done
@@ -184,13 +184,13 @@ echo "  PHASE 4: Directory listings"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 START=$(now_ms)
-COUNT=$(curl -sf "$SERVER/fs/stress/images/" -H "Authorization: Bearer $JWT" | \
+COUNT=$(curl -sf "$SERVER/files/stress/images/" -H "Authorization: Bearer $JWT" | \
   python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
 END=$(now_ms)
 echo "  images/: $COUNT entries in $((END - START))ms"
 
 START=$(now_ms)
-COUNT=$(curl -sf "$SERVER/fs/stress/" -H "Authorization: Bearer $JWT" | \
+COUNT=$(curl -sf "$SERVER/files/stress/" -H "Authorization: Bearer $JWT" | \
   python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
 END=$(now_ms)
 echo "  stress/: $COUNT entries in $((END - START))ms"
@@ -203,7 +203,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  PHASE 5: Delete half the images"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-DELETE_LIST=$(curl -sf "$SERVER/fs/stress/images/" -H "Authorization: Bearer $JWT" | \
+DELETE_LIST=$(curl -sf "$SERVER/files/stress/images/" -H "Authorization: Bearer $JWT" | \
   python3 -c "import sys,json; names=[e['name'] for e in json.load(sys.stdin)]; [print(n) for n in names[:len(names)//2]]" 2>/dev/null)
 mapfile -t TO_DELETE < <(echo "$DELETE_LIST")
 
@@ -211,7 +211,7 @@ DELETED=0
 START=$(now_ms)
 for NAME in "${TO_DELETE[@]}"; do
   CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-    -X DELETE "$SERVER/fs/stress/images/$NAME" \
+    -X DELETE "$SERVER/files/stress/images/$NAME" \
     -H "Authorization: Bearer $JWT" 2>/dev/null || echo "000")
   [ "$CODE" = "200" ] && DELETED=$((DELETED + 1))
 done
@@ -232,7 +232,7 @@ for FILE in "${IMAGES[@]:0:$((UPLOADED/2))}"; do
   BASENAME=$(basename "$FILE")
   UNIQUE_NAME="${BASENAME%.*}_$(echo "$FILE" | md5sum | head -c8).${BASENAME##*.}"
   CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-    -X PUT "$SERVER/fs/stress/images/$UNIQUE_NAME" \
+    -X PUT "$SERVER/files/stress/images/$UNIQUE_NAME" \
     -H "Authorization: Bearer $JWT" \
     -H "Content-Type: image/jpeg" \
     --data-binary "@$FILE" 2>/dev/null || echo "000")
@@ -250,7 +250,7 @@ echo "  FINAL RESULTS"
 echo "══════════════════════════════════════════════════════"
 
 DB_SIZE=$(stat -c%s "$DB_PATH")
-REMAINING=$(curl -sf "$SERVER/fs/stress/images/" -H "Authorization: Bearer $JWT" | \
+REMAINING=$(curl -sf "$SERVER/files/stress/images/" -H "Authorization: Bearer $JWT" | \
   python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
 
 echo "  Database file:   $((DB_SIZE / 1024 / 1024)) MB"
@@ -261,7 +261,7 @@ echo ""
 
 # Metrics
 echo "  Prometheus Metrics:"
-METRICS=$(curl -sf "$SERVER/admin/metrics" -H "Authorization: Bearer $JWT" 2>/dev/null || echo "unavailable")
+METRICS=$(curl -sf "$SERVER/system/metrics" -H "Authorization: Bearer $JWT" 2>/dev/null || echo "unavailable")
 if [ "$METRICS" != "unavailable" ]; then
   echo "$METRICS" | grep -E "^aeordb_(files|chunks_stored|chunks_read|chunk_store)" | head -15
 fi

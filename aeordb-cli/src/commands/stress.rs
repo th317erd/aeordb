@@ -239,7 +239,7 @@ async fn perform_write(
   path: &str,
   data: &[u8],
 ) -> Result<(), String> {
-  let url = format!("{target}/fs{path}");
+  let url = format!("{target}/files{path}");
 
   let response = client
     .put(&url)
@@ -263,7 +263,7 @@ async fn perform_read(
   token: &str,
   path: &str,
 ) -> Result<(), String> {
-  let url = format!("{target}/fs{path}");
+  let url = format!("{target}/files{path}");
 
   let response = client
     .get(&url)
