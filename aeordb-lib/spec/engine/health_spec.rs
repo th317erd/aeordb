@@ -82,16 +82,20 @@ fn make_health_checks(
 
 #[test]
 fn test_engine_health_returns_healthy() {
-    let (engine, _temp) = create_temp_engine_for_tests();
-    let health = check_engine(&engine);
+    let (engine, temp) = create_temp_engine_for_tests();
+    let db_path = temp.path().join("test.aeordb");
+    let db_path_str = db_path.to_str().unwrap();
+    let health = check_engine(&engine, db_path_str);
     assert_eq!(health.status, HealthStatus::Healthy);
-    // Fresh engine should have some entries (root directory at minimum).
+    // Fresh engine should have a non-zero WAL file on disk.
     assert!(health.db_file_size_bytes > 0);
 }
 
 #[test]
 fn test_engine_health_reflects_entries() {
-    let (engine, _temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
+    let db_path = temp.path().join("test.aeordb");
+    let db_path_str = db_path.to_str().unwrap();
 
     // Store some data to increase entry count.
     let ctx = RequestContext::system();
@@ -99,7 +103,7 @@ fn test_engine_health_reflects_entries() {
     ops.store_file(&ctx, "/test/data.json", b"{}", Some("application/json"))
         .unwrap();
 
-    let health = check_engine(&engine);
+    let health = check_engine(&engine, db_path_str);
     assert_eq!(health.status, HealthStatus::Healthy);
     assert!(health.entry_count > 0);
     assert!(health.db_file_size_bytes > 0);

@@ -241,11 +241,10 @@ fn test_cancellation_token_parent_propagates_to_child() {
 
 #[tokio::test]
 async fn test_heartbeat_cancellation_stops_task() {
-    let (engine, _temp) = aeordb::server::create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
     let cancel = CancellationToken::new();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, cancel.clone());
+    let handle = spawn_heartbeat(bus.clone(), 1, cancel.clone());
 
     // Cancel immediately
     cancel.cancel();
@@ -261,12 +260,11 @@ async fn test_heartbeat_cancellation_stops_task() {
 
 #[tokio::test]
 async fn test_heartbeat_runs_until_cancelled() {
-    let (engine, _temp) = aeordb::server::create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
     let cancel = CancellationToken::new();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, cancel.clone());
+    let handle = spawn_heartbeat(bus.clone(), 1, cancel.clone());
 
     // Wait for at least one heartbeat event
     let event = tokio::time::timeout(

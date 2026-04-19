@@ -7,7 +7,7 @@ use aeordb::engine::{
     EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED,
     EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
     EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
-    EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
+    EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS,
 };
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -258,51 +258,34 @@ async fn test_version_event_data_optional_fields_skipped() {
 #[tokio::test]
 async fn test_heartbeat_data_serialize() {
     let data = HeartbeatData {
-        entry_count: 100,
-        kv_entries: 50,
-        chunk_count: 30,
-        file_count: 20,
-        directory_count: 10,
-        snapshot_count: 5,
-        fork_count: 2,
-        void_count: 1,
-        void_space_bytes: 4096,
-        db_file_size_bytes: 1_000_000,
-        kv_size_bytes: 50_000,
-        nvt_buckets: 1024,
         intent_time: 1700000000000,
         construct_time: 1700000000005,
         node_id: 1,
     };
     let json = serde_json::to_value(&data).unwrap();
-    assert_eq!(json["entry_count"], 100);
-    assert_eq!(json["kv_entries"], 50);
-    assert_eq!(json["chunk_count"], 30);
-    assert_eq!(json["file_count"], 20);
-    assert_eq!(json["directory_count"], 10);
-    assert_eq!(json["snapshot_count"], 5);
-    assert_eq!(json["fork_count"], 2);
-    assert_eq!(json["void_count"], 1);
-    assert_eq!(json["void_space_bytes"], 4096);
-    assert_eq!(json["db_file_size_bytes"], 1_000_000);
-    assert_eq!(json["kv_size_bytes"], 50_000);
-    assert_eq!(json["nvt_buckets"], 1024);
+    assert_eq!(json["intent_time"], 1700000000000u64);
+    assert_eq!(json["construct_time"], 1700000000005u64);
+    assert_eq!(json["node_id"], 1);
+    // Verify stats fields are NOT present (stripped in Phase 3)
+    assert!(json.get("entry_count").is_none());
+    assert!(json.get("kv_entries").is_none());
+    assert!(json.get("chunk_count").is_none());
 }
 
 // --- Event type constant tests ---
 
 #[test]
 fn test_event_type_constants() {
-    // Verify all 20 event type constants are distinct non-empty strings
+    // Verify all 21 event type constants are distinct non-empty strings
     let all_types: Vec<&str> = vec![
         EVENT_ENTRIES_CREATED, EVENT_ENTRIES_UPDATED, EVENT_ENTRIES_DELETED,
         EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED,
         EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED,
         EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
         EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
-        EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
+        EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS,
     ];
-    assert_eq!(all_types.len(), 20);
+    assert_eq!(all_types.len(), 21);
     for t in &all_types {
         assert!(!t.is_empty());
     }

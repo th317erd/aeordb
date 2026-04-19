@@ -331,6 +331,10 @@ name = "heartbeat_spec"
 path = "spec/engine/heartbeat_spec.rs"
 
 [[test]]
+name = "metrics_pulse_spec"
+path = "spec/engine/metrics_pulse_spec.rs"
+
+[[test]]
 name = "webhook_spec"
 path = "spec/engine/webhook_spec.rs"
 

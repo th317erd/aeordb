@@ -107,18 +107,6 @@ pub struct PluginEventData {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HeartbeatData {
-    pub entry_count: u64,
-    pub kv_entries: usize,
-    pub chunk_count: usize,
-    pub file_count: usize,
-    pub directory_count: usize,
-    pub snapshot_count: usize,
-    pub fork_count: usize,
-    pub void_count: usize,
-    pub void_space_bytes: u64,
-    pub db_file_size_bytes: u64,
-    pub kv_size_bytes: u64,
-    pub nvt_buckets: usize,
     /// The aligned boundary time (ms) this heartbeat targeted.
     pub intent_time: u64,
     /// Actual wall-clock time (ms) when the heartbeat message was constructed.
@@ -158,6 +146,7 @@ pub const EVENT_API_KEYS_REVOKED: &str = "api_keys_revoked";
 pub const EVENT_PLUGINS_DEPLOYED: &str = "plugins_deployed";
 pub const EVENT_PLUGINS_REMOVED: &str = "plugins_removed";
 pub const EVENT_HEARTBEAT: &str = "heartbeat";
+pub const EVENT_METRICS: &str = "metrics";
 pub const EVENT_GC_STARTED: &str = "gc_started";
 pub const EVENT_GC_COMPLETED: &str = "gc_completed";
 pub const EVENT_TASKS_CREATED: &str = "tasks_created";

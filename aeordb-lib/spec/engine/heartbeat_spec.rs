@@ -1,16 +1,14 @@
 use std::sync::Arc;
 use aeordb::engine::EventBus;
 use aeordb::engine::heartbeat::spawn_heartbeat;
-use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_heartbeat_emits_event() {
-    let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
+    let handle = spawn_heartbeat(bus.clone(), 1, CancellationToken::new());
 
     // Wait for first heartbeat (max ~20 seconds for alignment + one interval)
     let event = tokio::time::timeout(
@@ -21,50 +19,56 @@ async fn test_heartbeat_emits_event() {
 
     assert_eq!(event.event_type, "heartbeat");
     assert_eq!(event.user_id, "system");
-    assert!(event.payload["stats"]["entry_count"].is_number());
-    assert!(event.payload["stats"]["file_count"].is_number());
-    assert!(event.payload["stats"]["db_file_size_bytes"].is_number());
+    // Clock-sync fields should be present under "clock"
+    assert!(event.payload["clock"]["intent_time"].is_number());
+    assert!(event.payload["clock"]["construct_time"].is_number());
+    assert!(event.payload["clock"]["node_id"].is_number());
 
     handle.abort();
 }
 
 #[tokio::test]
-async fn test_heartbeat_contains_all_stats_fields() {
-    let (engine, _temp) = create_temp_engine_for_tests();
+async fn test_heartbeat_contains_only_clock_fields() {
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
+    let handle = spawn_heartbeat(bus.clone(), 42, CancellationToken::new());
 
     let event = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         rx.recv(),
     ).await.unwrap().unwrap();
 
-    let stats = &event.payload["stats"];
-    // Verify all fields present
-    assert!(stats.get("entry_count").is_some());
-    assert!(stats.get("kv_entries").is_some());
-    assert!(stats.get("chunk_count").is_some());
-    assert!(stats.get("file_count").is_some());
-    assert!(stats.get("directory_count").is_some());
-    assert!(stats.get("snapshot_count").is_some());
-    assert!(stats.get("fork_count").is_some());
-    assert!(stats.get("void_count").is_some());
-    assert!(stats.get("void_space_bytes").is_some());
-    assert!(stats.get("db_file_size_bytes").is_some());
-    assert!(stats.get("kv_size_bytes").is_some());
-    assert!(stats.get("nvt_buckets").is_some());
+    let clock = &event.payload["clock"];
+    // Verify only clock-sync fields are present
+    assert!(clock.get("intent_time").is_some());
+    assert!(clock.get("construct_time").is_some());
+    assert!(clock.get("node_id").is_some());
+    // Verify stats fields are NOT present (stripped in Phase 3)
+    assert!(clock.get("entry_count").is_none());
+    assert!(clock.get("kv_entries").is_none());
+    assert!(clock.get("chunk_count").is_none());
+    assert!(clock.get("file_count").is_none());
+    assert!(clock.get("directory_count").is_none());
+    assert!(clock.get("snapshot_count").is_none());
+    assert!(clock.get("fork_count").is_none());
+    assert!(clock.get("void_count").is_none());
+    assert!(clock.get("void_space_bytes").is_none());
+    assert!(clock.get("db_file_size_bytes").is_none());
+    assert!(clock.get("kv_size_bytes").is_none());
+    assert!(clock.get("nvt_buckets").is_none());
+
+    // Verify node_id is correctly propagated
+    assert_eq!(clock["node_id"].as_u64().unwrap(), 42);
 
     handle.abort();
 }
 
 #[tokio::test]
 async fn test_heartbeat_abort_stops_emission() {
-    let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
+    let handle = spawn_heartbeat(bus.clone(), 1, CancellationToken::new());
     handle.abort();
 
     // Should not panic or cause issues
@@ -92,10 +96,9 @@ fn test_delay_to_next_boundary_within_range() {
 #[tokio::test]
 async fn test_heartbeat_no_subscribers_does_not_panic() {
     // Spawn heartbeat with no subscribers -- events should be silently dropped.
-    let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
+    let handle = spawn_heartbeat(bus.clone(), 1, CancellationToken::new());
 
     // Let it run briefly without any subscriber
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -106,11 +109,10 @@ async fn test_heartbeat_no_subscribers_does_not_panic() {
 
 #[tokio::test]
 async fn test_heartbeat_event_has_valid_envelope() {
-    let (engine, _temp) = create_temp_engine_for_tests();
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
 
-    let handle = spawn_heartbeat(bus.clone(), engine, 1, CancellationToken::new());
+    let handle = spawn_heartbeat(bus.clone(), 1, CancellationToken::new());
 
     let event = tokio::time::timeout(
         std::time::Duration::from_secs(20),
@@ -126,6 +128,31 @@ async fn test_heartbeat_event_has_valid_envelope() {
     // Verify event_id looks like a UUID (36 chars with hyphens)
     assert_eq!(event.event_id.len(), 36);
     assert_eq!(event.event_id.chars().filter(|c| *c == '-').count(), 4);
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_heartbeat_intent_time_aligned_to_15s() {
+    let bus = Arc::new(EventBus::new());
+    let mut rx = bus.subscribe();
+
+    let handle = spawn_heartbeat(bus.clone(), 1, CancellationToken::new());
+
+    let event = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        rx.recv(),
+    ).await.unwrap().unwrap();
+
+    let intent_time = event.payload["clock"]["intent_time"].as_u64().unwrap();
+    // intent_time should be aligned to a 15-second boundary (divisible by 15000ms)
+    assert_eq!(intent_time % 15_000, 0, "intent_time should be aligned to 15s boundary");
+
+    let construct_time = event.payload["clock"]["construct_time"].as_u64().unwrap();
+    // construct_time should be >= intent_time (actual time is at or after the boundary)
+    assert!(construct_time >= intent_time, "construct_time should be >= intent_time");
+    // Drift should be small (less than 1 second)
+    assert!(construct_time - intent_time < 1_000, "drift between intent and construct should be < 1s");
 
     handle.abort();
 }

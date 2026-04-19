@@ -4,12 +4,11 @@ use chrono::Timelike;
 use tokio_util::sync::CancellationToken;
 use crate::engine::engine_event::{EngineEvent, HeartbeatData, EVENT_HEARTBEAT};
 use crate::engine::event_bus::EventBus;
-use crate::engine::storage_engine::StorageEngine;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const HEARTBEAT_INTERVAL_MS: u64 = HEARTBEAT_INTERVAL_SECS * 1000;
 
-/// Spawn a heartbeat task that emits DatabaseStats every 15 seconds,
+/// Spawn a heartbeat task that emits clock-sync data every 15 seconds,
 /// aligned to wall clock boundaries (XX:00, XX:15, XX:30, XX:45).
 ///
 /// Each heartbeat carries clock-sync fields (`intent_time`, `construct_time`,
@@ -23,7 +22,6 @@ const HEARTBEAT_INTERVAL_MS: u64 = HEARTBEAT_INTERVAL_SECS * 1000;
 /// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_heartbeat(
     bus: Arc<EventBus>,
-    engine: Arc<StorageEngine>,
     node_id: u64,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -46,20 +44,7 @@ pub fn spawn_heartbeat(
             // Build the heartbeat payload at the actual wall-clock instant.
             let construct_time = chrono::Utc::now().timestamp_millis() as u64;
 
-            let stats = engine.stats();
             let heartbeat_data = HeartbeatData {
-                entry_count: stats.entry_count,
-                kv_entries: stats.kv_entries,
-                chunk_count: stats.chunk_count,
-                file_count: stats.file_count,
-                directory_count: stats.directory_count,
-                snapshot_count: stats.snapshot_count,
-                fork_count: stats.fork_count,
-                void_count: stats.void_count,
-                void_space_bytes: stats.void_space_bytes,
-                db_file_size_bytes: stats.db_file_size_bytes,
-                kv_size_bytes: stats.kv_size_bytes,
-                nvt_buckets: stats.nvt_buckets,
                 intent_time,
                 construct_time,
                 node_id,
@@ -68,7 +53,7 @@ pub fn spawn_heartbeat(
             let event = EngineEvent::new(
                 EVENT_HEARTBEAT,
                 "system",
-                serde_json::json!({"stats": heartbeat_data}),
+                serde_json::json!({"clock": heartbeat_data}),
             );
             bus.emit(event);
 

@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
-use aeordb::engine::{spawn_heartbeat, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus};
+use aeordb::engine::{spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus};
+use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::{create_app_with_auth_mode, create_engine_with_hot_dir};
@@ -123,10 +125,22 @@ pub async fn run(
   // Create a CancellationToken shared by all background tasks and the server.
   let cancel = CancellationToken::new();
 
-  // Start the heartbeat task (emits DatabaseStats every 15 seconds).
+  // Start the heartbeat task (clock-sync only, every 15 seconds).
   // TODO: replace hard-coded node_id=1 with a configured value once
   // multi-node support is wired up.
-  let heartbeat_handle = spawn_heartbeat(event_bus.clone(), engine.clone(), 1, cancel.clone());
+  let heartbeat_handle = spawn_heartbeat(event_bus.clone(), 1, cancel.clone());
+
+  // Start the rate sampler (1 Hz) and metrics pulse (15s) for detailed stats.
+  let counters = engine.counters().clone();
+  let rate_trackers = Arc::new(RateTrackerSet::new());
+  let sampler_handle = spawn_rate_sampler(counters.clone(), rate_trackers.clone(), cancel.clone());
+  let metrics_handle = spawn_metrics_pulse(
+    event_bus.clone(),
+    counters,
+    rate_trackers,
+    database.to_string(),
+    cancel.clone(),
+  );
 
   // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {
@@ -220,7 +234,7 @@ pub async fn run(
     // Give background tasks a moment to notice cancellation
     let _ = tokio::time::timeout(
       std::time::Duration::from_secs(5),
-      futures_join_all(vec![heartbeat_handle, webhook_handle, cron_handle, worker_handle]),
+      futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
     ).await;
     engine.shutdown().ok();
     std::process::exit(1);
@@ -230,7 +244,7 @@ pub async fn run(
   tracing::info!("Waiting for background tasks to finish...");
   let _ = tokio::time::timeout(
     std::time::Duration::from_secs(10),
-    futures_join_all(vec![heartbeat_handle, webhook_handle, cron_handle, worker_handle]),
+    futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
   ).await;
 
   // Flush engine buffers and sync to disk.

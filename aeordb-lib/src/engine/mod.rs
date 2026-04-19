@@ -21,6 +21,7 @@ pub mod entry_type;
 pub mod errors;
 pub mod event_bus;
 pub mod heartbeat;
+pub mod metrics_pulse;
 pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
@@ -159,13 +160,14 @@ pub use engine_event::{
     EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
     EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
     EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
-    EVENT_GC_STARTED, EVENT_GC_COMPLETED, GcEventData,
+    EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_METRICS, GcEventData,
     EVENT_TASKS_CREATED, EVENT_TASKS_STARTED, EVENT_TASKS_COMPLETED,
     EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED,
     EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;
+pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
 pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
 pub use request_context::RequestContext;

@@ -59,13 +59,25 @@ pub struct AuthHealth {
     pub signing_key_present: bool,
 }
 
-/// Check engine health by querying database statistics.
-pub fn check_engine(engine: &StorageEngine) -> EngineHealth {
-    let stats = engine.stats();
+/// Check engine health by querying atomic counters (O(1), no KV scan).
+///
+/// `db_path` is used to read the WAL file size from disk metadata.
+pub fn check_engine(engine: &StorageEngine, db_path: &str) -> EngineHealth {
+    let snapshot = engine.counters().snapshot();
+    // Total entry count: files + directories + symlinks + chunks + snapshots + forks
+    let entry_count = snapshot.files
+        + snapshot.directories
+        + snapshot.symlinks
+        + snapshot.chunks
+        + snapshot.snapshots
+        + snapshot.forks;
+    let db_file_size_bytes = std::fs::metadata(db_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     EngineHealth {
         status: HealthStatus::Healthy,
-        entry_count: stats.entry_count,
-        db_file_size_bytes: stats.db_file_size_bytes,
+        entry_count,
+        db_file_size_bytes,
     }
 }
 
@@ -214,7 +226,7 @@ pub fn full_health_check(
     peer_manager: &PeerManager,
     startup_time: u64,
 ) -> HealthReport {
-    let engine_check = check_engine(engine);
+    let engine_check = check_engine(engine, db_path);
     let disk_check = check_disk(db_path);
     let sync_check = check_sync(peer_manager);
     let auth_check = check_auth(engine);
