@@ -209,7 +209,6 @@ pub fn create_app_with_all_and_task_queue(
   let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
   let api_key_cache = Arc::new(ApiKeyCache::new(cache_ttl));
   let peer_manager = Arc::new(PeerManager::new());
-
   let app_state = AppState {
     jwt_manager,
     auth_provider,

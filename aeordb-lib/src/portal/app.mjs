@@ -1,7 +1,7 @@
 'use strict';
 
-import '/portal/dashboard.mjs';
-import '/portal/users.mjs';
+import '/system/portal/dashboard.mjs';
+import '/system/portal/users.mjs';
 
 // Auth state management
 const AUTH = {
@@ -163,6 +163,7 @@ window.addEventListener('hashchange', navigate);
 
 // Detect no-auth mode: probe /system/stats without a token.
 // If it succeeds, auth is disabled and we skip the login screen.
+// We use /system/health (public) first, then try /system/stats.
 async function init() {
   if (!AUTH.token) {
     try {
@@ -171,7 +172,7 @@ async function init() {
         authDisabled = true;
       }
     } catch (_) {
-      // Server unreachable or auth required — show login
+      // Auth required — show login
     }
   }
   navigate();

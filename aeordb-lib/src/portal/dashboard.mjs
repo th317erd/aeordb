@@ -231,7 +231,7 @@ class AeorDashboard extends HTMLElement {
           <div class="chart-container" id="chart-storage"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">Activity (writes/sec)</div>
+          <div class="chart-title">Activity (ops/sec)</div>
           <div class="chart-container" id="chart-activity"></div>
         </div>
       </div>
@@ -414,10 +414,12 @@ class AeorDashboard extends HTMLElement {
 
   recordActivityPoint(data) {
     const writesPerSecond = data.throughput?.writes_per_sec?.['1m'] || 0;
+    const readsPerSecond = data.throughput?.reads_per_sec?.['1m'] || 0;
 
     this._activityHistory.push({
-      timestamp:      Date.now(),
-      writesPerSecond: writesPerSecond,
+      timestamp: Date.now(),
+      writesPerSecond,
+      readsPerSecond,
     });
 
     // Keep rolling window of 60 data points (15 minutes at 15s metrics intervals)
@@ -451,24 +453,20 @@ class AeorDashboard extends HTMLElement {
     const chartWidth = width - paddingLeft - paddingRight;
     const chartHeight = height - paddingTop - paddingBottom;
 
-    const values = history.map((point) => point.writesPerSecond);
-    const minValue = Math.min(...values);
-    const maxValue = Math.max(...values);
+    // Compute shared Y-axis range from both series
+    const allValues = history.flatMap((p) => [p.writesPerSecond, p.readsPerSecond]);
+    const minValue = Math.min(...allValues);
+    const maxValue = Math.max(...allValues);
     const range = maxValue - minValue || 1;
 
-    const points = history.map((point, index) => {
+    const toXY = (value, index) => {
       const x = paddingLeft + (index / (history.length - 1)) * chartWidth;
-      const y = paddingTop + chartHeight - ((point.writesPerSecond - minValue) / range) * chartHeight;
+      const y = paddingTop + chartHeight - ((value - minValue) / range) * chartHeight;
       return `${x},${y}`;
-    });
+    };
 
-    const polyline = points.join(' ');
-
-    // Area fill path
-    const firstX = paddingLeft;
-    const lastX = paddingLeft + chartWidth;
-    const bottomY = paddingTop + chartHeight;
-    const areaPath = `M${firstX},${bottomY} L${points.map((point) => `L${point}`).join(' ')} L${lastX},${bottomY} Z`;
+    const writePoints = history.map((p, i) => toXY(p.writesPerSecond, i)).join(' ');
+    const readPoints = history.map((p, i) => toXY(p.readsPerSecond, i)).join(' ');
 
     // Y-axis labels
     const yLabelCount = 4;
@@ -491,12 +489,22 @@ class AeorDashboard extends HTMLElement {
       timeLabels.push(`<text x="${x}" y="${height - 4}" text-anchor="middle" fill="#8b949e" font-size="10" font-family="var(--font-mono)">${label}</text>`);
     }
 
+    // Legend
+    const legendY = paddingTop + 2;
+    const legend = `
+      <circle cx="${paddingLeft + 4}" cy="${legendY}" r="4" fill="#f0883e"/>
+      <text x="${paddingLeft + 12}" y="${legendY + 4}" fill="#f0883e" font-size="10" font-family="var(--font-mono)">writes</text>
+      <circle cx="${paddingLeft + 64}" cy="${legendY}" r="4" fill="#3fb950"/>
+      <text x="${paddingLeft + 72}" y="${legendY + 4}" fill="#3fb950" font-size="10" font-family="var(--font-mono)">reads</text>
+    `;
+
     container.innerHTML = `
       <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
         ${yLabels}
         ${timeLabels.join('')}
-        <path d="${areaPath}" fill="rgba(240, 136, 62, 0.1)"/>
-        <polyline points="${polyline}" fill="none" stroke="#f0883e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        ${legend}
+        <polyline points="${writePoints}" fill="none" stroke="#f0883e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline points="${readPoints}" fill="none" stroke="#3fb950" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       </svg>
     `;
   }

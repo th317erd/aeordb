@@ -1,4 +1,6 @@
+use std::sync::Arc;
 use axum::extract::State;
+use axum::Extension;
 use axum::response::{Html, IntoResponse, Json};
 use axum::http::{header, StatusCode};
 use serde::Serialize;
@@ -96,7 +98,11 @@ pub struct StatsHealth {
 /// - `RateTrackerSet::snapshot()` — O(window_size) but bounded at 900 samples
 /// - `check_disk()` — single `statvfs` syscall
 /// - `std::fs::metadata()` — single `stat` syscall
-pub async fn get_stats(State(state): State<AppState>) -> Json<EnhancedStats> {
+pub async fn get_stats(
+    State(state): State<AppState>,
+    rate_ext: Option<Extension<Arc<crate::engine::rate_tracker::RateTrackerSet>>>,
+    db_path_ext: Option<Extension<String>>,
+) -> Json<EnhancedStats> {
     // O(1) counter snapshot from atomics
     let counters = state.engine.counters().snapshot();
 
@@ -107,7 +113,8 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<EnhancedStats> {
     let hash_algorithm = format!("{:?}", state.engine.hash_algo());
 
     // Database file size: single stat() call
-    let db_path = &state.db_path;
+    let db_path_string = db_path_ext.map(|Extension(p)| p).unwrap_or_else(|| state.db_path.clone());
+    let db_path = &db_path_string;
     let disk_total = std::fs::metadata(db_path)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -123,7 +130,10 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<EnhancedStats> {
         .saturating_sub(counters.chunk_data_size);
 
     // Throughput from rate trackers (zero-rate fallback if not wired up)
-    let throughput = match &state.rate_trackers {
+    // Try AppState first, then Extension layer, then zero fallback
+    let ext_trackers = rate_ext.map(|Extension(t)| t);
+    let tracker_ref = state.rate_trackers.as_ref().or(ext_trackers.as_ref());
+    let throughput = match tracker_ref {
         Some(trackers) => {
             let rate_snapshot = trackers.snapshot();
             StatsThroughput {

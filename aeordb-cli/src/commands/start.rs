@@ -137,10 +137,15 @@ pub async fn run(
   let metrics_handle = spawn_metrics_pulse(
     event_bus.clone(),
     counters,
-    rate_trackers,
+    rate_trackers.clone(),
     database.to_string(),
     cancel.clone(),
   );
+
+  // Make rate_trackers and db_path available to the stats endpoint via Extension.
+  let application = application
+    .layer(axum::Extension(rate_trackers))
+    .layer(axum::Extension(database.to_string()));
 
   // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {
