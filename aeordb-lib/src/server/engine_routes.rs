@@ -26,7 +26,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
-/// Query parameters for GET /engine/*path (version access + directory listing).
+/// Query parameters for GET /files/*path (version access + directory listing).
 #[derive(Deserialize, Default)]
 pub struct EngineGetQuery {
   pub snapshot: Option<String>,
@@ -34,6 +34,8 @@ pub struct EngineGetQuery {
   pub depth: Option<i32>,
   pub glob: Option<String>,
   pub nofollow: Option<bool>,
+  pub limit: Option<usize>,
+  pub offset: Option<usize>,
 }
 
 /// Filter a listing of JSON entries based on active API key rules.
@@ -47,6 +49,27 @@ fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[cr
             None => false, // no matching rule = denied
         }
     });
+}
+
+/// Apply limit/offset pagination to a listing and return a JSON response
+/// with `items`, `total`, `limit`, and `offset` fields.
+fn paginated_listing_response(
+  mut listing: Vec<serde_json::Value>,
+  limit: Option<usize>,
+  offset: Option<usize>,
+) -> Response {
+  let total = listing.len();
+  let off = offset.unwrap_or(0).min(total);
+  listing = listing.split_off(off);
+  if let Some(lim) = limit {
+    listing.truncate(lim);
+  }
+  (StatusCode::OK, Json(serde_json::json!({
+    "items": listing,
+    "total": total,
+    "limit": limit,
+    "offset": off,
+  }))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +343,8 @@ fn handle_symlink_resolution(
   symlink_target: &str,
   user_id_str: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  limit: Option<usize>,
+  offset: Option<usize>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -378,7 +403,7 @@ fn handle_symlink_resolution(
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
           match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-            Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
+            Ok(()) => paginated_listing_response(listing, limit, offset),
             Err(response) => response,
           }
         }
@@ -517,7 +542,7 @@ fn handle_recursive_listing(
         .collect();
 
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
+        Ok(()) => paginated_listing_response(listing, version_query.limit, version_query.offset),
         Err(response) => response,
       }
     }
@@ -541,6 +566,8 @@ fn handle_directory_listing(
   path: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   user_id_str: &str,
+  limit: Option<usize>,
+  offset: Option<usize>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -548,7 +575,7 @@ fn handle_directory_listing(
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response(),
+        Ok(()) => paginated_listing_response(listing, limit, offset),
         Err(response) => response,
       }
     }
@@ -618,6 +645,7 @@ pub async fn engine_get(
 
     return handle_symlink_resolution(
       &state.engine, &path, &symlink_record.target, &_claims.sub, key_rules,
+      version_query.limit, version_query.offset,
     );
   }
 
@@ -645,7 +673,7 @@ pub async fn engine_get(
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub)
+  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset)
 }
 
 

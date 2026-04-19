@@ -307,3 +307,131 @@ async fn test_version_query_still_works() {
   let bytes = body_bytes(response.into_body()).await;
   assert_eq!(bytes, b"version-one");
 }
+
+// ===========================================================================
+// Pagination: limit and offset
+// ===========================================================================
+
+#[tokio::test]
+async fn test_listing_with_limit() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  // Store 5 files
+  for i in 0..5 {
+    ops.store_file(&ctx, &format!("/page/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+  }
+
+  let app = rebuild_app(&jwt, &engine);
+  let request = Request::get("/files/page?limit=2")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["items"].as_array().unwrap().len(), 2);
+  assert_eq!(json["total"].as_u64().unwrap(), 5);
+  assert_eq!(json["limit"].as_u64().unwrap(), 2);
+  assert_eq!(json["offset"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_listing_with_offset() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for i in 0..5 {
+    ops.store_file(&ctx, &format!("/page2/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+  }
+
+  let app = rebuild_app(&jwt, &engine);
+  let request = Request::get("/files/page2?offset=3")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["items"].as_array().unwrap().len(), 2);
+  assert_eq!(json["total"].as_u64().unwrap(), 5);
+  assert_eq!(json["offset"].as_u64().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_listing_with_limit_and_offset() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for i in 0..10 {
+    ops.store_file(&ctx, &format!("/page3/file{:02}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+  }
+
+  let app = rebuild_app(&jwt, &engine);
+  let request = Request::get("/files/page3?limit=3&offset=2")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["items"].as_array().unwrap().len(), 3);
+  assert_eq!(json["total"].as_u64().unwrap(), 10);
+  assert_eq!(json["limit"].as_u64().unwrap(), 3);
+  assert_eq!(json["offset"].as_u64().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_listing_offset_beyond_total_returns_empty() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file(&ctx, "/page4/only.txt", b"data", None).unwrap();
+
+  let app = rebuild_app(&jwt, &engine);
+  let request = Request::get("/files/page4?offset=100")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["items"].as_array().unwrap().len(), 0);
+  assert_eq!(json["total"].as_u64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_listing_no_pagination_returns_total() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for i in 0..3 {
+    ops.store_file(&ctx, &format!("/page5/f{}.txt", i), b"data", None).unwrap();
+  }
+
+  let app = rebuild_app(&jwt, &engine);
+  let request = Request::get("/files/page5")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["items"].as_array().unwrap().len(), 3);
+  assert_eq!(json["total"].as_u64().unwrap(), 3);
+}
