@@ -361,12 +361,12 @@ async fn test_rename_to_same_path_returns_400() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_rename_across_system_boundary_returns_400() {
+async fn test_rename_across_system_boundary_returns_404() {
     let (_app, jwt_manager, engine, _temp_dir) = test_app();
     let auth = bearer_token(&jwt_manager);
 
-    // Note: root users CAN access /.system/ but cross-boundary is rejected
-    // by the engine itself (InvalidInput -> 400) regardless of auth level.
+    // All /.system/ paths are invisible via the API — renaming to a
+    // .system/ destination returns 404, never revealing .system/ exists.
     store_file(&engine, "/user-file.txt", b"user data");
 
     let app = rebuild_app(&jwt_manager, &engine);
@@ -379,16 +379,8 @@ async fn test_rename_across_system_boundary_returns_400() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    // The engine rejects cross-boundary with InvalidInput (400)
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let json = body_json(response.into_body()).await;
-    let error_msg = json["error"].as_str().unwrap_or("");
-    assert!(
-        error_msg.contains("system boundary"),
-        "Expected error mentioning 'system boundary', got: {}",
-        error_msg
-    );
+    // System paths are invisible — returns 404 (not 400 or 403)
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::directory_ops::{file_path_hash, directory_path_hash};
+use crate::engine::directory_ops::{file_path_hash, directory_path_hash, is_system_path};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
@@ -65,6 +65,10 @@ pub fn export_snapshot(
 
 /// Write all entries from a VersionTree into an output engine.
 /// Returns (chunks_written, files_written, directories_written).
+///
+/// SECURITY: All entries under /.system/ are filtered out. Exports must
+/// contain only user data, never system internals (JWT keys, API key
+/// hashes, refresh tokens, user records).
 fn write_tree_to_engine(
     tree: &VersionTree,
     source: &StorageEngine,
@@ -74,8 +78,19 @@ fn write_tree_to_engine(
     let mut files_written = 0u64;
     let mut dirs_written = 0u64;
 
-    // Write chunks first (referenced by FileRecords)
-    for chunk_hash in &tree.chunks {
+    // Collect chunk hashes referenced by non-system files only, so we don't
+    // export chunks that belong exclusively to /.system/ files.
+    let mut user_chunk_hashes = std::collections::HashSet::new();
+    for (path, (_file_hash, record)) in &tree.files {
+        if !is_system_path(path) {
+            for chunk_hash in &record.chunk_hashes {
+                user_chunk_hashes.insert(chunk_hash.clone());
+            }
+        }
+    }
+
+    // Write only chunks referenced by user (non-system) files
+    for chunk_hash in &user_chunk_hashes {
         if let Some((_header, key, value)) = source.get_entry(chunk_hash)? {
             output.store_entry(EntryType::Chunk, &key, &value)?;
             chunks_written += 1;
@@ -85,8 +100,12 @@ fn write_tree_to_engine(
     // Write FileRecords at both content-hash and path-hash keys.
     // The tree walker stores content hashes as file_hash, but read_file
     // looks up by path hash, so both must be present in the exported database.
+    // SECURITY: Skip all files under /.system/.
     let file_algo = output.hash_algo();
     for (path, (file_hash, _record)) in &tree.files {
+        if is_system_path(path) {
+            continue;
+        }
         if let Some((_header, key, value)) = source.get_entry(file_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::FileRecord, &key, &value)?;
@@ -102,8 +121,12 @@ fn write_tree_to_engine(
     // Write DirectoryIndexes at both content-hash and path-hash keys.
     // The tree walker stores content hashes as dir_hash, but list_directory
     // looks up by path hash, so both must be present in the exported database.
+    // SECURITY: Skip all directories under /.system/.
     let algo = output.hash_algo();
     for (path, (dir_hash, _data)) in &tree.directories {
+        if is_system_path(path) {
+            continue;
+        }
         if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
@@ -117,8 +140,12 @@ fn write_tree_to_engine(
     }
 
     // Write symlink entries at both content-hash and path-hash keys.
+    // SECURITY: Skip all symlinks under /.system/.
     let symlink_algo = output.hash_algo();
     for (path, (symlink_hash, _record)) in &tree.symlinks {
+        if is_system_path(path) {
+            continue;
+        }
         if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::Symlink, &key, &value)?;

@@ -13,7 +13,6 @@ use crate::auth::TokenClaims;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
-use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct CreateSymlinkRequest {
@@ -36,26 +35,21 @@ pub async fn create_symlink(
         }
     };
 
-    // Block non-root users from creating symlinks that point to /.system/ paths
+    // Block ALL users from creating symlinks that point to /.system/ paths —
+    // system data is invisible through the API for all users, including root.
     let normalized_target = normalize_path(target);
     if is_system_path(&normalized_target) {
-        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-            return ErrorResponse::new("Cannot create symlink targeting a system path. System paths (/.system/) are restricted to the root user")
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
     }
 
-    // Block non-root users from creating symlinks under /.system/ paths
+    // Block ALL users from creating symlinks under /.system/ paths
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {
-        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-            return ErrorResponse::new(format!("Not found: {}", path))
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
     }
 
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -84,17 +78,16 @@ pub async fn create_symlink(
 /// GET /links/{*path} — read symlink metadata without following it.
 pub async fn get_symlink(
     State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
+    Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
+    // Block ALL access to /.system/ via API — system data is only accessible
+    // through the internal system_store module, never through HTTP endpoints.
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {
-        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-            return ErrorResponse::new(format!("Not found: {}", path))
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
     }
 
     let ops = DirectoryOps::new(&state.engine);
@@ -126,20 +119,19 @@ pub async fn get_symlink(
 /// DELETE /links/{*path} — delete a symlink.
 pub async fn delete_symlink(
     State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
+    Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
+    // Block ALL access to /.system/ via API — system data is only accessible
+    // through the internal system_store module, never through HTTP endpoints.
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {
-        let user_id = uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-            return ErrorResponse::new(format!("Not found: {}", path))
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
     }
 
-    let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+    let ctx = RequestContext::from_claims(&_claims.sub, state.event_bus.clone());
     let ops = DirectoryOps::new(&state.engine);
 
     match ops.delete_symlink(&ctx, &path) {

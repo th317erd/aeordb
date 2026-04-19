@@ -12,7 +12,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::version_access::{read_file_at_version, resolve_file_at_version};
 use crate::engine::version_manager::VersionManager;
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::user::is_root;
 
@@ -35,6 +35,14 @@ pub async fn file_history(
     Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
+    // Block ALL access to /.system/ via API — system data is only accessible
+    // through the internal system_store module, never through HTTP endpoints.
+    if is_system_path(&path) {
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+    }
+
     let vm = VersionManager::new(&state.engine);
 
     // List all snapshots
@@ -158,6 +166,14 @@ pub async fn file_restore(
     Path(path): Path<String>,
     Json(payload): Json<RestoreRequest>,
 ) -> Response {
+    // Block ALL access to /.system/ via API — system data is only accessible
+    // through the internal system_store module, never through HTTP endpoints.
+    if is_system_path(&path) {
+        return ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+    }
+
     // Auth: Restore requires root (snapshot permission)
     let user_id = match uuid::Uuid::parse_str(&claims.sub) {
         Ok(id) => id,

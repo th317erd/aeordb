@@ -95,18 +95,12 @@ pub async fn engine_store_file(
   headers: HeaderMap,
   body: Body,
 ) -> Response {
-  // Block non-root access to /.system/
+  // Block ALL access to /.system/ via API — system data is only accessible
+  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-      Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN).into_response(),
-    };
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   // Stream the body into memory with a hard cap to prevent OOM.
@@ -308,7 +302,7 @@ fn build_directory_listing(
 fn apply_listing_filters(
   listing: &mut Vec<serde_json::Value>,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  user_id_str: &str,
+  _user_id_str: &str,
 ) -> Result<(), Response> {
   if let Some(rules) = key_rules {
     if !rules.is_empty() {
@@ -316,21 +310,12 @@ fn apply_listing_filters(
     }
   }
 
-  // Filter /.system/ from listings for non-root
-  let user_id = match uuid::Uuid::parse_str(user_id_str) {
-    Ok(id) => id,
-    Err(_) => return Err(
-      ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN)
-        .into_response()
-    ),
-  };
-  if !is_root(&user_id) {
-    listing.retain(|entry| {
-      let path = entry["path"].as_str().unwrap_or("");
-      !path.starts_with("/.system")
-    });
-  }
+  // Filter /.system/ from ALL listings — system data is invisible through
+  // the API for all users, including root.
+  listing.retain(|entry| {
+    let path = entry["path"].as_str().unwrap_or("");
+    !path.starts_with("/.system")
+  });
 
   Ok(())
 }
@@ -350,14 +335,12 @@ fn handle_symlink_resolution(
 
   match resolve_symlink(engine, path) {
     Ok(ResolvedTarget::File(ref file_record)) => {
-      // Block non-root access to symlinks resolving to /.system/ paths
+      // Block ALL access to symlinks resolving to /.system/ paths — system
+      // data is invisible through the API for all users, including root.
       if is_system_path(&file_record.path) {
-        let user_id = uuid::Uuid::parse_str(user_id_str).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-          return ErrorResponse::new(format!("Not found: {}", path))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
       }
 
       // Check if the resolved target path is allowed by API key rules
@@ -389,14 +372,12 @@ fn handle_symlink_resolution(
       build_file_streaming_response(engine, file_record, Some(symlink_target))
     }
     Ok(ResolvedTarget::Directory(dir_path)) => {
-      // Block non-root access to symlinks resolving to /.system/ directories
+      // Block ALL access to symlinks resolving to /.system/ directories —
+      // system data is invisible through the API for all users, including root.
       if is_system_path(&dir_path) {
-        let user_id = uuid::Uuid::parse_str(user_id_str).unwrap_or(uuid::Uuid::new_v4());
-        if !is_root(&user_id) {
-          return ErrorResponse::new(format!("Not found: {}", path))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response();
-        }
+        return ErrorResponse::new(format!("Not found: {}", path))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
       }
 
       match directory_ops.list_directory(&dir_path) {
@@ -605,18 +586,12 @@ pub async fn engine_get(
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  // Block non-root access to /.system/
+  // Block ALL access to /.system/ via API — system data is only accessible
+  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
-      Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN).into_response(),
-    };
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   // If snapshot or version query param is present, read from historical version
@@ -773,18 +748,12 @@ pub async fn engine_delete_file(
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block non-root access to /.system/
+  // Block ALL access to /.system/ via API — system data is only accessible
+  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-      Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN).into_response(),
-    };
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -834,18 +803,12 @@ pub async fn engine_head(
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block non-root access to /.system/
+  // Block ALL access to /.system/ via API — system data is only accessible
+  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    let user_id = match uuid::Uuid::parse_str(&_claims.sub) {
-      Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN).into_response(),
-    };
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   let directory_ops = DirectoryOps::new(&state.engine);
@@ -919,6 +882,15 @@ pub async fn engine_get_by_hash(
   Extension(_claims): Extension<TokenClaims>,
   Path(hex_hash): Path<String>,
 ) -> Response {
+  // M3: Restrict hash-based blob access to root users only.
+  // Direct hash lookups bypass path-level permissions, so only root may use this endpoint.
+  let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
+  if !is_root(&user_id) {
+    return ErrorResponse::new("Root access required for hash-based lookups".to_string())
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
@@ -943,14 +915,12 @@ pub async fn engine_get_by_hash(
     }
   };
 
-  // Block non-root access to system-flagged entries (H1: hash bypass protection)
+  // Block ALL access to system-flagged entries via API — system data is only
+  // accessible through the internal system_store module, never through HTTP.
   if header.is_system_entry() {
-    let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   match header.entry_type {
@@ -1544,11 +1514,26 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, Stri
 ///   - Object with "or": OR of child clauses
 ///   - Object with "not": NOT of a single child clause
 ///   - Object with "field": leaf field query
+/// Maximum allowed nesting depth for where-clause parsing.
+/// Prevents stack overflow from adversarial deeply-nested queries.
+const MAX_WHERE_CLAUSE_DEPTH: usize = 32;
+
 fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
+  parse_where_clause_inner(value, 0)
+}
+
+fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<QueryNode, String> {
+  if depth > MAX_WHERE_CLAUSE_DEPTH {
+    return Err(format!(
+      "Query nesting too deep (max {} levels). Simplify the where clause",
+      MAX_WHERE_CLAUSE_DEPTH,
+    ));
+  }
+
   if value.is_array() {
     let array = value.as_array().unwrap();
     let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
+      .map(|v| parse_where_clause_inner(v, depth + 1))
       .collect();
     return Ok(QueryNode::And(children?));
   }
@@ -1557,7 +1542,7 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
     let array = and_array.as_array()
       .ok_or_else(|| "'and' must be an array".to_string())?;
     let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
+      .map(|v| parse_where_clause_inner(v, depth + 1))
       .collect();
     return Ok(QueryNode::And(children?));
   }
@@ -1566,13 +1551,13 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
     let array = or_array.as_array()
       .ok_or_else(|| "'or' must be an array".to_string())?;
     let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
+      .map(|v| parse_where_clause_inner(v, depth + 1))
       .collect();
     return Ok(QueryNode::Or(children?));
   }
 
   if let Some(not_value) = value.get("not") {
-    let child = parse_where_clause(not_value)?;
+    let child = parse_where_clause_inner(not_value, depth + 1)?;
     return Ok(QueryNode::Not(Box::new(child)));
   }
 
@@ -1791,6 +1776,9 @@ pub async fn query_endpoint(
     Ok(paginated) => {
       let response_items: Vec<serde_json::Value> = paginated.results
         .iter()
+        // Filter /.system/ paths from query results — system data is invisible
+        // through the API for all users, including root.
+        .filter(|result| !is_system_path(&result.file_record.path))
         .map(|result| {
           serde_json::json!({
             "path": result.file_record.path,
@@ -1926,18 +1914,12 @@ pub async fn engine_rename(
     }
   };
 
-  // Block non-root users from renaming to/from /.system/ paths
+  // Block ALL access to /.system/ via API — system data is only accessible
+  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) || is_system_path(destination) {
-    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-      Ok(id) => id,
-      Err(_) => return ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-        .with_status(StatusCode::FORBIDDEN).into_response(),
-    };
-    if !is_root(&user_id) {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
