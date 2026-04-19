@@ -82,6 +82,91 @@ Each event is a JSON object with:
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata |
 | `permissions_changed` | Permissions were updated for a path | `{"path": "..."}` |
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
+| `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
+| `metrics` | System metrics snapshot (every 15s) | `{"counts", "sizes", "throughput", "health"}` |
+
+---
+
+### Heartbeat Event
+
+The `heartbeat` event is used exclusively for **clock synchronization** between nodes. It fires every 15 seconds and carries only three fields:
+
+```json
+{
+  "intent_time": 1776563925000,
+  "construct_time": 1776563925003,
+  "node_id": 1
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `intent_time` | integer | Timestamp (ms) when the heartbeat was scheduled to fire |
+| `construct_time` | integer | Timestamp (ms) when the heartbeat payload was actually constructed |
+| `node_id` | integer | The node that emitted this heartbeat |
+
+The delta between `intent_time` and `construct_time` is used by peers to measure clock offset and network latency. **The heartbeat does not contain any stats or metrics data** — it is a lightweight clock-sync mechanism only.
+
+> **Breaking change:** Prior versions included stats fields (file counts, disk usage, etc.) in the heartbeat payload. These fields have been removed. Use the `metrics` event for monitoring data.
+
+---
+
+### Metrics Event
+
+The `metrics` event delivers system metrics to connected clients every 15 seconds (configurable, independent of the heartbeat interval). All values are computed in O(1) from atomic counters — subscribing to this event has no performance impact on the server.
+
+**Subscribe to metrics:**
+
+```bash
+curl -N "http://localhost:3000/system/events?events=metrics" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Payload:**
+
+```json
+{
+  "counts": {
+    "files": 150000,
+    "directories": 23000,
+    "symlinks": 500,
+    "chunks": 420000,
+    "snapshots": 12,
+    "forks": 2
+  },
+  "sizes": {
+    "disk_total": 2147483648,
+    "kv_file": 86114304,
+    "logical_data": 1800000000,
+    "chunk_data": 1200000000,
+    "void_space": 5242880,
+    "dedup_savings": 600000000
+  },
+  "throughput": {
+    "writes_per_sec": { "1m": 42.3, "5m": 38.1, "15m": 35.7, "peak_1m": 120.0 },
+    "reads_per_sec": { "1m": 156.2, "5m": 140.5, "15m": 138.0, "peak_1m": 450.0 },
+    "bytes_written_per_sec": { "1m": 435200, "5m": 392000, "15m": 367000 },
+    "bytes_read_per_sec": { "1m": 16065536, "5m": 14450000, "15m": 14200000 }
+  },
+  "health": {
+    "disk_usage_percent": 48.5,
+    "kv_fill_ratio": 0.72,
+    "dedup_hit_rate": 0.33,
+    "write_buffer_depth": 42
+  }
+}
+```
+
+**Payload sections:**
+
+| Section | Description |
+|---------|-------------|
+| `counts` | Current totals for files, directories, symlinks, chunks, snapshots, and forks |
+| `sizes` | Byte-level storage breakdown: disk total, KV file, logical data, chunk data, void space, dedup savings |
+| `throughput` | Rolling rates (1m, 5m, 15m averages and peak) for read/write operations and bytes |
+| `health` | Operational health signals: disk usage, KV fill ratio, dedup efficiency, write buffer depth |
+
+> **Migration note:** If your dashboard previously subscribed to `?events=heartbeat` for monitoring data, switch to `?events=metrics`. If you need both clock data and metrics (uncommon), subscribe to `?events=heartbeat,metrics`.
 
 ### Keepalive
 

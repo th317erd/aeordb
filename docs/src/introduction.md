@@ -27,7 +27,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 - **Plugins:** WASM parser plugins for any file format, WASM query plugins for custom data-layer logic
 - **Operations:** Background task system, cron scheduler, garbage collection, automatic reindexing
 - **Auth:** Self-contained JWT auth, API keys, user/group management, path-level permissions, or `--auth false` for local use
-- **Observability:** Prometheus metrics at `/system/metrics`, SSE event stream at `/system/events`, structured logging
+- **Observability:** O(1) stats at `/system/stats`, Prometheus metrics at `/system/metrics`, real-time `metrics` SSE event, structured logging
 
 ## Next Steps
 

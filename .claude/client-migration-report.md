@@ -269,6 +269,52 @@ evtSource.addEventListener('task.completed', handler);
 evtSource.addEventListener('tasks_completed', handler);
 ```
 
+### Heartbeat event stripped down (breaking change)
+
+The `heartbeat` event no longer contains stats data (file counts, disk usage, throughput, etc.). It is now a clock-sync-only event with three fields:
+
+```json
+{
+  "intent_time": 1776563925000,
+  "construct_time": 1776563925003,
+  "node_id": 1
+}
+```
+
+If your code reads stats fields from heartbeat events, it will find them missing.
+
+### New `metrics` event
+
+A dedicated `metrics` event now delivers system metrics every 15 seconds with structured payload sections: `counts`, `sizes`, `throughput`, and `health`.
+
+**Dashboard subscribers must switch:**
+
+```javascript
+// Before — heartbeat carried stats data
+const evtSource = new EventSource('/system/events?events=heartbeat');
+
+// After — metrics carries stats data, heartbeat is clock-sync only
+const evtSource = new EventSource('/system/events?events=metrics');
+```
+
+### `GET /system/stats` response restructured (breaking change)
+
+The `GET /system/stats` response was previously a flat object. It is now structured into nested sections:
+
+| Section | Contents |
+|---------|----------|
+| `identity` | version, database_path, hash_algorithm, chunk_size, node_id, uptime_seconds |
+| `counts` | files, directories, symlinks, chunks, snapshots, forks |
+| `sizes` | disk_total, kv_file, logical_data, chunk_data, void_space, dedup_savings |
+| `throughput` | writes_per_sec, reads_per_sec, bytes_written_per_sec, bytes_read_per_sec (each with 1m/5m/15m/peak_1m) |
+| `latency` | write, read, query, flush (each with p50/p95/p99) |
+| `health` | disk_usage_percent, kv_fill_ratio, dedup_hit_rate, gc_last_reclaimed_bytes, write_buffer_depth |
+| `sync` | active_peers, failing_peers, last_sync_ms, sync_lag_entries |
+
+Code that reads flat fields like `response.file_count` must be updated to `response.counts.files`, etc.
+
+The stats endpoint is now O(1) — no performance concern polling at high frequency.
+
 ---
 
 ## 6. Error Code Changes
@@ -395,6 +441,9 @@ curl -X PATCH http://localhost:3000/files/ \
 - [ ] Wrap array response parsing to expect `{items: [...]}` objects
 - [ ] Directory listings now include `total`, `limit`, `offset` metadata
 - [ ] Update event listener names (`task.*` -> `tasks_*`, `sync.*` -> `syncs_*`)
+- [ ] Switch dashboard SSE subscription from `?events=heartbeat` to `?events=metrics` for stats data
+- [ ] Remove any code that reads stats fields from `heartbeat` event payloads (heartbeat is now clock-sync only)
+- [ ] Update `GET /system/stats` response parsing — response is now nested (e.g., `response.counts.files` instead of `response.file_count`)
 - [ ] Replace `--cors` CLI flag with `--cors-origins`
 - [ ] Handle new error codes: `PAYLOAD_TOO_LARGE`, `METHOD_NOT_ALLOWED`, `SERVICE_UNAVAILABLE`
 - [ ] Remove handling for `SYSTEM_BOUNDARY` error code

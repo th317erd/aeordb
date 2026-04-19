@@ -51,7 +51,7 @@ curl -X POST http://localhost:3000/sync/conflicts/assets/logo.psd \
 
 ## Virtual Clock
 
-Nodes synchronize their clocks using the heartbeat mechanism. Each heartbeat includes timing information that allows nodes to compute clock offsets and network latency. This ensures that timestamps — used for conflict resolution ordering — are consistent across nodes to near-millisecond precision.
+Nodes synchronize their clocks using the heartbeat mechanism. Each heartbeat carries three fields — `intent_time`, `construct_time`, and `node_id` — which allow nodes to compute clock offsets and network latency. This ensures that timestamps used for conflict resolution ordering are consistent across nodes to near-millisecond precision. The heartbeat is a dedicated clock-sync pulse and does not carry any stats or metrics data.
 
 When a new node connects, it enters a **honeymoon phase** where only heartbeats are exchanged. The node settles its clock before any data sync begins, ensuring accurate timestamp ordering from the first sync.
 

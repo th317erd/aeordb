@@ -161,12 +161,12 @@ document.getElementById('logout-button').addEventListener('click', () => {
 // Listen for hash changes
 window.addEventListener('hashchange', navigate);
 
-// Detect no-auth mode: probe /api/stats without a token.
+// Detect no-auth mode: probe /system/stats without a token.
 // If it succeeds, auth is disabled and we skip the login screen.
 async function init() {
   if (!AUTH.token) {
     try {
-      const res = await fetch('/api/stats');
+      const res = await fetch('/system/stats');
       if (res.ok) {
         authDisabled = true;
       }

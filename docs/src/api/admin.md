@@ -42,6 +42,7 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
+| GET | `/system/stats` | System stats (JSON) | Yes (auth required) |
 | GET | `/system/metrics` | Prometheus metrics | Yes (auth required) |
 | GET | `/system/health` | Health check | No (public) |
 
@@ -540,6 +541,89 @@ curl -X POST "http://localhost:3000/versions/promote?hash=a1b2c3d4e5f6..." \
 ---
 
 ## Monitoring
+
+### GET /system/stats
+
+System statistics endpoint. Returns a structured JSON snapshot of all engine metrics. All values are read from O(1) atomic counters — this endpoint is safe to poll frequently with no performance impact.
+
+**Response:** `200 OK`
+
+```json
+{
+  "identity": {
+    "version": "0.9.0",
+    "database_path": "/data/mydb.aeordb",
+    "hash_algorithm": "Blake3_256",
+    "chunk_size": 262144,
+    "node_id": 1,
+    "uptime_seconds": 86400
+  },
+  "counts": {
+    "files": 150000,
+    "directories": 23000,
+    "symlinks": 500,
+    "chunks": 420000,
+    "snapshots": 12,
+    "forks": 2
+  },
+  "sizes": {
+    "disk_total": 2147483648,
+    "kv_file": 86114304,
+    "logical_data": 1800000000,
+    "chunk_data": 1200000000,
+    "void_space": 5242880,
+    "dedup_savings": 600000000
+  },
+  "throughput": {
+    "writes_per_sec": { "1m": 42.3, "5m": 38.1, "15m": 35.7, "peak_1m": 120.0 },
+    "reads_per_sec": { "1m": 156.2, "5m": 140.5, "15m": 138.0, "peak_1m": 450.0 },
+    "bytes_written_per_sec": { "1m": 435200, "5m": 392000, "15m": 367000 },
+    "bytes_read_per_sec": { "1m": 16065536, "5m": 14450000, "15m": 14200000 }
+  },
+  "latency": {
+    "write": { "p50": 5.6, "p95": 15.4, "p99": 20.5 },
+    "read": { "p50": 2.1, "p95": 8.3, "p99": 12.0 },
+    "query": { "p50": 4.2, "p95": 22.0, "p99": 45.0 },
+    "flush": { "p50": 1.2, "p95": 5.0, "p99": 12.0 }
+  },
+  "health": {
+    "disk_usage_percent": 48.5,
+    "kv_fill_ratio": 0.72,
+    "dedup_hit_rate": 0.33,
+    "gc_last_reclaimed_bytes": 1048576,
+    "write_buffer_depth": 42
+  },
+  "sync": {
+    "active_peers": 2,
+    "failing_peers": 0,
+    "last_sync_ms": 1776563922032,
+    "sync_lag_entries": { "peer_2": 0, "peer_3": 15 }
+  }
+}
+```
+
+**Response sections:**
+
+| Section | Description |
+|---------|-------------|
+| `identity` | Server version, database path, hash algorithm, chunk size, node ID, and uptime |
+| `counts` | Current totals for files, directories, symlinks, chunks, snapshots, and forks |
+| `sizes` | Byte-level storage breakdown: disk total, KV file size, logical data, chunk data, void space, dedup savings |
+| `throughput` | Rolling read/write rates (1m, 5m, 15m averages) and peak rates |
+| `latency` | Percentile latencies (p50, p95, p99) for write, read, query, and flush operations (in milliseconds) |
+| `health` | Operational health signals: disk usage, KV fill ratio, dedup hit rate, last GC reclamation, write buffer depth |
+| `sync` | Replication status: active/failing peers, last sync timestamp, per-peer sync lag (only present when replication is active) |
+
+> **Note:** The previous `GET /system/stats` returned a flat object computed via O(n) iteration. The new response is structured into nested sections and is O(1) — no performance concerns polling at high frequency.
+
+**Example:**
+
+```bash
+curl http://localhost:3000/system/stats \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
 
 ### GET /system/health
 
