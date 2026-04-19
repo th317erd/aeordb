@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use base64::Engine as _;
 use serde::Serialize;
 
+use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::index_store::{FieldIndex, IndexManager};
@@ -966,13 +968,19 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  /// Evaluate a single FieldQuery leaf against the index.
+  /// Evaluate a single FieldQuery leaf against the index (or virtual field scan).
   fn evaluate_field_query(
     &self,
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
   ) -> EngineResult<HashSet<Vec<u8>>> {
+    // Virtual fields (prefixed with '@') bypass index lookup entirely.
+    // They scan all files under the path and filter by file metadata.
+    if field_query.field_name.starts_with('@') {
+      return self.evaluate_virtual_field_query(field_query, path);
+    }
+
     let index = index_manager.load_index(path, &field_query.field_name)?;
     let mut index = match index {
       Some(index) => index,
@@ -1048,13 +1056,288 @@ impl<'a> QueryEngine<'a> {
     Ok(all_hashes)
   }
 
+  /// Evaluate a virtual field query by scanning all files under the path.
+  ///
+  /// Virtual fields (`@path`, `@filename`, `@extension`, `@content_type`,
+  /// `@size`, `@created_at`, `@updated_at`) are derived from FileRecord
+  /// metadata and do not require indexes. This is an O(n) scan over all
+  /// files in the directory tree.
+  fn evaluate_virtual_field_query(
+    &self,
+    field_query: &FieldQuery,
+    path: &str,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let field_name = field_query.field_name.as_str();
+
+    // Validate the virtual field name up front.
+    match field_name {
+      "@path" | "@filename" | "@extension" | "@content_type"
+      | "@size" | "@created_at" | "@updated_at" => {}
+      unknown => {
+        return Err(EngineError::InvalidInput(format!(
+          "Unknown virtual field '{}'. Supported: @path, @filename, @extension, \
+           @content_type, @size, @created_at, @updated_at",
+          unknown,
+        )));
+      }
+    }
+
+    // Collect all files under the query path via recursive directory listing.
+    let listing = match list_directory_recursive(self.engine, path, -1, None) {
+      Ok(entries) => entries,
+      Err(EngineError::NotFound(_)) => return Ok(HashSet::new()),
+      Err(other) => return Err(other),
+    };
+
+    let hash_length = self.engine.hash_algo().hash_length();
+    let mut matching_hashes = HashSet::new();
+
+    for entry in &listing {
+      // Only consider file entries, not directories.
+      if entry.entry_type != EntryType::FileRecord.to_u8() {
+        continue;
+      }
+
+      // Load the full FileRecord from the entry hash.
+      let file_record = match self.engine.get_entry(&entry.hash) {
+        Ok(Some((header, _key, value))) => {
+          FileRecord::deserialize(&value, hash_length, header.entry_version)?
+        }
+        Ok(None) => continue,
+        Err(_) => continue,
+      };
+
+      let matches = self.virtual_field_matches(field_name, &file_record, &field_query.operation)?;
+      if matches {
+        matching_hashes.insert(entry.hash.clone());
+      }
+    }
+
+    Ok(matching_hashes)
+  }
+
+  /// Check whether a single FileRecord matches a virtual field operation.
+  fn virtual_field_matches(
+    &self,
+    field_name: &str,
+    file_record: &FileRecord,
+    operation: &QueryOp,
+  ) -> EngineResult<bool> {
+    match field_name {
+      "@path" => {
+        self.virtual_string_matches(&file_record.path, operation)
+      }
+      "@filename" => {
+        let filename = file_record.path.rsplit('/').next().unwrap_or("");
+        self.virtual_string_matches(filename, operation)
+      }
+      "@extension" => {
+        let filename = file_record.path.rsplit('/').next().unwrap_or("");
+        let extension = filename.rsplit('.').next().unwrap_or("");
+        // If there's no dot, rsplit returns the full filename — treat as no extension.
+        let extension = if extension == filename { "" } else { extension };
+        self.virtual_string_matches(extension, operation)
+      }
+      "@content_type" => {
+        let content_type = file_record.content_type.as_deref().unwrap_or("");
+        self.virtual_string_matches(content_type, operation)
+      }
+      "@size" => {
+        self.virtual_u64_matches(file_record.total_size, operation)
+      }
+      "@created_at" => {
+        self.virtual_i64_matches(file_record.created_at, operation)
+      }
+      "@updated_at" => {
+        self.virtual_i64_matches(file_record.updated_at, operation)
+      }
+      _ => Ok(false),
+    }
+  }
+
+  /// Apply a query operation against a string value (for virtual fields).
+  /// Supports Eq (exact match), Contains (substring), and In (set membership).
+  fn virtual_string_matches(
+    &self,
+    value: &str,
+    operation: &QueryOp,
+  ) -> EngineResult<bool> {
+    match operation {
+      QueryOp::Eq(query_bytes) => {
+        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        Ok(value == query_str)
+      }
+      QueryOp::Contains(query_str) => {
+        Ok(value.contains(query_str.as_str()))
+      }
+      QueryOp::In(values) => {
+        for query_bytes in values {
+          let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+          if value == query_str {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      QueryOp::Gt(query_bytes) => {
+        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        Ok(value > query_str)
+      }
+      QueryOp::Lt(query_bytes) => {
+        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        Ok(value < query_str)
+      }
+      QueryOp::Similar(query_str, threshold) => {
+        let similarity = crate::engine::fuzzy::trigram_similarity(value, query_str);
+        Ok(similarity >= *threshold)
+      }
+      QueryOp::Phonetic(query_str) => {
+        let value_soundex = crate::engine::phonetic::soundex(value);
+        let query_soundex = crate::engine::phonetic::soundex(query_str);
+        if value_soundex == query_soundex {
+          return Ok(true);
+        }
+        let value_dm = crate::engine::phonetic::dmetaphone_primary(value);
+        let query_dm = crate::engine::phonetic::dmetaphone_primary(query_str);
+        if value_dm == query_dm {
+          return Ok(true);
+        }
+        if let Some(value_alt) = crate::engine::phonetic::dmetaphone_alt(value) {
+          if value_alt == query_dm {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      QueryOp::Fuzzy(query_str, options) => {
+        let max_distance = match &options.fuzziness {
+          Fuzziness::Auto => crate::engine::fuzzy::auto_fuzziness(query_str.len()),
+          Fuzziness::Fixed(d) => *d,
+        };
+        match &options.algorithm {
+          FuzzyAlgorithm::DamerauLevenshtein => {
+            let distance = crate::engine::fuzzy::damerau_levenshtein(value, query_str);
+            Ok(distance <= max_distance)
+          }
+          FuzzyAlgorithm::JaroWinkler => {
+            let similarity = crate::engine::fuzzy::jaro_winkler(value, query_str);
+            // JW returns 0.0-1.0; convert max_distance to threshold
+            let threshold = if max_distance == 0 { 1.0 } else { 1.0 - (max_distance as f64 * 0.1) };
+            Ok(similarity >= threshold.max(0.0))
+          }
+        }
+      }
+      QueryOp::Match(query_str) => {
+        // Match: fuse trigram similarity + substring check
+        let contains = value.to_lowercase().contains(&query_str.to_lowercase());
+        let similarity = crate::engine::fuzzy::trigram_similarity(value, query_str);
+        Ok(contains || similarity >= 0.3)
+      }
+      other => {
+        Err(EngineError::InvalidInput(format!(
+          "Operation '{:?}' is not supported for string virtual fields",
+          std::mem::discriminant(other),
+        )))
+      }
+    }
+  }
+
+  /// Apply a query operation against a u64 value (for virtual @size field).
+  fn virtual_u64_matches(
+    &self,
+    value: u64,
+    operation: &QueryOp,
+  ) -> EngineResult<bool> {
+    match operation {
+      QueryOp::Eq(query_bytes) => {
+        let query_value = bytes_to_u64(query_bytes);
+        Ok(value == query_value)
+      }
+      QueryOp::Gt(query_bytes) => {
+        let query_value = bytes_to_u64(query_bytes);
+        Ok(value > query_value)
+      }
+      QueryOp::Lt(query_bytes) => {
+        let query_value = bytes_to_u64(query_bytes);
+        Ok(value < query_value)
+      }
+      QueryOp::Between(min_bytes, max_bytes) => {
+        let min_value = bytes_to_u64(min_bytes);
+        let max_value = bytes_to_u64(max_bytes);
+        Ok(value >= min_value && value <= max_value)
+      }
+      QueryOp::In(values) => {
+        for query_bytes in values {
+          if value == bytes_to_u64(query_bytes) {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      other => {
+        Err(EngineError::InvalidInput(format!(
+          "Operation '{:?}' is not supported for numeric virtual fields",
+          std::mem::discriminant(other),
+        )))
+      }
+    }
+  }
+
+  /// Apply a query operation against an i64 value (for virtual @created_at, @updated_at fields).
+  fn virtual_i64_matches(
+    &self,
+    value: i64,
+    operation: &QueryOp,
+  ) -> EngineResult<bool> {
+    match operation {
+      QueryOp::Eq(query_bytes) => {
+        let query_value = bytes_to_i64(query_bytes);
+        Ok(value == query_value)
+      }
+      QueryOp::Gt(query_bytes) => {
+        let query_value = bytes_to_i64(query_bytes);
+        Ok(value > query_value)
+      }
+      QueryOp::Lt(query_bytes) => {
+        let query_value = bytes_to_i64(query_bytes);
+        Ok(value < query_value)
+      }
+      QueryOp::Between(min_bytes, max_bytes) => {
+        let min_value = bytes_to_i64(min_bytes);
+        let max_value = bytes_to_i64(max_bytes);
+        Ok(value >= min_value && value <= max_value)
+      }
+      QueryOp::In(values) => {
+        for query_bytes in values {
+          if value == bytes_to_i64(query_bytes) {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      other => {
+        Err(EngineError::InvalidInput(format!(
+          "Operation '{:?}' is not supported for numeric virtual fields",
+          std::mem::discriminant(other),
+        )))
+      }
+    }
+  }
+
   /// Check if a QueryNode tree contains any fuzzy operations.
+  /// Virtual fields (prefixed with `@`) are excluded — they handle Contains
+  /// via direct substring matching, not trigram indexes.
   fn node_has_fuzzy_ops(&self, node: &QueryNode) -> bool {
     match node {
-      QueryNode::Field(fq) => matches!(
-        fq.operation,
-        QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
-      ),
+      QueryNode::Field(fq) => {
+        if fq.field_name.starts_with('@') {
+          return false;
+        }
+        matches!(
+          fq.operation,
+          QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
+        )
+      }
       QueryNode::And(children) | QueryNode::Or(children) => {
         children.iter().any(|c| self.node_has_fuzzy_ops(c))
       }
@@ -2242,5 +2525,37 @@ impl<'a> FieldQueryBuilder<'a> {
       operation: QueryOp::Match(value.to_string()),
     }));
     self.parent
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Virtual field byte conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Decode a big-endian u64 from bytes (as produced by `json_value_to_bytes`).
+/// Returns 0 if the byte slice is not exactly 8 bytes.
+fn bytes_to_u64(bytes: &[u8]) -> u64 {
+  if bytes.len() == 8 {
+    u64::from_be_bytes([
+      bytes[0], bytes[1], bytes[2], bytes[3],
+      bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+  } else {
+    0
+  }
+}
+
+/// Decode a big-endian i64 from bytes (as produced by `json_value_to_bytes`).
+/// Returns 0 if the byte slice is not exactly 8 bytes.
+fn bytes_to_i64(bytes: &[u8]) -> i64 {
+  if bytes.len() == 8 {
+    // json_value_to_bytes casts i64 as u64 before encoding to big-endian bytes,
+    // so we decode as u64 and reinterpret as i64.
+    u64::from_be_bytes([
+      bytes[0], bytes[1], bytes[2], bytes[3],
+      bytes[4], bytes[5], bytes[6], bytes[7],
+    ]) as i64
+  } else {
+    0
   }
 }
