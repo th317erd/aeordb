@@ -116,7 +116,7 @@ pub struct DatabaseStats {
 pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
-  kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  pub(crate) kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
   /// Path to the `.kv` sidecar file, stored at construction time so that
   /// `stats()` can read its metadata without locking `kv_writer`.
   /// (Used in stats() — dead_code analysis misses it through RwLock indirection.)
@@ -128,7 +128,7 @@ pub struct StorageEngine {
   // before appending, writing into reclaimed space to reduce file growth.
   // TODO: Wire into store_entry/delete_entry to reclaim void space before appending.
   #[allow(dead_code)]
-  void_manager: RwLock<VoidManager>,
+  pub(crate) void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
 }
 

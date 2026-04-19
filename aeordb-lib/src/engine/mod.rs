@@ -13,6 +13,7 @@ pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_listing;
 pub mod directory_ops;
+pub mod engine_counters;
 pub mod engine_event;
 pub mod entry_header;
 pub mod entry_scanner;
@@ -44,6 +45,7 @@ pub mod permission_resolver;
 pub mod permissions;
 pub mod permissions_cache;
 pub mod query_engine;
+pub mod rate_tracker;
 pub mod request_context;
 pub mod scalar_converter;
 pub mod source_resolver;
@@ -67,6 +69,7 @@ pub mod virtual_clock;
 pub mod void_manager;
 pub mod webhook;
 
+pub use engine_counters::{EngineCounters, CountersSnapshot};
 pub use api_key_cache::ApiKeyCache;
 pub use api_key_rules::{KeyRule, match_rules, check_operation_permitted, validate_rules, parse_rules_from_json, operation_to_flag_char};
 pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
@@ -166,6 +169,7 @@ pub use heartbeat::spawn_heartbeat;
 pub use task_worker::{spawn_task_worker, process_next_task};
 pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
 pub use request_context::RequestContext;
+pub use rate_tracker::{RateTracker, RateSnapshot, RateTrackerSet, RateSetSnapshot};
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};
 pub use btree::{
     BTreeNode, LeafNode, InternalNode,

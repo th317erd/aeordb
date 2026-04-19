@@ -627,6 +627,14 @@ path = "spec/engine/cron_scheduler_spec.rs"
 name = "backup_task_spec"
 path = "spec/engine/backup_task_spec.rs"
 
+[[test]]
+name = "rate_tracker_spec"
+path = "spec/engine/rate_tracker_spec.rs"
+
+[[test]]
+name = "engine_counters_spec"
+path = "spec/engine/engine_counters_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"

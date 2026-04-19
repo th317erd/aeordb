@@ -114,6 +114,42 @@
 
 ---
 
+## Enhanced Metrics — In Progress
+
+### Phase 1: Core Counters
+- [ ] EngineCounters struct (AtomicU64 fields)
+- [ ] RateTracker (rolling averages)
+- [ ] Wire into StorageEngine, initialize from KV on startup
+
+### Phase 2: Instrument Operations
+- [ ] directory_ops.rs (file/symlink CRUD counters)
+- [ ] version_manager.rs (snapshot/fork counters)
+- [ ] disk_kv_store.rs (write buffer depth)
+- [ ] gc.rs (reconciliation)
+
+### Phase 3: Heartbeat/Metrics Separation
+- [ ] Strip heartbeat to clock sync only
+- [ ] Create metrics_pulse.rs (new metrics SSE event)
+- [ ] Wire into server startup
+
+### Phase 4: Stats API + Prometheus
+- [ ] Rewrite stats endpoint to O(1) counters
+- [ ] Prometheus gauges from counters
+- [ ] Latency histograms instrumentation
+
+### Phase 5: Dashboard
+- [ ] Subscribe to metrics event instead of heartbeat
+- [ ] Identity bar, size cards, throughput charts, latency, health indicators
+
+### Phase 6: Documentation
+- [ ] docs/src/ updates for metrics/heartbeat changes
+- [ ] Client migration report update
+
+### Phase 7: Marketing Site
+- [ ] Update aeordb-www features section
+
+---
+
 ## Future Plans (Not Started)
 
 - [ ] Fork merging (true merge with conflict detection)
