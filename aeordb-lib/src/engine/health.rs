@@ -83,11 +83,11 @@ pub fn check_engine(engine: &StorageEngine, db_path: &str) -> EngineHealth {
 
 /// Check disk health for the partition containing the database file.
 ///
-/// On Linux, uses `libc::statvfs` to determine available and total space.
-/// Returns a fallback with zero values and Healthy status on non-Linux
+/// On Unix (Linux/macOS), uses `libc::statvfs` to determine available and total space.
+/// Returns a fallback with zero values and Healthy status on non-Unix
 /// platforms or if the stat call fails.
 pub fn check_disk(db_path: &str) -> DiskHealth {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::ffi::CString;
         let parent = Path::new(db_path)
