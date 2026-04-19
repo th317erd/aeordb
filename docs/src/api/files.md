@@ -13,6 +13,8 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | PATCH | `/files/{path}` | Rename or move a file or symlink | Yes | 200, 400, 404, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
+> **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
+
 ---
 
 ## PUT /files/{path}

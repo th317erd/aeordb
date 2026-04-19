@@ -379,6 +379,109 @@ Inspect the query execution plan without running the full query. Useful for debu
 
 ---
 
+## Virtual Fields
+
+Virtual fields let you query file metadata directly -- without defining any indexes. Prefix a field name with `@` to query against built-in file attributes instead of indexed document fields.
+
+### Available Virtual Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `@path` | string | Full file path (e.g., `/docs/report.pdf`) |
+| `@filename` | string | Filename only -- the last segment of the path (e.g., `report.pdf`) |
+| `@extension` | string | File extension after the last `.` (e.g., `pdf`) |
+| `@content_type` | string | MIME type (e.g., `application/pdf`) |
+| `@size` | u64 | File size in bytes |
+| `@created_at` | i64 | Creation timestamp in milliseconds |
+| `@updated_at` | i64 | Last update timestamp in milliseconds |
+
+### Supported Operators
+
+**String virtual fields** (`@path`, `@filename`, `@extension`, `@content_type`) support:
+
+`eq`, `contains`, `in`, `gt`, `lt`, `similar` (trigram), `fuzzy` (edit distance), `phonetic` (soundex/metaphone), `match` (fused multi-strategy)
+
+**Numeric virtual fields** (`@size`, `@created_at`, `@updated_at`) support:
+
+`eq`, `gt`, `lt`, `between`, `in`
+
+### How Virtual Fields Work
+
+Virtual fields scan all files under the query path and evaluate each file's metadata against the filter conditions. This means:
+
+- **No index configuration required.** Virtual field queries work immediately with zero setup.
+- **Slower than indexed queries.** Because every file is scanned, virtual field queries are O(n) where n is the number of files under the path. For small-to-medium datasets this is perfectly fine. For large datasets with millions of files, prefer indexed fields for hot query paths.
+- **Combinable with indexed fields.** You can mix virtual fields and indexed fields in the same `where` clause using boolean combinators (`and`, `or`, `not`).
+
+### Virtual Field Examples
+
+Find all PDFs by extension:
+
+```bash
+curl -X POST http://localhost:6830/files/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/",
+    "where": {"field": "@extension", "op": "eq", "value": "pdf"}
+  }'
+```
+
+Fuzzy filename search (handles typos):
+
+```bash
+curl -X POST http://localhost:6830/files/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/docs",
+    "where": {"field": "@filename", "op": "similar", "value": "report", "threshold": 0.3}
+  }'
+```
+
+Find large files over 10 MB:
+
+```bash
+curl -X POST http://localhost:6830/files/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/",
+    "where": {"field": "@size", "op": "gt", "value": 10485760}
+  }'
+```
+
+Find images by content type:
+
+```bash
+curl -X POST http://localhost:6830/files/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/",
+    "where": {"field": "@content_type", "op": "contains", "value": "image/"}
+  }'
+```
+
+Combine multiple virtual fields -- large PDFs:
+
+```bash
+curl -X POST http://localhost:6830/files/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/",
+    "where": {
+      "and": [
+        {"field": "@extension", "op": "eq", "value": "pdf"},
+        {"field": "@size", "op": "gt", "value": 1048576}
+      ]
+    }
+  }'
+```
+
+---
+
 ## Examples
 
 ### Simple equality query

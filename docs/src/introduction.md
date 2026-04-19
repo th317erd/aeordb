@@ -25,7 +25,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 - **Storage:** Append-only WAL file, content-addressed BLAKE3 hashing, automatic zstd compression, 256KB chunking for dedup
 - **Indexing:** Scalar bucketing (NVT) with u64, i64, f64, string, timestamp, trigram, phonetic/soundex/dmetaphone index types
 - **Native parsers:** 8 built-in parsers (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) -- no WASM deployment needed
-- **Querying:** JSON query API with boolean logic (`and`, `or`, `not`), comparison operators, sorting, pagination, projections, and aggregations
+- **Querying:** JSON query API with boolean logic (`and`, `or`, `not`), comparison operators, sorting, pagination, projections, aggregations, and zero-config virtual fields for searching by filename, extension, size, and content type
 - **Versioning:** Snapshots, forks, diff/patch, export/import as self-contained `.aeordb` files, file-level history and restore
 - **Plugins:** WASM parser plugins for custom formats, WASM query plugins for server-side logic
 - **Operations:** Background task system, cron scheduler (including automated backups), garbage collection, automatic reindexing
