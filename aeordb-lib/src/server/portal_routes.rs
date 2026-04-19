@@ -14,6 +14,7 @@ const PORTAL_HTML: &str = include_str!("../portal/index.html");
 const PORTAL_APP_MJS: &str = include_str!("../portal/app.mjs");
 const PORTAL_DASHBOARD_MJS: &str = include_str!("../portal/dashboard.mjs");
 const PORTAL_USERS_MJS: &str = include_str!("../portal/users.mjs");
+const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
 
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
@@ -28,6 +29,7 @@ pub async fn portal_asset(
         "app.mjs" => (PORTAL_APP_MJS, "application/javascript; charset=utf-8"),
         "dashboard.mjs" => (PORTAL_DASHBOARD_MJS, "application/javascript; charset=utf-8"),
         "users.mjs" => (PORTAL_USERS_MJS, "application/javascript; charset=utf-8"),
+        "groups.mjs" => (PORTAL_GROUPS_MJS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
 

@@ -2,6 +2,79 @@
 
 import '/system/portal/dashboard.mjs';
 import '/system/portal/users.mjs';
+import '/system/portal/groups.mjs';
+
+// ---------------------------------------------------------------------------
+// <aeor-crudlify> — Toggle component for crudlify permission flags
+// Usage: <aeor-crudlify value="cr--l---"></aeor-crudlify>
+// Read value: element.value (returns string like "cr--l---")
+// ---------------------------------------------------------------------------
+
+const CRUDLIFY_FLAGS = [
+  { char: 'c', label: 'Create' },
+  { char: 'r', label: 'Read' },
+  { char: 'u', label: 'Update' },
+  { char: 'd', label: 'Delete' },
+  { char: 'l', label: 'List' },
+  { char: 'i', label: 'Index' },
+  { char: 'f', label: 'Fork' },
+  { char: 'y', label: 'Sync' },
+];
+
+class AeorCrudlify extends HTMLElement {
+  constructor() {
+    super();
+    this._flags = [false, false, false, false, false, false, false, false];
+  }
+
+  connectedCallback() {
+    // Parse initial value attribute
+    const initial = this.getAttribute('value') || '--------';
+    for (let i = 0; i < 8; i++) {
+      this._flags[i] = (initial[i] && initial[i] !== '-');
+    }
+    this.render();
+  }
+
+  get value() {
+    return this._flags.map((on, i) => on ? CRUDLIFY_FLAGS[i].char : '-').join('');
+  }
+
+  set value(v) {
+    for (let i = 0; i < 8; i++) {
+      this._flags[i] = (v[i] && v[i] !== '-');
+    }
+    this.render();
+  }
+
+  render() {
+    this.innerHTML = `<div class="crudlify-row">${
+      CRUDLIFY_FLAGS.map((flag, i) => {
+        const active = this._flags[i] ? 'active' : '';
+        return `<button type="button" class="crudlify-flag ${active}" data-idx="${i}" title="${flag.label}">${flag.char.toUpperCase()}</button>`;
+      }).join('')
+    }</div>`;
+
+    this.querySelectorAll('.crudlify-flag').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (e.shiftKey) {
+          // Shift+click: invert ALL flags
+          for (let i = 0; i < 8; i++) this._flags[i] = !this._flags[i];
+          this.querySelectorAll('.crudlify-flag').forEach((b, i) => {
+            b.classList.toggle('active', this._flags[i]);
+          });
+        } else {
+          const idx = parseInt(btn.dataset.idx);
+          this._flags[idx] = !this._flags[idx];
+          btn.classList.toggle('active', this._flags[idx]);
+        }
+      });
+    });
+  }
+}
+
+customElements.define('aeor-crudlify', AeorCrudlify);
 
 // Auth state management
 const AUTH = {
@@ -113,11 +186,23 @@ function escapeHtml(text) {
 // Track whether auth is disabled (--auth=false mode)
 let authDisabled = false;
 
+// Cached page instances — survives navigation so chart history isn't lost
+const pageCache = {};
+
+function getOrCreatePage(tag) {
+  if (!pageCache[tag]) {
+    pageCache[tag] = document.createElement(tag);
+  }
+  return pageCache[tag];
+}
+
 // Router
 function navigate() {
   const page = location.hash.slice(1) || 'dashboard';
   const main = document.getElementById('main-content');
-  main.innerHTML = '';
+
+  // Remove current child without destroying cached elements
+  while (main.firstChild) main.removeChild(main.firstChild);
 
   if (!AUTH.token && !authDisabled) {
     main.appendChild(document.createElement('aeor-login'));
@@ -129,10 +214,13 @@ function navigate() {
 
   switch (page) {
     case 'users':
-      main.appendChild(document.createElement('aeor-users'));
+      main.appendChild(getOrCreatePage('aeor-users'));
+      break;
+    case 'groups':
+      main.appendChild(getOrCreatePage('aeor-groups'));
       break;
     default:
-      main.appendChild(document.createElement('aeor-dashboard'));
+      main.appendChild(getOrCreatePage('aeor-dashboard'));
   }
 }
 

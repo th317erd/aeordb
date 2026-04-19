@@ -21,6 +21,16 @@ function formatRate(value) {
   return (value < 10) ? value.toFixed(2) : formatNumber(Math.round(value));
 }
 
+function formatBytesRate(bytesPerSec) {
+  if (bytesPerSec == null || bytesPerSec === 0)
+    return '0 B/s';
+
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  const index = Math.floor(Math.log(bytesPerSec) / Math.log(1024));
+  const clamped = Math.min(index, units.length - 1);
+  return parseFloat((bytesPerSec / Math.pow(1024, clamped)).toFixed(1)) + ' ' + units[clamped];
+}
+
 function formatPercent(value) {
   if (value == null)
     return '\u2014';
@@ -201,6 +211,14 @@ class AeorDashboard extends HTMLElement {
           <div class="stat-label">Reads / sec (1m)</div>
           <div class="stat-value" id="stat-reads-per-sec">&mdash;</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-label">Write rate (1m)</div>
+          <div class="stat-value" id="stat-bytes-written-per-sec">&mdash;</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Read rate (1m)</div>
+          <div class="stat-value" id="stat-bytes-read-per-sec">&mdash;</div>
+        </div>
       </div>
       <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Health</div>
       <div class="stats-grid" id="stats-health">
@@ -227,12 +245,21 @@ class AeorDashboard extends HTMLElement {
       </div>
       <div class="charts-row">
         <div class="chart-card">
+          <div class="chart-title">Activity (ops/sec)</div>
+          <div class="chart-container" id="chart-activity"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Throughput (bytes/sec)</div>
+          <div class="chart-container" id="chart-throughput"></div>
+        </div>
+      </div>
+      <div class="charts-row">
+        <div class="chart-card">
           <div class="chart-title">Storage Overview</div>
           <div class="chart-container" id="chart-storage"></div>
         </div>
-        <div class="chart-card">
-          <div class="chart-title">Activity (ops/sec)</div>
-          <div class="chart-container" id="chart-activity"></div>
+        <div class="chart-card" style="display:flex;align-items:center;justify-content:center;">
+          <div style="text-align:center;color:var(--text-muted);font-size:0.85rem;padding:20px;">Additional charts coming soon</div>
         </div>
       </div>
     `;
@@ -327,6 +354,18 @@ class AeorDashboard extends HTMLElement {
       const rate = throughput.reads_per_sec?.['1m'];
       readsElement.textContent = formatRate(rate);
     }
+
+    const bytesWrittenElement = this.querySelector('#stat-bytes-written-per-sec');
+    if (bytesWrittenElement) {
+      const rate = throughput.bytes_written_per_sec?.['1m'];
+      bytesWrittenElement.textContent = formatBytesRate(rate);
+    }
+
+    const bytesReadElement = this.querySelector('#stat-bytes-read-per-sec');
+    if (bytesReadElement) {
+      const rate = throughput.bytes_read_per_sec?.['1m'];
+      bytesReadElement.textContent = formatBytesRate(rate);
+    }
   }
 
   updateHealthIndicators(health) {
@@ -415,11 +454,15 @@ class AeorDashboard extends HTMLElement {
   recordActivityPoint(data) {
     const writesPerSecond = data.throughput?.writes_per_sec?.['1m'] || 0;
     const readsPerSecond = data.throughput?.reads_per_sec?.['1m'] || 0;
+    const bytesWrittenPerSecond = data.throughput?.bytes_written_per_sec?.['1m'] || 0;
+    const bytesReadPerSecond = data.throughput?.bytes_read_per_sec?.['1m'] || 0;
 
     this._activityHistory.push({
       timestamp: Date.now(),
       writesPerSecond,
       readsPerSecond,
+      bytesWrittenPerSecond,
+      bytesReadPerSecond,
     });
 
     // Keep rolling window of 60 data points (15 minutes at 15s metrics intervals)
@@ -428,45 +471,50 @@ class AeorDashboard extends HTMLElement {
   }
 
   updateActivityChart() {
-    const container = this.querySelector('#chart-activity');
-    if (!container)
-      return;
-
     const history = this._activityHistory;
+    const waiting = '<div style="color:#8b949e;font-size:0.85rem;padding:20px;text-align:center;">Collecting data...</div>';
 
-    if (history.length < 2) {
-      container.innerHTML = '<div style="color:#8b949e;font-size:0.85rem;padding:20px;text-align:center;">Collecting data...</div>';
-      return;
+    const opsContainer = this.querySelector('#chart-activity');
+    if (opsContainer) {
+      if (history.length < 2) {
+        opsContainer.innerHTML = waiting;
+      } else {
+        this.renderDualLineChart(opsContainer, history, 'writesPerSecond', 'readsPerSecond', 'writes', 'reads', formatRate);
+      }
     }
 
-    this.renderLineChart(container, history);
+    const throughputContainer = this.querySelector('#chart-throughput');
+    if (throughputContainer) {
+      if (history.length < 2) {
+        throughputContainer.innerHTML = waiting;
+      } else {
+        this.renderDualLineChart(throughputContainer, history, 'bytesWrittenPerSecond', 'bytesReadPerSecond', 'written', 'read', formatBytesRate);
+      }
+    }
   }
 
-  renderLineChart(container, history) {
+  renderDualLineChart(container, history, orangeKey, greenKey, orangeLabel, greenLabel, formatter) {
     const width = container.clientWidth || 400;
     const height = 220;
-    const paddingLeft = 60;
+    const paddingLeft = 70;
     const paddingRight = 16;
-    const paddingTop = 16;
+    const paddingTop = 24;
     const paddingBottom = 30;
 
     const chartWidth = width - paddingLeft - paddingRight;
     const chartHeight = height - paddingTop - paddingBottom;
 
     // Compute shared Y-axis range from both series
-    const allValues = history.flatMap((p) => [p.writesPerSecond, p.readsPerSecond]);
+    const allValues = history.flatMap((p) => [p[orangeKey] || 0, p[greenKey] || 0]);
     const minValue = Math.min(...allValues);
     const maxValue = Math.max(...allValues);
     const range = maxValue - minValue || 1;
 
-    const toXY = (value, index) => {
-      const x = paddingLeft + (index / (history.length - 1)) * chartWidth;
-      const y = paddingTop + chartHeight - ((value - minValue) / range) * chartHeight;
-      return `${x},${y}`;
-    };
+    const toX = (index) => paddingLeft + (index / (history.length - 1)) * chartWidth;
+    const toY = (value) => paddingTop + chartHeight - (((value || 0) - minValue) / range) * chartHeight;
 
-    const writePoints = history.map((p, i) => toXY(p.writesPerSecond, i)).join(' ');
-    const readPoints = history.map((p, i) => toXY(p.readsPerSecond, i)).join(' ');
+    const orangePoints = history.map((p, i) => `${toX(i)},${toY(p[orangeKey])}`).join(' ');
+    const greenPoints = history.map((p, i) => `${toX(i)},${toY(p[greenKey])}`).join(' ');
 
     // Y-axis labels
     const yLabelCount = 4;
@@ -474,7 +522,7 @@ class AeorDashboard extends HTMLElement {
     for (let index = 0; index <= yLabelCount; index++) {
       const value = minValue + (range * index / yLabelCount);
       const y = paddingTop + chartHeight - (index / yLabelCount) * chartHeight;
-      yLabels += `<text x="${paddingLeft - 8}" y="${y + 4}" text-anchor="end" fill="#8b949e" font-size="11" font-family="var(--font-mono)">${formatRate(value)}</text>`;
+      yLabels += `<text x="${paddingLeft - 8}" y="${y + 4}" text-anchor="end" fill="#8b949e" font-size="10" font-family="var(--font-mono)">${formatter(value)}</text>`;
       yLabels += `<line x1="${paddingLeft}" y1="${y}" x2="${width - paddingRight}" y2="${y}" stroke="#30363d" stroke-width="1"/>`;
     }
 
@@ -483,30 +531,113 @@ class AeorDashboard extends HTMLElement {
     const labelCount = Math.min(5, history.length);
     for (let index = 0; index < labelCount; index++) {
       const dataIndex = Math.floor(index * (history.length - 1) / (labelCount - 1));
-      const x = paddingLeft + (dataIndex / (history.length - 1)) * chartWidth;
+      const x = toX(dataIndex);
       const time = new Date(history[dataIndex].timestamp);
       const label = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}:${time.getSeconds().toString().padStart(2, '0')}`;
       timeLabels.push(`<text x="${x}" y="${height - 4}" text-anchor="middle" fill="#8b949e" font-size="10" font-family="var(--font-mono)">${label}</text>`);
     }
 
     // Legend
-    const legendY = paddingTop + 2;
+    const legendY = 12;
     const legend = `
       <circle cx="${paddingLeft + 4}" cy="${legendY}" r="4" fill="#f0883e"/>
-      <text x="${paddingLeft + 12}" y="${legendY + 4}" fill="#f0883e" font-size="10" font-family="var(--font-mono)">writes</text>
-      <circle cx="${paddingLeft + 64}" cy="${legendY}" r="4" fill="#3fb950"/>
-      <text x="${paddingLeft + 72}" y="${legendY + 4}" fill="#3fb950" font-size="10" font-family="var(--font-mono)">reads</text>
+      <text x="${paddingLeft + 12}" y="${legendY + 4}" fill="#f0883e" font-size="10" font-family="var(--font-mono)">${orangeLabel}</text>
+      <circle cx="${paddingLeft + 14 + orangeLabel.length * 6}" cy="${legendY}" r="4" fill="#3fb950"/>
+      <text x="${paddingLeft + 22 + orangeLabel.length * 6}" y="${legendY + 4}" fill="#3fb950" font-size="10" font-family="var(--font-mono)">${greenLabel}</text>
     `;
 
+    // Hover elements (hidden by default)
+    const hoverId = `hover-${orangeKey}-${Date.now()}`;
+    const hoverElements = `
+      <line id="${hoverId}-line" x1="0" y1="${paddingTop}" x2="0" y2="${paddingTop + chartHeight}" stroke="#8b949e" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>
+      <circle id="${hoverId}-dot-orange" r="4" fill="#f0883e" stroke="#0f1117" stroke-width="2" visibility="hidden"/>
+      <circle id="${hoverId}-dot-green" r="4" fill="#3fb950" stroke="#0f1117" stroke-width="2" visibility="hidden"/>
+    `;
+
+    // Invisible hit areas for each data point
+    let hitAreas = '';
+    for (let i = 0; i < history.length; i++) {
+      const x = toX(i);
+      const halfGap = (i < history.length - 1) ? (toX(i + 1) - x) / 2 : (x - toX(Math.max(0, i - 1))) / 2;
+      hitAreas += `<rect x="${x - halfGap}" y="${paddingTop}" width="${halfGap * 2}" height="${chartHeight}" fill="transparent" data-idx="${i}"/>`;
+    }
+
+    container.style.position = 'relative';
     container.innerHTML = `
-      <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;">
         ${yLabels}
         ${timeLabels.join('')}
         ${legend}
-        <polyline points="${writePoints}" fill="none" stroke="#f0883e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-        <polyline points="${readPoints}" fill="none" stroke="#3fb950" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline points="${orangePoints}" fill="none" stroke="#f0883e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline points="${greenPoints}" fill="none" stroke="#3fb950" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        ${hoverElements}
+        ${hitAreas}
       </svg>
+      <div id="${hoverId}-tooltip" style="
+        display:none; position:absolute; pointer-events:none;
+        background:var(--card); border:1px solid var(--border); border-radius:6px;
+        padding:8px 12px; font-size:0.78rem; font-family:var(--font-mono);
+        color:var(--text); box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:10;
+        white-space:nowrap;
+      "></div>
     `;
+
+    // Wire hover events
+    const svg = container.querySelector('svg');
+    const hoverLine = container.querySelector(`#${hoverId}-line`);
+    const dotOrange = container.querySelector(`#${hoverId}-dot-orange`);
+    const dotGreen = container.querySelector(`#${hoverId}-dot-green`);
+    const tooltip = container.querySelector(`#${hoverId}-tooltip`);
+
+    svg.addEventListener('mousemove', (e) => {
+      const rect = svg.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      // Find nearest data point
+      let nearest = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < history.length; i++) {
+        const dist = Math.abs(toX(i) - mouseX);
+        if (dist < nearestDist) { nearestDist = dist; nearest = i; }
+      }
+
+      const x = toX(nearest);
+      const p = history[nearest];
+      const oyVal = p[orangeKey] || 0;
+      const gyVal = p[greenKey] || 0;
+
+      hoverLine.setAttribute('x1', x);
+      hoverLine.setAttribute('x2', x);
+      hoverLine.setAttribute('visibility', 'visible');
+
+      dotOrange.setAttribute('cx', x);
+      dotOrange.setAttribute('cy', toY(oyVal));
+      dotOrange.setAttribute('visibility', 'visible');
+
+      dotGreen.setAttribute('cx', x);
+      dotGreen.setAttribute('cy', toY(gyVal));
+      dotGreen.setAttribute('visibility', 'visible');
+
+      const time = new Date(p.timestamp);
+      const timeStr = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}:${time.getSeconds().toString().padStart(2, '0')}`;
+      tooltip.innerHTML = `
+        <div style="color:var(--text-muted);margin-bottom:4px;">${timeStr}</div>
+        <div><span style="color:#f0883e;">\u25CF</span> ${orangeLabel}: <strong>${formatter(oyVal)}</strong></div>
+        <div><span style="color:#3fb950;">\u25CF</span> ${greenLabel}: <strong>${formatter(gyVal)}</strong></div>
+      `;
+      tooltip.style.display = 'block';
+
+      // Position tooltip — flip to left side if near right edge
+      const tooltipX = (x + 16 + 140 > width) ? x - 150 : x + 16;
+      tooltip.style.left = `${tooltipX}px`;
+      tooltip.style.top = `${paddingTop}px`;
+    });
+
+    svg.addEventListener('mouseleave', () => {
+      hoverLine.setAttribute('visibility', 'hidden');
+      dotOrange.setAttribute('visibility', 'hidden');
+      dotGreen.setAttribute('visibility', 'hidden');
+      tooltip.style.display = 'none';
+    });
   }
 }
 

@@ -29,7 +29,7 @@ class AeorUsers extends HTMLElement {
 
   async fetchUsers() {
     try {
-      const response = await window.api('/admin/users');
+      const response = await window.api('/system/users');
 
       if (response.status === 403) {
         this._forbidden = true;
@@ -40,7 +40,8 @@ class AeorUsers extends HTMLElement {
       if (!response.ok)
         throw new Error(`Failed to fetch users (${response.status})`);
 
-      this._users = await response.json();
+      const data = await response.json();
+      this._users = data.items || data;
       this._error = null;
       this._forbidden = false;
       this.renderContent();
@@ -180,7 +181,7 @@ class AeorUsers extends HTMLElement {
     const modalError = this.querySelector('#modal-error');
 
     try {
-      const response = await window.api('/admin/users', {
+      const response = await window.api('/system/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -259,7 +260,7 @@ class AeorUsers extends HTMLElement {
     const modalError = this.querySelector('#modal-error');
 
     try {
-      const response = await window.api(`/admin/users/${userId}`, {
+      const response = await window.api(`/system/users/${userId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -287,7 +288,7 @@ class AeorUsers extends HTMLElement {
       return;
 
     try {
-      const response = await window.api(`/admin/users/${userId}`, {
+      const response = await window.api(`/system/users/${userId}`, {
         method: 'DELETE',
       });
 
