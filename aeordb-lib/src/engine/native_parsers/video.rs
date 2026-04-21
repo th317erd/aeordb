@@ -22,6 +22,7 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
         has_video: None,
         video_codec: None,
         audio_codec: None,
+        tags: None,
     };
 
     if data.len() >= 8 && &data[4..8] == b"ftyp" {
@@ -36,23 +37,29 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
         parse_flv(data, &mut result);
     }
 
+    let mut metadata = serde_json::json!({
+        "filename": result.filename,
+        "content_type": result.content_type,
+        "size": result.size,
+        "format": result.format,
+        "brand": result.brand,
+        "duration_seconds": result.duration_seconds,
+        "width": result.width,
+        "height": result.height,
+        "frame_rate": result.frame_rate,
+        "has_audio": result.has_audio,
+        "has_video": result.has_video,
+        "video_codec": result.video_codec,
+        "audio_codec": result.audio_codec,
+    });
+
+    if let Some(tags) = result.tags {
+        metadata["tags"] = tags;
+    }
+
     Ok(serde_json::json!({
         "text": "",
-        "metadata": {
-            "filename": result.filename,
-            "content_type": result.content_type,
-            "size": result.size,
-            "format": result.format,
-            "brand": result.brand,
-            "duration_seconds": result.duration_seconds,
-            "width": result.width,
-            "height": result.height,
-            "frame_rate": result.frame_rate,
-            "has_audio": result.has_audio,
-            "has_video": result.has_video,
-            "video_codec": result.video_codec,
-            "audio_codec": result.audio_codec,
-        }
+        "metadata": metadata,
     }))
 }
 
@@ -70,6 +77,7 @@ struct VideoMetadata {
     has_video: Option<bool>,
     video_codec: Option<String>,
     audio_codec: Option<String>,
+    tags: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,10 +240,88 @@ fn parse_moov(data: &[u8], result: &mut VideoMetadata) {
         match box_type {
             b"mvhd" => parse_mvhd(box_data, result),
             b"trak" => parse_trak(box_data, result),
+            b"udta" => parse_udta(box_data, result),
             _ => {}
         }
         true
     });
+}
+
+fn parse_udta(data: &[u8], result: &mut VideoMetadata) {
+    iter_boxes(data, |box_type, box_data, _| {
+        if box_type == b"meta" {
+            // `meta` is a "full box" — first 4 bytes are version (1) + flags (3)
+            if box_data.len() > 4 {
+                parse_meta_ilst(&box_data[4..], result);
+            }
+        }
+        true
+    });
+}
+
+fn parse_meta_ilst(data: &[u8], result: &mut VideoMetadata) {
+    iter_boxes(data, |box_type, box_data, _| {
+        if box_type == b"ilst" {
+            parse_ilst(box_data, result);
+        }
+        true
+    });
+}
+
+fn parse_ilst(data: &[u8], result: &mut VideoMetadata) {
+    let mut tags = serde_json::Map::new();
+
+    iter_boxes(data, |box_type, box_data, _| {
+        // iTunes atoms use © prefix encoded as two bytes: 0xA9 + ASCII char
+        let key = match box_type {
+            [0xA9, b'n', b'a', b'm'] => Some("title"),
+            [0xA9, b'A', b'R', b'T'] => Some("artist"),
+            [0xA9, b'a', b'l', b'b'] => Some("album"),
+            [0xA9, b'c', b'm', b't'] => Some("comment"),
+            [0xA9, b'd', b'a', b'y'] => Some("year"),
+            [0xA9, b'g', b'e', b'n'] => Some("genre"),
+            [0xA9, b't', b'o', b'o'] => Some("encoder"),
+            b"desc" => Some("description"),
+            b"cprt" => Some("copyright"),
+            _ => None,
+        };
+
+        if let Some(key) = key {
+            if let Some(text) = extract_ilst_text(box_data) {
+                tags.insert(key.to_string(), serde_json::json!(text));
+            }
+        }
+        true
+    });
+
+    if !tags.is_empty() {
+        result.tags = Some(serde_json::Value::Object(tags));
+    }
+}
+
+/// Extract text from an ilst atom's `data` sub-atom.
+///
+/// Each ilst child contains a `data` atom with:
+///   - 4 bytes: type indicator (1 = UTF-8 text)
+///   - 4 bytes: locale (usually 0)
+///   - N bytes: the actual text
+fn extract_ilst_text(atom_data: &[u8]) -> Option<String> {
+    let mut result = None;
+    iter_boxes(atom_data, |box_type, box_data, _| {
+        if box_type == b"data" && box_data.len() > 8 {
+            let text_bytes = &box_data[8..];
+            // Strip trailing nulls
+            let trimmed = text_bytes.iter()
+                .rposition(|&b| b != 0)
+                .map(|last| &text_bytes[..=last])
+                .unwrap_or(text_bytes);
+            if !trimmed.is_empty() {
+                result = Some(String::from_utf8_lossy(trimmed).into_owned());
+            }
+        }
+        true
+    });
+    result
 }
 
 fn parse_mvhd(data: &[u8], result: &mut VideoMetadata) {
