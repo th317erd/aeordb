@@ -1,77 +1,105 @@
 'use strict';
 
-import { FileBrowserAdapter } from '/system/portal/shared/components/aeor-file-browser-adapter.js';
-import '/system/portal/shared/components/aeor-file-browser.js';
+// ---------------------------------------------------------------------------
+// Shim: intercept the client-app fetch calls that the shared file browser
+// component makes (/api/v1/sync, /api/v1/browse/...) and translate them
+// into AeorDB portal API calls.  This lets us use the component as-is
+// without modifications.
+// ---------------------------------------------------------------------------
 
-class PortalFileBrowserAdapter extends FileBrowserAdapter {
-  constructor() {
-    super();
+const PORTAL_RELATIONSHIP = {
+  id: 'portal',
+  name: 'Database',
+  remote_path: '/',
+  local_path: '/',
+  direction: 'pull',
+};
+
+const _realFetch = window.fetch.bind(window);
+
+window.fetch = async function shimmedFetch(input, init) {
+  const url = (typeof input === 'string') ? input : input.url;
+
+  // GET /api/v1/sync → return a single fake "local database" relationship
+  if (url === '/api/v1/sync') {
+    return new Response(JSON.stringify([PORTAL_RELATIONSHIP]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  async browse(path, limit, offset) {
-    const encoded = encodeURIComponent(path === '/' ? '/' : path);
-    const response = await window.api(`/files/${encoded}?limit=${limit}&offset=${offset}`);
+  // GET /api/v1/browse/{rel_id}/{path}?limit=N&offset=M → proxy to /files/{path}
+  const browseMatch = url.match(/^\/api\/v1\/browse\/[^/?]+\/?(.*)$/);
+  if (browseMatch) {
+    const rawTail = browseMatch[1]; // "path?limit=100&offset=0" or "?limit=..."
+    const [pathPart, queryString] = rawTail.split('?');
+
+    // Build the /files/ path — root requires %2F since the route is /files/{*path}
+    const decodedPath = decodeURIComponent(pathPart || '');
+    const filesPath = (decodedPath && decodedPath !== '/')
+      ? `/files/${decodedPath}`
+      : '/files/%2F';
+
+    const qs = (queryString) ? `?${queryString}` : '';
+    const response = await window.api(`${filesPath}${qs}`);
+
     if (!response.ok)
-      throw new Error(`${response.status}`);
+      return response;
 
     const data = await response.json();
-    // Server returns { items: [...] } — map to { entries, total }
     const items = data.items || [];
-    return {
+
+    // Transform AeorDB listing shape → component's expected shape
+    const transformed = {
       entries: items.map((item) => ({
         name: item.name,
+        path: item.path,
         entry_type: item.entry_type,
-        size: item.size || item.total_size || 0,
+        size: item.size || 0,
         content_type: item.content_type || 'application/octet-stream',
         created_at: item.created_at,
         updated_at: item.updated_at,
       })),
-      total: data.total || items.length,
+      total: (data.total != null) ? data.total : items.length,
     };
-  }
 
-  fileUrl(path) {
-    return `/files${path}`;
-  }
-
-  async upload(path, body, contentType) {
-    const response = await window.api(`/files${path}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': contentType },
-      body,
-    });
-    if (!response.ok)
-      throw new Error(`${response.status}`);
-  }
-
-  async delete(path) {
-    const response = await window.api(`/files${path}`, { method: 'DELETE' });
-    if (!response.ok)
-      throw new Error(`${response.status}`);
-  }
-
-  async rename(fromPath, toPath) {
-    const response = await window.api('/files/rename', {
-      method: 'POST',
+    return new Response(JSON.stringify(transformed), {
+      status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: fromPath, to: toPath }),
     });
-    if (!response.ok)
-      throw new Error(`${response.status}`);
   }
 
-  get supportsOpenLocally() { return false; }
-  get supportsTabs() { return false; }
-  get supportsSync() { return false; }
-}
+  // POST /api/v1/files/{rel_id}/rename → proxy to /files/rename
+  const renameMatch = url.match(/^\/api\/v1\/files\/[^/?]+\/rename$/);
+  if (renameMatch) {
+    return window.api('/files/rename', init);
+  }
+
+  // GET/PUT/DELETE /api/v1/files/{rel_id}/{path} → proxy to /files/{path}
+  // Used by preview components (src attribute) and file operations
+  const filesMatch = url.match(/^\/api\/v1\/files\/[^/?]+\/(.+)$/);
+  if (filesMatch) {
+    const encodedPath = filesMatch[1];
+    const decodedPath = decodeURIComponent(encodedPath);
+    const filesUrl = `/files/${decodedPath}`;
+    return window.api(filesUrl, init);
+  }
+
+  // Everything else — pass through
+  return _realFetch(input, init);
+};
+
+// ---------------------------------------------------------------------------
+// Portal file browser page — just mount the shared component
+// ---------------------------------------------------------------------------
+
+import '/system/portal/shared/components/aeor-file-browser.js';
 
 class AeorFiles extends HTMLElement {
   connectedCallback() {
     if (!this._initialized) {
       this._initialized = true;
       this.innerHTML = '<aeor-file-browser></aeor-file-browser>';
-      const browser = this.querySelector('aeor-file-browser');
-      browser.setAdapter(new PortalFileBrowserAdapter());
     }
   }
 }
