@@ -24,7 +24,6 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
         "channels": serde_json::Value::Null,
         "bitrate": serde_json::Value::Null,
         "bits_per_sample": serde_json::Value::Null,
-        "tags": {},
     });
 
     match format {
@@ -514,6 +513,13 @@ fn parse_wav(data: &[u8], metadata: &mut serde_json::Value) {
             }
         }
 
+        if chunk_id == b"LIST" && chunk_size >= 4 && chunk_data_start + 4 <= data.len() {
+            let list_type = &data[chunk_data_start..chunk_data_start + 4];
+            if list_type == b"INFO" {
+                parse_info_chunks(&data[chunk_data_start + 4..chunk_data_start + chunk_size.min(data.len() - chunk_data_start)], metadata);
+            }
+        }
+
         // Advance to next chunk (chunks are 2-byte aligned)
         let padded_size = if chunk_size % 2 == 1 { chunk_size + 1 } else { chunk_size };
         offset = chunk_data_start + padded_size;
@@ -522,6 +528,61 @@ fn parse_wav(data: &[u8], metadata: &mut serde_json::Value) {
     // Remove internal helper field
     if let Some(object) = metadata.as_object_mut() {
         object.remove("_byte_rate");
+    }
+}
+
+fn parse_info_chunks(data: &[u8], metadata: &mut serde_json::Value) {
+    let mut tags = serde_json::Map::new();
+    let mut offset: usize = 0;
+
+    while offset + 8 <= data.len() {
+        let chunk_id = &data[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes([
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]) as usize;
+
+        let chunk_data_start = offset + 8;
+        let chunk_data_end = (chunk_data_start + chunk_size).min(data.len());
+
+        if chunk_data_start > data.len() {
+            break;
+        }
+
+        let key = match chunk_id {
+            b"INAM" => Some("title"),
+            b"IART" => Some("artist"),
+            b"ICMT" => Some("comment"),
+            b"ICOP" => Some("copyright"),
+            b"IGNR" => Some("genre"),
+            b"ICRD" => Some("year"),
+            b"ISFT" => Some("software"),
+            _ => None,
+        };
+
+        if let Some(key) = key {
+            let text_bytes = &data[chunk_data_start..chunk_data_end];
+            // Strip trailing nulls
+            let trimmed = text_bytes.iter()
+                .rposition(|&b| b != 0)
+                .map(|last| &text_bytes[..=last])
+                .unwrap_or(&[]);
+            if !trimmed.is_empty() {
+                if let Ok(text) = std::str::from_utf8(trimmed) {
+                    tags.insert(key.to_string(), json!(text.to_string()));
+                }
+            }
+        }
+
+        // Advance to next sub-chunk (2-byte aligned)
+        let padded_size = if chunk_size % 2 == 1 { chunk_size + 1 } else { chunk_size };
+        offset = chunk_data_start + padded_size;
+    }
+
+    if !tags.is_empty() {
+        metadata["tags"] = serde_json::Value::Object(tags);
     }
 }
 

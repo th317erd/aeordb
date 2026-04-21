@@ -1237,6 +1237,128 @@ fn exif_to_json_omits_none_fields() {
 }
 
 // ===========================================================================
+// MP4 iTunes metadata tests
+// ===========================================================================
+
+/// Build a minimal MP4 with ftyp + moov containing udta/meta/ilst atoms.
+fn build_mp4_with_tags(tags: &[(&[u8; 4], &str)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // ftyp box
+    let ftyp_data = b"isom\x00\x00\x00\x00isom";
+    let ftyp_size = (8 + ftyp_data.len()) as u32;
+    buf.extend_from_slice(&ftyp_size.to_be_bytes());
+    buf.extend_from_slice(b"ftyp");
+    buf.extend_from_slice(ftyp_data);
+
+    // Build ilst content
+    let mut ilst_content = Vec::new();
+    for (atom_type, text) in tags {
+        // data sub-atom: size(4) + "data"(4) + type_indicator(4) + locale(4) + text
+        let data_payload_size = (8 + 8 + text.len()) as u32;
+        let mut data_atom = Vec::new();
+        data_atom.extend_from_slice(&data_payload_size.to_be_bytes());
+        data_atom.extend_from_slice(b"data");
+        data_atom.extend_from_slice(&1u32.to_be_bytes()); // type = UTF-8 text
+        data_atom.extend_from_slice(&0u32.to_be_bytes()); // locale
+        data_atom.extend_from_slice(text.as_bytes());
+
+        // ilst child atom: size(4) + type(4) + data_atom
+        let child_size = (8 + data_atom.len()) as u32;
+        ilst_content.extend_from_slice(&child_size.to_be_bytes());
+        ilst_content.extend_from_slice(*atom_type);
+        ilst_content.extend_from_slice(&data_atom);
+    }
+
+    // ilst box
+    let ilst_size = (8 + ilst_content.len()) as u32;
+    let mut ilst_box = Vec::new();
+    ilst_box.extend_from_slice(&ilst_size.to_be_bytes());
+    ilst_box.extend_from_slice(b"ilst");
+    ilst_box.extend_from_slice(&ilst_content);
+
+    // meta box (full box: 4-byte version/flags before children)
+    let meta_size = (8 + 4 + ilst_box.len()) as u32;
+    let mut meta_box = Vec::new();
+    meta_box.extend_from_slice(&meta_size.to_be_bytes());
+    meta_box.extend_from_slice(b"meta");
+    meta_box.extend_from_slice(&[0u8; 4]); // version + flags
+    meta_box.extend_from_slice(&ilst_box);
+
+    // udta box
+    let udta_size = (8 + meta_box.len()) as u32;
+    let mut udta_box = Vec::new();
+    udta_box.extend_from_slice(&udta_size.to_be_bytes());
+    udta_box.extend_from_slice(b"udta");
+    udta_box.extend_from_slice(&meta_box);
+
+    // moov box with just udta
+    let moov_size = (8 + udta_box.len()) as u32;
+    buf.extend_from_slice(&moov_size.to_be_bytes());
+    buf.extend_from_slice(b"moov");
+    buf.extend_from_slice(&udta_box);
+
+    buf
+}
+
+#[test]
+fn mp4_extracts_itunes_metadata() {
+    let mp4 = build_mp4_with_tags(&[
+        (b"\xa9nam", "Mountain Timelapse"),
+        (b"\xa9ART", "Jane Doe"),
+        (b"desc", "4K timelapse of sunset"),
+        (b"cprt", "2026 Jane Doe"),
+        (b"\xa9cmt", "Shot with Canon R5"),
+        (b"\xa9day", "2026"),
+        (b"\xa9too", "HandBrake 1.8.0"),
+    ]);
+
+    let result = parse_native(&mp4, "video/mp4", "timelapse.mp4", "/timelapse.mp4", mp4.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("MP4 should parse");
+    assert_eq!(json["metadata"]["format"], "mp4");
+    assert_eq!(json["metadata"]["tags"]["title"], "Mountain Timelapse");
+    assert_eq!(json["metadata"]["tags"]["artist"], "Jane Doe");
+    assert_eq!(json["metadata"]["tags"]["description"], "4K timelapse of sunset");
+    assert_eq!(json["metadata"]["tags"]["copyright"], "2026 Jane Doe");
+    assert_eq!(json["metadata"]["tags"]["comment"], "Shot with Canon R5");
+    assert_eq!(json["metadata"]["tags"]["year"], "2026");
+    assert_eq!(json["metadata"]["tags"]["encoder"], "HandBrake 1.8.0");
+}
+
+#[test]
+fn mp4_without_udta_has_no_tags() {
+    // Minimal MP4 with just ftyp + moov (no udta)
+    let mut buf = Vec::new();
+
+    // ftyp
+    let ftyp_data = b"isom\x00\x00\x00\x00isom";
+    let ftyp_size = (8 + ftyp_data.len()) as u32;
+    buf.extend_from_slice(&ftyp_size.to_be_bytes());
+    buf.extend_from_slice(b"ftyp");
+    buf.extend_from_slice(ftyp_data);
+
+    // Empty moov
+    buf.extend_from_slice(&8u32.to_be_bytes());
+    buf.extend_from_slice(b"moov");
+
+    let result = parse_native(&buf, "video/mp4", "video.mp4", "/video.mp4", buf.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("MP4 should parse");
+    assert_eq!(json["metadata"]["format"], "mp4");
+    assert!(json["metadata"].get("tags").is_none(), "no tags when no udta present");
+}
+
+#[test]
+fn mp4_with_empty_ilst_has_no_tags() {
+    let mp4 = build_mp4_with_tags(&[]);
+    let result = parse_native(&mp4, "video/mp4", "empty.mp4", "/empty.mp4", mp4.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("MP4 should parse");
+    assert!(json["metadata"].get("tags").is_none(), "no tags when ilst is empty");
+}
+
+// ===========================================================================
 // WAV RIFF INFO chunk tests
 // ===========================================================================
 
