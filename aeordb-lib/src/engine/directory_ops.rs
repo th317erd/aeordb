@@ -1018,6 +1018,21 @@ impl<'a> DirectoryOps<'a> {
     path: &str,
     target: &str,
   ) -> EngineResult<SymlinkRecord> {
+    // SECURITY: Reject control characters in both path and target BEFORE
+    // normalization. JSON deserializes \r\n into actual CR+LF bytes (0x0D, 0x0A)
+    // which normalize_path does NOT strip. This prevents CRLF injection and
+    // other control character attacks in symlink paths and targets.
+    if path.bytes().any(|b| (b < 0x20 && b != 0) || b == 0x7F) {
+      return Err(EngineError::InvalidInput(
+        "Symlink path contains control characters".to_string()
+      ));
+    }
+    if target.bytes().any(|b| (b < 0x20 && b != 0) || b == 0x7F) {
+      return Err(EngineError::InvalidInput(
+        "Symlink target contains control characters".to_string()
+      ));
+    }
+
     let normalized = normalize_path(path);
     let normalized_target = normalize_path(target);
 

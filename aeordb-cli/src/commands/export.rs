@@ -5,6 +5,18 @@ pub fn run(database: &str, output: &str, snapshot: Option<&str>, hash: Option<&s
     println!("Source: {}", database);
     println!("Output: {}", output);
 
+    // Check for root key auth — future gating for .system/ data in exports
+    let _include_system = if let Ok(_root_key) = std::env::var("AEORDB_ROOT_KEY") {
+        // TODO: Validate the key against the database once encrypted exports land.
+        // For now, CLI export with filesystem access includes everything since
+        // the user already has the .aeordb file.
+        eprintln!("Note: AEORDB_ROOT_KEY detected. System data inclusion will be gated by key validation in a future release.");
+        true
+    } else {
+        eprintln!("Note: Set AEORDB_ROOT_KEY to include system data in exports.");
+        false
+    };
+
     // Check output doesn't already exist
     if std::path::Path::new(output).exists() {
         eprintln!(

@@ -185,10 +185,18 @@ pub async fn get_stats(
         0.0
     };
 
+    // SECURITY: Only expose the database filename, not the full absolute path.
+    // The full path leaks server filesystem layout to authenticated users.
+    let db_filename = std::path::Path::new(db_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     let stats = EnhancedStats {
         identity: StatsIdentity {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            database_path: db_path.clone(),
+            database_path: db_filename,
             hash_algorithm,
             chunk_size: DEFAULT_CHUNK_SIZE,
             node_id: 1,

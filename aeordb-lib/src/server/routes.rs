@@ -30,7 +30,13 @@ pub async fn health_check(
     &state.peer_manager,
     state.startup_time,
   );
-  Json(report)
+  // SECURITY: Only expose the top-level status publicly. Detailed checks
+  // (engine stats, disk info, peer counts, auth mode) leak internal state
+  // that aids attackers. Load balancers only need the status string.
+  Json(serde_json::json!({
+    "status": report.status,
+    "version": env!("CARGO_PKG_VERSION"),
+  }))
 }
 
 // ---------------------------------------------------------------------------
