@@ -5,6 +5,7 @@ import '/system/portal/shared/components/aeor-crudlify.js';
 import '/system/portal/dashboard.mjs';
 import '/system/portal/users.mjs';
 import '/system/portal/groups.mjs';
+import '/system/portal/files.mjs';
 
 // Auth state management
 const AUTH = {
@@ -172,6 +173,9 @@ function navigate() {
       break;
     case 'groups':
       main.appendChild(getOrCreatePage('aeor-groups'));
+      break;
+    case 'files':
+      main.appendChild(getOrCreatePage('aeor-files'));
       break;
     default:
       main.appendChild(getOrCreatePage('aeor-dashboard'));
