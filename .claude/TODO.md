@@ -126,11 +126,11 @@
 
 ---
 
-## In Progress
+## Completed: Final Polish
 
-- [ ] Migrate plugin routes to /files/plugins/ + /plugins/{name}/invoke
-- [ ] Wire shared web components into portal and client
-- [ ] Fix stress test read mode (generates non-existent paths)
+- [x] Migrate plugin routes to /plugins/{name}/invoke (handler sigs, middleware, tests)
+- [x] Wire shared web components into portal (crudlify, shared assets via include_str!)
+- [x] Fix stress test read mode (discovers existing files before starting workers)
 
 ## Future Plans (Not Started)
 
