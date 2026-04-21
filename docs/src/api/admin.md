@@ -627,15 +627,18 @@ curl http://localhost:6830/system/stats \
 
 ### GET /system/health
 
-Public health check endpoint. No authentication required.
+Public health check endpoint. No authentication required. Returns only a minimal status object -- no detailed internal checks are exposed.
 
 **Response:** `200 OK`
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "version": "0.9.0"
 }
 ```
+
+The response contains only `status` (either `"ok"` or `"degraded"`) and `version` (the server version string). For detailed system diagnostics, use `GET /system/stats` instead (requires authentication).
 
 **Example:**
 

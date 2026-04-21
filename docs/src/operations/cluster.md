@@ -16,18 +16,18 @@ Add peers at startup or at runtime:
 
 ```bash
 # At startup
-aeordb start -D data.aeordb --peers "node2:3000,node3:3000"
+aeordb start -D data.aeordb --peers "node2:6830,node3:6830"
 
 # At runtime
 curl -X POST http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"address": "https://node2:3000", "label": "US West"}'
+  -d '{"address": "https://node2:6830", "label": "US West"}'
 ```
 
 ### Authentication
 
-All `/sync/*` endpoints require JWT authentication. Nodes use root JWT tokens (nil UUID) for peer-to-peer sync, which grants full access including `/.system/` entries.
+All `/sync/*` endpoints require JWT authentication. Nodes use root JWT tokens (nil UUID) for peer-to-peer sync. The `.system/` namespace is never exposed through the HTTP file APIs (`/files/`, `/links/`, `/blobs/`) -- not even to root users. Instead, the sync system transfers `.system/` data internally through the `/sync/diff` and `/sync/chunks` endpoints when the caller is authenticated as a root JWT user (handled automatically via the `SyncCaller::RootUser` mechanism). Operators do not need to manage `.system/` data manually.
 
 ### TLS
 
@@ -102,7 +102,7 @@ curl -X POST http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "address": "https://cdn-edge:3000",
+    "address": "https://cdn-edge:6830",
     "label": "CDN Edge",
     "sync_paths": ["/public/**"]
   }'
@@ -118,14 +118,13 @@ All sync endpoints use JWT Bearer token authentication:
 
 | Caller | Access Level |
 |--------|-------------|
-| Root JWT (nil UUID) | Full access including `/.system/` |
+| Root JWT (nil UUID) | Full sync access -- `.system/` data is included automatically by the sync internals |
 | Non-root JWT | Filtered access (scoped) |
 
-Root JWT tokens get full access. Non-root tokens get filtered results:
+The `.system/` namespace is completely invisible through all HTTP file APIs, regardless of caller privilege. During sync, `.system/` data is transferred internally when the sync system detects a root JWT caller -- this is handled by the `include_system()` mechanism and requires no operator intervention. Non-root tokens get filtered results:
 
-- `/.system/` entries are excluded from all responses
-- API key scoping rules further restrict which paths are visible
-- Chunks with the `FLAG_SYSTEM` flag are not served
+- API key scoping rules restrict which paths are visible
+- Chunks with the `FLAG_SYSTEM` flag are never served through file APIs
 
 ### Example: Client Sync
 

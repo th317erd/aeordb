@@ -5,10 +5,10 @@ This tutorial walks you through the core operations: storing files, querying, cr
 ## 1. Start the Server
 
 ```bash
-aeordb start --database mydb.aeordb --port 3000 --auth false
+aeordb start --database mydb.aeordb --port 6830 --auth false
 ```
 
-You should see log output indicating the server is listening on port 3000. The `mydb.aeordb` file is created automatically if it does not exist.
+You should see log output indicating the server is listening on port 6830. The `mydb.aeordb` file is created automatically if it does not exist.
 
 ## 2. Store a File
 

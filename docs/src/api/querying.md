@@ -165,7 +165,7 @@ Invert a condition:
 
 ### Nested Boolean Logic
 
-Combinators can be nested arbitrarily:
+Combinators can be nested up to **32 levels deep**. Queries exceeding this depth are rejected with a `400` error. Additionally, a single query can return at most **100,000 results** -- requests that would exceed this ceiling are truncated.
 
 ```json
 {

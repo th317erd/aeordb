@@ -15,7 +15,7 @@ aeordb start [OPTIONS]
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--config` | `-c` | -- | Path to a TOML configuration file |
-| `--port` | `-p` | `3000` | TCP port to listen on |
+| `--port` | `-p` | `6830` | TCP port to listen on |
 | `--host` | | `0.0.0.0` | Bind address |
 | `--database` | `-D` | `data.aeordb` | Path to the `.aeordb` database file |
 | `--log-format` | | `pretty` | Log output format: `pretty` or `json` |

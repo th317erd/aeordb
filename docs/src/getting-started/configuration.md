@@ -14,7 +14,7 @@ Every config key has a 1:1 mapping to a CLI flag. CLI flags override config file
 
 ```toml
 [server]
-port = 3000
+port = 6830
 host = "0.0.0.0"
 log_format = "pretty"
 
@@ -46,7 +46,7 @@ aeordb start [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config`, `-c` | — | Path to a TOML configuration file |
-| `--port`, `-p` | `3000` | HTTP listen port |
+| `--port`, `-p` | `6830` | HTTP listen port |
 | `--host` | `0.0.0.0` | Bind address |
 | `--database`, `-D` | `data.aeordb` | Path to the database file (created if it does not exist) |
 | `--auth` | self-contained | Auth provider URI (see [Auth Modes](#auth-modes)) |
