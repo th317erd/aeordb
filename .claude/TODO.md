@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: ~2,300+ tests, all passing
+## Total: 3,542 tests, all passing
 
 ---
 
@@ -131,6 +131,13 @@
 - [x] Migrate plugin routes to /plugins/{name}/invoke (handler sigs, middleware, tests)
 - [x] Wire shared web components into portal (crudlify, shared assets via include_str!)
 - [x] Fix stress test read mode (discovers existing files before starting workers)
+
+## Completed: Media Parser Metadata Gaps — 16 tests
+
+- [x] Shared EXIF module (exif.rs) with 5 new textual tags + 9 tests
+- [x] Image parser rewired to shared EXIF, TIFF EXIF extraction + 2 tests
+- [x] MP4/MOV iTunes metadata (title, artist, description, copyright, etc.) + 3 tests
+- [x] WAV RIFF INFO chunks (title, artist, comment, copyright, etc.) + 2 tests
 
 ## Future Plans (Not Started)
 
