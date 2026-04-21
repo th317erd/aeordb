@@ -494,7 +494,7 @@ async fn test_deploy_plugin_empty_body_returns_400() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/mytable/_deploy")
+    .uri("/plugins/mytable")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -510,7 +510,7 @@ async fn test_deploy_plugin_invalid_plugin_type_returns_400() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/mytable/_deploy?plugin_type=invalid_type")
+    .uri("/plugins/mytable?plugin_type=invalid_type")
     .header("authorization", &auth)
     .body(Body::from(vec![0u8; 10]))
     .unwrap();
@@ -526,7 +526,7 @@ async fn test_invoke_nonexistent_plugin_returns_404() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/testdb/public/nonexistent/run/_invoke")
+    .uri("/plugins/nonexistent/invoke")
     .header("authorization", &auth)
     .body(Body::from("input"))
     .unwrap();
@@ -542,7 +542,7 @@ async fn test_remove_nonexistent_plugin_returns_404() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/testdb/public/nonexistent/run/_remove")
+    .uri("/plugins/nonexistent")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -569,11 +569,12 @@ async fn test_health_check_returns_ok() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  // Health endpoint now returns a full HealthReport with status "healthy".
+  // Health endpoint returns minimal public response: status + version only.
   assert_eq!(json["status"], "healthy");
-  assert!(json["checks"].is_object());
-  assert!(json["uptime_seconds"].is_number());
   assert!(json["version"].is_string());
+  // Detailed checks are NOT exposed publicly (L1 security fix).
+  assert!(json.get("checks").is_none(), "checks should not be in public health response");
+  assert!(json.get("uptime_seconds").is_none(), "uptime should not be in public health response");
 }
 
 // ---------------------------------------------------------------------------

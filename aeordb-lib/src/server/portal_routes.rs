@@ -16,6 +16,14 @@ const PORTAL_DASHBOARD_MJS: &str = include_str!("../portal/dashboard.mjs");
 const PORTAL_USERS_MJS: &str = include_str!("../portal/users.mjs");
 const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
 const PORTAL_SHARED_UTILS_JS: &str = include_str!("../portal/shared/utils.js");
+const PORTAL_SHARED_API_JS: &str = include_str!("../portal/shared/api.js");
+const PORTAL_SHARED_CRUDLIFY_JS: &str = include_str!("../portal/shared/components/aeor-crudlify.js");
+const PORTAL_SHARED_TOASTS_JS: &str = include_str!("../portal/shared/components/aeor-toasts.js");
+const PORTAL_SHARED_MODAL_JS: &str = include_str!("../portal/shared/components/aeor-modal.js");
+const PORTAL_SHARED_LOGIN_JS: &str = include_str!("../portal/shared/components/aeor-login.js");
+const PORTAL_SHARED_DASHBOARD_JS: &str = include_str!("../portal/shared/components/aeor-dashboard.js");
+const PORTAL_SHARED_TOKENS_CSS: &str = include_str!("../portal/shared/styles/tokens.css");
+const PORTAL_SHARED_COMPONENTS_CSS: &str = include_str!("../portal/shared/styles/components.css");
 
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
@@ -38,11 +46,20 @@ pub async fn portal_asset(
 }
 
 /// Serve shared web-component assets (symlinked into portal/shared/ at build time).
+/// Accepts a wildcard path to support nested directories (e.g., components/aeor-crudlify.js).
 pub async fn portal_shared_asset(
-    axum::extract::Path(filename): axum::extract::Path<String>,
+    axum::extract::Path(path): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let (content, content_type) = match filename.as_str() {
+    let (content, content_type) = match path.as_str() {
         "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
+        "api.js" => (PORTAL_SHARED_API_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-crudlify.js" => (PORTAL_SHARED_CRUDLIFY_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-toasts.js" => (PORTAL_SHARED_TOASTS_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-modal.js" => (PORTAL_SHARED_MODAL_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-login.js" => (PORTAL_SHARED_LOGIN_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-dashboard.js" => (PORTAL_SHARED_DASHBOARD_JS, "application/javascript; charset=utf-8"),
+        "styles/tokens.css" => (PORTAL_SHARED_TOKENS_CSS, "text/css; charset=utf-8"),
+        "styles/components.css" => (PORTAL_SHARED_COMPONENTS_CSS, "text/css; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
 

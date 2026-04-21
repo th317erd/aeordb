@@ -43,8 +43,7 @@ const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
 // NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
-// checks: /files/query, /blobs/*, /versions/*, /{db}/{schema}/{table}/_deploy,
-// /{db}/{schema}/{table}/{fn}/_invoke, /system/events.
+// checks: /files/query, /blobs/*, /versions/*, /plugins/*, /system/events.
 // Consider expanding permission checks to these routes in a future update.
 
 /// Build the full application router with all routes and middleware.
@@ -326,22 +325,9 @@ pub fn create_app_with_all_and_task_queue(
                             .get(symlink_routes::get_symlink)
                             .delete(symlink_routes::delete_symlink))
     // Plugin routes
-    .route(
-      "/{database}/{schema}/{table}/_deploy",
-      put(routes::deploy_plugin),
-    )
-    .route(
-      "/{database}/{schema}/{table}/{function_name}/_invoke",
-      post(routes::invoke_plugin),
-    )
-    .route(
-      "/{database}/_plugins",
-      get(routes::list_plugins),
-    )
-    .route(
-      "/{database}/{schema}/{table}/{function_name}/_remove",
-      delete(routes::remove_plugin),
-    )
+    .route("/plugins/{name}", put(routes::deploy_plugin).delete(routes::remove_plugin))
+    .route("/plugins/{name}/invoke", post(routes::invoke_plugin))
+    .route("/plugins", get(routes::list_plugins))
     // Merge the large-upload and medium-upload routes into the protected group
     .merge(large_upload_routes)
     .merge(medium_upload_routes)
@@ -359,7 +345,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/system/portal", get(portal_routes::portal_index))
     .route("/system/portal/", get(portal_routes::portal_index))
     .route("/system/portal/{filename}", get(portal_routes::portal_asset))
-    .route("/system/portal/shared/{filename}", get(portal_routes::portal_shared_asset))
+    .route("/system/portal/shared/{*path}", get(portal_routes::portal_shared_asset))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));

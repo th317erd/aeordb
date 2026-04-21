@@ -854,8 +854,8 @@ fn test_crudlify_op_from_http_method() {
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.functions", &state), CrudlifyOp::Deploy);
   // PUT to new file -> Create (file doesn't exist)
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/newfile.json", &state), CrudlifyOp::Create);
-  // POST to /_invoke -> Invoke
-  assert_eq!(http_to_crudlify(&Method::POST, "myapp/func/_invoke", &state), CrudlifyOp::Invoke);
+  // POST to /plugins/{name}/invoke -> Invoke
+  assert_eq!(http_to_crudlify(&Method::POST, "plugins/myfunc/invoke", &state), CrudlifyOp::Invoke);
 }
 
 // ---------------------------------------------------------------------------

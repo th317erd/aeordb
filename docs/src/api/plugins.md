@@ -1,6 +1,6 @@
 # Plugin Endpoints
 
-AeorDB supports deploying WebAssembly (WASM) plugins that extend the database with custom logic. Plugins are scoped to a `{database}/{schema}/{table}` namespace.
+AeorDB supports deploying WebAssembly (WASM) plugins that extend the database with custom logic. Plugins are identified by name under the `/plugins` namespace.
 
 ## Native Parsers
 
@@ -34,25 +34,23 @@ Native parsers have zero overhead compared to WASM -- they run as compiled Rust 
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| PUT | `/{db}/{schema}/{table}/_deploy` | Deploy a WASM plugin | Yes |
-| POST | `/{db}/{schema}/{table}/{function}/_invoke` | Invoke a plugin function | Yes |
-| GET | `/{db}/_plugins` | List all deployed plugins | Yes |
-| DELETE | `/{db}/{schema}/{table}/{function}/_remove` | Remove a deployed plugin | Yes |
+| PUT | `/plugins/{name}` | Deploy a WASM plugin | Yes |
+| POST | `/plugins/{name}/invoke` | Invoke a plugin | Yes |
+| GET | `/plugins` | List all deployed plugins | Yes |
+| DELETE | `/plugins/{name}` | Remove a deployed plugin | Yes |
 
 ---
 
-## PUT /{db}/{schema}/{table}/_deploy
+## PUT /plugins/{name}
 
-Deploy a WASM plugin to the given namespace. If a plugin already exists at this path, it is replaced.
+Deploy a WASM plugin with the given name. If a plugin already exists with this name, it is replaced.
 
 ### Request
 
 - **URL parameters:**
-  - `{db}` -- database name
-  - `{schema}` -- schema name
-  - `{table}` -- table name
+  - `{name}` -- plugin name
 - **Query parameters:**
-  - `name` (optional) -- plugin name (defaults to the `{table}` segment)
+  - `name` (optional) -- override the plugin name (defaults to the `{name}` URL segment)
   - `plugin_type` (optional) -- plugin type string (defaults to `"wasm"`)
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
@@ -67,7 +65,7 @@ Returns the plugin metadata:
 ```json
 {
   "name": "my-plugin",
-  "path": "mydb/public/users",
+  "path": "my-plugin",
   "plugin_type": "wasm",
   "deployed_at": "2026-04-13T10:00:00Z"
 }
@@ -76,7 +74,7 @@ Returns the plugin metadata:
 ### Example
 
 ```bash
-curl -X PUT "http://localhost:6830/mydb/public/users/_deploy?name=my-plugin" \
+curl -X PUT "http://localhost:6830/plugins/my-plugin" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @plugin.wasm
 ```
@@ -91,17 +89,14 @@ curl -X PUT "http://localhost:6830/mydb/public/users/_deploy?name=my-plugin" \
 
 ---
 
-## POST /{db}/{schema}/{table}/{function}/_invoke
+## POST /plugins/{name}/invoke
 
-Invoke a deployed plugin's function. The request body is wrapped in a `PluginRequest` envelope with metadata, then passed to the WASM runtime.
+Invoke a deployed plugin. The request body is wrapped in a `PluginRequest` envelope with metadata, then passed to the WASM runtime.
 
 ### Request
 
 - **URL parameters:**
-  - `{db}` -- database name
-  - `{schema}` -- schema name
-  - `{table}` -- table name
-  - `{function}` -- function name to invoke
+  - `{name}` -- plugin name
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
   - `Content-Type` -- depends on what the plugin expects
@@ -115,9 +110,9 @@ The server wraps the raw body into:
 {
   "arguments": "<raw body bytes>",
   "metadata": {
-    "function_name": "compute",
-    "path": "/mydb/public/users/compute",
-    "plugin_path": "mydb/public/users"
+    "name": "my-plugin",
+    "path": "/plugins/my-plugin",
+    "plugin_path": "my-plugin"
   }
 }
 ```
@@ -154,7 +149,7 @@ Plugins have access to the following host functions for interacting with the dat
 ### Example
 
 ```bash
-curl -X POST http://localhost:6830/mydb/public/users/compute/_invoke \
+curl -X POST http://localhost:6830/plugins/my-plugin/invoke \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input": "hello"}'
@@ -164,19 +159,17 @@ curl -X POST http://localhost:6830/mydb/public/users/compute/_invoke \
 
 | Status | Condition |
 |--------|-----------|
-| 404 | Plugin not found at the given path |
+| 404 | Plugin not found |
 | 500 | Plugin invocation failure (runtime error, panic, etc.) |
 
 ---
 
-## GET /{db}/_plugins
+## GET /plugins
 
 List all deployed plugins.
 
 ### Request
 
-- **URL parameters:**
-  - `{db}` -- database name
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
 
@@ -185,35 +178,34 @@ List all deployed plugins.
 **Status:** `200 OK`
 
 ```json
-[
-  {
-    "name": "my-plugin",
-    "path": "mydb/public/users",
-    "plugin_type": "wasm"
-  }
-]
+{
+  "items": [
+    {
+      "name": "my-plugin",
+      "path": "my-plugin",
+      "plugin_type": "wasm"
+    }
+  ]
+}
 ```
 
 ### Example
 
 ```bash
-curl http://localhost:6830/mydb/_plugins \
+curl http://localhost:6830/plugins \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-## DELETE /{db}/{schema}/{table}/{function}/_remove
+## DELETE /plugins/{name}
 
 Remove a deployed plugin.
 
 ### Request
 
 - **URL parameters:**
-  - `{db}` -- database name
-  - `{schema}` -- schema name
-  - `{table}` -- table name
-  - `{function}` -- function name
+  - `{name}` -- plugin name
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
 
@@ -224,14 +216,14 @@ Remove a deployed plugin.
 ```json
 {
   "removed": true,
-  "path": "mydb/public/users"
+  "path": "my-plugin"
 }
 ```
 
 ### Example
 
 ```bash
-curl -X DELETE http://localhost:6830/mydb/public/users/compute/_remove \
+curl -X DELETE http://localhost:6830/plugins/my-plugin \
   -H "Authorization: Bearer $TOKEN"
 ```
 

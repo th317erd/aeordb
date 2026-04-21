@@ -286,6 +286,53 @@ async fn perform_read(
   Ok(())
 }
 
+/// Discover existing file paths under a directory prefix by listing the directory.
+/// Returns a list of full file paths suitable for read operations.
+async fn discover_existing_files(
+  client: &reqwest::Client,
+  target: &str,
+  token: &str,
+  path_prefix: &str,
+) -> Result<Vec<String>, String> {
+  // Ensure the path ends with '/' so the server treats it as a directory listing
+  let normalized_prefix = if path_prefix.ends_with('/') {
+    path_prefix.to_string()
+  } else {
+    format!("{path_prefix}/")
+  };
+  let url = format!("{target}/files{normalized_prefix}");
+
+  let response = client
+    .get(&url)
+    .bearer_auth(token)
+    .send()
+    .await
+    .map_err(|error| format!("directory listing request failed: {error}"))?;
+
+  if !response.status().is_success() {
+    let status = response.status();
+    return Err(format!("directory listing failed with status {status}"));
+  }
+
+  let body: serde_json::Value = response
+    .json()
+    .await
+    .map_err(|error| format!("failed to parse directory listing response: {error}"))?;
+
+  let items = body["items"]
+    .as_array()
+    .ok_or_else(|| "directory listing response missing 'items' array".to_string())?;
+
+  // entry_type 2 = FileRecord; filter out directories and other non-file entries
+  let file_paths: Vec<String> = items
+    .iter()
+    .filter(|item| item["entry_type"].as_u64() == Some(2))
+    .filter_map(|item| item["path"].as_str().map(|path| path.to_string()))
+    .collect();
+
+  Ok(file_paths)
+}
+
 struct WorkerConfiguration {
   client: reqwest::Client,
   target: String,
@@ -501,6 +548,39 @@ pub async fn run(arguments: StressArgs) -> Result<(), String> {
   );
 
   let written_paths: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
+
+  // For read-only mode, discover existing files before starting the timer.
+  // Without this, reads would generate random paths that don't match any files.
+  if operation_type == OperationType::Read {
+    println!(
+      "Discovering existing files at '{}'...",
+      arguments.path_prefix
+    );
+    match discover_existing_files(&client, &arguments.target, &token, &arguments.path_prefix)
+      .await
+    {
+      Ok(paths) if paths.is_empty() => {
+        eprintln!(
+          "Warning: No files found at '{}'. Run a write stress test first.",
+          arguments.path_prefix
+        );
+        return Ok(());
+      }
+      Ok(paths) => {
+        println!("Discovered {} existing files.", paths.len());
+        *written_paths.write().await = paths;
+      }
+      Err(error) => {
+        eprintln!(
+          "Warning: Failed to list directory '{}': {error}",
+          arguments.path_prefix
+        );
+        eprintln!("Run a write stress test first to create files.");
+        return Ok(());
+      }
+    }
+  }
+
   let deadline = Instant::now() + duration;
   let test_start = Instant::now();
 

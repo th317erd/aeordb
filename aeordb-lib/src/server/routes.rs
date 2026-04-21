@@ -49,19 +49,19 @@ pub struct DeployPluginQuery {
   pub plugin_type: Option<String>,
 }
 
-/// PUT /:database/:schema/:table/_deploy — deploy a plugin.
+/// PUT /plugins/:name — deploy a plugin.
 ///
 /// Accepts the WASM binary as the raw request body.
-/// Plugin name comes from the `name` query parameter (defaults to the table segment).
+/// Plugin name comes from the URL path segment.
 /// Plugin type comes from the `plugin_type` query parameter (defaults to "wasm").
 pub async fn deploy_plugin(
   State(state): State<AppState>,
-  Path((database, schema, table)): Path<(String, String, String)>,
+  Path(name): Path<String>,
   Query(query): Query<DeployPluginQuery>,
   body: axum::body::Bytes,
 ) -> Response {
-  let plugin_path = format!("{}/{}/{}", database, schema, table);
-  let plugin_name = query.name.unwrap_or_else(|| table.clone());
+  let plugin_path = name.clone();
+  let plugin_name = query.name.unwrap_or_else(|| name.clone());
 
   let plugin_type_string = query.plugin_type.unwrap_or_else(|| "wasm".to_string());
   let plugin_type: crate::plugins::PluginType = match plugin_type_string.parse() {
@@ -106,7 +106,7 @@ pub async fn deploy_plugin(
   }
 }
 
-/// POST /:database/:schema/:table/:function_name/_invoke — invoke a deployed plugin.
+/// POST /plugins/:name/invoke — invoke a deployed plugin.
 ///
 /// Wraps the raw request body in a `PluginRequest` envelope with metadata,
 /// passes it through the WASM runtime with engine context, then deserializes
@@ -116,20 +116,20 @@ pub async fn deploy_plugin(
 pub async fn invoke_plugin(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
-  Path((database, schema, table, function_name)): Path<(String, String, String, String)>,
+  Path(name): Path<String>,
   body: axum::body::Bytes,
 ) -> Response {
-  let plugin_path = format!("{}/{}/{}", database, schema, table);
+  let plugin_path = name.clone();
 
   // Build a PluginRequest envelope with metadata about the invocation.
   let plugin_request = aeordb_plugin_sdk::PluginRequest {
     arguments: body.to_vec(),
     metadata: {
       let mut meta = std::collections::HashMap::new();
-      meta.insert("function_name".to_string(), function_name.clone());
+      meta.insert("name".to_string(), name.clone());
       meta.insert(
         "path".to_string(),
-        format!("/{}/{}/{}/{}", database, schema, table, function_name),
+        format!("/plugins/{}", name),
       );
       meta.insert("plugin_path".to_string(), plugin_path.clone());
       meta
@@ -208,10 +208,9 @@ pub async fn invoke_plugin(
   }
 }
 
-/// GET /:database/_plugins — list all deployed plugins.
+/// GET /plugins — list all deployed plugins.
 pub async fn list_plugins(
   State(state): State<AppState>,
-  Path(_database): Path<String>,
 ) -> Response {
   match state.plugin_manager.list_plugins() {
     Ok(plugins) => match serde_json::to_value(plugins) {
@@ -232,12 +231,12 @@ pub async fn list_plugins(
   }
 }
 
-/// DELETE /:database/:schema/:table/:function_name/_remove — remove a deployed plugin.
+/// DELETE /plugins/:name — remove a deployed plugin.
 pub async fn remove_plugin(
   State(state): State<AppState>,
-  Path((database, schema, table, _function_name)): Path<(String, String, String, String)>,
+  Path(name): Path<String>,
 ) -> Response {
-  let plugin_path = format!("{}/{}/{}", database, schema, table);
+  let plugin_path = name.clone();
 
   match state.plugin_manager.remove_plugin(&plugin_path) {
     Ok(true) => (

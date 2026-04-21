@@ -126,9 +126,15 @@
 
 ---
 
+## In Progress
+
+- [ ] Migrate plugin routes to /files/plugins/ + /plugins/{name}/invoke
+- [ ] Wire shared web components into portal and client
+- [ ] Fix stress test read mode (generates non-existent paths)
+
 ## Future Plans (Not Started)
 
+- [ ] Void reuse (wire find_void into store_entry — fill gaps before appending)
 - [ ] Fork merging (true merge with conflict detection)
-- [ ] File defragmentation (rewrite file to eliminate voids)
 - [ ] Encryption, vaults, zero-knowledge multi-user storage
 - [ ] Multi-database sharding

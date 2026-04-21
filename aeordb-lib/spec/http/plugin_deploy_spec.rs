@@ -81,7 +81,7 @@ async fn test_deploy_wasm_plugin_returns_200() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/myfunc/_deploy?name=myfunc")
+    .uri("/plugins/myfunc")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -91,7 +91,7 @@ async fn test_deploy_wasm_plugin_returns_200() {
 
   let json = body_json(response.into_body()).await;
   assert_eq!(json["name"], "myfunc");
-  assert_eq!(json["path"], "testdb/public/myfunc");
+  assert_eq!(json["path"], "myfunc");
   assert_eq!(json["plugin_type"], "wasm");
   assert!(json["plugin_id"].is_string());
 }
@@ -104,7 +104,7 @@ async fn test_deploy_invalid_wasm_returns_400() {
   let garbage = vec![0x00, 0x61, 0x73, 0x6d, 0xFF, 0xFF, 0xFF, 0xFF];
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/badfunc/_deploy?name=badfunc")
+    .uri("/plugins/badfunc")
     .header("authorization", &auth)
     .body(Body::from(garbage))
     .unwrap();
@@ -123,7 +123,7 @@ async fn test_deploy_empty_body_returns_400() {
 
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/empty/_deploy?name=empty")
+    .uri("/plugins/empty")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -142,7 +142,7 @@ async fn test_invoke_deployed_plugin_returns_result() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy_request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/echo/_deploy?name=echo")
+    .uri("/plugins/echo")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -157,7 +157,7 @@ async fn test_invoke_deployed_plugin_returns_result() {
   let app = rebuild_app(&jwt_manager, &engine);
   let invoke_request = Request::builder()
     .method("POST")
-    .uri("/testdb/public/echo/handle/_invoke")
+    .uri("/plugins/echo/invoke")
     .header("authorization", &auth)
     .body(Body::from("hello plugin"))
     .unwrap();
@@ -176,13 +176,13 @@ async fn test_invoke_deployed_plugin_returns_result() {
     .map(|v| v.as_u64().unwrap() as u8)
     .collect();
   assert_eq!(arguments, b"hello plugin");
-  // Metadata should contain the function_name and path.
-  assert_eq!(echoed["metadata"]["function_name"], "handle");
+  // Metadata should contain the name and path.
+  assert_eq!(echoed["metadata"]["name"], "echo");
   assert_eq!(
     echoed["metadata"]["path"],
-    "/testdb/public/echo/handle"
+    "/plugins/echo"
   );
-  assert_eq!(echoed["metadata"]["plugin_path"], "testdb/public/echo");
+  assert_eq!(echoed["metadata"]["plugin_path"], "echo");
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn test_invoke_nonexistent_plugin_returns_404() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/testdb/public/missing/handle/_invoke")
+    .uri("/plugins/missing/invoke")
     .header("authorization", &auth)
     .body(Body::from("data"))
     .unwrap();
@@ -211,7 +211,7 @@ async fn test_list_deployed_plugins() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/func_a/_deploy?name=func_a")
+    .uri("/plugins/func_a")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes.clone()))
     .unwrap();
@@ -220,7 +220,7 @@ async fn test_list_deployed_plugins() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/func_b/_deploy?name=func_b")
+    .uri("/plugins/func_b")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -230,7 +230,7 @@ async fn test_list_deployed_plugins() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("GET")
-    .uri("/testdb/_plugins")
+    .uri("/plugins")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -252,7 +252,7 @@ async fn test_remove_deployed_plugin() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/removeme/_deploy?name=removeme")
+    .uri("/plugins/removeme")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -262,7 +262,7 @@ async fn test_remove_deployed_plugin() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri("/testdb/public/removeme/handle/_remove")
+    .uri("/plugins/removeme")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -276,7 +276,7 @@ async fn test_remove_deployed_plugin() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("POST")
-    .uri("/testdb/public/removeme/handle/_invoke")
+    .uri("/plugins/removeme/invoke")
     .header("authorization", &auth)
     .body(Body::from("data"))
     .unwrap();
@@ -291,7 +291,7 @@ async fn test_deploy_requires_auth() {
   let wasm_bytes = minimal_wasm_bytes();
   let request = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/func/_deploy?name=func")
+    .uri("/plugins/func")
     // No authorization header
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -306,7 +306,7 @@ async fn test_list_plugins_requires_auth() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/testdb/_plugins")
+    .uri("/plugins")
     .body(Body::empty())
     .unwrap();
 
@@ -372,7 +372,7 @@ async fn test_invoke_plugin_response_status_code_propagated() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/resp/_deploy?name=resp")
+    .uri("/plugins/resp")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -382,7 +382,7 @@ async fn test_invoke_plugin_response_status_code_propagated() {
   let app = rebuild_app(&jwt_manager, &engine);
   let invoke = Request::builder()
     .method("POST")
-    .uri("/testdb/public/resp/run/_invoke")
+    .uri("/plugins/resp/invoke")
     .header("authorization", &auth)
     .body(Body::from("ignored"))
     .unwrap();
@@ -416,7 +416,7 @@ async fn test_invoke_plugin_fallback_for_non_plugin_response() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/echo2/_deploy?name=echo2")
+    .uri("/plugins/echo2")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -426,7 +426,7 @@ async fn test_invoke_plugin_fallback_for_non_plugin_response() {
   let app = rebuild_app(&jwt_manager, &engine);
   let invoke = Request::builder()
     .method("POST")
-    .uri("/testdb/public/echo2/run/_invoke")
+    .uri("/plugins/echo2/invoke")
     .header("authorization", &auth)
     .body(Body::from("raw data"))
     .unwrap();
@@ -451,7 +451,7 @@ async fn test_invoke_plugin_metadata_includes_function_name() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/meta/_deploy?name=meta")
+    .uri("/plugins/meta")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -461,7 +461,7 @@ async fn test_invoke_plugin_metadata_includes_function_name() {
   let app = rebuild_app(&jwt_manager, &engine);
   let invoke = Request::builder()
     .method("POST")
-    .uri("/testdb/public/meta/my_func/_invoke")
+    .uri("/plugins/meta/invoke")
     .header("authorization", &auth)
     .body(Body::from("test"))
     .unwrap();
@@ -470,9 +470,9 @@ async fn test_invoke_plugin_metadata_includes_function_name() {
 
   let bytes = body_bytes(response.into_body()).await;
   let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-  assert_eq!(echoed["metadata"]["function_name"], "my_func");
-  assert_eq!(echoed["metadata"]["path"], "/testdb/public/meta/my_func");
-  assert_eq!(echoed["metadata"]["plugin_path"], "testdb/public/meta");
+  assert_eq!(echoed["metadata"]["name"], "meta");
+  assert_eq!(echoed["metadata"]["path"], "/plugins/meta");
+  assert_eq!(echoed["metadata"]["plugin_path"], "meta");
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn test_invoke_plugin_empty_body() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy = Request::builder()
     .method("PUT")
-    .uri("/testdb/public/emptybody/_deploy?name=emptybody")
+    .uri("/plugins/emptybody")
     .header("authorization", &auth)
     .body(Body::from(wasm_bytes))
     .unwrap();
@@ -494,7 +494,7 @@ async fn test_invoke_plugin_empty_body() {
   let app = rebuild_app(&jwt_manager, &engine);
   let invoke = Request::builder()
     .method("POST")
-    .uri("/testdb/public/emptybody/handle/_invoke")
+    .uri("/plugins/emptybody/invoke")
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -518,7 +518,7 @@ async fn test_invoke_requires_auth() {
 
   let request = Request::builder()
     .method("POST")
-    .uri("/testdb/public/func/handle/_invoke")
+    .uri("/plugins/func/invoke")
     .body(Body::from("data"))
     .unwrap();
 
@@ -532,7 +532,7 @@ async fn test_remove_requires_auth() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri("/testdb/public/func/handle/_remove")
+    .uri("/plugins/func")
     .body(Body::empty())
     .unwrap();
 

@@ -241,7 +241,7 @@ pub async fn permission_middleware(
 /// - GET on directory (ends with '/') -> List
 /// - GET/HEAD -> Read
 /// - DELETE -> Delete
-/// - POST to /_invoke -> Invoke
+/// - POST to /plugins/{name}/invoke -> Invoke
 pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> CrudlifyOp {
   // Check for special file names in the path.
   let file_name = path.rsplit('/').next().unwrap_or("");
@@ -270,7 +270,7 @@ pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> Crudli
   }
 
   if *method == Method::POST {
-    if path.contains("/_invoke") {
+    if path.ends_with("/invoke") && path.starts_with("plugins/") {
       return CrudlifyOp::Invoke;
     }
     // Default POST to Create.
