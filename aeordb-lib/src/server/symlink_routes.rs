@@ -66,6 +66,11 @@ pub async fn create_symlink(
             });
             (StatusCode::CREATED, Json(response)).into_response()
         }
+        Err(crate::engine::errors::EngineError::InvalidInput(msg)) => {
+            ErrorResponse::new(msg)
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response()
+        }
         Err(error) => {
             tracing::error!("Failed to create symlink at '{}': {}", path, error);
             ErrorResponse::new(format!("Failed to create symlink: {}", error))

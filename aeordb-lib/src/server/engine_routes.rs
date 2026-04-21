@@ -882,15 +882,8 @@ pub async fn engine_get_by_hash(
   Extension(_claims): Extension<TokenClaims>,
   Path(hex_hash): Path<String>,
 ) -> Response {
-  // M3: Restrict hash-based blob access to root users only.
-  // Direct hash lookups bypass path-level permissions, so only root may use this endpoint.
-  let user_id = uuid::Uuid::parse_str(&_claims.sub).unwrap_or(uuid::Uuid::new_v4());
-  if !is_root(&user_id) {
-    return ErrorResponse::new("Root access required for hash-based lookups".to_string())
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
-  }
-
+  // Any authenticated user can fetch by hash. System-flagged entries
+  // return 404 (system hashes use a separate domain, can't be guessed).
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
