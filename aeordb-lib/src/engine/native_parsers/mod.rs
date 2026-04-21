@@ -5,6 +5,7 @@
 /// types return `None`, falling through to the WASM plugin system.
 
 mod text;
+pub mod exif;
 mod html;
 mod image;
 mod audio;

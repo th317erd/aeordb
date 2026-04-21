@@ -1051,3 +1051,187 @@ fn real_rust_source() {
             lines, json["metadata"]["word_count"].as_u64().unwrap_or(0));
     }
 }
+
+// ===========================================================================
+// Shared EXIF module tests
+// ===========================================================================
+
+use aeordb::engine::native_parsers::exif::{parse_exif, ExifData};
+
+/// Build a minimal TIFF/IFD buffer with the given IFD entries.
+/// Each entry is (tag: u16, data_type: u16, count: u32, value_or_offset: u32).
+/// For ASCII strings longer than 4 bytes, `extra_data` is appended after the
+/// IFD and `value_or_offset` should point to it (offset from start of buffer).
+fn build_tiff_ifd(entries: &[(u16, u16, u32, u32)], extra_data: &[u8], little_endian: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // TIFF header: byte order (2) + magic 42 (2) + IFD offset (4)
+    if little_endian {
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&8u32.to_le_bytes()); // IFD starts at byte 8
+    } else {
+        buf.extend_from_slice(b"MM");
+        buf.extend_from_slice(&42u16.to_be_bytes());
+        buf.extend_from_slice(&8u32.to_be_bytes());
+    }
+
+    // IFD: entry count (2) + entries (12 each) + next IFD offset (4)
+    let count = entries.len() as u16;
+    if little_endian {
+        buf.extend_from_slice(&count.to_le_bytes());
+    } else {
+        buf.extend_from_slice(&count.to_be_bytes());
+    }
+
+    for &(tag, dtype, count, value) in entries {
+        if little_endian {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&dtype.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&value.to_le_bytes());
+        } else {
+            buf.extend_from_slice(&tag.to_be_bytes());
+            buf.extend_from_slice(&dtype.to_be_bytes());
+            buf.extend_from_slice(&count.to_be_bytes());
+            buf.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    // Next IFD offset = 0 (no more IFDs)
+    buf.extend_from_slice(&[0u8; 4]);
+
+    // Extra data (strings, GPS rationals, etc.)
+    buf.extend_from_slice(extra_data);
+
+    buf
+}
+
+#[test]
+fn exif_parses_camera_make_and_model() {
+    // "Canon\0" at offset after IFD, "EOS R5\0" right after
+    let ifd_end = 8 + 2 + (2 * 12) + 4; // header + count + 2 entries + next_ifd
+    let make = b"Canon\0";
+    let model = b"EOS R5\0";
+    let make_offset = ifd_end as u32;
+    let model_offset = (ifd_end + make.len()) as u32;
+
+    let entries = vec![
+        (0x010F, 2, make.len() as u32, make_offset),   // Make
+        (0x0110, 2, model.len() as u32, model_offset),  // Model
+    ];
+    let mut extra = Vec::new();
+    extra.extend_from_slice(make);
+    extra.extend_from_slice(model);
+
+    let buf = build_tiff_ifd(&entries, &extra, true);
+    let exif = parse_exif(&buf).expect("should parse EXIF");
+    assert_eq!(exif.camera_make.as_deref(), Some("Canon"));
+    assert_eq!(exif.camera_model.as_deref(), Some("EOS R5"));
+}
+
+#[test]
+fn exif_parses_new_textual_tags() {
+    let ifd_end = 8 + 2 + (5 * 12) + 4; // 5 entries
+    let desc = b"Sunset photo\0";
+    let artist = b"Jane Doe\0";
+    let copyright = b"2026 Jane Doe\0";
+    let software = b"Lightroom\0";
+
+    let mut offset = ifd_end as u32;
+    let desc_off = offset; offset += desc.len() as u32;
+    let artist_off = offset; offset += artist.len() as u32;
+    let copyright_off = offset; offset += copyright.len() as u32;
+    let software_off = offset;
+
+    let entries = vec![
+        (0x010E, 2, desc.len() as u32, desc_off),         // ImageDescription
+        (0x013B, 2, artist.len() as u32, artist_off),      // Artist
+        (0x8298, 2, copyright.len() as u32, copyright_off), // Copyright
+        (0x0131, 2, software.len() as u32, software_off),  // Software
+        (0x0112, 3, 1, 6),                                  // Orientation = 6 (SHORT inline)
+    ];
+    let mut extra = Vec::new();
+    extra.extend_from_slice(desc);
+    extra.extend_from_slice(artist);
+    extra.extend_from_slice(copyright);
+    extra.extend_from_slice(software);
+
+    let buf = build_tiff_ifd(&entries, &extra, true);
+    let exif = parse_exif(&buf).expect("should parse EXIF");
+    assert_eq!(exif.image_description.as_deref(), Some("Sunset photo"));
+    assert_eq!(exif.artist.as_deref(), Some("Jane Doe"));
+    assert_eq!(exif.copyright.as_deref(), Some("2026 Jane Doe"));
+    assert_eq!(exif.software.as_deref(), Some("Lightroom"));
+    assert_eq!(exif.orientation, Some(6));
+}
+
+#[test]
+fn exif_parses_big_endian() {
+    let ifd_end = 8 + 2 + (1 * 12) + 4;
+    let make = b"Nikon\0";
+    let make_offset = ifd_end as u32;
+
+    let entries = vec![
+        (0x010F, 2, make.len() as u32, make_offset),
+    ];
+    let buf = build_tiff_ifd(&entries, make, false); // big-endian
+    let exif = parse_exif(&buf).expect("should parse big-endian EXIF");
+    assert_eq!(exif.camera_make.as_deref(), Some("Nikon"));
+}
+
+#[test]
+fn exif_returns_none_for_empty_data() {
+    assert!(parse_exif(&[]).is_none());
+    assert!(parse_exif(&[0; 4]).is_none());
+}
+
+#[test]
+fn exif_returns_none_for_invalid_byte_order() {
+    let mut buf = vec![0x00, 0x00]; // invalid byte order
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    assert!(parse_exif(&buf).is_none());
+}
+
+#[test]
+fn exif_returns_none_for_wrong_magic() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&99u16.to_le_bytes()); // wrong magic (not 42)
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    assert!(parse_exif(&buf).is_none());
+}
+
+#[test]
+fn exif_returns_none_when_no_tags_present() {
+    // Valid TIFF header but zero IFD entries
+    let buf = build_tiff_ifd(&[], &[], true);
+    assert!(parse_exif(&buf).is_none());
+}
+
+#[test]
+fn exif_handles_truncated_ifd_gracefully() {
+    // Valid header pointing to IFD at offset 8, but buffer ends before IFD data
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    // Only 8 bytes — IFD count would need 2 more bytes
+    assert!(parse_exif(&buf).is_none());
+}
+
+#[test]
+fn exif_to_json_omits_none_fields() {
+    let data = ExifData {
+        camera_make: Some("Canon".into()),
+        artist: Some("Jane".into()),
+        ..Default::default()
+    };
+    let json = data.to_json();
+    assert_eq!(json["camera_make"], "Canon");
+    assert_eq!(json["artist"], "Jane");
+    assert!(json.get("camera_model").is_none());
+    assert!(json.get("copyright").is_none());
+    assert!(json.get("gps_latitude").is_none());
+}
