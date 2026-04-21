@@ -1,63 +1,14 @@
 'use strict';
 
-function formatBytes(bytes) {
-  if (bytes === 0)
-    return '0 B';
-
-  const kilobyte = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const index = Math.floor(Math.log(bytes) / Math.log(kilobyte));
-  return parseFloat((bytes / Math.pow(kilobyte, index)).toFixed(1)) + ' ' + sizes[index];
-}
-
-function formatNumber(number) {
-  return number.toLocaleString();
-}
-
-function formatRate(value) {
-  if (value == null)
-    return '\u2014';
-
-  return (value < 10) ? value.toFixed(2) : formatNumber(Math.round(value));
-}
-
-function formatBytesRate(bytesPerSec) {
-  if (bytesPerSec == null || bytesPerSec === 0)
-    return '0 B/s';
-
-  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-  const index = Math.floor(Math.log(bytesPerSec) / Math.log(1024));
-  const clamped = Math.min(index, units.length - 1);
-  return parseFloat((bytesPerSec / Math.pow(1024, clamped)).toFixed(1)) + ' ' + units[clamped];
-}
-
-function formatPercent(value) {
-  if (value == null)
-    return '\u2014';
-
-  return value.toFixed(1) + '%';
-}
-
-function formatUptime(seconds) {
-  if (seconds == null)
-    return '\u2014';
-
-  const days    = Math.floor(seconds / 86400);
-  const hours   = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs    = Math.floor(seconds % 60);
-
-  if (days > 0)
-    return `${days}d ${hours}h ${minutes}m`;
-
-  if (hours > 0)
-    return `${hours}h ${minutes}m ${secs}s`;
-
-  if (minutes > 0)
-    return `${minutes}m ${secs}s`;
-
-  return `${secs}s`;
-}
+import {
+  escapeHtml,
+  formatBytes,
+  formatNumber,
+  formatRate,
+  formatBytesRate,
+  formatPercent,
+  formatUptime,
+} from '/system/portal/shared/utils.js';
 
 const COUNT_DEFINITIONS = [
   { key: 'files',       label: 'Files',       format: formatNumber },
@@ -639,12 +590,6 @@ class AeorDashboard extends HTMLElement {
       tooltip.style.display = 'none';
     });
   }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 customElements.define('aeor-dashboard', AeorDashboard);

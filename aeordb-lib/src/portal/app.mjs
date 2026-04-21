@@ -1,5 +1,6 @@
 'use strict';
 
+import { escapeHtml } from '/system/portal/shared/utils.js';
 import '/system/portal/dashboard.mjs';
 import '/system/portal/users.mjs';
 import '/system/portal/groups.mjs';
@@ -175,13 +176,6 @@ class AeorLogin extends HTMLElement {
 }
 
 customElements.define('aeor-login', AeorLogin);
-
-// HTML escaping helper
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
 
 // Track whether auth is disabled (--auth=false mode)
 let authDisabled = false;

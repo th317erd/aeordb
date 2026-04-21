@@ -1,5 +1,7 @@
 'use strict';
 
+import { escapeHtml } from '/system/portal/shared/utils.js';
+
 class AeorUsers extends HTMLElement {
   constructor() {
     super();
@@ -310,12 +312,6 @@ class AeorUsers extends HTMLElement {
     if (modalContainer)
       modalContainer.innerHTML = '';
   }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 customElements.define('aeor-users', AeorUsers);

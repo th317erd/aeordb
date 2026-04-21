@@ -359,6 +359,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/system/portal", get(portal_routes::portal_index))
     .route("/system/portal/", get(portal_routes::portal_index))
     .route("/system/portal/{filename}", get(portal_routes::portal_asset))
+    .route("/system/portal/shared/{filename}", get(portal_routes::portal_shared_asset))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));

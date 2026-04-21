@@ -1,5 +1,7 @@
 'use strict';
 
+import { escapeHtml } from '/system/portal/shared/utils.js';
+
 class AeorGroups extends HTMLElement {
   constructor() {
     super();
@@ -250,12 +252,6 @@ class AeorGroups extends HTMLElement {
     if (modalContainer)
       modalContainer.innerHTML = '';
   }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 customElements.define('aeor-groups', AeorGroups);

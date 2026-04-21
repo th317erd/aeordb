@@ -15,6 +15,7 @@ const PORTAL_APP_MJS: &str = include_str!("../portal/app.mjs");
 const PORTAL_DASHBOARD_MJS: &str = include_str!("../portal/dashboard.mjs");
 const PORTAL_USERS_MJS: &str = include_str!("../portal/users.mjs");
 const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
+const PORTAL_SHARED_UTILS_JS: &str = include_str!("../portal/shared/utils.js");
 
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
@@ -30,6 +31,18 @@ pub async fn portal_asset(
         "dashboard.mjs" => (PORTAL_DASHBOARD_MJS, "application/javascript; charset=utf-8"),
         "users.mjs" => (PORTAL_USERS_MJS, "application/javascript; charset=utf-8"),
         "groups.mjs" => (PORTAL_GROUPS_MJS, "application/javascript; charset=utf-8"),
+        _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
+    };
+
+    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+}
+
+/// Serve shared web-component assets (symlinked into portal/shared/ at build time).
+pub async fn portal_shared_asset(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let (content, content_type) = match filename.as_str() {
+        "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
 
