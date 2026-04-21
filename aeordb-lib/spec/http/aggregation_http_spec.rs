@@ -252,7 +252,8 @@ async fn test_aggregate_no_field_returns_error() {
 
     let json = body_json(response.into_body()).await;
     let error_msg = json["error"].as_str().unwrap_or("");
-    assert!(error_msg.contains("No index found"), "error should mention missing index: {}", error_msg);
+    assert!(error_msg.contains("index") && error_msg.contains("nonexistent_field"),
+      "error should mention missing index: {}", error_msg);
 }
 
 // ============================================================================

@@ -41,30 +41,25 @@ impl<'a> IndexingPipeline<'a> {
       None => return Ok(()),
     };
 
-    // Try native parser first (no WASM overhead)
     let ct = content_type.unwrap_or("application/octet-stream");
     let filename = crate::engine::path_utils::file_name(path).unwrap_or_default();
-    let native_result = crate::engine::native_parsers::parse_native(
-      data, ct, &filename, path, data.len() as u64,
-    );
 
-    // Determine parser name: explicit config or content-type registry fallback
-    let parser_name = config.parser.clone()
-      .or_else(|| self.lookup_parser_by_content_type(content_type));
+    // Determine parser names from config and content-type registry
+    let explicit_parser = config.parser.clone();
+    let registry_parser = self.lookup_parser_by_content_type(content_type);
 
-    // Get JSON data: native parser > WASM plugin > raw JSON
-    let json_data = if let Some(result) = native_result {
-      match result {
-        Ok(json) => json,
-        Err(e) => {
-          if config.logging {
-            self.log_system(&parent, "parsing.log",
-              &format!("native parser failed for {}: {}", path, e));
-          }
-          return Ok(());
-        }
-      }
-    } else if let Some(ref parser) = parser_name {
+    // Priority order for the indexing pipeline:
+    // 1. Explicit parser in config — always honored (user's intent)
+    // 2. Content-type registry parser — user mapped this content type
+    // 3. Raw JSON parse — preserves actual field structure for indexing
+    // 4. Native parser — extracts metadata for non-JSON content (images, audio, etc.)
+    //
+    // Note: native parsers wrap data in metadata (text, title, metadata fields),
+    // which is great for search but loses the original field structure needed for
+    // field-level indexing. Raw JSON parsing must come before native parsers so
+    // that JSON data (even with non-JSON content types) gets indexed correctly.
+    let json_data = if let Some(ref parser) = explicit_parser {
+      // Config specifies an explicit parser — always use it
       match self.invoke_parser(parser, data, path, content_type, &config) {
         Ok(json) => json,
         Err(e) => {
@@ -75,17 +70,45 @@ impl<'a> IndexingPipeline<'a> {
           return Ok(());
         }
       }
-    } else {
-      // No parser — try raw data as JSON
-      match self.parse_json(data) {
+    } else if let Some(ref parser) = registry_parser {
+      // Content-type registry maps this content type to a specific parser
+      match self.invoke_parser(parser, data, path, content_type, &config) {
         Ok(json) => json,
         Err(e) => {
           if config.logging {
             self.log_system(&parent, "parsing.log",
-              &format!("JSON parse failed for {}: {}", path, e));
+              &format!("parser '{}' failed for {}: {}", parser, path, e));
           }
-          return Ok(()); // Don't fail the store
+          return Ok(());
         }
+      }
+    } else if let Ok(json) = self.parse_json(data) {
+      // Data is valid JSON — use it directly to preserve field structure
+      json
+    } else {
+      // Not JSON: try native parser for metadata extraction (images, audio, etc.)
+      let native_result = crate::engine::native_parsers::parse_native(
+        data, ct, &filename, path, data.len() as u64,
+      );
+
+      if let Some(result) = native_result {
+        match result {
+          Ok(json) => json,
+          Err(e) => {
+            if config.logging {
+              self.log_system(&parent, "parsing.log",
+                &format!("native parser failed for {}: {}", path, e));
+            }
+            return Ok(());
+          }
+        }
+      } else {
+        // No parser could handle this content — skip indexing
+        if config.logging {
+          self.log_system(&parent, "parsing.log",
+            &format!("no parser available for {}", path));
+        }
+        return Ok(());
       }
     };
 

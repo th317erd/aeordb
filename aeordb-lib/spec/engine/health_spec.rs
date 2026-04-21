@@ -529,6 +529,10 @@ fn test_full_health_check_version_matches_crate_version() {
 
 #[tokio::test]
 async fn test_health_endpoint_returns_full_report() {
+    // L1 security fix: the public health endpoint only exposes {status, version}.
+    // Detailed checks (engine, disk, sync, auth) are NOT returned via HTTP
+    // to avoid leaking internal state. The full HealthReport is tested above
+    // via direct full_health_check() calls.
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
@@ -550,32 +554,14 @@ async fn test_health_endpoint_returns_full_report() {
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    // Verify the response structure matches HealthReport.
+    // Public endpoint returns only status + version (L1 security fix)
     assert!(json["status"].is_string());
-    assert!(json["checks"].is_object());
-    assert!(json["checks"]["engine"].is_object());
-    assert!(json["checks"]["disk"].is_object());
-    assert!(json["checks"]["sync"].is_object());
-    assert!(json["checks"]["auth"].is_object());
-    assert!(json["uptime_seconds"].is_number());
+    assert_eq!(json["status"], "healthy");
     assert!(json["version"].is_string());
 
-    // Engine check should have entry_count and db_file_size_bytes.
-    assert!(json["checks"]["engine"]["entry_count"].is_number());
-    assert!(json["checks"]["engine"]["db_file_size_bytes"].is_number());
-
-    // Disk check should have available_bytes, total_bytes, usage_percent.
-    assert!(json["checks"]["disk"]["available_bytes"].is_number());
-    assert!(json["checks"]["disk"]["total_bytes"].is_number());
-    assert!(json["checks"]["disk"]["usage_percent"].is_number());
-
-    // Sync check should have active_peers and failing_peers.
-    assert!(json["checks"]["sync"]["active_peers"].is_number());
-    assert!(json["checks"]["sync"]["failing_peers"].is_number());
-
-    // Auth check should have mode and signing_key_present.
-    assert!(json["checks"]["auth"]["mode"].is_string());
-    assert!(json["checks"]["auth"]["signing_key_present"].is_boolean());
+    // Detailed checks must NOT be exposed publicly
+    assert!(json.get("checks").is_none(), "checks should not be in public health response");
+    assert!(json.get("uptime_seconds").is_none(), "uptime should not be in public health response");
 }
 
 #[tokio::test]
@@ -610,6 +596,10 @@ async fn test_health_endpoint_no_auth_required() {
 async fn test_health_endpoint_cluster_mode_with_key_healthy() {
     // When peer configs are stored but a signing key exists (bootstrapped by
     // FileAuthProvider::new), auth should be healthy even in cluster mode.
+    // L1 security fix: the HTTP endpoint only exposes {status, version},
+    // so we verify the top-level status is "healthy" and that detailed checks
+    // are NOT leaked. The full HealthReport (including auth mode/key checks)
+    // is tested via direct full_health_check() calls above.
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
@@ -617,8 +607,6 @@ async fn test_health_endpoint_cluster_mode_with_key_healthy() {
 
     let (engine, _temp) = create_temp_engine_for_tests();
     store_peer_configs(&engine, &[make_peer_config(2)]);
-    // Note: create_app_with_jwt_and_engine -> FileAuthProvider::new auto-bootstraps
-    // a signing key, so auth will be healthy.
 
     let jwt_manager = Arc::new(JwtManager::generate());
     let app = aeordb::server::create_app_with_jwt_and_engine(jwt_manager, engine);
@@ -635,9 +623,8 @@ async fn test_health_endpoint_cluster_mode_with_key_healthy() {
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    // Auth should be healthy because FileAuthProvider bootstraps a signing key.
+    // With a bootstrapped signing key, the overall status should be healthy
     assert_eq!(json["status"], "healthy");
-    assert_eq!(json["checks"]["auth"]["status"], "healthy");
-    assert_eq!(json["checks"]["auth"]["mode"], "cluster");
-    assert_eq!(json["checks"]["auth"]["signing_key_present"], true);
+    // Detailed checks must NOT be exposed publicly
+    assert!(json.get("checks").is_none(), "checks should not be in public health response");
 }

@@ -411,19 +411,21 @@ fn test_pipeline_logging_creates_log_on_error() {
   let config = make_config_with_logging("name", "string", true);
   store_index_config(&engine, "/logged", &config);
 
-  // Send non-JSON data — should trigger parse failure log
-  let data = b"this is not json";
+  // Send invalid UTF-8 binary data — not valid JSON, and the native text
+  // parser also rejects it ("not valid UTF-8"), triggering an error log.
+  let data: &[u8] = &[0xFF, 0xFE, 0x00, 0x80];
   let pipeline = IndexingPipeline::new(&engine);
   let ctx = RequestContext::system();
-  pipeline.run(&ctx, "/logged/bad.txt", &data[..], Some("text/plain")).unwrap();
+  pipeline.run(&ctx, "/logged/bad.bin", data, Some("application/octet-stream")).unwrap();
 
   // Check that .logs/system/parsing.log was created
   let ops = DirectoryOps::new(&engine);
   let log_result = ops.read_file("/logged/.logs/system/parsing.log");
   assert!(log_result.is_ok(), "Expected parsing.log to be created");
   let log_content = String::from_utf8(log_result.unwrap()).unwrap();
-  assert!(log_content.contains("JSON parse failed"), "Log should contain parse failure message, got: {}", log_content);
-  assert!(log_content.contains("/logged/bad.txt"), "Log should reference the file path");
+  assert!(log_content.contains("parser") || log_content.contains("failed") || log_content.contains("no parser"),
+    "Log should contain failure message, got: {}", log_content);
+  assert!(log_content.contains("/logged/bad.bin"), "Log should reference the file path");
 }
 
 #[test]
