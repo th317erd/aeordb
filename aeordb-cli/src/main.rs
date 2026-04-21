@@ -31,13 +31,16 @@ enum Commands {
     /// Path to a TOML configuration file
     #[arg(short, long)]
     config: Option<String>,
+    /// HTTP server port (default: 6830)
     #[arg(short, long)]
     port: Option<u16>,
     /// Bind address (default: "0.0.0.0")
     #[arg(long)]
     host: Option<String>,
+    /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long)]
     database: Option<String>,
+    /// Log output format: "pretty", "json", or "compact" (default: "pretty")
     #[arg(long)]
     log_format: Option<String>,
     /// Auth provider URI: disabled/false/null/no/0, self, file:///path/to/identity
@@ -66,53 +69,70 @@ enum Commands {
   Stress(StressArgs),
   /// Emergency reset: revoke the current root API key and generate a new one
   EmergencyReset {
+    /// Path to the database file
     #[arg(short = 'D', long)]
     database: String,
+    /// Skip confirmation prompt
     #[arg(long)]
     force: bool,
   },
   /// Export a version as a self-contained .aeordb file
   Export {
+    /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
+    /// Output file path for the exported .aeordb
     #[arg(short, long)]
     output: String,
+    /// Snapshot name to export (default: current HEAD)
     #[arg(short, long)]
     snapshot: Option<String>,
+    /// Version hash to export (alternative to snapshot name)
     #[arg(long)]
     hash: Option<String>,
   },
   /// Create a patch .aeordb containing only the changeset between two versions
   Diff {
+    /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
+    /// Output file path for the patch .aeordb
     #[arg(short, long)]
     output: String,
+    /// Source version (snapshot name or hash)
     #[arg(long)]
     from: String,
+    /// Target version (default: current HEAD)
     #[arg(long)]
     to: Option<String>,
   },
   /// Import an export or patch .aeordb file into a target database
   Import {
+    /// Path to the target database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
+    /// Path to the .aeordb file to import
     #[arg(short, long)]
     file: String,
+    /// Force import, overwriting conflicts
     #[arg(long)]
     force: bool,
+    /// Promote imported version to HEAD after import
     #[arg(long)]
     promote: bool,
   },
   /// Promote a version hash to HEAD
   Promote {
+    /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
+    /// Version hash to promote to HEAD
     #[arg(long)]
     hash: String,
   },
   /// Run garbage collection to reclaim unreachable entries
   Gc {
+    /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
     /// Report what would be collected without actually deleting
