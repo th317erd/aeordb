@@ -1235,3 +1235,164 @@ fn exif_to_json_omits_none_fields() {
     assert!(json.get("copyright").is_none());
     assert!(json.get("gps_latitude").is_none());
 }
+
+// ===========================================================================
+// WAV RIFF INFO chunk tests
+// ===========================================================================
+
+/// Build a WAV file with fmt + data + LIST/INFO chunks.
+fn build_wav_with_info(info_chunks: &[(&[u8; 4], &str)]) -> Vec<u8> {
+    // Build the INFO sub-chunks
+    let mut info_content = Vec::new();
+    info_content.extend_from_slice(b"INFO");
+    for (id, text) in info_chunks {
+        let text_bytes = text.as_bytes();
+        let chunk_size = text_bytes.len() as u32 + 1; // +1 for null terminator
+        info_content.extend_from_slice(*id);
+        info_content.extend_from_slice(&chunk_size.to_le_bytes());
+        info_content.extend_from_slice(text_bytes);
+        info_content.push(0); // null terminator
+        // Pad to even boundary
+        if (text_bytes.len() + 1) % 2 == 1 {
+            info_content.push(0);
+        }
+    }
+
+    // Build fmt chunk (PCM, stereo, 44100Hz, 16-bit)
+    let mut fmt_data = Vec::new();
+    fmt_data.extend_from_slice(&1u16.to_le_bytes());     // PCM
+    fmt_data.extend_from_slice(&2u16.to_le_bytes());     // 2 channels
+    fmt_data.extend_from_slice(&44100u32.to_le_bytes()); // sample rate
+    fmt_data.extend_from_slice(&176400u32.to_le_bytes()); // byte rate
+    fmt_data.extend_from_slice(&4u16.to_le_bytes());     // block align
+    fmt_data.extend_from_slice(&16u16.to_le_bytes());    // bits per sample
+
+    // Build data chunk (empty audio data)
+    let data_size: u32 = 0;
+
+    // Total RIFF size
+    let riff_content_size = 4  // "WAVE"
+        + 8 + fmt_data.len()   // fmt chunk
+        + 8 + data_size as usize // data chunk
+        + 8 + info_content.len(); // LIST chunk
+
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(riff_content_size as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+
+    // fmt chunk
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&(fmt_data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&fmt_data);
+
+    // data chunk
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+
+    // LIST chunk
+    wav.extend_from_slice(b"LIST");
+    wav.extend_from_slice(&(info_content.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&info_content);
+
+    wav
+}
+
+#[test]
+fn wav_extracts_info_metadata() {
+    let wav = build_wav_with_info(&[
+        (b"INAM", "Forest Ambience"),
+        (b"IART", "Sound Studio"),
+        (b"ICMT", "Field recording"),
+        (b"ICOP", "2026 Sound Studio"),
+        (b"ISFT", "Audacity 3.5"),
+        (b"IGNR", "Ambient"),
+        (b"ICRD", "2026-04-15"),
+    ]);
+
+    let result = parse_native(&wav, "audio/wav", "forest.wav", "/forest.wav", wav.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("WAV should parse");
+    assert_eq!(json["metadata"]["format"], "wav");
+    assert_eq!(json["metadata"]["tags"]["title"], "Forest Ambience");
+    assert_eq!(json["metadata"]["tags"]["artist"], "Sound Studio");
+    assert_eq!(json["metadata"]["tags"]["comment"], "Field recording");
+    assert_eq!(json["metadata"]["tags"]["copyright"], "2026 Sound Studio");
+    assert_eq!(json["metadata"]["tags"]["software"], "Audacity 3.5");
+    assert_eq!(json["metadata"]["tags"]["genre"], "Ambient");
+    assert_eq!(json["metadata"]["tags"]["year"], "2026-04-15");
+}
+
+#[test]
+fn wav_without_info_has_no_tags() {
+    let wav = build_minimal_wav(); // existing helper from this file
+    let result = parse_native(&wav, "audio/wav", "audio.wav", "/audio.wav", wav.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("WAV should parse");
+    assert_eq!(json["metadata"]["format"], "wav");
+    assert!(json["metadata"].get("tags").is_none(), "no tags without INFO chunk");
+}
+
+#[test]
+fn tiff_extracts_exif_metadata() {
+    let ifd_end = 8 + 2 + (2 * 12) + 4;
+    let desc = b"Mountain landscape\0";
+    let artist = b"Photo Pro\0";
+    let desc_off = ifd_end as u32;
+    let artist_off = (ifd_end + desc.len()) as u32;
+
+    let entries = vec![
+        (0x010E_u16, 2_u16, desc.len() as u32, desc_off),
+        (0x013B, 2, artist.len() as u32, artist_off),
+    ];
+    let mut extra = Vec::new();
+    extra.extend_from_slice(desc);
+    extra.extend_from_slice(artist);
+    let tiff_data = build_tiff_ifd(&entries, &extra, true);
+
+    let result = parse_native(&tiff_data, "image/tiff", "photo.tiff", "/photo.tiff", tiff_data.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("TIFF should parse");
+    assert_eq!(json["metadata"]["format"], "tiff");
+    assert_eq!(json["metadata"]["exif"]["image_description"], "Mountain landscape");
+    assert_eq!(json["metadata"]["exif"]["artist"], "Photo Pro");
+}
+
+#[test]
+fn jpeg_exif_includes_new_fields() {
+    let ifd_end = 8 + 2 + (2 * 12) + 4;
+    let desc = b"Beach sunset\0";
+    let artist = b"Jane Doe\0";
+    let desc_off = ifd_end as u32;
+    let artist_off = (ifd_end + desc.len()) as u32;
+
+    let entries = vec![
+        (0x010E_u16, 2_u16, desc.len() as u32, desc_off),
+        (0x013B, 2, artist.len() as u32, artist_off),
+    ];
+    let mut extra = Vec::new();
+    extra.extend_from_slice(desc);
+    extra.extend_from_slice(artist);
+    let tiff_data = build_tiff_ifd(&entries, &extra, true);
+
+    let mut jpeg = vec![0xFF, 0xD8];
+    jpeg.push(0xFF); jpeg.push(0xE1);
+    let app1_length = (2 + 6 + tiff_data.len()) as u16;
+    jpeg.extend_from_slice(&app1_length.to_be_bytes());
+    jpeg.extend_from_slice(b"Exif\x00\x00");
+    jpeg.extend_from_slice(&tiff_data);
+    jpeg.extend_from_slice(&[0xFF, 0xC0]);
+    jpeg.extend_from_slice(&11u16.to_be_bytes());
+    jpeg.push(8);
+    jpeg.extend_from_slice(&100u16.to_be_bytes());
+    jpeg.extend_from_slice(&200u16.to_be_bytes());
+    jpeg.push(3);
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+
+    let result = parse_native(&jpeg, "image/jpeg", "sunset.jpg", "/sunset.jpg", jpeg.len() as u64);
+    assert!(result.is_some());
+    let json = result.unwrap().expect("JPEG should parse");
+    assert_eq!(json["metadata"]["format"], "jpeg");
+    assert_eq!(json["metadata"]["exif"]["image_description"], "Beach sunset");
+    assert_eq!(json["metadata"]["exif"]["artist"], "Jane Doe");
+}

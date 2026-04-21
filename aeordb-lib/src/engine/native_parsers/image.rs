@@ -3,8 +3,12 @@
 /// Ported from `aeordb-plugin-parser-image`.
 
 use serde_json::json;
-
-
+use super::exif;
+use super::exif::{
+    read_u16_big_endian, read_u16_little_endian,
+    read_u32_big_endian, read_u32_little_endian,
+    read_u16, read_u32,
+};
 
 pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Result<serde_json::Value, String> {
     // data is already passed as parameter
@@ -204,7 +208,9 @@ fn parse_jpeg(data: &[u8]) -> FormatResult {
         if marker == 0xE1 && segment_start + segment_length <= data.len() {
             let app1_data = &data[segment_start + 2..segment_end.min(data.len())];
             if app1_data.len() >= 6 && app1_data[0..6] == *b"Exif\x00\x00" {
-                result.exif = parse_exif(&app1_data[6..]);
+                if let Some(exif_data) = exif::parse_exif(&app1_data[6..]) {
+                    result.exif = Some(exif_data.to_json());
+                }
             }
         }
 
@@ -216,269 +222,6 @@ fn parse_jpeg(data: &[u8]) -> FormatResult {
     }
 
     result
-}
-
-// ---------------------------------------------------------------------------
-// EXIF parsing
-// ---------------------------------------------------------------------------
-
-fn parse_exif(tiff_data: &[u8]) -> Option<serde_json::Value> {
-    if tiff_data.len() < 8 {
-        return None;
-    }
-
-    let little_endian = match (tiff_data[0], tiff_data[1]) {
-        (0x49, 0x49) => true,
-        (0x4D, 0x4D) => false,
-        _ => return None,
-    };
-
-    let magic = read_u16(tiff_data, 2, little_endian);
-    if magic != 42 {
-        return None;
-    }
-
-    let ifd_offset = read_u32(tiff_data, 4, little_endian) as usize;
-    if ifd_offset >= tiff_data.len() {
-        return None;
-    }
-
-    let mut exif = serde_json::Map::new();
-    let mut gps_ifd_offset: Option<usize> = None;
-    let mut exif_ifd_offset: Option<usize> = None;
-
-    // Parse IFD0
-    parse_ifd(tiff_data, ifd_offset, little_endian, &mut exif, &mut gps_ifd_offset, &mut exif_ifd_offset);
-
-    // Parse Exif sub-IFD if present
-    if let Some(exif_offset) = exif_ifd_offset {
-        parse_ifd(tiff_data, exif_offset, little_endian, &mut exif, &mut None, &mut None);
-    }
-
-    // Parse GPS IFD if present
-    if let Some(gps_offset) = gps_ifd_offset {
-        parse_gps_ifd(tiff_data, gps_offset, little_endian, &mut exif);
-    }
-
-    if exif.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(exif))
-    }
-}
-
-fn parse_ifd(
-    data: &[u8],
-    offset: usize,
-    little_endian: bool,
-    exif: &mut serde_json::Map<String, serde_json::Value>,
-    gps_ifd_offset: &mut Option<usize>,
-    exif_ifd_offset: &mut Option<usize>,
-) {
-    if offset + 2 > data.len() {
-        return;
-    }
-
-    let entry_count = read_u16(data, offset, little_endian) as usize;
-    let mut position = offset + 2;
-
-    for _ in 0..entry_count {
-        if position + 12 > data.len() {
-            break;
-        }
-
-        let tag = read_u16(data, position, little_endian);
-        let data_type = read_u16(data, position + 2, little_endian);
-        let count = read_u32(data, position + 4, little_endian) as usize;
-        let value_offset_raw = read_u32(data, position + 8, little_endian);
-
-        match tag {
-            // Make (0x010F)
-            0x010F => {
-                if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8, little_endian) {
-                    exif.insert("camera_make".to_string(), json!(value));
-                }
-            }
-            // Model (0x0110)
-            0x0110 => {
-                if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8, little_endian) {
-                    exif.insert("camera_model".to_string(), json!(value));
-                }
-            }
-            // Orientation (0x0112)
-            0x0112 => {
-                let orientation = if data_type == 3 {
-                    // SHORT
-                    read_u16(data, position + 8, little_endian) as u32
-                } else {
-                    value_offset_raw
-                };
-                exif.insert("orientation".to_string(), json!(orientation));
-            }
-            // DateTime (0x0132)
-            0x0132 => {
-                if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8, little_endian) {
-                    exif.insert("date_taken".to_string(), json!(value));
-                }
-            }
-            // DateTimeOriginal (0x9003) -- in Exif sub-IFD
-            0x9003 => {
-                if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8, little_endian) {
-                    exif.insert("date_taken".to_string(), json!(value));
-                }
-            }
-            // GPS IFD pointer (0x8825)
-            0x8825 => {
-                *gps_ifd_offset = Some(value_offset_raw as usize);
-            }
-            // Exif IFD pointer (0x8769)
-            0x8769 => {
-                *exif_ifd_offset = Some(value_offset_raw as usize);
-            }
-            _ => {}
-        }
-
-        position += 12;
-    }
-}
-
-fn read_ifd_string(
-    data: &[u8],
-    data_type: u16,
-    count: usize,
-    value_offset: usize,
-    inline_offset: usize,
-    _little_endian: bool,
-) -> Option<String> {
-    // data_type 2 = ASCII
-    if data_type != 2 || count == 0 {
-        return None;
-    }
-
-    let string_offset = if count <= 4 {
-        inline_offset
-    } else {
-        value_offset
-    };
-
-    if string_offset + count > data.len() {
-        return None;
-    }
-
-    let bytes = &data[string_offset..string_offset + count];
-    // Strip trailing null
-    let trimmed = if bytes.last() == Some(&0) {
-        &bytes[..bytes.len() - 1]
-    } else {
-        bytes
-    };
-    String::from_utf8(trimmed.to_vec()).ok()
-}
-
-fn parse_gps_ifd(
-    data: &[u8],
-    offset: usize,
-    little_endian: bool,
-    exif: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    if offset + 2 > data.len() {
-        return;
-    }
-
-    let entry_count = read_u16(data, offset, little_endian) as usize;
-    let mut position = offset + 2;
-
-    let mut latitude_ref: Option<char> = None;
-    let mut longitude_ref: Option<char> = None;
-    let mut latitude_values: Option<(f64, f64, f64)> = None;
-    let mut longitude_values: Option<(f64, f64, f64)> = None;
-
-    for _ in 0..entry_count {
-        if position + 12 > data.len() {
-            break;
-        }
-
-        let tag = read_u16(data, position, little_endian);
-        let data_type = read_u16(data, position + 2, little_endian);
-        let count = read_u32(data, position + 4, little_endian) as usize;
-        let value_offset = read_u32(data, position + 8, little_endian) as usize;
-
-        match tag {
-            // GPSLatitudeRef (1)
-            1 => {
-                if data_type == 2 && count >= 1 {
-                    let char_offset = if count <= 4 { position + 8 } else { value_offset };
-                    if char_offset < data.len() {
-                        latitude_ref = Some(data[char_offset] as char);
-                    }
-                }
-            }
-            // GPSLatitude (2)
-            2 => {
-                if data_type == 5 && count == 3 {
-                    latitude_values = read_gps_rational_triple(data, value_offset, little_endian);
-                }
-            }
-            // GPSLongitudeRef (3)
-            3 => {
-                if data_type == 2 && count >= 1 {
-                    let char_offset = if count <= 4 { position + 8 } else { value_offset };
-                    if char_offset < data.len() {
-                        longitude_ref = Some(data[char_offset] as char);
-                    }
-                }
-            }
-            // GPSLongitude (4)
-            4 => {
-                if data_type == 5 && count == 3 {
-                    longitude_values = read_gps_rational_triple(data, value_offset, little_endian);
-                }
-            }
-            _ => {}
-        }
-
-        position += 12;
-    }
-
-    // Convert DMS to decimal degrees
-    if let Some((degrees, minutes, seconds)) = latitude_values {
-        let mut decimal = degrees + minutes / 60.0 + seconds / 3600.0;
-        if latitude_ref == Some('S') {
-            decimal = -decimal;
-        }
-        exif.insert("gps_latitude".to_string(), json!(decimal));
-    }
-
-    if let Some((degrees, minutes, seconds)) = longitude_values {
-        let mut decimal = degrees + minutes / 60.0 + seconds / 3600.0;
-        if longitude_ref == Some('W') {
-            decimal = -decimal;
-        }
-        exif.insert("gps_longitude".to_string(), json!(decimal));
-    }
-}
-
-fn read_gps_rational_triple(data: &[u8], offset: usize, little_endian: bool) -> Option<(f64, f64, f64)> {
-    // Each RATIONAL is 8 bytes (u32 numerator + u32 denominator)
-    if offset + 24 > data.len() {
-        return None;
-    }
-
-    let read_rational = |position: usize| -> f64 {
-        let numerator = read_u32(data, position, little_endian) as f64;
-        let denominator = read_u32(data, position + 4, little_endian) as f64;
-        if denominator == 0.0 {
-            0.0
-        } else {
-            numerator / denominator
-        }
-    };
-
-    Some((
-        read_rational(offset),
-        read_rational(offset + 8),
-        read_rational(offset + 16),
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +622,11 @@ fn parse_tiff(data: &[u8]) -> FormatResult {
         result.has_alpha = Some(false);
     }
 
+    // Extract textual EXIF metadata (reuses the same TIFF/IFD structure)
+    if let Some(exif_data) = exif::parse_exif(data) {
+        result.exif = Some(exif_data.to_json());
+    }
+
     result
 }
 
@@ -974,60 +722,6 @@ fn parse_svg_dimension(value: &str) -> Option<u32> {
         .trim_end_matches("in")
         .trim_end_matches('%');
     stripped.parse::<f64>().ok().map(|v| v as u32)
-}
-
-// ---------------------------------------------------------------------------
-// Byte reading helpers
-// ---------------------------------------------------------------------------
-
-fn read_u16_big_endian(data: &[u8], offset: usize) -> u16 {
-    if offset + 1 >= data.len() {
-        return 0;
-    }
-    ((data[offset] as u16) << 8) | (data[offset + 1] as u16)
-}
-
-fn read_u16_little_endian(data: &[u8], offset: usize) -> u16 {
-    if offset + 1 >= data.len() {
-        return 0;
-    }
-    (data[offset] as u16) | ((data[offset + 1] as u16) << 8)
-}
-
-fn read_u32_big_endian(data: &[u8], offset: usize) -> u32 {
-    if offset + 3 >= data.len() {
-        return 0;
-    }
-    ((data[offset] as u32) << 24)
-        | ((data[offset + 1] as u32) << 16)
-        | ((data[offset + 2] as u32) << 8)
-        | (data[offset + 3] as u32)
-}
-
-fn read_u32_little_endian(data: &[u8], offset: usize) -> u32 {
-    if offset + 3 >= data.len() {
-        return 0;
-    }
-    (data[offset] as u32)
-        | ((data[offset + 1] as u32) << 8)
-        | ((data[offset + 2] as u32) << 16)
-        | ((data[offset + 3] as u32) << 24)
-}
-
-fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> u16 {
-    if little_endian {
-        read_u16_little_endian(data, offset)
-    } else {
-        read_u16_big_endian(data, offset)
-    }
-}
-
-fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> u32 {
-    if little_endian {
-        read_u32_little_endian(data, offset)
-    } else {
-        read_u32_big_endian(data, offset)
-    }
 }
 
 // ===========================================================================
