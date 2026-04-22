@@ -95,6 +95,58 @@ window.fetch = async function shimmedFetch(input, init) {
 
 import '/system/portal/shared/components/aeor-file-browser.js';
 
+// ---------------------------------------------------------------------------
+// Patch the file browser component BEFORE it instantiates — override the
+// prototype so every instance gets portal behavior from the start.
+// ---------------------------------------------------------------------------
+
+const BrowserClass = customElements.get('aeor-file-browser');
+if (BrowserClass) {
+  const origRender = BrowserClass.prototype.render;
+  const origClose = BrowserClass.prototype._closeTab;
+  const origFetchRel = BrowserClass.prototype._fetchRelationships;
+
+  // Override _fetchRelationships: after fetching, auto-open a tab instead
+  // of showing the relationship selector (portal only has one "relationship")
+  BrowserClass.prototype._fetchRelationships = async function() {
+    await origFetchRel.call(this);
+
+    if (!this._active_tab_id) {
+      this._openTab(PORTAL_RELATIONSHIP.id, PORTAL_RELATIONSHIP.name);
+    }
+  };
+
+  // Override render: after normal render, patch "+" button and hide close on last tab
+  BrowserClass.prototype.render = function() {
+    origRender.call(this);
+
+    // "+" should auto-open a new tab, not show the relationship selector
+    const newTabBtn = this.querySelector('.tab-new');
+    if (newTabBtn) {
+      const fresh = newTabBtn.cloneNode(true);
+      newTabBtn.replaceWith(fresh);
+      fresh.addEventListener('click', () => {
+        this._openTab(PORTAL_RELATIONSHIP.id, PORTAL_RELATIONSHIP.name);
+      });
+    }
+
+    // Hide close button when only one tab remains
+    if (this._tabs.length <= 1) {
+      this.querySelectorAll('.tab-close').forEach((btn) => {
+        btn.style.display = 'none';
+      });
+    }
+  };
+
+  // Guard _closeTab: prevent closing the last tab
+  BrowserClass.prototype._closeTab = function(tabId) {
+    if (this._tabs.length <= 1)
+      return;
+
+    origClose.call(this, tabId);
+  };
+}
+
 class AeorFiles extends HTMLElement {
   connectedCallback() {
     if (!this._initialized) {
