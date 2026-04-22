@@ -68,7 +68,8 @@ async fn download_zip_with_valid_paths() {
     let mut archive = zip::ZipArchive::new(reader).expect("valid ZIP");
     assert_eq!(archive.len(), 2);
 
-    let mut readme = archive.by_name("docs/readme.md").expect("readme.md in ZIP");
+    // Both files are in /docs/ — common prefix stripped, so entries are just filenames
+    let mut readme = archive.by_name("readme.md").expect("readme.md in ZIP");
     let mut content = String::new();
     readme.read_to_string(&mut content).unwrap();
     assert_eq!(content, "# Hello");
