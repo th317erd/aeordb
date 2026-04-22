@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 3,542 tests, all passing
+## Total: 3,548 tests, all passing
 
 ---
 
@@ -138,6 +138,14 @@
 - [x] Image parser rewired to shared EXIF, TIFF EXIF extraction + 2 tests
 - [x] MP4/MOV iTunes metadata (title, artist, description, copyright, etc.) + 3 tests
 - [x] WAV RIFF INFO chunks (title, artist, comment, copyright, etc.) + 2 tests
+
+## Completed: File Browser Refactor — 6 tests
+
+- [x] Base class (aeor-file-browser-base.js, 872 lines) — tabs, nav, preview, pagination, abstract data access
+- [x] Client subclass (aeor-file-browser.js, 206 lines) — sync relationships, drag-out, open-locally
+- [x] Portal subclass (aeor-file-browser-portal.js, 158 lines) — direct /files/ API, auto-open, last-tab guard
+- [x] Portal files.mjs simplified (14 lines, was 160) — no fetch shim, no monkey-patches
+- [x] ZIP download endpoint (POST /files/download) — 6 tests, recursive folders, .system/ filtering
 
 ## Future Plans (Not Started)
 
