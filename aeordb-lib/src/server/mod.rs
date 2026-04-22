@@ -4,6 +4,7 @@ pub mod backup_routes;
 pub mod cluster_routes;
 pub mod conflict_routes;
 pub mod cors;
+pub mod download_routes;
 pub mod engine_routes;
 pub mod gc_routes;
 pub mod portal_routes;
@@ -297,6 +298,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/system/events", get(sse_routes::event_stream))
     // Files: query route (registered before /files/{*path} wildcard)
     .route("/files/query", post(engine_routes::query_endpoint))
+    // Files: ZIP download route (registered before /files/{*path} wildcard)
+    .route("/files/download", post(download_routes::download_zip))
     // Versions: snapshot routes
     .route("/versions/snapshots", post(engine_routes::snapshot_create)
                                  .get(engine_routes::snapshot_list))
