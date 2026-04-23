@@ -370,11 +370,11 @@ class AeorKeys extends HTMLElement {
     if (!bar) return;
 
     if (this._selectedKeyIds.size > 0) {
-      // Count how many selected keys are revocable (not already revoked, not current session)
+      // Count how many selected keys are revocable (not already revoked)
       const displayKeys = this._getDisplayKeys();
       const revocableCount = [...this._selectedKeyIds].filter((id) => {
         const key = displayKeys.find((k) => k.key_id === id);
-        return key && !key.is_revoked && key.key_id !== this._currentKeyId;
+        return key && !key.is_revoked;
       }).length;
 
       bar.innerHTML = `
@@ -405,16 +405,18 @@ class AeorKeys extends HTMLElement {
     const displayKeys = this._getDisplayKeys();
     const toRevoke = [...this._selectedKeyIds].filter((id) => {
       const key = displayKeys.find((k) => k.key_id === id);
-      return key && !key.is_revoked && key.key_id !== this._currentKeyId;
+      return key && !key.is_revoked;
     });
 
     if (toRevoke.length === 0) return;
 
-    // Use modal confirmation
-    const confirmed = await this._confirmAction(
-      'Revoke Keys',
-      `Revoke ${toRevoke.length} key${toRevoke.length > 1 ? 's' : ''}? This action cannot be undone.`,
-    );
+    // Check if the current session key is being revoked
+    const revokingCurrentSession = toRevoke.includes(this._currentKeyId);
+    const warningMessage = revokingCurrentSession
+      ? `Revoke ${toRevoke.length} key${toRevoke.length > 1 ? 's' : ''}?\n\nWARNING: This includes your current session key. You will be logged out immediately.`
+      : `Revoke ${toRevoke.length} key${toRevoke.length > 1 ? 's' : ''}? This action cannot be undone.`;
+
+    const confirmed = await this._confirmAction('Revoke Keys', warningMessage);
     if (!confirmed) return;
 
     for (const keyId of toRevoke) {
@@ -427,6 +429,13 @@ class AeorKeys extends HTMLElement {
         if (window.aeorToast)
           window.aeorToast(`Revoke failed for ${this._truncateId(keyId)}: ${error.message}`, 'error');
       }
+    }
+
+    // If we revoked the current session key, log out
+    if (revokingCurrentSession) {
+      window.AUTH.clear();
+      window.location.href = '/system/portal';
+      return;
     }
 
     this._selectedKeyIds.clear();
