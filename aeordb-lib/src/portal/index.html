@@ -456,28 +456,46 @@
     .text-muted { color: var(--text-muted); }
     .mb-4 { margin-bottom: 16px; }
 
-    /* Mobile hamburger button */
-    .mobile-menu-toggle {
+    /* Mobile top bar */
+    .mobile-top-bar {
       display: none;
       position: fixed;
-      top: 12px;
-      left: 12px;
-      z-index: 200;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 52px;
       background: var(--sidebar);
-      border: 1px solid var(--border);
-      border-radius: 6px;
+      border-bottom: 1px solid var(--border);
+      z-index: 200;
+      align-items: center;
+      padding: 0 16px;
+      gap: 12px;
+    }
+
+    .mobile-menu-toggle {
+      display: none;
+      background: none;
+      border: none;
       color: var(--accent);
       font-size: 1.4rem;
-      width: 40px;
-      height: 40px;
+      width: 36px;
+      height: 36px;
       cursor: pointer;
       align-items: center;
       justify-content: center;
       line-height: 1;
+      padding: 0;
+    }
+
+    .mobile-top-bar .mobile-logo {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--accent);
     }
 
     /* Mobile: sidebar overlay */
     @media (max-width: 768px) {
+      .mobile-top-bar { display: flex; }
       .mobile-menu-toggle { display: flex; }
 
       .sidebar {
@@ -528,7 +546,10 @@
   </style>
 </head>
 <body>
-  <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Menu">&#9776;</button>
+  <div class="mobile-top-bar">
+    <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Menu">&#9776;</button>
+    <span class="mobile-logo">AeorDB</span>
+  </div>
   <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">AeorDB</div>

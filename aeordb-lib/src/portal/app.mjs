@@ -163,8 +163,17 @@ function navigate() {
   if (!AUTH.token && !authDisabled) {
     main.appendChild(document.createElement('aeor-login'));
     updateNavLinks('');
+    // Hide sidebar and mobile top bar on login screen
+    if (sidebar) sidebar.style.display = 'none';
+    const mobileTopBar = document.querySelector('.mobile-top-bar');
+    if (mobileTopBar) mobileTopBar.style.display = 'none';
+    main.style.marginLeft = '0';
     return;
   }
+
+  // Show sidebar when logged in
+  const mobileTopBar = document.querySelector('.mobile-top-bar');
+  if (mobileTopBar) mobileTopBar.style.display = '';
 
   updateNavLinks(page);
 
