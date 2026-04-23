@@ -295,8 +295,9 @@ class AeorKeys extends HTMLElement {
 
         const keyId = row.dataset.keyId;
         const index = displayKeys.findIndex((k) => k.key_id === keyId);
-        const isCtrl = event.ctrlKey || event.metaKey;
-        const isShift = event.shiftKey;
+        const isMobile = window.innerWidth <= 768;
+        const isCtrl = isMobile || event.ctrlKey || event.metaKey;
+        const isShift = !isMobile && event.shiftKey;
 
         if (!isCtrl && !isShift) {
           // Plain click — single select
