@@ -7,6 +7,9 @@ repository.workspace = true
 autobenches = false
 
 [dependencies]
+# File locking
+fs2 = "0.4"
+
 # HTTP server
 axum = "0.8"
 tower = "0.5"

@@ -1,5 +1,8 @@
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+
+use fs2::FileExt;
 
 use arc_swap::ArcSwap;
 
@@ -133,9 +136,38 @@ pub struct StorageEngine {
   hash_algo: HashAlgorithm,
   /// Atomic counters for O(1) database statistics, maintained in-memory.
   counters: ArcSwap<EngineCounters>,
+  /// Advisory file lock on the database file. Held for the lifetime of the
+  /// engine to prevent multiple processes from opening the same file
+  /// simultaneously, which would cause corruption (in-process RwLock does
+  /// not protect across process boundaries).
+  #[allow(dead_code)]
+  _file_lock: std::fs::File,
 }
 
 impl StorageEngine {
+  /// Acquire an exclusive advisory file lock. Returns the locked file handle
+  /// which must be kept alive for the duration of the engine's lifetime.
+  /// If another process already holds the lock, returns an error immediately.
+  fn acquire_file_lock(lock_path: &str) -> EngineResult<std::fs::File> {
+    let lock_file = OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(lock_path)
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(format!("Failed to create lock file '{}': {}", lock_path, error)),
+      ))?;
+
+    lock_file.try_lock_exclusive().map_err(|_| {
+      EngineError::IoError(std::io::Error::other(format!(
+        "Database '{}' is locked by another process. Only one process can open a database at a time.",
+        lock_path.trim_end_matches(".lock"),
+      )))
+    })?;
+
+    Ok(lock_file)
+  }
+
   /// Create a new database file at the given path.
   ///
   /// Does not use a hot directory for crash recovery. Suitable for tests and
@@ -147,6 +179,11 @@ impl StorageEngine {
   /// Create a new database file at the given path with an optional hot directory
   /// for crash-recovery write-ahead logging.
   pub fn create_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
+    // Acquire advisory file lock to prevent multiple processes from opening
+    // the same database. The lock is held for the lifetime of the engine.
+    let lock_path = format!("{}.lock", path);
+    let lock_file = Self::acquire_file_lock(&lock_path)?;
+
     let writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
@@ -167,6 +204,7 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
+      _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
@@ -185,6 +223,11 @@ impl StorageEngine {
   /// When `hot_dir` is Some, hot files are replayed into the KV store on open,
   /// then deleted. A new hot file is initialized for ongoing crash recovery.
   fn open_internal(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
+    // Acquire advisory file lock to prevent multiple processes from opening
+    // the same database. The lock is held for the lifetime of the engine.
+    let lock_path = format!("{}.lock", path);
+    let lock_file = Self::acquire_file_lock(&lock_path)?;
+
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
@@ -377,6 +420,7 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
+      _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);

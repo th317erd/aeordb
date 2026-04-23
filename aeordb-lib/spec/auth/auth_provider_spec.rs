@@ -388,8 +388,11 @@ fn test_file_auth_provider_from_identity_file_no_double_bootstrap() {
   let identity_str = identity_path.to_str().unwrap();
 
   // First creation bootstraps.
-  let (_provider1, key1) = FileAuthProvider::from_identity_file(identity_str).unwrap();
+  let (provider1, key1) = FileAuthProvider::from_identity_file(identity_str).unwrap();
   assert!(key1.is_some());
+
+  // Drop the first provider to release the file lock before re-opening.
+  drop(provider1);
 
   // Second creation should NOT bootstrap again.
   let (_provider2, key2) = FileAuthProvider::from_identity_file(identity_str).unwrap();
