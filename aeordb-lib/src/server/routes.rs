@@ -494,6 +494,9 @@ pub async fn list_api_keys(
             "user_id": record.user_id,
             "created_at": record.created_at.to_rfc3339(),
             "is_revoked": record.is_revoked,
+            "expires_at": record.expires_at,
+            "label": record.label,
+            "rules": record.rules,
           })
         })
         .collect();

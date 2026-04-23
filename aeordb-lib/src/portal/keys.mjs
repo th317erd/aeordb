@@ -276,7 +276,10 @@ class AeorKeys extends HTMLElement {
                 <div class="key-id" title="${escapeHtml(String(key.key_id || ''))}">${escapeHtml(this._truncateId(key.key_id))}</div>
                 <div class="key-meta">Created ${created} \u00B7 Expires ${expires}</div>
               </div>
-              <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">${escapeHtml(this._truncateId(key.user_id))}</div>
+              <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">
+                <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">User</div>
+                ${escapeHtml(this._truncateId(key.user_id))}
+              </div>
               <div></div>
             </div>
           `;
