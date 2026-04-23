@@ -33,6 +33,7 @@ const PORTAL_SHARED_PREVIEW_VIDEO_JS: &str = include_str!("../portal/shared/comp
 const PORTAL_SHARED_PREVIEW_AUDIO_JS: &str = include_str!("../portal/shared/components/previews/aeor-preview-audio.js");
 const PORTAL_SHARED_PREVIEW_TEXT_JS: &str = include_str!("../portal/shared/components/previews/aeor-preview-text.js");
 const PORTAL_SHARED_PREVIEW_DEFAULT_JS: &str = include_str!("../portal/shared/components/previews/aeor-preview-default.js");
+const PORTAL_SHARED_PREVIEW_PDF_JS: &str = include_str!("../portal/shared/components/previews/aeor-preview-pdf.js");
 const PORTAL_SHARED_FILE_BROWSER_BASE_JS: &str = include_str!("../portal/shared/components/aeor-file-browser-base.js");
 const PORTAL_SHARED_FILE_BROWSER_PORTAL_JS: &str = include_str!("../portal/shared/components/aeor-file-browser-portal.js");
 
@@ -80,6 +81,7 @@ pub async fn portal_shared_asset(
         "components/previews/aeor-preview-audio.js" => (PORTAL_SHARED_PREVIEW_AUDIO_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-text.js" => (PORTAL_SHARED_PREVIEW_TEXT_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-default.js" => (PORTAL_SHARED_PREVIEW_DEFAULT_JS, "application/javascript; charset=utf-8"),
+        "components/previews/aeor-preview-pdf.js" => (PORTAL_SHARED_PREVIEW_PDF_JS, "application/javascript; charset=utf-8"),
         "styles/tokens.css" => (PORTAL_SHARED_TOKENS_CSS, "text/css; charset=utf-8"),
         "styles/components.css" => (PORTAL_SHARED_COMPONENTS_CSS, "text/css; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
