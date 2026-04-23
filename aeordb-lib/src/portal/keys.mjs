@@ -11,6 +11,8 @@ class AeorKeys extends HTMLElement {
     this._searchQuery = '';
     this._currentKeyId = null;
     this._isRoot = false;
+    this._selectedKeyIds = new Set();
+    this._lastSelectedAnchor = null;
   }
 
   connectedCallback() {
@@ -193,7 +195,27 @@ class AeorKeys extends HTMLElement {
           cursor: default;
         }
 
+        .key-row { cursor: pointer; outline: none; user-select: none; }
         .key-row:hover { border-color: var(--accent); }
+        .key-row.selected { background: rgba(249, 115, 22, 0.15); border-color: var(--accent); }
+
+        .keys-selection-bar {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 8px 16px;
+          height: 44px;
+          background: var(--card-hover, #21262d);
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          margin-bottom: 8px;
+          font-size: 0.9rem;
+          color: var(--text-muted);
+          box-sizing: border-box;
+          visibility: hidden;
+        }
+
+        .keys-selection-bar .sel-count { font-weight: 600; color: var(--text); }
 
         .key-info { min-width: 0; }
 
@@ -235,16 +257,16 @@ class AeorKeys extends HTMLElement {
         }
       </style>
 
+      <div class="keys-selection-bar" id="keys-selection-bar">&nbsp;</div>
       <div class="key-list">
         ${displayKeys.map((key) => {
           const status = this._getStatus(key);
-          const isCurrentSession = key.key_id === this._currentKeyId;
-          const canRevoke = !key.is_revoked && !isCurrentSession;
+          const isSelected = this._selectedKeyIds.has(key.key_id);
           const created = (key.created_at) ? new Date(key.created_at).toLocaleDateString() : '\u2014';
           const expires = (key.expires_at) ? new Date(key.expires_at).toLocaleDateString() : '\u2014';
 
           return `
-            <div class="key-row">
+            <div class="key-row ${isSelected ? 'selected' : ''}" data-key-id="${escapeHtml(String(key.key_id || ''))}">
               <div class="key-info">
                 <div class="key-label">
                   ${escapeHtml(key.label || 'Unnamed Key')}
@@ -254,18 +276,198 @@ class AeorKeys extends HTMLElement {
                 <div class="key-meta">Created ${created} \u00B7 Expires ${expires}</div>
               </div>
               <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">${escapeHtml(this._truncateId(key.user_id))}</div>
-              <div>
-                ${canRevoke ? `<button class="button button-small button-danger revoke-key-button" data-key-id="${escapeHtml(String(key.key_id || ''))}">Revoke</button>` : ''}
-              </div>
+              <div></div>
             </div>
           `;
         }).join('')}
       </div>
     `;
 
-    contentContainer.querySelectorAll('.revoke-key-button').forEach((button) => {
-      button.addEventListener('click', () => {
-        this._confirmRevoke(button.dataset.keyId);
+    this._bindKeyRowEvents(contentContainer, displayKeys);
+    this._updateSelectionBar();
+  }
+
+  _bindKeyRowEvents(container, displayKeys) {
+    container.querySelectorAll('.key-row').forEach((row) => {
+      row.addEventListener('click', (event) => {
+        // Don't select when clicking buttons inside the row
+        if (event.target.closest('button')) return;
+
+        const keyId = row.dataset.keyId;
+        const index = displayKeys.findIndex((k) => k.key_id === keyId);
+        const isCtrl = event.ctrlKey || event.metaKey;
+        const isShift = event.shiftKey;
+
+        if (!isCtrl && !isShift) {
+          // Plain click — single select
+          this._selectedKeyIds.clear();
+          this._selectedKeyIds.add(keyId);
+          this._lastSelectedAnchor = keyId;
+        } else if (isCtrl) {
+          // Ctrl+click — toggle
+          if (this._selectedKeyIds.has(keyId))
+            this._selectedKeyIds.delete(keyId);
+          else
+            this._selectedKeyIds.add(keyId);
+          this._lastSelectedAnchor = keyId;
+        } else if (isShift) {
+          // Shift+click — range select
+          const anchorIndex = this._lastSelectedAnchor
+            ? displayKeys.findIndex((k) => k.key_id === this._lastSelectedAnchor)
+            : 0;
+          const anchor = (anchorIndex >= 0) ? anchorIndex : 0;
+          const start = Math.min(anchor, index);
+          const end = Math.max(anchor, index);
+          for (let i = start; i <= end; i++) {
+            if (displayKeys[i])
+              this._selectedKeyIds.add(displayKeys[i].key_id);
+          }
+        }
+
+        this._updateSelectionVisual(container);
+        this._updateSelectionBar();
+      });
+    });
+
+    // Ctrl+A and Escape
+    this.setAttribute('tabindex', '0');
+    this.style.outline = 'none';
+    const keydownHandler = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'a') {
+        event.preventDefault();
+        for (const key of displayKeys)
+          this._selectedKeyIds.add(key.key_id);
+        if (displayKeys.length > 0)
+          this._lastSelectedAnchor = displayKeys[displayKeys.length - 1].key_id;
+        this._updateSelectionVisual(container);
+        this._updateSelectionBar();
+      } else if (event.key === 'Escape') {
+        this._selectedKeyIds.clear();
+        this._lastSelectedAnchor = null;
+        this._updateSelectionVisual(container);
+        this._updateSelectionBar();
+      }
+    };
+
+    if (this._keydownHandler)
+      this.removeEventListener('keydown', this._keydownHandler);
+    this._keydownHandler = keydownHandler;
+    this.addEventListener('keydown', keydownHandler);
+  }
+
+  _updateSelectionVisual(container) {
+    container.querySelectorAll('.key-row').forEach((row) => {
+      if (this._selectedKeyIds.has(row.dataset.keyId))
+        row.classList.add('selected');
+      else
+        row.classList.remove('selected');
+    });
+  }
+
+  _updateSelectionBar() {
+    const bar = this.querySelector('#keys-selection-bar');
+    if (!bar) return;
+
+    if (this._selectedKeyIds.size > 0) {
+      // Count how many selected keys are revocable (not already revoked, not current session)
+      const displayKeys = this._getDisplayKeys();
+      const revocableCount = [...this._selectedKeyIds].filter((id) => {
+        const key = displayKeys.find((k) => k.key_id === id);
+        return key && !key.is_revoked && key.key_id !== this._currentKeyId;
+      }).length;
+
+      bar.innerHTML = `
+        <span class="sel-count">${this._selectedKeyIds.size} selected</span>
+        ${revocableCount > 0 ? `<button class="button button-small button-danger" id="revoke-selected-btn">Revoke ${revocableCount} Key${revocableCount > 1 ? 's' : ''}</button>` : ''}
+        <button class="button button-small" id="clear-selection-btn">Clear</button>
+      `;
+      bar.style.visibility = 'visible';
+
+      const revokeBtn = bar.querySelector('#revoke-selected-btn');
+      if (revokeBtn) {
+        revokeBtn.addEventListener('click', () => this._revokeSelected());
+      }
+      bar.querySelector('#clear-selection-btn').addEventListener('click', () => {
+        this._selectedKeyIds.clear();
+        this._lastSelectedAnchor = null;
+        const container = this.querySelector('#keys-content');
+        if (container) this._updateSelectionVisual(container);
+        this._updateSelectionBar();
+      });
+    } else {
+      bar.innerHTML = '&nbsp;';
+      bar.style.visibility = 'hidden';
+    }
+  }
+
+  async _revokeSelected() {
+    const displayKeys = this._getDisplayKeys();
+    const toRevoke = [...this._selectedKeyIds].filter((id) => {
+      const key = displayKeys.find((k) => k.key_id === id);
+      return key && !key.is_revoked && key.key_id !== this._currentKeyId;
+    });
+
+    if (toRevoke.length === 0) return;
+
+    // Use modal confirmation
+    const confirmed = await this._confirmAction(
+      'Revoke Keys',
+      `Revoke ${toRevoke.length} key${toRevoke.length > 1 ? 's' : ''}? This action cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    for (const keyId of toRevoke) {
+      try {
+        const endpoint = this._isRoot && this._searchQuery.length > 0
+          ? `/auth/keys/admin/${keyId}`
+          : `/auth/keys/${keyId}`;
+        await window.api(endpoint, { method: 'DELETE' });
+      } catch (error) {
+        if (window.aeorToast)
+          window.aeorToast(`Revoke failed for ${this._truncateId(keyId)}: ${error.message}`, 'error');
+      }
+    }
+
+    this._selectedKeyIds.clear();
+    this._lastSelectedAnchor = null;
+    this._allKeys = null;
+    await this._fetchOwnKeys();
+    if (this._searchQuery.length > 0) {
+      await this._fetchAllKeys();
+      this.renderContent();
+    }
+  }
+
+  _confirmAction(title, message) {
+    return new Promise((resolve) => {
+      const modalContainer = this.querySelector('#keys-modal');
+      if (!modalContainer) { resolve(false); return; }
+
+      modalContainer.innerHTML = `
+        <div class="modal-overlay" id="modal-overlay">
+          <div class="modal-content">
+            <div class="modal-title">${escapeHtml(title)}</div>
+            <p style="color:var(--text-muted);margin-bottom:18px;">${escapeHtml(message)}</p>
+            <div class="modal-actions">
+              <button class="button" type="button" id="confirm-cancel">Cancel</button>
+              <button class="button button-danger" type="button" id="confirm-ok">Revoke</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      let resolved = false;
+      const done = (result) => {
+        if (resolved) return;
+        resolved = true;
+        modalContainer.innerHTML = '';
+        resolve(result);
+      };
+
+      modalContainer.querySelector('#confirm-cancel').addEventListener('click', () => done(false));
+      modalContainer.querySelector('#confirm-ok').addEventListener('click', () => done(true));
+      modalContainer.querySelector('#modal-overlay').addEventListener('click', (event) => {
+        if (event.target.id === 'modal-overlay') done(false);
       });
     });
   }
