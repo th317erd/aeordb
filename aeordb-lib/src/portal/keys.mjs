@@ -148,7 +148,7 @@ class AeorKeys extends HTMLElement {
     if (!id) return '\u2014';
     const str = String(id);
     if (str.length <= 12) return str;
-    return str.substring(0, 8) + '\u2026';
+    return '\u2026' + str.slice(-8);
   }
 
   renderContent() {
@@ -384,7 +384,7 @@ class AeorKeys extends HTMLElement {
       bar.innerHTML = `
         <span class="sel-count">${this._selectedKeyIds.size} selected</span>
         ${revocableCount > 0 ? `<button class="button button-small button-danger" id="revoke-selected-btn">Revoke ${revocableCount} Key${revocableCount > 1 ? 's' : ''}</button>` : ''}
-        <button class="button button-small" id="clear-selection-btn">Clear</button>
+        <button class="button button-small" id="clear-selection-btn">Clear Selection</button>
       `;
       bar.style.visibility = 'visible';
 
