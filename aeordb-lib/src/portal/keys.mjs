@@ -240,6 +240,7 @@ class AeorKeys extends HTMLElement {
           color: var(--text-muted);
           font-family: var(--font-mono);
           margin-top: 4px;
+          white-space: nowrap;
         }
 
         .key-user {
