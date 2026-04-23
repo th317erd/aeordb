@@ -82,6 +82,54 @@ fn paginated_listing_response(
 /// each 256 KB chunk individually and avoids buffering the full file.
 pub const MAX_INLINE_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// POST /files/mkdir — create an empty directory
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MkdirRequest {
+  pub path: String,
+}
+
+pub async fn mkdir(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Json(body): Json<MkdirRequest>,
+) -> Response {
+  let normalized = crate::engine::path_utils::normalize_path(&body.path);
+
+  if is_system_path(&normalized) {
+    return ErrorResponse::new(format!("Not found: {}", body.path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
+  if normalized == "/" {
+    return ErrorResponse::new("Cannot create root directory")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let ops = DirectoryOps::new(&state.engine);
+
+  match ops.create_directory(&ctx, &normalized) {
+    Ok(()) => {
+      (StatusCode::CREATED, Json(serde_json::json!({
+        "path": normalized,
+        "entry_type": 3,
+        "created": true,
+      }))).into_response()
+    }
+    Err(error) => {
+      tracing::error!("Failed to create directory '{}': {}", normalized, error);
+      ErrorResponse::new(format!("Failed to create directory: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
 /// PUT /engine/*path -- store a file via the custom storage engine.
 ///
 /// Accepts the request body as a stream and buffers up to
