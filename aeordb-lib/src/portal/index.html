@@ -455,10 +455,82 @@
     .flex-gap { display: flex; gap: 8px; }
     .text-muted { color: var(--text-muted); }
     .mb-4 { margin-bottom: 16px; }
+
+    /* Mobile hamburger button */
+    .mobile-menu-toggle {
+      display: none;
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 200;
+      background: var(--sidebar);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--accent);
+      font-size: 1.4rem;
+      width: 40px;
+      height: 40px;
+      cursor: pointer;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+
+    /* Mobile: sidebar overlay */
+    @media (max-width: 768px) {
+      .mobile-menu-toggle { display: flex; }
+
+      .sidebar {
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        z-index: 150;
+      }
+
+      .sidebar.open {
+        transform: translateX(0);
+      }
+
+      .sidebar-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 140;
+      }
+
+      .sidebar-backdrop.open {
+        display: block;
+      }
+
+      .main {
+        margin-left: 0;
+        padding: 68px 16px 16px 16px;
+      }
+
+      /* Responsive tables */
+      .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      table { font-size: 0.8rem; min-width: 500px; }
+      th, td { padding: 8px 10px; }
+
+      /* Responsive stat cards */
+      .stats-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+      .stat-value { font-size: 1.2rem; }
+
+      /* Charts stack */
+      .charts-row { grid-template-columns: 1fr; }
+
+      /* Login card */
+      .login-card { max-width: 100%; margin: 0 8px; }
+
+      /* Page header */
+      .page-header { flex-wrap: wrap; gap: 10px; }
+    }
   </style>
 </head>
 <body>
-  <aside class="sidebar">
+  <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Menu">&#9776;</button>
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+  <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">AeorDB</div>
     <nav class="sidebar-nav">
       <a class="nav-link active" data-page="dashboard" href="?page=dashboard">Dashboard</a>
@@ -473,6 +545,30 @@
   </aside>
   <main class="main" id="main-content"></main>
 
+  <script>
+    // Mobile sidebar toggle
+    const menuToggle = document.getElementById('mobile-menu-toggle');
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+
+    function toggleSidebar() {
+      sidebar.classList.toggle('open');
+      backdrop.classList.toggle('open');
+    }
+
+    function closeSidebar() {
+      sidebar.classList.remove('open');
+      backdrop.classList.remove('open');
+    }
+
+    menuToggle.addEventListener('click', toggleSidebar);
+    backdrop.addEventListener('click', closeSidebar);
+
+    // Close sidebar when a nav link is clicked (mobile)
+    sidebar.querySelectorAll('.nav-link').forEach(function(link) {
+      link.addEventListener('click', closeSidebar);
+    });
+  </script>
   <script type="module" src="/system/portal/app.mjs"></script>
 </body>
 </html>

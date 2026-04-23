@@ -115,7 +115,10 @@ class AeorKeys extends HTMLElement {
     }
 
     const source = this._allKeys || [];
-    const query = this._searchQuery.toLowerCase();
+    const query = this._searchQuery.trim().toLowerCase();
+
+    // Empty after trim (e.g. just a space) = show all, no filtering
+    if (query.length === 0) return source;
 
     return source.filter((key) => {
       const label = (key.label || '').toLowerCase();
