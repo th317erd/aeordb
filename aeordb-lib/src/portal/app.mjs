@@ -6,6 +6,7 @@ import '/system/portal/dashboard.mjs';
 import '/system/portal/users.mjs';
 import '/system/portal/groups.mjs';
 import '/system/portal/files.mjs';
+import '/system/portal/keys.mjs';
 
 // Auth state management
 const AUTH = {
@@ -176,6 +177,9 @@ function navigate() {
       break;
     case 'files':
       main.appendChild(getOrCreatePage('aeor-files'));
+      break;
+    case 'keys':
+      main.appendChild(getOrCreatePage('aeor-keys'));
       break;
     default:
       main.appendChild(getOrCreatePage('aeor-dashboard'));
