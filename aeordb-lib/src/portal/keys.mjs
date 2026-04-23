@@ -177,47 +177,89 @@ class AeorKeys extends HTMLElement {
       <style>
         .badge-expired { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
         .badge-session { background: rgba(249, 115, 22, 0.15); color: var(--accent); }
+
+        .key-list { display: flex; flex-direction: column; gap: 1px; }
+
+        .key-row {
+          display: grid;
+          grid-template-columns: 1fr auto auto;
+          align-items: center;
+          gap: 12px;
+          padding: 12px 16px;
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          margin-bottom: 4px;
+          cursor: default;
+        }
+
+        .key-row:hover { border-color: var(--accent); }
+
+        .key-info { min-width: 0; }
+
+        .key-label {
+          font-weight: 600;
+          color: var(--text);
+          margin-bottom: 2px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .key-id {
+          font-family: var(--font-mono);
+          font-size: 0.8rem;
+          color: var(--text-muted);
+        }
+
+        .key-meta {
+          font-size: 0.78rem;
+          color: var(--text-muted);
+          font-family: var(--font-mono);
+          margin-top: 4px;
+        }
+
+        .key-user {
+          font-family: var(--font-mono);
+          font-size: 0.8rem;
+          color: var(--text-muted);
+          text-align: right;
+        }
+
+        @media (max-width: 768px) {
+          .key-row {
+            grid-template-columns: 1fr auto;
+          }
+          .key-user { display: none; }
+        }
       </style>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Key ID</th>
-              <th>User</th>
-              <th>Created</th>
-              <th>Expires</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${displayKeys.map((key) => {
-              const status = this._getStatus(key);
-              const isCurrentSession = key.key_id === this._currentKeyId;
-              const canRevoke = !key.is_revoked && !isCurrentSession;
-              return `
-              <tr>
-                <td><strong>${escapeHtml(key.label || '\u2014')}</strong></td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;" title="${escapeHtml(String(key.key_id || ''))}">${escapeHtml(this._truncateId(key.key_id))}</td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;" title="${escapeHtml(String(key.user_id || ''))}">${escapeHtml(this._truncateId(key.user_id))}</td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">
-                  ${(key.created_at) ? new Date(key.created_at).toLocaleDateString() : '\u2014'}
-                </td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">
-                  ${(key.expires_at) ? new Date(key.expires_at).toLocaleDateString() : '\u2014'}
-                </td>
-                <td>
+
+      <div class="key-list">
+        ${displayKeys.map((key) => {
+          const status = this._getStatus(key);
+          const isCurrentSession = key.key_id === this._currentKeyId;
+          const canRevoke = !key.is_revoked && !isCurrentSession;
+          const created = (key.created_at) ? new Date(key.created_at).toLocaleDateString() : '\u2014';
+          const expires = (key.expires_at) ? new Date(key.expires_at).toLocaleDateString() : '\u2014';
+
+          return `
+            <div class="key-row">
+              <div class="key-info">
+                <div class="key-label">
+                  ${escapeHtml(key.label || 'Unnamed Key')}
                   <span class="badge ${status.cssClass}">${escapeHtml(status.text)}</span>
-                </td>
-                <td>
-                  ${canRevoke ? `<button class="button button-small button-danger revoke-key-button" data-key-id="${escapeHtml(String(key.key_id || ''))}">Revoke</button>` : ''}
-                </td>
-              </tr>
-            `;
-            }).join('')}
-          </tbody>
-        </table>
+                </div>
+                <div class="key-id" title="${escapeHtml(String(key.key_id || ''))}">${escapeHtml(this._truncateId(key.key_id))}</div>
+                <div class="key-meta">Created ${created} \u00B7 Expires ${expires}</div>
+              </div>
+              <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">${escapeHtml(this._truncateId(key.user_id))}</div>
+              <div>
+                ${canRevoke ? `<button class="button button-small button-danger revoke-key-button" data-key-id="${escapeHtml(String(key.key_id || ''))}">Revoke</button>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
       </div>
     `;
 
