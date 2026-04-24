@@ -11,7 +11,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.9.5"
 edition = "2021"
 license-file = "LICENSE-BSL.md"
 repository = "https://github.com/th317erd/aeordb"
