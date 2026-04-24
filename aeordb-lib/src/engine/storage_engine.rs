@@ -690,6 +690,18 @@ impl StorageEngine {
     }
   }
 
+  /// Acquire a read lock on the append writer.
+  ///
+  /// Used by the verify module and background integrity scanner to scan
+  /// entries without blocking concurrent reads. Returns a read guard that
+  /// provides access to `scan_entries()` and `read_entry_at_shared()`.
+  pub fn writer_read_lock(&self) -> EngineResult<std::sync::RwLockReadGuard<'_, AppendWriter>> {
+    self.writer.read()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(format!("writer lock poisoned: {}", error)),
+      ))
+  }
+
   /// Return the database's hash algorithm.
   pub fn hash_algo(&self) -> HashAlgorithm {
     self.hash_algo

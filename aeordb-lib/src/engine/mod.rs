@@ -172,6 +172,7 @@ pub use engine_event::{
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;
+pub use integrity_scanner::spawn_integrity_scanner;
 pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
 pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
