@@ -18,7 +18,15 @@ use clap::{Parser, Subcommand};
 use commands::stress::StressArgs;
 
 #[derive(Parser)]
-#[command(name = "aeordb", about = "AeorDB command-line interface", version)]
+#[command(
+  name = "aeordb",
+  about = "AeorDB — Content-addressed database with built-in versioning",
+  version,
+  subcommand_required = true,
+  arg_required_else_help = true,
+  subcommand_help_heading = "Commands",
+  after_help = "Use 'aeordb help <command>' or 'aeordb <command> --help' for more information on a specific command."
+)]
 struct Cli {
   #[command(subcommand)]
   command: Commands,
