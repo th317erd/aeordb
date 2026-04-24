@@ -210,7 +210,6 @@ function navigate() {
     }
     el.style.display = (tag === activeTag) ? '' : 'none';
   }
-  }
 }
 
 function updateNavLinks(activePage) {
