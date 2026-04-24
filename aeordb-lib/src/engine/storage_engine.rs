@@ -311,7 +311,13 @@ impl StorageEngine {
       // not persisted in the KV file).
       let scanner = writer.scan_entries()?;
       for scanned_result in scanner {
-        let scanned = scanned_result?;
+        let scanned = match scanned_result {
+          Ok(entry) => entry,
+          Err(e) => {
+            tracing::warn!("Skipping corrupt entry during void scan: {}", e);
+            continue;
+          }
+        };
         if scanned.header.entry_type == EntryType::Void {
           void_manager.register_void(scanned.header.total_length, scanned.offset);
         }
@@ -328,7 +334,13 @@ impl StorageEngine {
       let mut deletion_records: Vec<(String, u64)> = Vec::new();
       let scanner = writer.scan_entries()?;
       for scanned_result in scanner {
-        let scanned = scanned_result?;
+        let scanned = match scanned_result {
+          Ok(entry) => entry,
+          Err(e) => {
+            tracing::warn!("Skipping corrupt entry during rebuild: {}", e);
+            continue;
+          }
+        };
         // Collect deletion records and register void entries during the scan.
         if scanned.header.entry_type == EntryType::DeletionRecord {
           if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
@@ -990,7 +1002,13 @@ impl StorageEngine {
       ))?;
 
     for (hash, offset) in hashes {
-      let (_header, _key, value) = writer.read_entry_at_shared(offset)?;
+      let (_header, _key, value) = match writer.read_entry_at_shared(offset) {
+        Ok(entry) => entry,
+        Err(e) => {
+          tracing::warn!("Skipping corrupt entry at offset {} during entries_by_type: {}", offset, e);
+          continue;
+        }
+      };
       results.push((hash, value));
     }
 
@@ -1073,6 +1091,76 @@ impl StorageEngine {
       updated_at,
       hash_algorithm: format!("{:?}", self.hash_algo),
     }
+  }
+
+  /// Rebuild the KV index from a full scan of the append log.
+  ///
+  /// Deletes the existing `.kv` file and creates a fresh one populated from
+  /// every entry in the `.aeordb` file. Corrupt entries are skipped with a
+  /// warning. The rebuilt KV store is swapped in atomically.
+  pub fn rebuild_kv(&self) -> EngineResult<()> {
+    tracing::info!("Rebuilding KV index from append log...");
+    let timer = std::time::Instant::now();
+
+    // Get path info while holding minimal locks
+    let kv_path = self.kv_path.clone();
+    let hash_algo = self.hash_algo;
+
+    // Scan the append log (needs read lock on writer)
+    let entries: Vec<(u8, Vec<u8>, u64)> = {
+      let writer = self.writer.read()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let scanner = writer.scan_entries()?;
+      let mut collected = Vec::new();
+      for result in scanner {
+        match result {
+          Ok(scanned) => {
+            collected.push((
+              scanned.header.entry_type.to_kv_type(),
+              scanned.key.clone(),
+              scanned.offset,
+            ));
+          }
+          Err(e) => {
+            tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
+          }
+        }
+      }
+      collected
+    };
+    // Writer lock released here
+
+    // Delete old KV and create fresh
+    let _ = std::fs::remove_file(&kv_path);
+    let mut new_kv = DiskKVStore::create(
+      std::path::Path::new(&kv_path),
+      hash_algo,
+      None,
+    )?;
+
+    // Insert all entries
+    let mut count = 0;
+    for (type_flags, hash, offset) in &entries {
+      let kv_entry = KVEntry {
+        type_flags: *type_flags,
+        hash: hash.clone(),
+        offset: *offset,
+      };
+      new_kv.insert(kv_entry)?;
+      count += 1;
+    }
+
+    new_kv.flush()?;
+
+    // Swap the KV writer
+    let mut kv_lock = self.kv_writer.lock()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    *kv_lock = new_kv;
+
+    let elapsed = timer.elapsed();
+    tracing::info!("KV rebuild complete: {} entries indexed in {:.2}s", count, elapsed.as_secs_f64());
+
+    Ok(())
   }
 
   /// Gracefully shut down the engine: flush all buffers and sync to disk.
