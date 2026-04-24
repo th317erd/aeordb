@@ -256,6 +256,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/auth/keys", post(api_key_self_service_routes::create_own_key)
                         .get(api_key_self_service_routes::list_own_keys))
     .route("/auth/keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
+    .route("/auth/keys/users", get(api_key_self_service_routes::list_key_assignable_users))
     .route("/auth/keys/admin", post(routes::create_api_key).get(routes::list_api_keys))
     .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key))
     // System: metrics, stats

@@ -550,29 +550,29 @@ class AeorKeys extends HTMLElement {
     if (!modalContainer)
       return;
 
-    // For root users, fetch the user list for the selector
+    // Fetch users the caller can create keys for (scoped by permissions)
     let userOptions = '';
-    if (this._isRoot) {
-      try {
-        const response = await window.api('/system/users');
-        if (response.ok) {
-          const data = await response.json();
-          const users = data.items || data;
+    let showUserSelector = false;
+    try {
+      const response = await window.api('/auth/keys/users');
+      if (response.ok) {
+        const data = await response.json();
+        const users = data.items || [];
+        if (users.length > 1) {
+          showUserSelector = true;
           userOptions = users.map((user) => {
-            const label = user.username || user.name || user.user_id;
-            return `<option value="${escapeHtml(String(user.user_id))}">${escapeHtml(String(label))} (${escapeHtml(this._truncateId(user.user_id))})</option>`;
+            return `<option value="${escapeHtml(String(user.user_id))}">${escapeHtml(String(user.username))}</option>`;
           }).join('');
         }
-      } catch (error) {
-        // Fall back to no user selector
       }
+    } catch (error) {
+      // Fall back to no user selector
     }
 
-    const userSelectorHtml = (this._isRoot && userOptions) ? `
+    const userSelectorHtml = (showUserSelector) ? `
       <div class="form-group">
         <label class="form-label" for="create-user">User</label>
         <select class="form-input" id="create-user">
-          <option value="">Yourself (root)</option>
           ${userOptions}
         </select>
       </div>

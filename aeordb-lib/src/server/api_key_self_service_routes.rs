@@ -271,3 +271,64 @@ pub async fn revoke_own_key(
     }
   }
 }
+
+/// GET /auth/keys/users — list users the caller can create keys for.
+///
+/// Root: returns all users (user_id + username only — minimal data).
+/// Non-root: returns only the caller (they can only create keys for themselves).
+pub async fn list_key_assignable_users(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+) -> Response {
+  let caller_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid sub claim in JWT")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  if is_root(&caller_id) {
+    // Root sees all users
+    match crate::engine::system_store::list_users(&state.engine) {
+      Ok(users) => {
+        let mut items: Vec<serde_json::Value> = users
+          .iter()
+          .map(|u| serde_json::json!({
+            "user_id": u.user_id,
+            "username": u.username,
+          }))
+          .collect();
+
+        // Include root itself (not in the user store)
+        items.insert(0, serde_json::json!({
+          "user_id": Uuid::nil(),
+          "username": "root",
+        }));
+
+        (StatusCode::OK, Json(serde_json::json!({ "items": items }))).into_response()
+      }
+      Err(e) => {
+        tracing::error!("Failed to list users for key assignment: {}", e);
+        ErrorResponse::new("Failed to list users")
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response()
+      }
+    }
+  } else {
+    // Non-root sees only themselves
+    let username = crate::engine::system_store::get_user(&state.engine, &caller_id)
+      .ok()
+      .flatten()
+      .map(|u| u.username)
+      .unwrap_or_else(|| caller_id.to_string());
+
+    (StatusCode::OK, Json(serde_json::json!({
+      "items": [{
+        "user_id": caller_id,
+        "username": username,
+      }]
+    }))).into_response()
+  }
+}
