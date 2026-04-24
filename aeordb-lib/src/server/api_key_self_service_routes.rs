@@ -156,6 +156,16 @@ pub async fn list_own_keys(
 
   match state.auth_provider.list_api_keys() {
     Ok(keys) => {
+      // Resolve caller's username once
+      let caller_username = crate::engine::system_store::get_user(&state.engine, &caller_id)
+        .ok()
+        .flatten()
+        .map(|u| u.username)
+        .unwrap_or_else(|| {
+          if crate::engine::user::is_root(&caller_id) { "root".to_string() }
+          else { caller_id.to_string() }
+        });
+
       let own_keys: Vec<serde_json::Value> = keys
         .iter()
         .filter(|record| record.user_id == caller_id)
@@ -163,6 +173,7 @@ pub async fn list_own_keys(
           serde_json::json!({
             "key_id": record.key_id,
             "user_id": record.user_id,
+            "username": caller_username,
             "created_at": record.created_at.to_rfc3339(),
             "is_revoked": record.is_revoked,
             "expires_at": record.expires_at,

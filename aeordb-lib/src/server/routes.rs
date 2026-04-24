@@ -486,12 +486,31 @@ pub async fn list_api_keys(
 
   match state.auth_provider.list_api_keys() {
     Ok(keys) => {
+      // Build a user_id → username cache to avoid repeated lookups
+      let mut username_cache: std::collections::HashMap<uuid::Uuid, String> = std::collections::HashMap::new();
+      username_cache.insert(
+        uuid::Uuid::nil(),
+        "root".to_string(),
+      );
+
       let metadata: Vec<serde_json::Value> = keys
         .iter()
         .map(|record| {
+          let username = username_cache
+            .entry(record.user_id)
+            .or_insert_with(|| {
+              crate::engine::system_store::get_user(&state.engine, &record.user_id)
+                .ok()
+                .flatten()
+                .map(|u| u.username)
+                .unwrap_or_else(|| record.user_id.to_string())
+            })
+            .clone();
+
           serde_json::json!({
             "key_id": record.key_id,
             "user_id": record.user_id,
+            "username": username,
             "created_at": record.created_at.to_rfc3339(),
             "is_revoked": record.is_revoked,
             "expires_at": record.expires_at,
