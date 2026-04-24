@@ -40,6 +40,7 @@ pub mod kv_pages;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod kv_snapshot;
+pub mod lost_found;
 pub mod nvt;
 pub mod nvt_ops;
 pub mod path_utils;
