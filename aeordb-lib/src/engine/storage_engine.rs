@@ -1175,6 +1175,28 @@ impl StorageEngine {
     Ok(())
   }
 
+  /// Begin a transaction: increment the KV store's transaction depth so that
+  /// `flush()` skips hot-file truncation until the transaction ends.
+  pub fn begin_transaction(&self) {
+    if let Ok(mut kv) = self.kv_writer.lock() {
+      kv.transaction_depth += 1;
+    }
+  }
+
+  /// End a transaction: decrement the KV store's transaction depth and, when
+  /// it reaches zero, truncate the hot file (completing the deferred work
+  /// that `flush()` skipped while the transaction was active).
+  pub fn end_transaction(&self) {
+    if let Ok(mut kv) = self.kv_writer.lock() {
+      kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
+      if kv.transaction_depth == 0 {
+        if let Err(e) = kv.truncate_hot_file() {
+          tracing::warn!("Failed to truncate hot file after transaction: {}", e);
+        }
+      }
+    }
+  }
+
   /// Gracefully shut down the engine: flush all buffers and sync to disk.
   ///
   /// This is a best-effort operation. Errors during individual flush steps
@@ -1217,5 +1239,28 @@ impl StorageEngine {
 
     tracing::info!("Storage engine shutdown complete");
     Ok(())
+  }
+}
+
+/// RAII guard that begins a transaction on creation and ends it on drop.
+///
+/// While this guard is alive, `DiskKVStore::flush()` will skip truncating the
+/// hot file, ensuring crash recovery can replay all entries written during
+/// the transaction. When the guard is dropped, `end_transaction()` is called,
+/// which decrements the depth and truncates the hot file if depth reaches 0.
+pub struct TransactionGuard<'a> {
+  engine: &'a StorageEngine,
+}
+
+impl<'a> TransactionGuard<'a> {
+  pub fn new(engine: &'a StorageEngine) -> Self {
+    engine.begin_transaction();
+    TransactionGuard { engine }
+  }
+}
+
+impl<'a> Drop for TransactionGuard<'a> {
+  fn drop(&mut self) {
+    self.engine.end_transaction();
   }
 }

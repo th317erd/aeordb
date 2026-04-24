@@ -54,6 +54,11 @@ pub struct DiskKVStore {
     /// Set to true when a corrupt KV page is detected and zeroed during flush.
     /// The engine should trigger a full KV rebuild when this flag is set.
     pub needs_rebuild: bool,
+    /// Transaction nesting depth. When > 0, flush() skips truncating the hot
+    /// file so that crash recovery can replay all entries written during the
+    /// transaction. Decremented by end_transaction(); truncation happens when
+    /// the depth returns to 0.
+    pub transaction_depth: u32,
 }
 
 impl DiskKVStore {
@@ -142,6 +147,7 @@ impl DiskKVStore {
             snapshot,
             shared_nvt,
             needs_rebuild: false,
+            transaction_depth: 0,
         })
     }
 
@@ -246,6 +252,7 @@ impl DiskKVStore {
             snapshot,
             shared_nvt,
             needs_rebuild: false,
+            transaction_depth: 0,
         })
     }
 
@@ -477,9 +484,12 @@ impl DiskKVStore {
         // NOW drain the buffer — disk pages are stable, safe for readers.
         self.write_buffer.clear();
 
-        // Hot file: flush remaining buffer, then truncate (all data is on KV pages now)
+        // Hot file: flush remaining buffer, then truncate (all data is on KV pages now).
+        // Skip truncation inside a transaction so crash recovery can replay all entries.
         self.flush_hot_buffer()?;
-        self.truncate_hot_file()?;
+        if self.transaction_depth == 0 {
+            self.truncate_hot_file()?;
+        }
 
         // Incremental snapshot publish — only re-read modified pages from disk.
         // Unmodified pages are shared via Arc from the previous snapshot.
@@ -901,7 +911,7 @@ impl DiskKVStore {
     /// Truncate the hot file (after successful KV flush).
     /// H8: fsync after truncation ensures the truncate is durable — without it,
     /// a crash could leave stale entries on disk that get replayed on restart.
-    fn truncate_hot_file(&mut self) -> EngineResult<()> {
+    pub(crate) fn truncate_hot_file(&mut self) -> EngineResult<()> {
         if let Some(ref mut file) = self.hot_file {
             file.set_len(0)?;
             file.sync_all()?;
