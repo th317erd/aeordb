@@ -415,7 +415,15 @@ impl StorageEngine {
 
     // Replay hot entries into the KV store, then flush
     let mut kv_store = kv_store;
+    let mut replayed_file_record_hashes: Vec<Vec<u8>> = Vec::new();
+
     if !hot_entries_to_replay.is_empty() {
+      tracing::info!("Replaying {} hot file entries", hot_entries_to_replay.len());
+      for entry in &hot_entries_to_replay {
+        if entry.entry_type() == crate::engine::kv_store::KV_TYPE_FILE_RECORD {
+          replayed_file_record_hashes.push(entry.hash.clone());
+        }
+      }
       for entry in hot_entries_to_replay {
         kv_store.insert(entry)?;
       }
@@ -436,7 +444,63 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
+
+    // Recovery: re-propagate orphaned files from incomplete transactions
+    if !replayed_file_record_hashes.is_empty() {
+      Self::recover_orphaned_files(&engine, &replayed_file_record_hashes);
+    }
+
     Ok(engine)
+  }
+
+  /// After hot file replay, check if replayed FileRecords are properly
+  /// listed in their parent directories. If not, re-propagate.
+  fn recover_orphaned_files(engine: &StorageEngine, file_record_hashes: &[Vec<u8>]) {
+    let hash_length = engine.hash_algo().hash_length();
+    let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
+    let ctx = crate::engine::request_context::RequestContext::system();
+
+    for hash in file_record_hashes {
+      match engine.get_entry(hash) {
+        Ok(Some((header, _key, value))) => {
+          match crate::engine::file_record::FileRecord::deserialize(
+            &value, hash_length, header.entry_version,
+          ) {
+            Ok(record) => {
+              let path = &record.path;
+              if let Some(parent) = crate::engine::path_utils::parent_path(path) {
+                match ops.list_directory(&parent) {
+                  Ok(children) => {
+                    let file_name = crate::engine::path_utils::file_name(path).unwrap_or("");
+                    let is_listed = children.iter().any(|c| c.name == file_name);
+                    if !is_listed {
+                      tracing::info!(
+                        "Recovering orphaned file '{}' — adding to parent directory",
+                        path,
+                      );
+                      // Re-store the file record at the path key to trigger directory propagation.
+                      // The simplest approach: read the data back and store it again.
+                      // Chunk dedup prevents duplicate storage. This is a recovery path.
+                      if let Ok(data) = ops.read_file(path) {
+                        let ct = record.content_type.as_deref();
+                        if let Err(e) = ops.store_file(&ctx, path, &data, ct) {
+                          tracing::warn!("Failed to recover orphaned file '{}': {}", path, e);
+                        }
+                      }
+                    }
+                  }
+                  Err(_) => {} // Parent doesn't exist or corrupt — skip
+                }
+              }
+            }
+            Err(e) => {
+              tracing::debug!("Skipping non-parseable file record during recovery: {}", e);
+            }
+          }
+        }
+        _ => {} // Entry not found — skip
+      }
+    }
   }
 
   /// Open an existing database file.

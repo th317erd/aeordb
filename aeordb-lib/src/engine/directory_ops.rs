@@ -302,6 +302,7 @@ impl<'a> DirectoryOps<'a> {
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     // M15: Reject storing at root path — it would create a ghost entry.
     if normalized == "/" {
@@ -496,6 +497,7 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a file, storing a DeletionRecord and updating parent directories.
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -819,6 +821,7 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let file_key = file_path_hash(&normalized, &algo)?;
     let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
