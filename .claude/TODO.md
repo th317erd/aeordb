@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 3,548 tests, all passing
+## Total: 3,564 tests, all passing
 
 ---
 
@@ -146,6 +146,17 @@
 - [x] Portal subclass (aeor-file-browser-portal.js, 158 lines) — direct /files/ API, auto-open, last-tab guard
 - [x] Portal files.mjs simplified (14 lines, was 160) — no fetch shim, no monkey-patches
 - [x] ZIP download endpoint (POST /files/download) — 6 tests, recursive folders, .system/ filtering
+
+## Completed: Database Corruption Hardening — 12 tests
+
+- [x] Lost+found quarantine module (quarantine_bytes, quarantine_metadata)
+- [x] Scanner magic byte search — scans past corrupt headers instead of stopping
+- [x] Hash verification on direct reads — detects bit-flipped data
+- [x] KV flush resilience — zeros corrupt pages, flags for rebuild
+- [x] Storage engine hardening — IO error tolerance, rebuild_kv(), entries_by_type skip
+- [x] Graceful directory listing — returns empty on corrupt index
+- [x] Admin repair endpoint (POST /system/repair)
+- [x] 12 comprehensive corruption tests
 
 ## Future Plans (Not Started)
 
