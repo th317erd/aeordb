@@ -266,7 +266,7 @@ fn test_run_gc_end_to_end() {
 
   let result = run_gc(&engine, &ctx, false).unwrap();
 
-  assert_eq!(result.versions_scanned, 4); // HEAD + v1 + v2 + experiment
+  assert_eq!(result.versions_scanned, 5); // HEAD + v1 + v2 + experiment + _aeordb_pre_gc_*
   assert!(result.live_entries > 0);
   assert!(result.garbage_entries > 0);
   assert!(result.reclaimed_bytes > 0);
@@ -283,7 +283,7 @@ fn test_gc_empty_database() {
 
   let result = run_gc(&engine, &ctx, false).unwrap();
   assert_eq!(result.garbage_entries, 0);
-  assert_eq!(result.versions_scanned, 1);
+  assert_eq!(result.versions_scanned, 2); // HEAD + _aeordb_pre_gc_*
 }
 
 #[test]

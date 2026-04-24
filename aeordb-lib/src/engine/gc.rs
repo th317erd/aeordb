@@ -491,6 +491,38 @@ pub fn run_gc(
   }));
 
   let vm = VersionManager::new(engine);
+
+  // Auto-snapshot before GC — safety net in case sweep removes something needed
+  if !dry_run {
+    let snapshot_name = format!("_aeordb_pre_gc_{}", chrono::Utc::now().timestamp());
+
+    match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
+      Ok(_) => {
+        tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
+      }
+      Err(e) => {
+        tracing::warn!("Failed to create pre-GC snapshot: {}. Proceeding with GC anyway.", e);
+      }
+    }
+
+    // Clean up old pre-GC snapshots — keep last 3
+    if let Ok(snapshots) = vm.list_snapshots() {
+      let mut pre_gc_snapshots: Vec<String> = snapshots
+        .iter()
+        .filter(|s| s.name.starts_with("_aeordb_pre_gc_"))
+        .map(|s| s.name.clone())
+        .collect();
+      pre_gc_snapshots.sort();
+      pre_gc_snapshots.reverse(); // newest first (timestamp suffix sorts lexicographically)
+
+      for old_name in pre_gc_snapshots.iter().skip(3) {
+        if let Err(e) = vm.delete_snapshot(ctx, old_name) {
+          tracing::warn!("Failed to delete old pre-GC snapshot {}: {}", old_name, e);
+        }
+      }
+    }
+  }
+
   let snapshot_count = vm.list_snapshots()?.len();
   let fork_count = vm.list_forks()?.len();
   let versions_scanned = 1 + snapshot_count + fork_count;
