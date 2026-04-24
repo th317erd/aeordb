@@ -545,10 +545,38 @@ class AeorKeys extends HTMLElement {
     }
   }
 
-  showCreateModal() {
+  async showCreateModal() {
     const modalContainer = this.querySelector('#keys-modal');
     if (!modalContainer)
       return;
+
+    // For root users, fetch the user list for the selector
+    let userOptions = '';
+    if (this._isRoot) {
+      try {
+        const response = await window.api('/system/users');
+        if (response.ok) {
+          const data = await response.json();
+          const users = data.items || data;
+          userOptions = users.map((user) => {
+            const label = user.username || user.name || user.user_id;
+            return `<option value="${escapeHtml(String(user.user_id))}">${escapeHtml(String(label))} (${escapeHtml(this._truncateId(user.user_id))})</option>`;
+          }).join('');
+        }
+      } catch (error) {
+        // Fall back to no user selector
+      }
+    }
+
+    const userSelectorHtml = (this._isRoot && userOptions) ? `
+      <div class="form-group">
+        <label class="form-label" for="create-user">User</label>
+        <select class="form-input" id="create-user">
+          <option value="">Yourself (root)</option>
+          ${userOptions}
+        </select>
+      </div>
+    ` : '';
 
     modalContainer.innerHTML = `
       <div class="modal-overlay" id="modal-overlay">
@@ -556,6 +584,7 @@ class AeorKeys extends HTMLElement {
           <div class="modal-title">Create Key</div>
           <div id="modal-error"></div>
           <form id="create-key-form">
+            ${userSelectorHtml}
             <div class="form-group">
               <label class="form-label" for="create-label">Label (optional)</label>
               <input class="form-input" id="create-label" type="text" placeholder="e.g. CI pipeline key">
@@ -586,6 +615,7 @@ class AeorKeys extends HTMLElement {
     const modalError = this.querySelector('#modal-error');
     const labelInput = this.querySelector('#create-label');
     const expiresInput = this.querySelector('#create-expires');
+    const userSelect = this.querySelector('#create-user');
 
     const body = {
       expires_in_days: parseInt(expiresInput.value, 10) || 365,
@@ -593,6 +623,10 @@ class AeorKeys extends HTMLElement {
 
     if (labelInput.value.trim()) {
       body.label = labelInput.value.trim();
+    }
+
+    if (userSelect && userSelect.value) {
+      body.user_id = userSelect.value;
     }
 
     try {
