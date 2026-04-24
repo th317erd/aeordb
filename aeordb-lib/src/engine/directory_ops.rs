@@ -557,26 +557,55 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// List the children of a directory.
+  ///
+  /// If the directory index or child entries are corrupt, logs a warning
+  /// and returns an empty listing instead of failing the entire operation.
+  /// `NotFound` is still returned as an error (directory genuinely doesn't exist).
   pub fn list_directory(&self, path: &str) -> EngineResult<Vec<ChildEntry>> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
-    match self.engine.get_entry(&dir_key)? {
-      Some((header, _key, value)) => {
+    match self.engine.get_entry(&dir_key) {
+      Ok(Some((header, _key, value))) => {
         if value.is_empty() {
           return Ok(Vec::new());
         }
         if crate::engine::btree::is_btree_format(&value) {
           // B-tree format: value is the root node data
-          crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length)
+          match crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length) {
+            Ok(children) => Ok(children),
+            Err(e) => {
+              tracing::warn!(
+                "Corrupt B-tree directory index at '{}': {}. Returning empty listing.",
+                normalized, e
+              );
+              Ok(Vec::new())
+            }
+          }
         } else {
           // Flat format
-          deserialize_child_entries(&value, hash_length, header.entry_version)
+          match deserialize_child_entries(&value, hash_length, header.entry_version) {
+            Ok(children) => Ok(children),
+            Err(e) => {
+              tracing::warn!(
+                "Corrupt directory index at '{}': {}. Returning empty listing.",
+                normalized, e
+              );
+              Ok(Vec::new())
+            }
+          }
         }
       }
-      None => Err(EngineError::NotFound(normalized)),
+      Ok(None) => Err(EngineError::NotFound(normalized)),
+      Err(e) => {
+        tracing::warn!(
+          "Error reading directory '{}': {}. Returning empty listing.",
+          normalized, e
+        );
+        Ok(Vec::new())
+      }
     }
   }
 
