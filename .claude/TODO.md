@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 3,564 tests, all passing
+## Total: 3,578 tests, all passing
 
 ---
 
@@ -157,6 +157,15 @@
 - [x] Graceful directory listing — returns empty on corrupt index
 - [x] Admin repair endpoint (POST /system/repair)
 - [x] 12 comprehensive corruption tests
+
+## Completed: Database Resilience Features — 9 tests
+
+- [x] Auto-snapshot before GC (`_aeordb_pre_gc_{timestamp}`, keep last 3)
+- [x] Verify module (full integrity scan with VerifyReport)
+- [x] `aeordb verify` CLI command with `--repair` flag
+- [x] Background integrity scanner (1% sample per hour, quarantine on failure)
+- [x] Cluster auto-healing framework (stub transport, verification logic complete)
+- [x] 9 resilience tests (GC snapshot, verify, metrics, voids, repair)
 
 ## Future Plans (Not Started)
 
