@@ -114,6 +114,12 @@ let authDisabled = false;
 // Cached page instances — survives navigation so chart history isn't lost
 const pageCache = {};
 
+function hideAllPages(container) {
+  for (const el of Object.values(pageCache)) {
+    el.style.display = 'none';
+  }
+}
+
 function getOrCreatePage(tag) {
   if (!pageCache[tag]) {
     pageCache[tag] = document.createElement(tag);
@@ -157,11 +163,15 @@ function navigate() {
     }
   }
 
-  // Remove current child without destroying cached elements
-  while (main.firstChild) main.removeChild(main.firstChild);
-
   if (!AUTH.token && !authDisabled) {
-    main.appendChild(document.createElement('aeor-login'));
+    // Hide all pages, show login
+    hideAllPages(main);
+    let login = main.querySelector('aeor-login');
+    if (!login) {
+      login = document.createElement('aeor-login');
+      main.appendChild(login);
+    }
+    login.style.display = '';
     updateNavLinks('');
     // Hide sidebar and mobile top bar on login screen
     if (sidebar) sidebar.style.display = 'none';
@@ -175,23 +185,31 @@ function navigate() {
   const mobileTopBar = document.querySelector('.mobile-top-bar');
   if (mobileTopBar) mobileTopBar.style.display = '';
 
+  // Hide login if it exists
+  const login = main.querySelector('aeor-login');
+  if (login) login.style.display = 'none';
+
   updateNavLinks(page);
 
-  switch (page) {
-    case 'users':
-      main.appendChild(getOrCreatePage('aeor-users'));
-      break;
-    case 'groups':
-      main.appendChild(getOrCreatePage('aeor-groups'));
-      break;
-    case 'files':
-      main.appendChild(getOrCreatePage('aeor-files'));
-      break;
-    case 'keys':
-      main.appendChild(getOrCreatePage('aeor-keys'));
-      break;
-    default:
-      main.appendChild(getOrCreatePage('aeor-dashboard'));
+  // Ensure all pages are in the DOM (created once, never removed)
+  const pageMap = {
+    'dashboard': 'aeor-dashboard',
+    'files': 'aeor-files',
+    'users': 'aeor-users',
+    'groups': 'aeor-groups',
+    'keys': 'aeor-keys',
+  };
+
+  const activeTag = pageMap[page] || pageMap['dashboard'];
+
+  for (const [, tag] of Object.entries(pageMap)) {
+    let el = getOrCreatePage(tag);
+    if (!el.parentNode) {
+      el.style.display = 'none';
+      main.appendChild(el);
+    }
+    el.style.display = (tag === activeTag) ? '' : 'none';
+  }
   }
 }
 
