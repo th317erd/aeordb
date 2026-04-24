@@ -1,6 +1,6 @@
 # AeorDB — TODO
 
-## Total: 3,578 tests, all passing
+## Total: 3,594 tests, all passing
 
 ---
 
@@ -166,6 +166,13 @@
 - [x] Background integrity scanner (1% sample per hour, quarantine on failure)
 - [x] Cluster auto-healing framework (stub transport, verification logic complete)
 - [x] 9 resilience tests (GC snapshot, verify, metrics, voids, repair)
+
+## Completed: Hot File Transactions — 16 tests
+
+- [x] KV transaction_depth + TransactionGuard RAII
+- [x] store_file and delete_file wrapped in transactions
+- [x] Orphan recovery on restart (hot file replay + directory re-propagation)
+- [x] 16 tests: guard safety, panic/error paths, deadlock prevention, recovery, edge cases
 
 ## Future Plans (Not Started)
 
