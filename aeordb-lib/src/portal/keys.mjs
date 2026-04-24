@@ -13,12 +13,14 @@ class AeorKeys extends HTMLElement {
     this._isRoot = false;
     this._selectedKeyIds = new Set();
     this._lastSelectedAnchor = null;
+    this._userMap = null; // user_id → display name
   }
 
   connectedCallback() {
     this._currentKeyId = this._getCurrentKeyId();
     this._isRoot = this._checkIsRoot();
     this.render();
+    this._fetchUserMap();
     this._fetchOwnKeys();
   }
 
@@ -38,6 +40,34 @@ class AeorKeys extends HTMLElement {
       const payload = JSON.parse(atob(token.split('.')[1]));
       return payload.sub === '00000000-0000-0000-0000-000000000000';
     } catch { return false; }
+  }
+
+  async _fetchUserMap() {
+    try {
+      const response = await window.api('/system/users');
+      if (!response.ok) return;
+      const data = await response.json();
+      const users = data.items || data;
+      this._userMap = {};
+      for (const user of users) {
+        const id = String(user.user_id);
+        this._userMap[id] = user.username || user.name || user.email || id;
+      }
+      // Add root
+      this._userMap['00000000-0000-0000-0000-000000000000'] = 'root';
+      // Re-render if keys are already loaded
+      if (this._keys.length > 0) this.renderContent();
+    } catch {
+      // Non-critical — fall back to showing IDs
+    }
+  }
+
+  _userName(userId) {
+    if (!userId) return '\u2014';
+    if (this._userMap && this._userMap[String(userId)]) {
+      return this._userMap[String(userId)];
+    }
+    return this._truncateId(userId);
   }
 
   render() {
@@ -278,7 +308,7 @@ class AeorKeys extends HTMLElement {
               </div>
               <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">
                 <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">User</div>
-                ${escapeHtml(this._truncateId(key.user_id))}
+                ${escapeHtml(this._userName(key.user_id))}
               </div>
               <div></div>
             </div>
