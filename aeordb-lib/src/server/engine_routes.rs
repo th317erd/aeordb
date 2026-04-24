@@ -36,6 +36,10 @@ pub struct EngineGetQuery {
   pub nofollow: Option<bool>,
   pub limit: Option<usize>,
   pub offset: Option<usize>,
+  /// Sort field: "name", "size", "created_at", "updated_at" (default: "name")
+  pub sort: Option<String>,
+  /// Sort order: "asc" or "desc" (default: "asc")
+  pub order: Option<String>,
 }
 
 /// Filter a listing of JSON entries based on active API key rules.
@@ -57,7 +61,40 @@ fn paginated_listing_response(
   mut listing: Vec<serde_json::Value>,
   limit: Option<usize>,
   offset: Option<usize>,
+  sort: Option<&str>,
+  order: Option<&str>,
 ) -> Response {
+  // Sort before pagination
+  let sort_field = sort.unwrap_or("name");
+  let descending = order.map(|o| o == "desc").unwrap_or(false);
+
+  listing.sort_by(|a, b| {
+    let cmp = match sort_field {
+      "size" => {
+        let a_size = a["size"].as_u64().unwrap_or(0);
+        let b_size = b["size"].as_u64().unwrap_or(0);
+        a_size.cmp(&b_size)
+      }
+      "created_at" => {
+        let a_ts = a["created_at"].as_i64().or_else(|| a["created_at"].as_u64().map(|v| v as i64)).unwrap_or(0);
+        let b_ts = b["created_at"].as_i64().or_else(|| b["created_at"].as_u64().map(|v| v as i64)).unwrap_or(0);
+        a_ts.cmp(&b_ts)
+      }
+      "updated_at" => {
+        let a_ts = a["updated_at"].as_i64().or_else(|| a["updated_at"].as_u64().map(|v| v as i64)).unwrap_or(0);
+        let b_ts = b["updated_at"].as_i64().or_else(|| b["updated_at"].as_u64().map(|v| v as i64)).unwrap_or(0);
+        a_ts.cmp(&b_ts)
+      }
+      _ => {
+        // Default: sort by name (case-insensitive)
+        let a_name = a["name"].as_str().unwrap_or("").to_lowercase();
+        let b_name = b["name"].as_str().unwrap_or("").to_lowercase();
+        a_name.cmp(&b_name)
+      }
+    };
+    if descending { cmp.reverse() } else { cmp }
+  });
+
   let total = listing.len();
   let off = offset.unwrap_or(0).min(total);
   listing = listing.split_off(off);
@@ -432,7 +469,7 @@ fn handle_symlink_resolution(
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
           match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-            Ok(()) => paginated_listing_response(listing, limit, offset),
+            Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
             Err(response) => response,
           }
         }
@@ -571,7 +608,7 @@ fn handle_recursive_listing(
         .collect();
 
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => paginated_listing_response(listing, version_query.limit, version_query.offset),
+        Ok(()) => paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref()),
         Err(response) => response,
       }
     }
@@ -597,6 +634,8 @@ fn handle_directory_listing(
   user_id_str: &str,
   limit: Option<usize>,
   offset: Option<usize>,
+  sort: Option<&str>,
+  order: Option<&str>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -604,7 +643,7 @@ fn handle_directory_listing(
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => paginated_listing_response(listing, limit, offset),
+        Ok(()) => paginated_listing_response(listing, limit, offset, sort, order),
         Err(response) => response,
       }
     }
@@ -696,7 +735,7 @@ pub async fn engine_get(
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset)
+  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref())
 }
 
 
