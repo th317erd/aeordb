@@ -17,6 +17,9 @@ pub struct EntryScanner {
   file: File,
   current_offset: u64,
   file_length: u64,
+  /// After a corrupt header is encountered, stores (offset, length) of the skipped region.
+  /// Callers can use this to quarantine the raw bytes to lost+found.
+  pub last_skipped_region: Option<(u64, usize)>,
 }
 
 impl EntryScanner {
@@ -29,7 +32,58 @@ impl EntryScanner {
       file,
       current_offset: start_offset,
       file_length,
+      last_skipped_region: None,
     })
+  }
+
+  /// Scan forward from `start` looking for the 4-byte entry magic (0x0AE012DB LE).
+  /// Caps the search at 1MB to avoid scanning the entire file.
+  /// Returns Some((offset, bytes_skipped)) if found, None if not.
+  fn scan_for_next_magic(&mut self, start: u64) -> Option<(u64, u64)> {
+    use crate::engine::entry_header::ENTRY_MAGIC;
+    let magic_bytes = ENTRY_MAGIC.to_le_bytes();
+    let max_scan = 1_048_576u64; // 1MB search window
+    let end = (start + max_scan).min(self.file_length);
+
+    // Read the search window into memory
+    let window_size = (end - start) as usize;
+    if window_size < 4 {
+      return None;
+    }
+
+    if self.file.seek(SeekFrom::Start(start)).is_err() {
+      return None;
+    }
+
+    let mut buffer = vec![0u8; window_size];
+    if let Err(_) = self.file.read_exact(&mut buffer) {
+      // Partial read — truncate to what we actually have
+      if self.file.seek(SeekFrom::Start(start)).is_err() {
+        return None;
+      }
+      let actual = self.file.read(&mut buffer).unwrap_or(0);
+      buffer.truncate(actual);
+    }
+
+    // Search for magic bytes
+    for i in 0..buffer.len().saturating_sub(3) {
+      if buffer[i..i + 4] == magic_bytes {
+        let candidate_offset = start + i as u64;
+
+        // Validate: try to deserialize a header at this offset
+        if self.file.seek(SeekFrom::Start(candidate_offset)).is_ok() {
+          if let Ok(header) = EntryHeader::deserialize(&mut self.file) {
+            // Sanity check: total_length should be reasonable
+            let remaining = self.file_length - candidate_offset;
+            if (header.total_length as u64) <= remaining && header.total_length > 0 {
+              return Some((candidate_offset, candidate_offset - start + 1));
+            }
+          }
+        }
+      }
+    }
+
+    None
   }
 }
 
@@ -53,14 +107,33 @@ impl Iterator for EntryScanner {
       Ok(header) => header,
       Err(crate::engine::errors::EngineError::UnexpectedEof) => return None,
       Err(error) => {
-        // Corrupt entry — log warning and skip
+        // Corrupt entry header — can't use total_length to skip.
+        // Scan forward looking for the next valid entry magic bytes.
         tracing::warn!(
-          "Corrupt entry at offset {}: {}. Skipping.",
+          "Corrupt entry header at offset {}: {}. Scanning for next valid entry...",
           entry_offset,
           error
         );
-        // We can't reliably skip without total_length, so we stop iteration
-        return None;
+
+        match self.scan_for_next_magic(entry_offset + 1) {
+          Some((next_offset, skipped_bytes)) => {
+            tracing::warn!(
+              "Found next valid entry at offset {} (skipped {} bytes from {})",
+              next_offset, skipped_bytes, entry_offset,
+            );
+            self.last_skipped_region = Some((entry_offset, skipped_bytes as usize));
+            self.current_offset = next_offset;
+            return self.next();
+          }
+          None => {
+            tracing::warn!(
+              "No valid entry found after offset {}. Stopping scan.",
+              entry_offset,
+            );
+            self.last_skipped_region = Some((entry_offset, (self.file_length - entry_offset) as usize));
+            return None;
+          }
+        }
       }
     };
 
@@ -81,13 +154,25 @@ impl Iterator for EntryScanner {
     // Read key
     let mut key = vec![0u8; header.key_length as usize];
     if let Err(error) = self.file.read_exact(&mut key) {
-      return Some(Err(error.into()));
+      tracing::warn!(
+        "IO error reading key at offset {}: {}. Skipping entry.",
+        entry_offset, error
+      );
+      self.last_skipped_region = Some((entry_offset, header.total_length as usize));
+      self.current_offset = entry_offset + header.total_length as u64;
+      return self.next();
     }
 
     // Read value
     let mut value = vec![0u8; header.value_length as usize];
     if let Err(error) = self.file.read_exact(&mut value) {
-      return Some(Err(error.into()));
+      tracing::warn!(
+        "IO error reading value at offset {}: {}. Skipping entry.",
+        entry_offset, error
+      );
+      self.last_skipped_region = Some((entry_offset, header.total_length as usize));
+      self.current_offset = entry_offset + header.total_length as u64;
+      return self.next();
     }
 
     // Verify hash integrity
