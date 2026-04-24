@@ -2011,6 +2011,40 @@ pub async fn engine_rename(
 }
 
 // ---------------------------------------------------------------------------
+// System repair
+// ---------------------------------------------------------------------------
+
+/// POST /system/repair — trigger a KV index rebuild from the append log.
+pub async fn repair_kv(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+) -> Response {
+    let caller_id = match uuid::Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => return ErrorResponse::new("Invalid token")
+            .with_status(StatusCode::UNAUTHORIZED).into_response(),
+    };
+
+    if !crate::engine::user::is_root(&caller_id) {
+        return ErrorResponse::new("Root access required for repair operations")
+            .with_status(StatusCode::FORBIDDEN).into_response();
+    }
+
+    match state.engine.rebuild_kv() {
+        Ok(()) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "ok",
+                "message": "KV index rebuilt successfully",
+            }))).into_response()
+        }
+        Err(e) => {
+            ErrorResponse::new(format!("Repair failed: {}", e))
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

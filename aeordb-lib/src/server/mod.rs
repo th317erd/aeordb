@@ -282,6 +282,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/versions/promote", post(backup_routes::promote_head))
     // System: GC
     .route("/system/gc", post(gc_routes::run_gc_endpoint))
+    // System: repair (KV index rebuild)
+    .route("/system/repair", post(engine_routes::repair_kv))
     // System: task & cron routes
     .route("/system/tasks", get(task_routes::list_tasks))
     .route("/system/tasks/reindex", post(task_routes::trigger_reindex))

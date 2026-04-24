@@ -658,6 +658,10 @@ path = "spec/engine/engine_counters_spec.rs"
 name = "native_parsers_spec"
 path = "spec/engine/native_parsers_spec.rs"
 
+[[test]]
+name = "corruption_hardening_spec"
+path = "spec/engine/corruption_hardening_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
