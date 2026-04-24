@@ -6,3 +6,4 @@ pub mod import_cmd;
 pub mod promote;
 pub mod start;
 pub mod stress;
+pub mod verify;

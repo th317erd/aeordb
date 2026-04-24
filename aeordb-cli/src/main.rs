@@ -130,6 +130,15 @@ enum Commands {
     #[arg(long)]
     hash: String,
   },
+  /// Verify database integrity and optionally repair issues
+  Verify {
+    /// Path to the database file (default: "data.aeordb")
+    #[arg(short = 'D', long, default_value = "data.aeordb")]
+    database: String,
+    /// Auto-repair recoverable issues (rebuild KV, quarantine corrupt entries)
+    #[arg(long)]
+    repair: bool,
+  },
   /// Run garbage collection to reclaim unreachable entries
   Gc {
     /// Path to the database file (default: "data.aeordb")
@@ -255,6 +264,9 @@ async fn main() {
     }
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);
+    }
+    Commands::Verify { database, repair } => {
+      commands::verify::run(&database, repair);
     }
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);
