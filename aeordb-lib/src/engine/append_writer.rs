@@ -269,6 +269,17 @@ impl AppendWriter {
     let mut value = vec![0u8; header.value_length as usize];
     self.file.read_exact(&mut value)?;
 
+    // Verify hash integrity — detect bit-flipped values
+    if !header.verify(&key, &value) {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "Hash verification failed for entry at offset {}. Data may be corrupt.",
+          offset,
+        ),
+      });
+    }
+
     Ok((header, key, value))
   }
 
@@ -305,6 +316,17 @@ impl AppendWriter {
 
     let mut value = vec![0u8; header.value_length as usize];
     file.read_exact(&mut value)?;
+
+    // Verify hash integrity — detect bit-flipped values
+    if !header.verify(&key, &value) {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "Hash verification failed for entry at offset {}. Data may be corrupt.",
+          offset,
+        ),
+      });
+    }
 
     Ok((header, key, value))
   }
