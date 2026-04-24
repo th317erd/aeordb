@@ -51,6 +51,9 @@ pub struct DiskKVStore {
     snapshot: Arc<ArcSwap<ReadSnapshot>>,
     /// Shared NVT wrapped in Arc — re-cloned only on flush/resize.
     shared_nvt: Arc<NormalizedVectorTable>,
+    /// Set to true when a corrupt KV page is detected and zeroed during flush.
+    /// The engine should trigger a full KV rebuild when this flag is set.
+    pub needs_rebuild: bool,
 }
 
 impl DiskKVStore {
@@ -138,6 +141,7 @@ impl DiskKVStore {
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
+            needs_rebuild: false,
         })
     }
 
@@ -241,6 +245,7 @@ impl DiskKVStore {
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
+            needs_rebuild: false,
         })
     }
 
@@ -353,7 +358,20 @@ impl DiskKVStore {
             self.kv_file.seek(SeekFrom::Start(offset))?;
             self.kv_file.read_exact(&mut page_data)?;
 
-            let mut existing = deserialize_page(&page_data, hash_length)?;
+            let mut existing = match deserialize_page(&page_data, hash_length) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        "Corrupt KV page at bucket {}: {}. Resetting page to empty.",
+                        bucket_index, e
+                    );
+                    let empty_page = vec![0u8; psize];
+                    self.kv_file.seek(SeekFrom::Start(offset))?;
+                    self.kv_file.write_all(&empty_page)?;
+                    self.needs_rebuild = true;
+                    Vec::new()
+                }
+            };
 
             for entry in new_entries {
                 if !upsert_in_page(&mut existing, entry.clone()) {
@@ -426,7 +444,20 @@ impl DiskKVStore {
             self.kv_file.seek(SeekFrom::Start(offset))?;
             self.kv_file.read_exact(&mut page_data)?;
 
-            let mut existing = deserialize_page(&page_data, hash_length)?;
+            let mut existing = match deserialize_page(&page_data, hash_length) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        "Corrupt KV page at bucket {}: {}. Resetting page to empty.",
+                        bucket_index, e
+                    );
+                    let empty_page = vec![0u8; psize];
+                    self.kv_file.seek(SeekFrom::Start(offset))?;
+                    self.kv_file.write_all(&empty_page)?;
+                    self.needs_rebuild = true;
+                    Vec::new()
+                }
+            };
 
             // Merge new entries into existing page
             for entry in new_entries {
