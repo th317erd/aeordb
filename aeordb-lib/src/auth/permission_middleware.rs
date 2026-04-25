@@ -78,22 +78,28 @@ pub async fn permission_middleware(
   };
 
   // Parse user_id from claims.sub.
-  // Non-UUID subjects are rejected — all valid users must have UUID identities.
-  let user_id = match Uuid::parse_str(&claims.sub) {
-    Ok(user_id) => user_id,
-    Err(_) => {
-      tracing::warn!(
-        sub = %claims.sub,
-        "Rejecting request: sub is not a valid UUID"
-      );
-      return (
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse {
-          error: "Invalid user identity".to_string(),
-          code: None,
-        }),
-      )
-        .into_response();
+  // Share keys use "share:<id>" as sub — they skip the permission resolver.
+  // Normal users must have UUID identities.
+  let is_share_key = claims.sub.starts_with("share:");
+  let user_id = if is_share_key {
+    None
+  } else {
+    match Uuid::parse_str(&claims.sub) {
+      Ok(user_id) => Some(user_id),
+      Err(_) => {
+        tracing::warn!(
+          sub = %claims.sub,
+          "Rejecting request: sub is not a valid UUID"
+        );
+        return (
+          StatusCode::FORBIDDEN,
+          Json(ErrorResponse {
+            error: "Invalid user identity".to_string(),
+            code: None,
+          }),
+        )
+          .into_response();
+      }
     }
   };
 
@@ -189,18 +195,24 @@ pub async fn permission_middleware(
     // Empty rules = full pass-through, no extension inserted.
   }
 
-  // Check permission.
+  // For share keys, the API key rules are the sole permission authority.
+  // Skip the user/group permission resolver entirely.
+  if is_share_key {
+    return next.run(request).await;
+  }
+
+  // Check permission (normal user flow).
   let resolver = PermissionResolver::new(
     &state.engine,
     &state.group_cache,
     &state.permissions_cache,
   );
 
-  match resolver.check_permission(&user_id, engine_path, operation) {
+  match resolver.check_permission(&user_id.unwrap(), engine_path, operation) {
     Ok(true) => next.run(request).await,
     Ok(false) => {
       tracing::warn!(
-        user_id = %user_id,
+        user_id = %user_id.unwrap(),
         path = %engine_path,
         operation = ?operation,
         "Permission denied"
@@ -216,7 +228,7 @@ pub async fn permission_middleware(
     }
     Err(error) => {
       tracing::error!(
-        user_id = %user_id,
+        user_id = %user_id.unwrap(),
         path = %engine_path,
         "Permission check failed: {}",
         error
