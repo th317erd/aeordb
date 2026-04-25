@@ -537,7 +537,7 @@ async fn test_token_exchange_rejects_expired_key() {
   let record = aeordb::auth::ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::nil(),
+    user_id: Some(uuid::Uuid::nil()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: 1000, // epoch + 1 second — way in the past

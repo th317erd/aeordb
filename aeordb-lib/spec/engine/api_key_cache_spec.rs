@@ -16,7 +16,7 @@ fn store_test_key(engine: &Arc<aeordb::engine::storage_engine::StorageEngine>) -
     let record = ApiKeyRecord {
         key_id,
         key_hash: hash_api_key("test_secret").unwrap(),
-        user_id,
+        user_id: Some(user_id),
         created_at: Utc::now(),
         is_revoked: false,
         expires_at: Utc::now().timestamp_millis() + 86_400_000,

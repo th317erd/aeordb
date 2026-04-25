@@ -191,7 +191,7 @@ async fn test_auth_token_with_valid_api_key_returns_jwt() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -284,7 +284,7 @@ async fn test_list_api_keys_returns_metadata() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -326,7 +326,7 @@ async fn test_revoke_api_key_succeeds() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -365,7 +365,7 @@ async fn test_revoked_api_key_cannot_get_token() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -405,7 +405,7 @@ async fn test_bootstrap_creates_root_key_on_first_run() {
 
   let keys = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys.len(), 1);
-  assert_eq!(keys[0].user_id, uuid::Uuid::nil());
+  assert_eq!(keys[0].user_id, Some(uuid::Uuid::nil()));
   assert!(!keys[0].is_revoked);
 }
 

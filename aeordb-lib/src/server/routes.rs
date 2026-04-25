@@ -342,7 +342,10 @@ pub async fn auth_token(
   let key_expires_seconds = (record.expires_at / 1000) - now;
   let jwt_expiry = std::cmp::min(crate::auth::jwt::DEFAULT_EXPIRY_SECONDS, key_expires_seconds.max(0));
   let claims = TokenClaims {
-    sub: record.user_id.to_string(),
+    sub: match record.user_id {
+      Some(uid) => uid.to_string(),
+      None => format!("share:{}", record.key_id),
+    },
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + jwt_expiry,
@@ -370,7 +373,10 @@ pub async fn auth_token(
   let ctx = RequestContext::with_bus(state.event_bus.clone());
   let refresh_record = RefreshTokenRecord {
     token_hash: refresh_token_hash,
-    user_subject: record.user_id.to_string(),
+    user_subject: match record.user_id {
+      Some(uid) => uid.to_string(),
+      None => format!("share:{}", record.key_id),
+    },
     created_at: chrono::Utc::now(),
     expires_at: refresh_expires_at,
     is_revoked: false,
@@ -445,7 +451,7 @@ pub async fn create_api_key(
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: target_user_id,
+    user_id: Some(target_user_id),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: chrono::Utc::now().timestamp_millis()
@@ -496,16 +502,20 @@ pub async fn list_api_keys(
       let metadata: Vec<serde_json::Value> = keys
         .iter()
         .map(|record| {
-          let username = username_cache
-            .entry(record.user_id)
-            .or_insert_with(|| {
-              crate::engine::system_store::get_user(&state.engine, &record.user_id)
-                .ok()
-                .flatten()
-                .map(|u| u.username)
-                .unwrap_or_else(|| record.user_id.to_string())
-            })
-            .clone();
+          let username = if let Some(uid) = record.user_id {
+            username_cache
+              .entry(uid)
+              .or_insert_with(|| {
+                crate::engine::system_store::get_user(&state.engine, &uid)
+                  .ok()
+                  .flatten()
+                  .map(|u| u.username)
+                  .unwrap_or_else(|| uid.to_string())
+              })
+              .clone()
+          } else {
+            "share-key".to_string()
+          };
 
           serde_json::json!({
             "key_id": record.key_id,

@@ -60,7 +60,9 @@ pub fn store_api_key(
     ctx: &RequestContext,
     record: &ApiKeyRecord,
 ) -> EngineResult<()> {
-    validate_user_id(&record.user_id)?;
+    if let Some(ref uid) = record.user_id {
+        validate_user_id(uid)?;
+    }
     store_api_key_unchecked(engine, ctx, record)
 }
 

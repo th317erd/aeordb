@@ -118,7 +118,7 @@ fn seed_api_key(engine: &StorageEngine) -> String {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -138,7 +138,7 @@ fn seed_revoked_api_key(engine: &StorageEngine) -> String {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: true,
     expires_at: i64::MAX,

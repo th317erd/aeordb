@@ -74,7 +74,7 @@ impl AuthProvider for NoAuthProvider {
     Ok(Some(ApiKeyRecord {
       key_id: uuid::Uuid::nil(),
       key_hash: String::new(),
-      user_id: ROOT_USER_ID,
+      user_id: Some(ROOT_USER_ID),
       created_at: chrono::Utc::now(),
       is_revoked: false,
       expires_at: i64::MAX,

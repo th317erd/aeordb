@@ -37,15 +37,32 @@ pub async fn auth_middleware(
     return next.run(request).await;
   }
 
+  // Extract token from Authorization header or ?token= query param
   let authorization_header = request
     .headers()
     .get("authorization")
     .and_then(|value| value.to_str().ok())
     .map(|value| value.to_string());
 
-  let token = match authorization_header {
-    Some(ref header) if header.starts_with("Bearer ") => &header[7..],
-    _ => {
+  let token_from_header = authorization_header
+    .as_ref()
+    .filter(|h| h.starts_with("Bearer "))
+    .map(|h| h[7..].to_string());
+
+  let token_from_query = if token_from_header.is_none() {
+    request.uri().query()
+      .and_then(|q| {
+        q.split('&')
+          .find(|pair| pair.starts_with("token="))
+          .map(|pair| pair[6..].to_string())
+      })
+  } else {
+    None
+  };
+
+  let token = match token_from_header.or(token_from_query) {
+    Some(t) => t,
+    None => {
       tracing::warn!("Auth failed: missing or invalid Authorization header");
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
@@ -62,7 +79,7 @@ pub async fn auth_middleware(
     }
   };
 
-  let claims = match state.jwt_manager.verify_token(token) {
+  let claims = match state.jwt_manager.verify_token(&token) {
     Ok(claims) => claims,
     Err(error) => {
       tracing::warn!(reason = %error, "JWT validation failed");

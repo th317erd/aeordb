@@ -16,6 +16,8 @@ const API_KEY_PREFIX: &str = "aeor_k_";
 pub const DEFAULT_EXPIRY_DAYS: i64 = 730;
 /// Maximum expiry for API keys: 10 years (in days).
 pub const MAX_EXPIRY_DAYS: i64 = 3650;
+/// Sentinel value for "never expires" share keys. Year 2200 in milliseconds.
+pub const NO_EXPIRY_SENTINEL: i64 = 7_258_118_400_000;
 
 /// Metadata record for a stored API key (never contains the plaintext key).
 /// The `user_id` field links this key to its owning user. For the root
@@ -24,7 +26,7 @@ pub const MAX_EXPIRY_DAYS: i64 = 3650;
 pub struct ApiKeyRecord {
   pub key_id: Uuid,
   pub key_hash: String,
-  pub user_id: Uuid,
+  pub user_id: Option<Uuid>,
   pub created_at: DateTime<Utc>,
   pub is_revoked: bool,
   /// Milliseconds since epoch. Mandatory — old records without this field

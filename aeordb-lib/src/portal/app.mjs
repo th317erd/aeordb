@@ -55,6 +55,16 @@ async function api(path, options = {}) {
 window.AUTH = AUTH;
 window.api = api;
 
+// Detect ?token= query param for share link access
+(function detectShareToken() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  if (token) {
+    AUTH.setToken(token);
+    AUTH._isShareSession = true;
+  }
+})();
+
 // Login component
 class AeorLogin extends HTMLElement {
   connectedCallback() {
@@ -208,7 +218,9 @@ function navigate() {
     'keys': 'aeor-keys',
   };
 
-  const activeTag = pageMap[page] || pageMap['dashboard'];
+  // Share sessions default to files page
+  const defaultPage = AUTH._isShareSession ? 'files' : 'dashboard';
+  const activeTag = pageMap[page] || pageMap[defaultPage];
 
   for (const [, tag] of Object.entries(pageMap)) {
     let el = getOrCreatePage(tag);
@@ -220,6 +232,18 @@ function navigate() {
     el.style.display = isActive ? '' : 'none';
     // Notify the page it became visible so it can refresh data
     if (isActive && typeof el.onPageShow === 'function') el.onPageShow();
+  }
+
+  // Share session: navigate file browser to shared path
+  if (AUTH._isShareSession) {
+    const params = new URLSearchParams(window.location.search);
+    const sharedPath = params.get('path');
+    // Hide non-files sidebar items in share sessions
+    document.querySelectorAll('.nav-link').forEach((link) => {
+      if (link.dataset.page !== 'files') {
+        link.style.display = 'none';
+      }
+    });
   }
 }
 

@@ -28,7 +28,7 @@ fn make_api_key_record(user_id: Uuid) -> ApiKeyRecord {
     ApiKeyRecord {
         key_id: Uuid::new_v4(),
         key_hash: "hash_placeholder".to_string(),
-        user_id,
+        user_id: Some(user_id),
         created_at: Utc::now(),
         is_revoked: false,
         expires_at: Utc::now().timestamp_millis() + 86_400_000,

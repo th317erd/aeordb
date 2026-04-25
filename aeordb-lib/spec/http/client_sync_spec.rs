@@ -143,7 +143,7 @@ fn create_scoped_key_and_token_with_expiry(
     let record = ApiKeyRecord {
         key_id,
         key_hash,
-        user_id,
+        user_id: Some(user_id),
         created_at: now,
         is_revoked: false,
         expires_at,

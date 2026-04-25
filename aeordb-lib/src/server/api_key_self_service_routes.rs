@@ -102,7 +102,7 @@ pub async fn create_own_key(
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: target_user_id,
+    user_id: Some(target_user_id),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at,
@@ -168,7 +168,7 @@ pub async fn list_own_keys(
 
       let own_keys: Vec<serde_json::Value> = keys
         .iter()
-        .filter(|record| record.user_id == caller_id)
+        .filter(|record| record.user_id == Some(caller_id))
         .map(|record| {
           serde_json::json!({
             "key_id": record.key_id,
@@ -238,7 +238,7 @@ pub async fn revoke_own_key(
     }
     Some(record) => {
       // Non-root users can only revoke their own keys.
-      if record.user_id != caller_id && !is_root(&caller_id) {
+      if record.user_id != Some(caller_id) && !is_root(&caller_id) {
         return ErrorResponse::new("Cannot revoke another user's key. You can only revoke keys you own")
           .with_status(StatusCode::FORBIDDEN)
           .into_response();

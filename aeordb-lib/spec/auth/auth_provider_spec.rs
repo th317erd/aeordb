@@ -201,7 +201,7 @@ fn test_no_auth_provider_allows_everything() {
   let result = provider.get_api_key_by_prefix("anything").unwrap();
   assert!(result.is_some());
   let record = result.unwrap();
-  assert_eq!(record.user_id, ROOT_USER_ID);
+  assert_eq!(record.user_id, Some(ROOT_USER_ID));
   assert!(!record.is_revoked);
 }
 
@@ -212,7 +212,7 @@ fn test_no_auth_provider_store_is_noop() {
   let record = ApiKeyRecord {
     key_id: uuid::Uuid::new_v4(),
     key_hash: "hash".to_string(),
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -278,7 +278,7 @@ fn test_file_auth_provider_validates_key() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -320,7 +320,7 @@ fn test_file_auth_provider_list_and_revoke() {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: uuid::Uuid::new_v4(),
+    user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,
@@ -378,7 +378,7 @@ fn test_file_auth_provider_from_identity_file() {
   // Verify the key is stored.
   let keys = provider.list_api_keys().unwrap();
   assert_eq!(keys.len(), 1);
-  assert_eq!(keys[0].user_id, ROOT_USER_ID);
+  assert_eq!(keys[0].user_id, Some(ROOT_USER_ID));
 }
 
 #[test]
