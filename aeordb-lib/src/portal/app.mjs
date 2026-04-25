@@ -22,6 +22,14 @@ const AUTH = {
   headers() {
     return (this.token) ? { 'Authorization': `Bearer ${this.token}` } : {};
   },
+  /** Decode the JWT payload to get the current user's sub (user_id). */
+  currentUserId() {
+    if (!this.token) return null;
+    try {
+      const payload = JSON.parse(atob(this.token.split('.')[1]));
+      return payload.sub || null;
+    } catch (_) { return null; }
+  },
 };
 
 // Simple fetch wrapper with auth
@@ -208,7 +216,10 @@ function navigate() {
       el.style.display = 'none';
       main.appendChild(el);
     }
-    el.style.display = (tag === activeTag) ? '' : 'none';
+    const isActive = tag === activeTag;
+    el.style.display = isActive ? '' : 'none';
+    // Notify the page it became visible so it can refresh data
+    if (isActive && typeof el.onPageShow === 'function') el.onPageShow();
   }
 }
 

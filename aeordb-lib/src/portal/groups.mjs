@@ -15,6 +15,11 @@ class AeorGroups extends HTMLElement {
     this.fetchGroups();
   }
 
+  /** Called by navigate() when this page becomes visible. */
+  onPageShow() {
+    this.fetchGroups();
+  }
+
   render() {
     this.innerHTML = `
       <div class="page-header">
@@ -46,11 +51,36 @@ class AeorGroups extends HTMLElement {
       this._groups = data.items || data;
       this._error = null;
       this._forbidden = false;
+
+      // Resolve user:UUID group names to usernames
+      await this._resolveUserGroupNames();
+
       this.renderContent();
     } catch (error) {
       this._error = error.message;
       this.renderContent();
     }
+  }
+
+  async _resolveUserGroupNames() {
+    const userGroups = this._groups.filter((g) => g.name && g.name.startsWith('user:'));
+    if (userGroups.length === 0) return;
+
+    try {
+      const resp = await window.api('/auth/keys/users');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const users = data.items || [];
+      const userMap = {};
+      for (const u of users) userMap[String(u.user_id)] = u.username;
+
+      for (const g of this._groups) {
+        if (g.name && g.name.startsWith('user:')) {
+          const uid = g.name.slice(5);
+          if (userMap[uid]) g._displayName = userMap[uid] + ' (auto)';
+        }
+      }
+    } catch (_) { /* best-effort */ }
   }
 
   renderContent() {
@@ -100,7 +130,7 @@ class AeorGroups extends HTMLElement {
           <tbody>
             ${this._groups.map((group) => `
               <tr>
-                <td><strong>${escapeHtml(group.name || '')}</strong></td>
+                <td><strong>${escapeHtml(group._displayName || group.name || '')}</strong></td>
                 <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_field || '')}</td>
                 <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_operator || '')}</td>
                 <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_value || '')}</td>

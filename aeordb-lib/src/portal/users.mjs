@@ -15,6 +15,10 @@ class AeorUsers extends HTMLElement {
     this.fetchUsers();
   }
 
+  onPageShow() {
+    this.fetchUsers();
+  }
+
   render() {
     this.innerHTML = `
       <div class="page-header">
