@@ -19,6 +19,11 @@ pub struct PermissionLink {
   /// Optional deny flags for non-members of this group.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub others_deny: Option<String>,
+  /// When set, this link only applies to entries whose filename matches
+  /// this exact pattern within the directory. When absent, applies to
+  /// everything in the directory (current behavior).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub path_pattern: Option<String>,
 }
 
 /// Permissions for a directory path, stored as `.permissions` JSON file.
@@ -133,6 +138,7 @@ mod tests {
           deny: "........".to_string(),
           others_allow: None,
           others_deny: None,
+          path_pattern: None,
         },
         PermissionLink {
           group: "security".to_string(),
@@ -140,6 +146,7 @@ mod tests {
           deny: "........".to_string(),
           others_allow: Some("........".to_string()),
           others_deny: Some("crudlify".to_string()),
+          path_pattern: None,
         },
       ],
     };

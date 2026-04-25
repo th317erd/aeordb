@@ -68,6 +68,7 @@ fn member_link(group: &str, allow: &str, deny: &str) -> PermissionLink {
     deny: deny.to_string(),
     others_allow: None,
     others_deny: None,
+    path_pattern: None,
   }
 }
 
@@ -85,6 +86,7 @@ fn link_with_others(
     deny: deny.to_string(),
     others_allow: Some(others_allow.to_string()),
     others_deny: Some(others_deny.to_string()),
+    path_pattern: None,
   }
 }
 

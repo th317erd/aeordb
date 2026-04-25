@@ -79,6 +79,29 @@ impl<'a> PermissionResolver<'a> {
       let mut level_deny: [Option<bool>; 8] = [None; 8];
 
       for link in &permissions.links {
+        // If link has a path_pattern, only apply when:
+        // 1. This level is the immediate parent of the target path
+        // 2. The target's filename matches the pattern
+        if let Some(ref pattern) = link.path_pattern {
+          let target_parent = {
+            let trimmed = path.trim_end_matches('/');
+            match trimmed.rfind('/') {
+              Some(0) => "/".to_string(),
+              Some(idx) => trimmed[..idx].to_string(),
+              None => "/".to_string(),
+            }
+          };
+          let normalized_level = level.trim_end_matches('/');
+          let normalized_parent = target_parent.trim_end_matches('/');
+          if normalized_level != normalized_parent {
+            continue;
+          }
+          let filename = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+          if filename != pattern {
+            continue;
+          }
+        }
+
         let is_member = user_groups.contains(&link.group);
 
         if is_member {
