@@ -670,6 +670,10 @@ path = "spec/engine/resilience_features_spec.rs"
 name = "hot_file_transaction_spec"
 path = "spec/engine/hot_file_transaction_spec.rs"
 
+[[test]]
+name = "sharing_spec"
+path = "spec/engine/sharing_spec.rs"
+
 [[bin]]
 name = "stress-benchmark"
 path = "benches/stress_benchmark.rs"
