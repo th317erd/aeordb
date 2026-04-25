@@ -745,6 +745,28 @@ impl StorageEngine {
     Ok(Some((header, key, value)))
   }
 
+  /// Retrieve an entry by hash with BLAKE3 hash verification.
+  /// Use this for user-facing reads (GET /files/) where integrity matters.
+  /// Internal engine reads use `get_entry()` without verification for performance.
+  pub fn get_entry_verified(
+    &self,
+    hash: &[u8],
+  ) -> EngineResult<Option<EntryData>> {
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get(hash) {
+      Some(entry) if !entry.is_deleted() => entry,
+      _ => return Ok(None),
+    };
+
+    let writer = self.writer.read()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let (header, key, value) = writer.read_entry_at_shared_verified(kv_entry.offset)?;
+
+    Ok(Some((header, key, value)))
+  }
+
   /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();

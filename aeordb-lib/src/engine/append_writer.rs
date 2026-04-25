@@ -245,6 +245,14 @@ impl AppendWriter {
   }
 
   pub fn read_entry_at(&mut self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
+    self.read_entry_at_opt(offset, false)
+  }
+
+  pub fn read_entry_at_verified(&mut self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
+    self.read_entry_at_opt(offset, true)
+  }
+
+  fn read_entry_at_opt(&mut self, offset: u64, verify: bool) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
     self.file.seek(SeekFrom::Start(offset))?;
     let header = EntryHeader::deserialize(&mut self.file)?;
 
@@ -269,8 +277,10 @@ impl AppendWriter {
     let mut value = vec![0u8; header.value_length as usize];
     self.file.read_exact(&mut value)?;
 
-    // Verify hash integrity — detect bit-flipped values
-    if !header.verify(&key, &value) {
+    // Verify hash integrity — only on user-facing reads.
+    // Internal reads (directory ops, KV lookups) skip this for performance.
+    // The background integrity scanner and `aeordb verify` catch corruption.
+    if verify && !header.verify(&key, &value) {
       return Err(EngineError::CorruptEntry {
         offset,
         reason: format!(
@@ -289,6 +299,14 @@ impl AppendWriter {
   /// writer's seek position — allowing callers to hold a READ lock instead
   /// of a WRITE lock on the `RwLock<AppendWriter>`.
   pub fn read_entry_at_shared(&self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
+    self.read_entry_at_shared_opt(offset, false)
+  }
+
+  pub fn read_entry_at_shared_verified(&self, offset: u64) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
+    self.read_entry_at_shared_opt(offset, true)
+  }
+
+  fn read_entry_at_shared_opt(&self, offset: u64, verify: bool) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
     // Open a FRESH file handle instead of try_clone(). On POSIX, dup() (used by
     // try_clone) shares the seek position between the original and the clone,
     // causing data corruption when multiple threads read concurrently.
@@ -317,8 +335,7 @@ impl AppendWriter {
     let mut value = vec![0u8; header.value_length as usize];
     file.read_exact(&mut value)?;
 
-    // Verify hash integrity — detect bit-flipped values
-    if !header.verify(&key, &value) {
+    if verify && !header.verify(&key, &value) {
       return Err(EngineError::CorruptEntry {
         offset,
         reason: format!(

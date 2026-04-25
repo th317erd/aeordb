@@ -165,7 +165,8 @@ impl EngineFileStream {
     let mut chunks = Vec::with_capacity(chunk_hashes.len());
 
     for hash in &chunk_hashes {
-      match engine.get_entry(hash) {
+      // Chunks are user-facing data — verify integrity on read
+      match engine.get_entry_verified(hash) {
         Ok(Some((header, _key, value))) => {
           // Decompress if the chunk was stored compressed
           if header.compression_algo != CompressionAlgorithm::None {
@@ -472,7 +473,8 @@ impl<'a> DirectoryOps<'a> {
     let hash_length = algo.hash_length();
 
     let file_key = file_path_hash(&normalized, &algo)?;
-    let entry = self.engine.get_entry(&file_key)?
+    // User-facing read — verify hash integrity
+    let entry = self.engine.get_entry_verified(&file_key)?
       .ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
 
     let (header, _key, value) = entry;
