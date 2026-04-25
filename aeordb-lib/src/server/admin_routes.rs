@@ -22,7 +22,7 @@ use crate::auth::TokenClaims;
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
   pub username: String,
-  pub email: Option<String>,
+  pub email: String,
   #[serde(default)]
   pub tags: Vec<String>,
 }
@@ -47,7 +47,7 @@ pub async fn create_user(
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let mut user = User::new(&payload.username, payload.email.as_deref());
+  let mut user = User::new(&payload.username, Some(&payload.email));
   user.tags = payload.tags;
 
   if let Err(error) = system_store::store_user(&state.engine, &ctx, &user) {

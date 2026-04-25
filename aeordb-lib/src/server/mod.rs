@@ -15,6 +15,7 @@ pub mod state;
 pub mod task_routes;
 pub mod upload_routes;
 pub mod share_link_routes;
+pub mod settings_routes;
 pub mod share_routes;
 pub mod symlink_routes;
 pub mod sync_routes;
@@ -283,6 +284,9 @@ pub fn create_app_with_all_and_task_queue(
     .route("/versions/export", post(backup_routes::export_backup))
     .route("/versions/diff", post(backup_routes::diff_backup))
     .route("/versions/promote", post(backup_routes::promote_head))
+    // System: email configuration
+    .route("/system/email-config", get(settings_routes::get_email_config).put(settings_routes::put_email_config))
+    .route("/system/email-test", post(settings_routes::send_test_email))
     // System: GC
     .route("/system/gc", post(gc_routes::run_gc_endpoint))
     // System: repair (KV index rebuild)

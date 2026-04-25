@@ -7,6 +7,7 @@ import '/system/portal/users.mjs';
 import '/system/portal/groups.mjs';
 import '/system/portal/files.mjs';
 import '/system/portal/keys.mjs';
+import '/system/portal/settings.mjs';
 
 // Auth state management
 const AUTH = {
@@ -216,6 +217,7 @@ function navigate() {
     'users': 'aeor-users',
     'groups': 'aeor-groups',
     'keys': 'aeor-keys',
+    'settings': 'aeor-settings',
   };
 
   // Share sessions default to files page

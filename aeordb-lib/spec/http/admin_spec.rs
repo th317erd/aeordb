@@ -122,7 +122,7 @@ async fn test_create_user_has_uuid() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"bob"}"#))
+    .body(Body::from(r#"{"username":"bob","email":"bob@test.com"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -151,7 +151,7 @@ async fn test_list_users() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"charlie"}"#))
+    .body(Body::from(r#"{"username":"charlie","email":"charlie@test.com"}"#))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
@@ -240,7 +240,7 @@ async fn test_update_user() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"eve"}"#))
+    .body(Body::from(r#"{"username":"eve","email":"eve@test.com"}"#))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   let created = body_json(response.into_body()).await;
@@ -275,7 +275,7 @@ async fn test_update_user_404() {
     .uri(&format!("/system/users/{}", nonexistent_id))
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"nope"}"#))
+    .body(Body::from(r#"{"username":"nope","email":"nope@test.com"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -294,7 +294,7 @@ async fn test_deactivate_user() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"frank"}"#))
+    .body(Body::from(r#"{"username":"frank","email":"frank@test.com"}"#))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   let created = body_json(response.into_body()).await;
@@ -652,7 +652,7 @@ async fn test_admin_requires_root_users_post() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"should_fail"}"#))
+    .body(Body::from(r#"{"username":"should_fail","email":"fail@test.com"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -772,7 +772,7 @@ async fn test_create_user_returns_auto_group() {
     .uri("/system/users")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"autogroup_user"}"#))
+    .body(Body::from(r#"{"username":"autogroup_user","email":"autogroup@test.com"}"#))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
@@ -933,7 +933,7 @@ async fn test_update_user_invalid_uuid() {
     .uri("/system/users/bad-uuid")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"username":"x"}"#))
+    .body(Body::from(r#"{"username":"x","email":"x@test.com"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
