@@ -14,6 +14,7 @@ pub mod sse_routes;
 pub mod state;
 pub mod task_routes;
 pub mod upload_routes;
+pub mod share_routes;
 pub mod symlink_routes;
 pub mod sync_routes;
 pub mod version_file_routes;
@@ -305,6 +306,9 @@ pub fn create_app_with_all_and_task_queue(
     .route("/files/download", post(download_routes::download_zip))
     // Files: mkdir route (registered before /files/{*path} wildcard)
     .route("/files/mkdir", post(engine_routes::mkdir))
+    // Files: share routes (registered before /files/{*path} wildcard)
+    .route("/files/share", post(share_routes::share))
+    .route("/files/shares", get(share_routes::list_shares).delete(share_routes::unshare))
     // Versions: snapshot routes
     .route("/versions/snapshots", post(engine_routes::snapshot_create)
                                  .get(engine_routes::snapshot_list))
