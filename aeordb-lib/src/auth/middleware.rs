@@ -62,6 +62,7 @@ pub async fn auth_middleware(
     None
   };
 
+  let token_from_url = token_from_query.is_some();
   let token = match token_from_header.or(token_from_query) {
     Some(t) => t,
     None => {
@@ -106,5 +107,14 @@ pub async fn auth_middleware(
     "result" => "success"
   ).increment(1);
   request.extensions_mut().insert(claims);
-  next.run(request).await
+  let mut response = next.run(request).await;
+
+  // When auth came from a URL query param, add headers to reduce token leakage
+  if token_from_url {
+    let headers = response.headers_mut();
+    headers.insert("cache-control", "no-store".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+  }
+
+  response
 }
