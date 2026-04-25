@@ -232,11 +232,31 @@ pub fn create_app_with_all_and_task_queue(
   };
 
   // Routes with large body limits (file uploads: 10 GB)
+  //
+  // IMPORTANT: All /files/ routes that must NOT be captured by the
+  // /files/{*path} wildcard live here, registered BEFORE the wildcard,
+  // in the SAME router.  Putting them in a separate router and using
+  // .merge() causes axum to match the wildcard instead of the specific
+  // path (the wildcard wins for methods it already owns, e.g. GET/DELETE).
   let large_upload_routes = Router::new()
     .route(
       "/blobs/{hex_hash}",
       get(engine_routes::engine_get_by_hash),
     )
+    // Files: query route (must be before /files/{*path} wildcard)
+    .route("/files/query", post(engine_routes::query_endpoint))
+    // Files: ZIP download route (must be before /files/{*path} wildcard)
+    .route("/files/download", post(download_routes::download_zip))
+    // Files: mkdir route (must be before /files/{*path} wildcard)
+    .route("/files/mkdir", post(engine_routes::mkdir))
+    // Files: share routes (must be before /files/{*path} wildcard)
+    .route("/files/share", post(share_routes::share))
+    .route("/files/shares", get(share_routes::list_shares).delete(share_routes::unshare))
+    // Files: share-link routes (must be before /files/{*path} wildcard)
+    .route("/files/share-link", post(share_link_routes::create_share_link))
+    .route("/files/share-links", get(share_link_routes::list_share_links))
+    .route("/files/share-links/{key_id}", delete(share_link_routes::revoke_share_link))
+    // The wildcard MUST be last among /files/ routes
     .route(
       "/files/{*path}",
       put(engine_routes::engine_store_file)
@@ -305,19 +325,10 @@ pub fn create_app_with_all_and_task_queue(
     .route("/blobs/config", get(upload_routes::upload_config))
     // System: SSE event stream
     .route("/system/events", get(sse_routes::event_stream))
-    // Files: query route (registered before /files/{*path} wildcard)
-    .route("/files/query", post(engine_routes::query_endpoint))
-    // Files: ZIP download route (registered before /files/{*path} wildcard)
-    .route("/files/download", post(download_routes::download_zip))
-    // Files: mkdir route (registered before /files/{*path} wildcard)
-    .route("/files/mkdir", post(engine_routes::mkdir))
-    // Files: share routes (registered before /files/{*path} wildcard)
-    .route("/files/share", post(share_routes::share))
-    .route("/files/shares", get(share_routes::list_shares).delete(share_routes::unshare))
-    // Files: share link routes (registered before /files/{*path} wildcard)
-    .route("/files/share-link", post(share_link_routes::create_share_link))
-    .route("/files/share-links", get(share_link_routes::list_share_links))
-    .route("/files/share-links/{key_id}", delete(share_link_routes::revoke_share_link))
+    // NOTE: /files/query, /files/download, /files/mkdir, /files/share,
+    // /files/shares, /files/share-link, /files/share-links are registered
+    // in large_upload_routes (same router as /files/{*path} wildcard) to
+    // prevent the wildcard from shadowing them after merge.
     // Versions: snapshot routes
     .route("/versions/snapshots", post(engine_routes::snapshot_create)
                                  .get(engine_routes::snapshot_list))

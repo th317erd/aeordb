@@ -52,9 +52,11 @@ pub async fn auth_middleware(
   let token_from_query = if token_from_header.is_none() {
     request.uri().query()
       .and_then(|q| {
-        q.split('&')
-          .find(|pair| pair.starts_with("token="))
-          .map(|pair| pair[6..].to_string())
+        // Use form_urlencoded for proper percent-decoding of the token value.
+        // This handles tokens that contain URL-encoded characters (e.g. %3D for =).
+        form_urlencoded::parse(q.as_bytes())
+          .find(|(key, _)| key == "token")
+          .map(|(_, value)| value.into_owned())
       })
   } else {
     None

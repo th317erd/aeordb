@@ -30,6 +30,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
 
+# URL query-string parsing (for ?token= auth)
+form_urlencoded = "1"
+
 # Authentication
 jsonwebtoken = "9"
 argon2 = "0.5"

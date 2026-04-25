@@ -39,7 +39,18 @@ pub async fn permission_middleware(
   next: Next,
 ) -> Response {
   let request_path = request.uri().path().to_string();
-  let is_files_route = request_path.starts_with("/files/") && request_path != "/files/query";
+  // Only enforce path-level CRUD permissions for actual file operations.
+  // Administrative routes under /files/ (query, download, mkdir, share,
+  // share-link, share-links) are protected by their own handler-level
+  // auth checks and must not be treated as file paths.
+  let is_files_route = request_path.starts_with("/files/")
+    && request_path != "/files/query"
+    && request_path != "/files/download"
+    && request_path != "/files/mkdir"
+    && request_path != "/files/share"
+    && request_path != "/files/shares"
+    && request_path != "/files/share-link"
+    && !request_path.starts_with("/files/share-links");
 
   // For non-files routes, we still need to load key rules for downstream filtering
   // (e.g. /files/query endpoint filters results by key rules). But we skip the path-level
@@ -197,7 +208,23 @@ pub async fn permission_middleware(
 
   // For share keys, the API key rules are the sole permission authority.
   // Skip the user/group permission resolver entirely.
+  // Share keys with no rules must be denied — they have no user to fall back on.
   if is_share_key {
+    if let Some(ref key_id) = claims.key_id {
+      let key_record = state.api_key_cache.get_key(key_id, &state.engine);
+      if let Ok(Some(record)) = key_record {
+        if record.rules.is_empty() {
+          return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+              error: "Share key has no permission rules".to_string(),
+              code: None,
+            }),
+          )
+            .into_response();
+        }
+      }
+    }
     return next.run(request).await;
   }
 

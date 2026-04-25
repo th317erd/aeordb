@@ -126,6 +126,12 @@ pub async fn share(
     for raw_path in &body.paths {
         let normalized = normalize_path(raw_path);
 
+        if normalized.starts_with("/.system") {
+            return ErrorResponse::new("Cannot share system paths")
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+        }
+
         // Determine whether this is a file or directory.
         // Try reading as a file first; if NotFound, check as directory.
         let is_file = ops.read_file(&normalized).is_ok();

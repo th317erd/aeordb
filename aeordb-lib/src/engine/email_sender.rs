@@ -1,5 +1,37 @@
 use crate::engine::email_config::{EmailConfig, SmtpConfig, OAuthConfig};
 
+/// Validate that a URL is safe to make requests to (SSRF protection).
+/// Blocks private/internal IP ranges, metadata endpoints, and non-HTTPS URLs
+/// (except localhost for development).
+fn validate_url(url: &str) -> Result<(), String> {
+    // Must be HTTPS (except for localhost in dev)
+    if !url.starts_with("https://") && !url.starts_with("http://localhost") {
+        return Err(format!("URL must use HTTPS: {}", url));
+    }
+    // Block private IP ranges and metadata endpoints
+    let blocked = [
+        "169.254.", "10.", "172.16.", "172.17.", "172.18.", "172.19.",
+        "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+        "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+        "192.168.", "127.0.0.1", "[::1]", "0.0.0.0",
+    ];
+    for prefix in blocked {
+        if url.contains(prefix) {
+            return Err(format!("URL targets a blocked address: {}", url));
+        }
+    }
+    Ok(())
+}
+
+/// Validate that an email address does not contain header-injection characters.
+/// Used as defense-in-depth for paths that construct raw email headers (e.g. Gmail).
+fn validate_email(email: &str) -> Result<(), String> {
+    if email.contains('\r') || email.contains('\n') {
+        return Err(format!("Invalid email address: contains newline characters"));
+    }
+    Ok(())
+}
+
 /// Send an email using the configured provider.
 /// Returns Ok(()) on success, Err(error_message) on failure.
 pub async fn send_email(
@@ -29,6 +61,8 @@ async fn send_smtp(
         Message,
     };
 
+    // Safety: lettre's Mailbox parser validates RFC 5321 addresses and rejects
+    // embedded \r\n sequences, preventing email header injection attacks.
     let from: Mailbox = format!("{} <{}>", config.from_name, config.from_address)
         .parse()
         .map_err(|e| format!("Invalid from address: {}", e))?;
@@ -98,10 +132,13 @@ async fn send_oauth(
             "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
             "https://graph.microsoft.com/v1.0/me/sendMail".to_string(),
         ),
-        "custom" => (
-            config.token_url.clone().ok_or("Custom provider requires token_url")?,
-            config.send_url.clone().ok_or("Custom provider requires send_url")?,
-        ),
+        "custom" => {
+            let t_url = config.token_url.clone().ok_or("Custom provider requires token_url")?;
+            let s_url = config.send_url.clone().ok_or("Custom provider requires send_url")?;
+            validate_url(&t_url).map_err(|e| format!("token_url rejected: {}", e))?;
+            validate_url(&s_url).map_err(|e| format!("send_url rejected: {}", e))?;
+            (t_url, s_url)
+        },
         other => return Err(format!("Unknown OAuth provider: {}", other)),
     };
 
@@ -150,6 +187,12 @@ async fn send_gmail(
     html_body: &str,
 ) -> Result<(), String> {
     use base64::Engine;
+
+    // Defense in depth: validate email addresses before embedding in raw headers.
+    // Even though the raw email is base64-encoded, malicious \r\n in from/to could
+    // inject additional headers into the MIME message before encoding.
+    validate_email(from)?;
+    validate_email(to)?;
 
     let raw_email = format!(
         "From: {}\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
@@ -200,5 +243,118 @@ async fn send_outlook(
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("Outlook API error: {}", body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_url tests ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_url_accepts_https() {
+        assert!(validate_url("https://oauth2.googleapis.com/token").is_ok());
+        assert!(validate_url("https://login.microsoftonline.com/common/oauth2/v2.0/token").is_ok());
+        assert!(validate_url("https://custom-provider.example.com/oauth/token").is_ok());
+    }
+
+    #[test]
+    fn validate_url_accepts_localhost_http() {
+        assert!(validate_url("http://localhost:8080/token").is_ok());
+        assert!(validate_url("http://localhost/send").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_plain_http() {
+        let result = validate_url("http://evil.com/token");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn validate_url_rejects_metadata_endpoint() {
+        let result = validate_url("https://169.254.169.254/latest/meta-data/");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked address"));
+    }
+
+    #[test]
+    fn validate_url_rejects_private_ranges() {
+        let cases = vec![
+            "https://10.0.0.1/token",
+            "https://172.16.0.1/token",
+            "https://172.31.255.255/token",
+            "https://192.168.1.1/token",
+            "https://127.0.0.1/token",
+            "https://[::1]/token",
+            "https://0.0.0.0/token",
+        ];
+        for url in cases {
+            let result = validate_url(url);
+            assert!(result.is_err(), "Expected rejection for: {}", url);
+            assert!(result.unwrap_err().contains("blocked address"));
+        }
+    }
+
+    #[test]
+    fn validate_url_rejects_private_ip_in_path() {
+        // Attacker might try to sneak a private IP into the path or query
+        let result = validate_url("https://evil.com/redirect?target=http://169.254.169.254");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_ftp_and_other_schemes() {
+        assert!(validate_url("ftp://files.example.com/data").is_err());
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("gopher://evil.com").is_err());
+    }
+
+    // ── validate_email tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_email_accepts_normal_addresses() {
+        assert!(validate_email("user@example.com").is_ok());
+        assert!(validate_email("admin+tag@sub.domain.org").is_ok());
+    }
+
+    #[test]
+    fn validate_email_rejects_cr() {
+        let result = validate_email("attacker@evil.com\rBcc: payroll@evil.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newline"));
+    }
+
+    #[test]
+    fn validate_email_rejects_lf() {
+        let result = validate_email("attacker@evil.com\nBcc: payroll@evil.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newline"));
+    }
+
+    #[test]
+    fn validate_email_rejects_crlf() {
+        let result = validate_email("attacker@evil.com\r\nBcc: payroll@evil.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newline"));
+    }
+
+    #[test]
+    fn validate_email_rejects_embedded_newline() {
+        // Newline in the middle of an otherwise-valid looking address
+        let result = validate_email("user\n@example.com");
+        assert!(result.is_err());
+    }
+
+    // ── lettre Mailbox parser injection test ────────────────────────────
+
+    #[test]
+    fn lettre_mailbox_rejects_header_injection() {
+        use lettre::message::Mailbox;
+        // Verify that lettre itself rejects addresses with \r\n (our safety comment is accurate)
+        let injected = "attacker@evil.com\r\nBcc: payroll@evil.com";
+        let result: Result<Mailbox, _> = injected.parse();
+        assert!(result.is_err(), "lettre must reject addresses containing CRLF");
     }
 }

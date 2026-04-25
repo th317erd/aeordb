@@ -13,6 +13,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord, NO_EXPIRY_SENTINEL, MAX_EXPIRY_DAYS};
 use crate::engine::api_key_rules::KeyRule;
+use crate::engine::path_utils::normalize_path;
 use crate::engine::user::is_root;
 
 // ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ fn simple_url_encode(input: &str) -> String {
 
 fn permission_label(perms: &str) -> &str {
     match perms {
-        "cr..l..." => "View only",
+        "-r--l---" => "View only",
         "crudl..." => "Can edit",
         "crudlify" => "Full access",
         _ => "Custom",
@@ -99,6 +100,16 @@ pub async fn create_share_link(
         return ErrorResponse::new("permissions must be exactly 8 characters (crudlify pattern)")
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
+    }
+
+    // 2b. Block sharing of system paths.
+    for raw_path in &body.paths {
+        let normalized = normalize_path(raw_path);
+        if normalized.starts_with("/.system") {
+            return ErrorResponse::new("Cannot share system paths")
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+        }
     }
 
     // 3. Build rules: allow each path, then deny-all fallback.
@@ -233,9 +244,25 @@ pub async fn create_share_link(
 /// List active share links, optionally filtered by path.
 pub async fn list_share_links(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     axum::extract::Query(query): axum::extract::Query<ShareLinksQuery>,
 ) -> Response {
+    // Validate caller is root.
+    let caller_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return ErrorResponse::new("Invalid user identity")
+                .with_status(StatusCode::FORBIDDEN)
+                .into_response();
+        }
+    };
+
+    if !is_root(&caller_id) {
+        return ErrorResponse::new("Only root can list share links")
+            .with_status(StatusCode::FORBIDDEN)
+            .into_response();
+    }
+
     // List all API keys and filter to share keys (user_id is None, not revoked).
     let all_keys = match state.auth_provider.list_api_keys() {
         Ok(keys) => keys,

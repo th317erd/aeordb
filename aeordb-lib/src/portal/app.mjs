@@ -10,15 +10,25 @@ import '/system/portal/keys.mjs';
 import '/system/portal/settings.mjs';
 
 // Auth state management
+// Share sessions (via ?token= links) use sessionStorage so the token is scoped
+// to the current tab and does not persist across browser sessions, reducing XSS
+// exfiltration risk.  Normal login tokens stay in localStorage so users remain
+// logged in across tabs/sessions as expected.
 const AUTH = {
-  token: localStorage.getItem('aeordb_token'),
+  token: localStorage.getItem('aeordb_token') || sessionStorage.getItem('aeordb_share_token'),
+  _isShareSession: !!sessionStorage.getItem('aeordb_share_token'),
   setToken(token) {
     this.token = token;
-    localStorage.setItem('aeordb_token', token);
+    if (this._isShareSession) {
+      sessionStorage.setItem('aeordb_share_token', token);
+    } else {
+      localStorage.setItem('aeordb_token', token);
+    }
   },
   clear() {
     this.token = null;
     localStorage.removeItem('aeordb_token');
+    sessionStorage.removeItem('aeordb_share_token');
   },
   headers() {
     return (this.token) ? { 'Authorization': `Bearer ${this.token}` } : {};
@@ -34,6 +44,8 @@ const AUTH = {
 };
 
 // Simple fetch wrapper with auth
+// CSRF protection is not needed: all API calls use Authorization: Bearer headers,
+// which browsers never attach automatically to cross-origin requests.
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -61,8 +73,8 @@ window.api = api;
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
   if (token) {
+    AUTH._isShareSession = true;   // Set BEFORE setToken so it routes to sessionStorage
     AUTH.setToken(token);
-    AUTH._isShareSession = true;
   }
 })();
 
