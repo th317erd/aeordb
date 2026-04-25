@@ -79,6 +79,16 @@ pub async fn share(
         }
     };
 
+    // Resolve the caller's display name for notifications
+    let sharer_name = if is_root(&caller_id) {
+        "Root".to_string()
+    } else {
+        crate::engine::system_store::get_user(&state.engine, &caller_id)
+            .ok().flatten()
+            .map(|u| u.username)
+            .unwrap_or_else(|| "Someone".to_string())
+    };
+
     // Only root can share for now
     if !is_root(&caller_id) {
         return ErrorResponse::new("Only root can share files")
@@ -209,6 +219,16 @@ pub async fn share(
         shared_count += 1;
         shared_paths.push(normalized);
     }
+
+    // Spawn background email notification (best-effort)
+    let engine_clone = state.engine.clone();
+    let notify_paths = body.paths.clone();
+    let notify_permissions = body.permissions.clone();
+    let notify_users: Vec<String> = body.users.clone().unwrap_or_default();
+    let sharer = sharer_name.clone();
+    tokio::spawn(async move {
+        send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions).await;
+    });
 
     Json(serde_json::json!({
         "shared": shared_count,
@@ -389,4 +409,49 @@ pub async fn unshare(
         "group": body.group,
     }))
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Background email notifications
+// ---------------------------------------------------------------------------
+
+async fn send_share_notifications(
+    engine: &crate::engine::storage_engine::StorageEngine,
+    sharer_name: &str,
+    user_ids: &[String],
+    paths: &[String],
+    permissions: &str,
+) {
+    // Load email config — if not configured, silently skip
+    let config = match crate::engine::email_config::load_email_config(engine) {
+        Ok(Some(c)) => c,
+        _ => return,
+    };
+
+    for uid_str in user_ids {
+        let uid = match uuid::Uuid::parse_str(uid_str) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let user = match crate::engine::system_store::get_user(engine, &uid) {
+            Ok(Some(u)) => u,
+            _ => continue,
+        };
+        let email = match user.email {
+            Some(ref e) if !e.is_empty() => e.clone(),
+            _ => continue,
+        };
+
+        let portal_url = format!(
+            "/system/portal/?page=files&path={}",
+            paths.first().map(|p| p.as_str()).unwrap_or("/"),
+        );
+        let (subject, html, text) = crate::engine::email_template::build_share_notification(
+            sharer_name, paths, permissions, &portal_url,
+        );
+
+        if let Err(e) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
+            tracing::warn!("Failed to notify {}: {}", email, e);
+        }
+    }
 }
