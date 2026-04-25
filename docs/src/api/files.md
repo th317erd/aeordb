@@ -11,6 +11,9 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
 | PATCH | `/files/{path}` | Rename or move a file or symlink | Yes | 200, 400, 404, 500 |
+| POST | `/files/share` | Share paths with users/groups | Yes (root) | 200, 400, 404, 500 |
+| GET | `/files/shares?path=` | List active shares for a path | Yes | 200, 500 |
+| DELETE | `/files/shares` | Revoke a share | Yes (root) | 200, 404, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 > **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
@@ -461,6 +464,162 @@ Symlinks appear in directory listings with `entry_type: 8` and a `target` field:
 ### Symlink Versioning
 
 Symlinks are versioned like files. Snapshots capture the symlink's target path at that point in time. Restoring a snapshot restores the link, not the resolved content.
+
+---
+
+## Sharing
+
+AeorDB supports sharing files and directories with specific users and groups. Shares are stored as `.permissions` files in the filesystem — the sharing API is a convenience layer on top of the existing permission system.
+
+### POST /files/share
+
+Share one or more paths with users and/or groups. For files, the permission is scoped to just that file using a `path_pattern`. For directories, the permission applies to everything inside.
+
+**Auth:** Root only.
+
+**Request Body:**
+
+```json
+{
+  "paths": ["/photos/sunset.jpg", "/photos/beach.jpg"],
+  "users": ["6f94eecf-b136-47b4-9b47-c20f781f1f5b"],
+  "groups": ["design-team"],
+  "permissions": "crudl..."
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `paths` | array | Yes | Paths to share (files or directories) |
+| `users` | array | No | User UUIDs to share with |
+| `groups` | array | No | Group names to share with |
+| `permissions` | string | Yes | 8-character crudlify permission flags |
+
+At least one of `users` or `groups` must be non-empty.
+
+**Response:** `200 OK`
+
+```json
+{
+  "shared": 2,
+  "paths": ["/photos/sunset.jpg", "/photos/beach.jpg"]
+}
+```
+
+**How it works:**
+- For each file path, a `PermissionLink` is created on the parent directory's `.permissions` file with a `path_pattern` matching the filename — so the permission only applies to that specific file.
+- For each directory path, the link is created with no `path_pattern` — it applies to everything in the directory.
+- If a link for the same group and pattern already exists, it is updated (not duplicated).
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:6830/files/share \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paths": ["/photos/sunset.jpg"],
+    "users": ["6f94eecf-b136-47b4-9b47-c20f781f1f5b"],
+    "permissions": "cr..l..."
+  }'
+```
+
+### GET /files/shares
+
+List active shares for a path.
+
+**Query Parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | Yes | Path to list shares for |
+
+**Response:** `200 OK`
+
+```json
+{
+  "path": "/photos/sunset.jpg",
+  "shares": [
+    {
+      "group": "user:6f94eecf-...",
+      "username": "alice",
+      "allow": "cr..l...",
+      "deny": "........",
+      "path_pattern": "sunset.jpg"
+    },
+    {
+      "group": "design-team",
+      "allow": "crudl...",
+      "deny": "........",
+      "path_pattern": null
+    }
+  ]
+}
+```
+
+For `user:{uuid}` groups, the `username` field is resolved from the user store. For named groups, `username` is null.
+
+When querying a specific file, only shares with a matching `path_pattern` (or directory-wide shares with no pattern) are returned.
+
+**Example:**
+
+```bash
+curl "http://localhost:6830/files/shares?path=/photos/sunset.jpg" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### DELETE /files/shares
+
+Revoke a specific share by removing the matching `PermissionLink`.
+
+**Auth:** Root only.
+
+**Request Body:**
+
+```json
+{
+  "path": "/photos/sunset.jpg",
+  "group": "user:6f94eecf-...",
+  "path_pattern": "sunset.jpg"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | Yes | The shared path |
+| `group` | string | Yes | The group to revoke (`user:{uuid}` or group name) |
+| `path_pattern` | string | No | The path pattern to match (null for directory-wide links) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "revoked": true,
+  "group": "user:6f94eecf-..."
+}
+```
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:6830/files/shares \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/photos/sunset.jpg",
+    "group": "user:6f94eecf-...",
+    "path_pattern": "sunset.jpg"
+  }'
+```
+
+### Error Responses (Sharing)
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Empty paths, no users/groups, or invalid permissions string |
+| 403 | Non-root user attempted to share or unshare |
+| 404 | Path not found, or no matching share to revoke |
+| 500 | Internal failure writing permissions |
 
 ---
 
