@@ -42,7 +42,7 @@
 - `openraft` for distributed consensus
 - `axum` + `tokio` for HTTP
 
-## Test Count: 881 passing (full suite, 2 pre-existing hot-file failures)
+## Test Count: 3,612 passing (full suite, zero failures)
 
 ## Recently Completed Features
 - **Users, Groups, Permissions (crudlify)** — 1,008 tests. Root = nil UUID, query-based groups, per-directory `.permissions`, path walk resolution, group/permissions caching, admin API, emergency reset CLI
@@ -110,3 +110,12 @@
 - `aeordb-lib/src/server/cluster_routes.rs` — GET/POST/DELETE /admin/cluster endpoints
 - `aeordb-lib/src/server/conflict_routes.rs` — GET/POST /admin/conflicts, resolve, dismiss
 - `bot-docs/plan/replication-v2-design.md` — content-addressed sync replication design
+- `aeordb-lib/src/server/share_routes.rs` — POST /files/share, GET /files/shares, DELETE /files/shares
+- `docs/superpowers/specs/2026-04-24-file-sharing-phase1-design.md` — file sharing design spec
+- `docs/superpowers/plans/2026-04-24-file-sharing-phase1.md` — file sharing implementation plan
+
+## Recently Completed: File Sharing Phase 1
+- PermissionLink.path_pattern for per-file permission scoping
+- Share/unshare/list-shares REST endpoints (root-only)
+- Share modal UI in file browser (People tab, Link tab greyed out for Phase 2)
+- 18 sharing tests (resolver scoping, endpoints, auth, edge cases)
