@@ -35,7 +35,7 @@ pub fn run(database: &str, force: bool) {
 
   let mut revoked_count = 0u64;
   for key in &all_keys {
-    if key.user_id == ROOT_USER_ID && !key.is_revoked {
+    if key.user_id == Some(ROOT_USER_ID) && !key.is_revoked {
       if let Err(error) = system_store::revoke_api_key(&engine, &ctx, key.key_id) {
         eprintln!("Failed to revoke root key {}: {}", key.key_id, error);
         std::process::exit(1);
@@ -60,7 +60,7 @@ pub fn run(database: &str, force: bool) {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: ROOT_USER_ID,
+    user_id: Some(ROOT_USER_ID),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: chrono::Utc::now().timestamp_millis()
