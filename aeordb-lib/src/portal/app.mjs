@@ -232,9 +232,9 @@ function navigate() {
     'settings': 'aeor-settings',
   };
 
-  // Share sessions default to files page
-  const defaultPage = AUTH._isShareSession ? 'files' : 'dashboard';
-  const activeTag = pageMap[page] || pageMap[defaultPage];
+  // Share sessions default to files page (override dashboard default)
+  const effectivePage = (AUTH._isShareSession && page === 'dashboard') ? 'files' : page;
+  const activeTag = pageMap[effectivePage] || pageMap['dashboard'];
 
   for (const [, tag] of Object.entries(pageMap)) {
     let el = getOrCreatePage(tag);

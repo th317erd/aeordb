@@ -126,19 +126,26 @@ pub async fn create_share_link(
                 permitted: body.permissions.clone(),
             });
         } else {
-            // File: allow the file itself + listing the parent directory (read+list only)
+            // File: allow the file itself + listing the parent directory
             rules.push(KeyRule {
                 glob: path.clone(),
                 permitted: body.permissions.clone(),
             });
-            // Parent directory needs list access so the file browser can show it
+            // Parent directory: allow listing so the file browser can show the file.
+            // We need three rules because glob matching is strict:
+            //   - "/parent/"       matches the directory listing request itself
+            //   - "/parent/**"     matches items inside the directory
             let parent = match path.rfind('/') {
                 Some(0) => "/".to_string(),
                 Some(idx) => format!("{}/", &path[..idx]),
                 None => "/".to_string(),
             };
             rules.push(KeyRule {
-                glob: format!("{}*", parent),
+                glob: parent.clone(),
+                permitted: "-r--l---".to_string(),
+            });
+            rules.push(KeyRule {
+                glob: format!("{}**", parent),
                 permitted: "-r--l---".to_string(),
             });
         }
