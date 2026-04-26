@@ -55,7 +55,7 @@ async function api(path, options = {}) {
     },
   });
 
-  if (response.status === 401) {
+  if (response.status === 401 && !AUTH._isShareSession) {
     AUTH.clear();
     navigate();
     throw new Error('Unauthorized');
