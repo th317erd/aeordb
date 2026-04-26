@@ -258,15 +258,8 @@ function navigate() {
         link.style.display = 'none';
       }
     });
-    // Navigate file browser to the shared path (with a short delay to let the component mount)
-    if (sharedPath) {
-      setTimeout(() => {
-        const fb = document.querySelector('aeor-file-browser-portal');
-        if (fb && typeof fb.navigateTo === 'function') {
-          fb.navigateTo(sharedPath);
-        }
-      }, 300);
-    }
+    // The file browser component detects share sessions and starts at
+    // the shared path automatically (see connectedCallback in portal.js)
   }
 }
 
