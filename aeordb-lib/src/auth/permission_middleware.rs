@@ -177,24 +177,41 @@ pub async fn permission_middleware(
       let flag_char = operation_to_flag_char(&operation);
       let match_path = format!("/{}", engine_path);
 
-      match match_rules(&key_record.rules, &match_path) {
-        Some(rule) => {
-          if !check_operation_permitted(&rule.permitted, flag_char) {
-            // Operation not permitted by key — return 404 (not 403!).
+      // Check if this path is an ancestor of any rule target. Ancestor
+      // paths get read/list access to enable directory tree navigation
+      // down to the scoped target. This must be checked BEFORE the deny-all
+      // fallback, which would otherwise block ancestor directories.
+      let is_ancestor = crate::engine::api_key_rules::is_ancestor_of_any_rule(&key_record.rules, &match_path);
+      tracing::debug!(
+        match_path = %match_path,
+        flag_char = %flag_char,
+        is_ancestor = %is_ancestor,
+        rules_count = %key_record.rules.len(),
+        first_rule = %key_record.rules.first().map(|r| r.glob.as_str()).unwrap_or("none"),
+        "permission_middleware: key rule check"
+      );
+
+      if is_ancestor && (flag_char == 'r' || flag_char == 'l') {
+        // Ancestor directory — allow read/list for navigation
+      } else {
+        // Normal rule matching
+        match match_rules(&key_record.rules, &match_path) {
+          Some(rule) => {
+            if !check_operation_permitted(&rule.permitted, flag_char) {
+              return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
+              )
+                .into_response();
+            }
+          }
+          None => {
             return (
               StatusCode::NOT_FOUND,
               Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
             )
               .into_response();
           }
-        }
-        None => {
-          // No rule matches — path doesn't exist for this key.
-          return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
-          )
-            .into_response();
         }
       }
     }

@@ -112,41 +112,22 @@ pub async fn create_share_link(
         }
     }
 
-    // 3. Build rules: allow each path, then deny-all fallback.
-    let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() * 3 + 1);
+    // 3. Build rules: one rule per shared path, then deny-all fallback.
+    //    The permission middleware uses ancestor-aware matching for share keys,
+    //    so parent directories are automatically navigable without explicit rules.
+    let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() + 1);
     for path in &body.paths {
         if path.ends_with('/') {
-            // Directory: allow everything inside + the directory listing itself
+            // Directory: allow everything inside + the directory itself
             rules.push(KeyRule {
                 glob: format!("{}**", path),
                 permitted: body.permissions.clone(),
             });
-            rules.push(KeyRule {
-                glob: path.clone(),
-                permitted: body.permissions.clone(),
-            });
         } else {
-            // File: allow the file itself + listing the parent directory
+            // File: just the exact file
             rules.push(KeyRule {
                 glob: path.clone(),
                 permitted: body.permissions.clone(),
-            });
-            // Parent directory: allow listing so the file browser can show the file.
-            // We need three rules because glob matching is strict:
-            //   - "/parent/"       matches the directory listing request itself
-            //   - "/parent/**"     matches items inside the directory
-            let parent = match path.rfind('/') {
-                Some(0) => "/".to_string(),
-                Some(idx) => format!("{}/", &path[..idx]),
-                None => "/".to_string(),
-            };
-            rules.push(KeyRule {
-                glob: parent.clone(),
-                permitted: "-r--l---".to_string(),
-            });
-            rules.push(KeyRule {
-                glob: format!("{}**", parent),
-                permitted: "-r--l---".to_string(),
             });
         }
     }

@@ -121,6 +121,54 @@ pub fn match_rules<'a>(rules: &'a [KeyRule], path: &str) -> Option<&'a KeyRule> 
     None
 }
 
+/// Check if `path` is an ancestor directory of any rule's target path.
+///
+/// Example: rules contain `/projects/alpha/docs/report.pdf`.
+/// Path `/projects/alpha/` is an ancestor → returns true.
+/// Path `/photos/` is NOT an ancestor → returns false.
+///
+/// This enables scoped keys to navigate the directory tree down to their
+/// target paths without granting access to sibling directories.
+pub fn is_ancestor_of_any_rule(rules: &[KeyRule], path: &str) -> bool {
+    let normalized = path.trim_end_matches('/');
+    for rule in rules {
+        // Skip the deny-all fallback
+        if rule.glob == "**" { continue; }
+        let target = rule.glob.trim_end_matches('/').trim_end_matches("**").trim_end_matches('/');
+        // Check if the target path starts with the request path
+        if target.starts_with(normalized) && (target.len() == normalized.len() || target.as_bytes().get(normalized.len()) == Some(&b'/')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a listing item is on the path to any rule target.
+///
+/// Used by directory listing filters to show only items that lead to
+/// scoped paths — no sibling exposure.
+///
+/// Example: rules contain `/projects/alpha/docs/report.pdf`.
+/// Item `/projects/alpha/docs` → YES (on the path)
+/// Item `/projects/beta` → NO (sibling, not on the path)
+/// Item `/projects/alpha/docs/report.pdf` → YES (exact target)
+pub fn is_item_on_shared_path(rules: &[KeyRule], item_path: &str) -> bool {
+    let normalized_item = item_path.trim_end_matches('/');
+    for rule in rules {
+        if rule.glob == "**" { continue; }
+        let target = rule.glob.trim_end_matches('/').trim_end_matches("**").trim_end_matches('/');
+        // Item is the target itself or a descendant of the target
+        if glob_match::glob_match(&rule.glob, item_path) {
+            return true;
+        }
+        // Item is an ancestor of the target (on the path to the shared item)
+        if target.starts_with(normalized_item) && (target.len() == normalized_item.len() || target.as_bytes().get(normalized_item.len()) == Some(&b'/')) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a specific operation is permitted by a flags string.
 pub fn check_operation_permitted(permitted: &str, operation: char) -> bool {
     let index = match operation {
@@ -153,5 +201,39 @@ pub fn operation_to_flag_char(op: &crate::engine::permission_resolver::CrudlifyO
         CrudlifyOp::Invoke => 'i',
         CrudlifyOp::Configure => 'y',
         CrudlifyOp::Deploy => 'f',
+    }
+}
+
+#[cfg(test)]
+mod ancestor_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_ancestor_of_file_rule() {
+        let rules = vec![
+            KeyRule { glob: "/test/subdir/deep/file.txt".to_string(), permitted: "-r--l---".to_string() },
+            KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+        ];
+        assert!(is_ancestor_of_any_rule(&rules, "/test/subdir/deep/"), "immediate parent");
+        assert!(is_ancestor_of_any_rule(&rules, "/test/subdir/"), "grandparent");
+        assert!(is_ancestor_of_any_rule(&rules, "/test/"), "great-grandparent");
+        assert!(is_ancestor_of_any_rule(&rules, "/"), "root");
+        assert!(!is_ancestor_of_any_rule(&rules, "/other/"), "sibling dir");
+        // The exact target also counts as "on the path" (starts_with self)
+        assert!(is_ancestor_of_any_rule(&rules, "/test/subdir/deep/file.txt"), "exact target is on path");
+    }
+
+    #[test]
+    fn test_is_item_on_path() {
+        let rules = vec![
+            KeyRule { glob: "/test/subdir/deep/file.txt".to_string(), permitted: "-r--l---".to_string() },
+            KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+        ];
+        assert!(is_item_on_shared_path(&rules, "/test/subdir/deep"), "dir on path");
+        assert!(is_item_on_shared_path(&rules, "/test/subdir"), "parent dir on path");
+        assert!(is_item_on_shared_path(&rules, "/test"), "grandparent on path");
+        assert!(!is_item_on_shared_path(&rules, "/other"), "sibling NOT on path");
+        assert!(!is_item_on_shared_path(&rules, "/test/other"), "sibling subdir NOT on path");
+        assert!(is_item_on_shared_path(&rules, "/test/subdir/deep/file.txt"), "exact target");
     }
 }

@@ -48,9 +48,15 @@ pub struct EngineGetQuery {
 fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
     entries.retain(|entry| {
         let path = entry["path"].as_str().unwrap_or("");
+        // Check ancestor path first — items on the path to a scoped target
+        // must be visible for directory tree navigation, regardless of the
+        // deny-all fallback rule that would otherwise hide them.
+        if crate::engine::api_key_rules::is_item_on_shared_path(rules, path) {
+            return true;
+        }
         match match_rules(rules, path) {
             Some(rule) => check_operation_permitted(&rule.permitted, operation),
-            None => false, // no matching rule = denied
+            None => false,
         }
     });
 }

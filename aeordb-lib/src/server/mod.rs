@@ -266,7 +266,9 @@ pub fn create_app_with_all_and_task_queue(
         .patch(engine_routes::engine_rename),
     )
     .route("/blobs/chunks/{hash}", put(upload_routes::upload_chunk))
-    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10 GB
+    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10 GB
+    .route_layer(from_fn_with_state(app_state.clone(), permission_middleware))
+    .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 
   // Routes with medium body limits (backup import: 10 MB)
   let medium_upload_routes = Router::new()
