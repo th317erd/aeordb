@@ -113,22 +113,35 @@ pub async fn create_share_link(
     }
 
     // 3. Build rules: allow each path, then deny-all fallback.
-    let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() + 1);
+    let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() * 3 + 1);
     for path in &body.paths {
-        let glob = if path.ends_with('/') {
-            format!("{}**", path)
+        if path.ends_with('/') {
+            // Directory: allow everything inside + the directory listing itself
+            rules.push(KeyRule {
+                glob: format!("{}**", path),
+                permitted: body.permissions.clone(),
+            });
+            rules.push(KeyRule {
+                glob: path.clone(),
+                permitted: body.permissions.clone(),
+            });
         } else {
-            format!("{}/**", path)
-        };
-        rules.push(KeyRule {
-            glob,
-            permitted: body.permissions.clone(),
-        });
-        // Also allow listing the path itself (exact match for the directory).
-        rules.push(KeyRule {
-            glob: path.clone(),
-            permitted: body.permissions.clone(),
-        });
+            // File: allow the file itself + listing the parent directory (read+list only)
+            rules.push(KeyRule {
+                glob: path.clone(),
+                permitted: body.permissions.clone(),
+            });
+            // Parent directory needs list access so the file browser can show it
+            let parent = match path.rfind('/') {
+                Some(0) => "/".to_string(),
+                Some(idx) => format!("{}/", &path[..idx]),
+                None => "/".to_string(),
+            };
+            rules.push(KeyRule {
+                glob: format!("{}*", parent),
+                permitted: "-r--l---".to_string(),
+            });
+        }
     }
     // Deny-all fallback.
     rules.push(KeyRule {
