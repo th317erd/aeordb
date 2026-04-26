@@ -248,7 +248,7 @@ function navigate() {
     if (isActive && typeof el.onPageShow === 'function') el.onPageShow();
   }
 
-  // Share session: navigate file browser to shared path
+  // Share session: navigate file browser directly to shared path
   if (AUTH._isShareSession) {
     const params = new URLSearchParams(window.location.search);
     const sharedPath = params.get('path');
@@ -258,6 +258,15 @@ function navigate() {
         link.style.display = 'none';
       }
     });
+    // Navigate file browser to the shared path (with a short delay to let the component mount)
+    if (sharedPath) {
+      setTimeout(() => {
+        const fb = document.querySelector('aeor-file-browser-portal');
+        if (fb && typeof fb.navigateTo === 'function') {
+          fb.navigateTo(sharedPath);
+        }
+      }, 300);
+    }
   }
 }
 
