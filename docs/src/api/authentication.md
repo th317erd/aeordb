@@ -244,6 +244,7 @@ The root user has the nil UUID (`00000000-0000-0000-0000-000000000000`). Only th
 - Create and manage users
 - Create and manage groups
 - Share and unshare files and directories
+- Create and manage share links
 - Restore snapshots and manage forks
 - Run garbage collection
 - Manage tasks and cron schedules
@@ -443,6 +444,14 @@ Use the letter to allow the operation, `-` to deny it:
 2. If no rule matches the path, access is **denied**.
 3. An empty rules list means no restrictions (full pass-through to user permissions).
 4. Rules can only **restrict** — they never grant more access than the user already has.
+
+### Share Keys
+
+Keys created with `user_id: null` are **share keys** -- their rules are the sole permission authority. Share keys are not associated with any user and derive all access exclusively from their scoped rules. They are created automatically by the [link sharing](./files.md#link-sharing) endpoints.
+
+### Ancestor Directory Navigation
+
+Scoped keys automatically receive read and list access to ancestor directories leading to their scoped paths. For example, a key scoped to `/photos/vacation/**` can navigate `/` and `/photos/` with read+list only, but cannot see sibling directories or files outside the scoped path. Directory listings include an `effective_permissions` field per item when accessed with scoped keys.
 
 ### Security Behavior
 

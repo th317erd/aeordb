@@ -14,6 +14,9 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | POST | `/files/share` | Share paths with users/groups | Yes (root) | 200, 400, 404, 500 |
 | GET | `/files/shares?path=` | List active shares for a path | Yes | 200, 500 |
 | DELETE | `/files/shares` | Revoke a share | Yes (root) | 200, 404, 500 |
+| POST | `/files/share-link` | Create a share link (scoped API key + JWT URL) | Yes (root) | 201, 400, 403, 500 |
+| GET | `/files/share-links?path=` | List active share links for a path | Yes (root) | 200, 403, 500 |
+| DELETE | `/files/share-links/{key_id}` | Revoke a share link | Yes (root) | 200, 403, 404, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 > **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
@@ -120,6 +123,8 @@ Read a file or list a directory. The server determines the type automatically:
 Each entry includes `path`, `hash`, and numeric `entry_type` fields. Symlink entries also include a `target` field.
 
 Entry types: `2` = file, `3` = directory, `8` = symlink.
+
+> **Scoped key access:** When a directory listing is accessed with a scoped API key, each item in the response includes an `effective_permissions` field -- an 8-character crudlify string indicating what operations the key is allowed to perform on that item. Ancestor directory items (directories leading to the scoped path) receive read+list permissions only.
 
 ```json
 {
@@ -620,6 +625,132 @@ curl -X DELETE http://localhost:6830/files/shares \
 | 403 | Non-root user attempted to share or unshare |
 | 404 | Path not found, or no matching share to revoke |
 | 500 | Internal failure writing permissions |
+
+---
+
+## Link Sharing
+
+Shareable URLs backed by scoped API keys. A share link bundles a scoped API key with a JWT token into a URL that opens the portal file browser, scoped to the shared path.
+
+### POST /files/share-link
+
+Create a share link for one or more paths. This creates a scoped API key with `user_id: null` and generates a JWT token embedded in the URL.
+
+**Auth:** Root only.
+
+**Request Body:**
+
+```json
+{
+  "paths": ["/photos/vacation"],
+  "permissions": "cr..l...",
+  "expires_in_days": 30,
+  "base_url": "https://files.example.com"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `paths` | array | Yes | Paths to share |
+| `permissions` | string | Yes | 8-character crudlify permission flags |
+| `expires_in_days` | integer | No | Days until expiry (`null` = never expires) |
+| `base_url` | string | Yes | Base URL for the generated share link |
+
+**Response:** `201 Created`
+
+```json
+{
+  "url": "https://files.example.com/share?token=eyJ...",
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "key_id": "a1b2c3d4-...",
+  "permissions": "cr..l...",
+  "expires_at": 1778560398000,
+  "paths": ["/photos/vacation"]
+}
+```
+
+The URL opens the portal file browser scoped to the shared path. Ancestor directories are navigable (read+list only) -- only path components leading to the target are visible.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:6830/files/share-link \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paths": ["/photos/vacation"],
+    "permissions": "-r--l---",
+    "expires_in_days": 7,
+    "base_url": "https://files.example.com"
+  }'
+```
+
+### GET /files/share-links
+
+List active share links for a path.
+
+**Auth:** Root only.
+
+**Query Parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | Yes | Path to list share links for |
+
+**Response:** `200 OK`
+
+```json
+{
+  "path": "/photos/vacation",
+  "links": [
+    {
+      "key_id": "a1b2c3d4-...",
+      "label": "share-link:/photos/vacation",
+      "permissions": "-r--l---",
+      "expires_at": 1778560398000,
+      "created_at": 1775968398000
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl "http://localhost:6830/files/share-links?path=/photos/vacation" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### DELETE /files/share-links/{key_id}
+
+Revoke a share link. This deletes the underlying scoped API key and invalidates the JWT.
+
+**Auth:** Root only.
+
+**Response:** `200 OK`
+
+```json
+{
+  "revoked": true,
+  "key_id": "a1b2c3d4-..."
+}
+```
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:6830/files/share-links/a1b2c3d4-... \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Error Responses (Link Sharing)
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Missing or invalid fields (paths, permissions, base_url) |
+| 403 | Non-root user attempted to create, list, or revoke share links |
+| 404 | Share link not found (revoke) |
+| 500 | Internal failure creating or revoking share link |
 
 ---
 

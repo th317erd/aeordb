@@ -74,6 +74,14 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 | PATCH | `/system/groups/{name}` | Update a group | Yes |
 | DELETE | `/system/groups/{name}` | Delete a group | Yes |
 
+### Email Configuration
+
+| Method | Path | Description | Root Required |
+|--------|------|-------------|---------------|
+| GET | `/system/email-config` | Get email configuration (secrets masked) | Yes |
+| PUT | `/system/email-config` | Save email configuration (SMTP or OAuth) | Yes |
+| POST | `/system/email-test` | Send a test email | Yes |
+
 ---
 
 ## Garbage Collection
@@ -982,3 +990,128 @@ Delete a group. Requires root.
 | Status | Condition |
 |--------|-----------|
 | 404 | Group not found |
+
+---
+
+## Email Configuration
+
+AeorDB supports sending email notifications (e.g., when files are shared via `POST /files/share`). Email can be configured using either SMTP or OAuth providers.
+
+### GET /system/email-config
+
+Retrieve the current email configuration. Sensitive fields (passwords, client secrets, refresh tokens) are masked as `"••••••••"` in the response.
+
+**Auth:** Root only.
+
+**Response:** `200 OK`
+
+```json
+{
+  "provider": "smtp",
+  "host": "smtp.example.com",
+  "port": 587,
+  "username": "noreply@example.com",
+  "password": "••••••••",
+  "from_address": "noreply@example.com",
+  "from_name": "AeorDB",
+  "tls": true
+}
+```
+
+---
+
+### PUT /system/email-config
+
+Save email configuration. Supports two provider types: SMTP and OAuth.
+
+**Auth:** Root only.
+
+**SMTP Configuration:**
+
+```json
+{
+  "provider": "smtp",
+  "host": "smtp.example.com",
+  "port": 587,
+  "username": "noreply@example.com",
+  "password": "secret",
+  "from_address": "noreply@example.com",
+  "from_name": "AeorDB",
+  "tls": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | Must be `"smtp"` |
+| `host` | string | Yes | SMTP server hostname |
+| `port` | integer | Yes | SMTP server port |
+| `username` | string | Yes | SMTP username |
+| `password` | string | Yes | SMTP password |
+| `from_address` | string | Yes | Sender email address |
+| `from_name` | string | No | Sender display name |
+| `tls` | boolean | No | Enable TLS (default: true) |
+
+**OAuth Configuration:**
+
+```json
+{
+  "provider": "oauth",
+  "oauth_provider": "gmail",
+  "client_id": "...",
+  "client_secret": "...",
+  "refresh_token": "...",
+  "from_address": "noreply@example.com",
+  "from_name": "AeorDB"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | Must be `"oauth"` |
+| `oauth_provider` | string | Yes | OAuth provider: `"gmail"`, `"outlook"`, or `"custom"` |
+| `client_id` | string | Yes | OAuth client ID |
+| `client_secret` | string | Yes | OAuth client secret |
+| `refresh_token` | string | Yes | OAuth refresh token |
+| `from_address` | string | Yes | Sender email address |
+| `from_name` | string | No | Sender display name |
+
+**Response:** `200 OK`
+
+---
+
+### POST /system/email-test
+
+Send a test email to verify the current configuration.
+
+**Auth:** Root only.
+
+**Request Body:**
+
+```json
+{
+  "to": "recipient@example.com"
+}
+```
+
+**Response:** `200 OK`
+
+```json
+{
+  "sent": true,
+  "message": "Test email sent successfully"
+}
+```
+
+On failure:
+
+```json
+{
+  "sent": false,
+  "error": "Connection refused: smtp.example.com:587"
+}
+```
+
+### Share Notifications
+
+When files are shared via `POST /files/share`, email notifications are automatically sent to recipients if email is configured. If email is not configured, sharing still works -- notifications are silently skipped.
