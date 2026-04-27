@@ -175,7 +175,9 @@ pub async fn permission_middleware(
     // If key has rules, enforce them.
     if !key_record.rules.is_empty() {
       let flag_char = operation_to_flag_char(&operation);
-      let match_path = format!("/{}", engine_path);
+      // Normalize: decode %2F, ensure leading slash, handle empty root
+      let raw_path = format!("/{}", engine_path);
+      let match_path = raw_path.replace("%2F", "/").replace("//", "/");
 
       // Check if this path is an ancestor of any rule target. Ancestor
       // paths get read/list access to enable directory tree navigation
