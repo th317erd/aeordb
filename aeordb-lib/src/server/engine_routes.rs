@@ -46,16 +46,34 @@ pub struct EngineGetQuery {
 /// Entries whose "path" field is denied (no matching rule, or matched rule
 /// forbids the given operation) are silently removed.
 fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
-    entries.retain(|entry| {
-        let path = entry["path"].as_str().unwrap_or("");
+    entries.retain_mut(|entry| {
+        let path = entry["path"].as_str().unwrap_or("").to_string();
         // Check ancestor path first — items on the path to a scoped target
         // must be visible for directory tree navigation, regardless of the
         // deny-all fallback rule that would otherwise hide them.
-        if crate::engine::api_key_rules::is_item_on_shared_path(rules, path) {
+        if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
+            // Items on the ancestor path get read+list only for navigation.
+            // Items that directly match a rule get that rule's permissions.
+            let effective = match match_rules(rules, &path) {
+                Some(rule) if rule.glob != "**" => rule.permitted.clone(),
+                _ => "-r--l---".to_string(),
+            };
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("effective_permissions".to_string(), serde_json::Value::String(effective));
+            }
             return true;
         }
-        match match_rules(rules, path) {
-            Some(rule) => check_operation_permitted(&rule.permitted, operation),
+        match match_rules(rules, &path) {
+            Some(rule) => {
+                if check_operation_permitted(&rule.permitted, operation) {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("effective_permissions".to_string(), serde_json::Value::String(rule.permitted.clone()));
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             None => false,
         }
     });

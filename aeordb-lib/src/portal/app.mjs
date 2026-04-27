@@ -74,6 +74,7 @@ window.api = api;
   const token = params.get('token');
   if (token) {
     AUTH._isShareSession = true;   // Set BEFORE setToken so it routes to sessionStorage
+    AUTH._sharePermissions = params.get('perm') || null;
     AUTH.setToken(token);
   }
 })();

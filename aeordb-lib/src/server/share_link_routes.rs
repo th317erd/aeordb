@@ -217,10 +217,11 @@ pub async fn create_share_link(
     let base = body.base_url.unwrap_or_default();
     let encoded_path = simple_url_encode(&first_path);
     let url = format!(
-        "{}/system/portal/?token={}&path={}",
+        "{}/system/portal/?token={}&path={}&perm={}",
         base.trim_end_matches('/'),
         token,
         encoded_path,
+        body.permissions,
     );
 
     // 10. Return response.

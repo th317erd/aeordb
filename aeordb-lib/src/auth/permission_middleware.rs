@@ -350,6 +350,10 @@ pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> Crudli
     return CrudlifyOp::Delete;
   }
 
+  if *method == Method::PATCH {
+    return CrudlifyOp::Update;
+  }
+
   // Fallback: treat unknown methods as Read.
   CrudlifyOp::Read
 }
