@@ -160,6 +160,22 @@ pub struct StatsHealth {
 /// - `std::fs::metadata()` — single `stat` syscall
 pub async fn get_stats(
     State(state): State<AppState>,
+    claims: Option<Extension<crate::auth::TokenClaims>>,
+    rate_ext: Option<Extension<Arc<crate::engine::rate_tracker::RateTrackerSet>>>,
+    db_path_ext: Option<Extension<String>>,
+) -> axum::response::Response {
+    // Block share tokens from accessing stats
+    if let Some(Extension(ref c)) = claims {
+        if c.sub.starts_with("share:") {
+            return (StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Not available for share links"}))).into_response();
+        }
+    }
+    get_stats_inner(state, rate_ext, db_path_ext).into_response()
+}
+
+fn get_stats_inner(
+    state: AppState,
     rate_ext: Option<Extension<Arc<crate::engine::rate_tracker::RateTrackerSet>>>,
     db_path_ext: Option<Extension<String>>,
 ) -> Json<EnhancedStats> {

@@ -250,9 +250,14 @@ pub async fn share(
 /// List active shares for a path.
 pub async fn list_shares(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     axum::extract::Query(query): axum::extract::Query<SharesQuery>,
 ) -> Response {
+    // Share tokens cannot list shares
+    if claims.sub.starts_with("share:") {
+        return ErrorResponse::new("Not available for share links")
+            .with_status(StatusCode::FORBIDDEN).into_response();
+    }
     let normalized = normalize_path(&query.path);
     let ops = DirectoryOps::new(&state.engine);
 
