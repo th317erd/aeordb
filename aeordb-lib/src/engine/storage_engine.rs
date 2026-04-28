@@ -148,6 +148,15 @@ impl StorageEngine {
   /// Acquire an exclusive advisory file lock. Returns the locked file handle
   /// which must be kept alive for the duration of the engine's lifetime.
   /// If another process already holds the lock, returns an error immediately.
+  /// Derive the KV sidecar path from the DB path.
+  /// e.g., `/path/to/test.aeordb` → `/path/to/.aeordb-test.kv`
+  fn derive_kv_path(db_path: &str) -> String {
+    let p = Path::new(db_path);
+    let dir = p.parent().unwrap_or_else(|| Path::new("."));
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+    dir.join(format!(".aeordb-{}.kv", stem)).to_string_lossy().to_string()
+  }
+
   fn acquire_file_lock(lock_path: &str) -> EngineResult<std::fs::File> {
     let lock_file = OpenOptions::new()
       .write(true)
@@ -187,7 +196,7 @@ impl StorageEngine {
     let writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
-    let kv_path = format!("{}.kv", path);
+    let kv_path = Self::derive_kv_path(path);
     // Remove stale KV file if it exists (e.g. from a previous failed create)
     let _ = std::fs::remove_file(&kv_path);
     let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
@@ -231,7 +240,7 @@ impl StorageEngine {
     let writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
-    let kv_path = format!("{}.kv", path);
+    let kv_path = Self::derive_kv_path(path);
 
     let mut void_manager = VoidManager::new(hash_algo);
 
