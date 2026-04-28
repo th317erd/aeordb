@@ -252,6 +252,7 @@ pub fn create_app_with_all_and_task_queue(
     // Files: share routes (must be before /files/{*path} wildcard)
     .route("/files/share", post(share_routes::share))
     .route("/files/shares", get(share_routes::list_shares).delete(share_routes::unshare))
+    .route("/files/shared-with-me", get(share_routes::shared_with_me))
     // Files: share-link routes (must be before /files/{*path} wildcard)
     .route("/files/share-link", post(share_link_routes::create_share_link))
     .route("/files/share-links", get(share_link_routes::list_share_links))

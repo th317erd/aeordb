@@ -423,6 +423,86 @@ pub async fn unshare(
 }
 
 // ---------------------------------------------------------------------------
+// GET /files/shared-with-me — find all paths where the user has permissions
+// ---------------------------------------------------------------------------
+
+/// Scan all `.permissions` files and return paths where the calling user
+/// has at least one matching group. Used by the file browser to discover
+/// accessible entry points for non-root users.
+pub async fn shared_with_me(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+) -> Response {
+    // Share tokens don't use .permissions — they have scoped key rules
+    if claims.sub.starts_with("share:") {
+        return ErrorResponse::new("Not available for share links")
+            .with_status(StatusCode::FORBIDDEN).into_response();
+    }
+
+    let caller_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => return ErrorResponse::new("Invalid identity")
+            .with_status(StatusCode::FORBIDDEN).into_response(),
+    };
+
+    // Root sees everything — no need for this endpoint
+    if is_root(&caller_id) {
+        return Json(serde_json::json!({ "paths": [] })).into_response();
+    }
+
+    // Get the user's group memberships
+    let user_groups = match state.group_cache.get_groups(&caller_id, &state.engine) {
+        Ok(groups) => groups,
+        Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+    };
+
+    // Scan all .permissions files
+    let ops = DirectoryOps::new(&state.engine);
+    let perm_files = match crate::engine::directory_listing::list_directory_recursive(
+        &state.engine, "/", -1, Some(".permissions"),
+    ) {
+        Ok(entries) => entries,
+        Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+    };
+
+    let mut shared_paths: Vec<serde_json::Value> = Vec::new();
+
+    for entry in &perm_files {
+        let data = match ops.read_file(&entry.path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let perms = match PathPermissions::deserialize(&data) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Check if any link in this .permissions file matches the user's groups
+        for link in &perms.links {
+            if user_groups.contains(&link.group) {
+                // Extract the directory path (strip /.permissions suffix)
+                let dir_path = if entry.path.ends_with("/.permissions") {
+                    entry.path[..entry.path.len() - "/.permissions".len()].to_string()
+                } else if entry.path == "/.permissions" {
+                    "/".to_string()
+                } else {
+                    continue;
+                };
+
+                shared_paths.push(serde_json::json!({
+                    "path": dir_path,
+                    "permissions": link.allow,
+                    "path_pattern": link.path_pattern,
+                }));
+                break; // one match per .permissions file is enough
+            }
+        }
+    }
+
+    Json(serde_json::json!({ "paths": shared_paths })).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Background email notifications
 // ---------------------------------------------------------------------------
 
