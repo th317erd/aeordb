@@ -138,11 +138,11 @@ fn paginated_listing_response(
 // Engine file routes
 // ---------------------------------------------------------------------------
 
-/// Maximum body size for inline PUT /engine/{path} uploads (100 MB).
+/// Maximum body size for inline PUT /engine/{path} uploads (2 GB).
 /// Files larger than this should use the chunked upload protocol
 /// (PUT /upload/chunks/{hash} + POST /upload/commit) which streams
 /// each 256 KB chunk individually and avoids buffering the full file.
-pub const MAX_INLINE_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+pub const MAX_INLINE_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // POST /files/mkdir — create an empty directory
