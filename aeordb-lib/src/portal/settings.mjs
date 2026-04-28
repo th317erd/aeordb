@@ -10,16 +10,21 @@ class AeorSettings extends HTMLElement {
     this._forbidden = false;
     this._provider = 'smtp';
     this._feedback = null;
+    this._activeTab = 'email';
+    this._gcSchedule = null;
   }
 
   connectedCallback() {
     this.render();
-    this.fetchConfig();
+    this._fetchAll();
   }
 
-  /** Called by navigate() when this page becomes visible. */
   onPageShow() {
-    this.fetchConfig();
+    this._fetchAll();
+  }
+
+  async _fetchAll() {
+    await Promise.all([this.fetchConfig(), this.fetchGcSchedule()]);
   }
 
   render() {
@@ -29,9 +34,28 @@ class AeorSettings extends HTMLElement {
       </div>
       <div id="settings-error"></div>
       <div id="settings-feedback"></div>
-      <div id="settings-content"></div>
+      <div class="tab-bar" style="margin-bottom:20px;">
+        <div class="tab active settings-tab" data-tab="email">Email</div>
+        <div class="tab settings-tab" data-tab="gc">Garbage Collector</div>
+      </div>
+      <div id="settings-tab-email"></div>
+      <div id="settings-tab-gc" style="display:none;"></div>
     `;
+
+    this.querySelectorAll('.settings-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.querySelectorAll('.settings-tab').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        this._activeTab = btn.dataset.tab;
+        this.querySelector('#settings-tab-email').style.display = this._activeTab === 'email' ? '' : 'none';
+        this.querySelector('#settings-tab-gc').style.display = this._activeTab === 'gc' ? '' : 'none';
+      });
+    });
   }
+
+  // ---------------------------------------------------------------------------
+  // Email tab
+  // ---------------------------------------------------------------------------
 
   async fetchConfig() {
     try {
@@ -41,16 +65,15 @@ class AeorSettings extends HTMLElement {
         this._forbidden = true;
         this._config = null;
         this._error = null;
-        this.renderContent();
+        this.renderEmailTab();
         return;
       }
 
       if (response.status === 404) {
-        // No config yet — show empty form
         this._config = null;
         this._error = null;
         this._forbidden = false;
-        this.renderContent();
+        this.renderEmailTab();
         return;
       }
 
@@ -62,35 +85,32 @@ class AeorSettings extends HTMLElement {
       this._error = null;
       this._forbidden = false;
 
-      // Detect provider from existing config
       if (data.oauth_service || data.client_id) {
         this._provider = 'oauth';
       } else {
         this._provider = 'smtp';
       }
 
-      this.renderContent();
+      this.renderEmailTab();
     } catch (error) {
       this._error = error.message;
-      this.renderContent();
+      this.renderEmailTab();
     }
   }
 
-  renderContent() {
-    const contentContainer = this.querySelector('#settings-content');
+  renderEmailTab() {
+    const container = this.querySelector('#settings-tab-email');
     const errorContainer = this.querySelector('#settings-error');
+    if (!container) return;
 
-    if (!contentContainer || !errorContainer)
-      return;
-
-    if (this._error) {
+    if (this._error && errorContainer) {
       errorContainer.innerHTML = `<div class="alert alert-error">${escapeHtml(this._error)}</div>`;
-    } else {
+    } else if (errorContainer) {
       errorContainer.innerHTML = '';
     }
 
     if (this._forbidden) {
-      contentContainer.innerHTML = `
+      container.innerHTML = `
         <div class="card" style="text-align:center;padding:40px;">
           <div style="color:#8b949e;font-size:1rem;">You don't have permission to manage settings.</div>
         </div>
@@ -101,7 +121,7 @@ class AeorSettings extends HTMLElement {
     const cfg = this._config || {};
     const provider = this._provider;
 
-    contentContainer.innerHTML = `
+    container.innerHTML = `
       <div class="card">
         <h2 style="font-size:1.1rem;font-weight:700;margin-bottom:18px;">Email Configuration</h2>
         <form id="email-config-form">
@@ -187,7 +207,6 @@ class AeorSettings extends HTMLElement {
       </div>
     `;
 
-    // Provider toggle
     this.querySelector('#cfg-provider').addEventListener('change', (event) => {
       this._provider = event.target.value;
       const smtpFields = this.querySelector('#smtp-fields');
@@ -196,10 +215,7 @@ class AeorSettings extends HTMLElement {
       if (oauthFields) oauthFields.style.display = (this._provider === 'oauth') ? 'block' : 'none';
     });
 
-    // Save handler
     this.querySelector('#email-config-form').addEventListener('submit', (event) => this.handleSave(event));
-
-    // Test email handler
     this.querySelector('#test-email-button').addEventListener('click', () => this.handleTestEmail());
   }
 
@@ -233,7 +249,6 @@ class AeorSettings extends HTMLElement {
     if (!feedbackContainer) return;
     const cls = isError ? 'alert-error' : 'alert-info';
     feedbackContainer.innerHTML = `<div class="alert ${cls}">${escapeHtml(message)}</div>`;
-    // Auto-clear after 5 seconds
     setTimeout(() => {
       if (feedbackContainer) feedbackContainer.innerHTML = '';
     }, 5000);
@@ -241,7 +256,6 @@ class AeorSettings extends HTMLElement {
 
   async handleSave(event) {
     event.preventDefault();
-
     try {
       const payload = this._buildPayload();
       const response = await window.api('/system/email-config', {
@@ -249,12 +263,10 @@ class AeorSettings extends HTMLElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || `Save failed (${response.status})`);
       }
-
       this._showFeedback('Email configuration saved successfully.', false);
       this.fetchConfig();
     } catch (error) {
@@ -265,20 +277,179 @@ class AeorSettings extends HTMLElement {
   async handleTestEmail() {
     const recipient = window.prompt('Enter recipient email address for test:');
     if (!recipient) return;
-
     try {
       const response = await window.api('/system/email-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ to: recipient }),
       });
-
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || `Test email failed (${response.status})`);
       }
-
       this._showFeedback(`Test email sent to ${recipient}.`, false);
+    } catch (error) {
+      this._showFeedback(error.message, true);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Garbage Collector tab
+  // ---------------------------------------------------------------------------
+
+  async fetchGcSchedule() {
+    try {
+      const response = await window.api('/system/cron');
+      if (!response.ok) return;
+      const data = await response.json();
+      const schedules = data.items || data;
+      this._gcSchedule = schedules.find((s) => s.task_type === 'gc') || null;
+    } catch (e) {
+      this._gcSchedule = null;
+    }
+    this.renderGcTab();
+  }
+
+  renderGcTab() {
+    const container = this.querySelector('#settings-tab-gc');
+    if (!container) return;
+
+    if (this._forbidden) {
+      container.innerHTML = `
+        <div class="card" style="text-align:center;padding:40px;">
+          <div style="color:#8b949e;">You don't have permission to manage settings.</div>
+        </div>
+      `;
+      return;
+    }
+
+    const gc = this._gcSchedule;
+    const isEnabled = gc ? gc.enabled : false;
+    const schedule = gc ? gc.schedule : '0 3 * * *';
+
+    container.innerHTML = `
+      <div class="card" style="margin-bottom:20px;">
+        <div style="color:var(--text-muted);font-size:0.9rem;line-height:1.6;margin-bottom:20px;">
+          The <strong style="color:var(--text);">Garbage Collector</strong> reclaims disk space
+          by removing unreachable data — orphaned file chunks from interrupted uploads,
+          deleted files, and old versions that are no longer referenced. It runs safely
+          in the background without affecting reads or writes. A snapshot is automatically
+          created before each run as a safety net.
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="font-size:1.1rem;font-weight:700;margin-bottom:18px;">Schedule</h2>
+
+        <div class="form-group">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="gc-enabled" ${isEnabled ? 'checked' : ''}>
+            Run garbage collection on a schedule
+          </label>
+        </div>
+
+        <div id="gc-schedule-fields" style="display:${isEnabled ? 'block' : 'none'};">
+          <div class="form-group">
+            <label class="form-label">Run every</label>
+            <select class="form-input" id="gc-frequency">
+              <option value="0 3 * * *" ${schedule === '0 3 * * *' ? 'selected' : ''}>Day (3:00 AM)</option>
+              <option value="0 3 * * 0" ${schedule === '0 3 * * 0' ? 'selected' : ''}>Week (Sunday 3:00 AM)</option>
+              <option value="0 3 1 * *" ${schedule === '0 3 1 * *' ? 'selected' : ''}>Month (1st, 3:00 AM)</option>
+              <option value="custom" ${!['0 3 * * *', '0 3 * * 0', '0 3 1 * *'].includes(schedule) ? 'selected' : ''}>Custom cron expression</option>
+            </select>
+          </div>
+
+          <div id="gc-custom-cron" style="display:${!['0 3 * * *', '0 3 * * 0', '0 3 1 * *'].includes(schedule) ? 'block' : 'none'};">
+            <div class="form-group">
+              <label class="form-label" for="gc-cron-expr">Cron Expression</label>
+              <input class="form-input" id="gc-cron-expr" type="text" value="${escapeHtml(schedule)}" placeholder="0 3 * * *">
+              <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px;">
+                Format: minute hour day-of-month month day-of-week
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:18px;">
+          <button class="button button-primary" id="gc-save-button">Save</button>
+          <button class="button" id="gc-run-now-button">Run Now</button>
+        </div>
+      </div>
+    `;
+
+    // Toggle schedule fields
+    this.querySelector('#gc-enabled').addEventListener('change', (e) => {
+      this.querySelector('#gc-schedule-fields').style.display = e.target.checked ? 'block' : 'none';
+    });
+
+    // Toggle custom cron input
+    this.querySelector('#gc-frequency').addEventListener('change', (e) => {
+      this.querySelector('#gc-custom-cron').style.display = e.target.value === 'custom' ? 'block' : 'none';
+    });
+
+    // Save
+    this.querySelector('#gc-save-button').addEventListener('click', () => this.handleGcSave());
+
+    // Run Now
+    this.querySelector('#gc-run-now-button').addEventListener('click', () => this.handleGcRunNow());
+  }
+
+  async handleGcSave() {
+    const enabled = this.querySelector('#gc-enabled').checked;
+    const freqSelect = this.querySelector('#gc-frequency');
+    const schedule = freqSelect.value === 'custom'
+      ? this.querySelector('#gc-cron-expr').value
+      : freqSelect.value;
+
+    try {
+      if (this._gcSchedule) {
+        // Update existing
+        const response = await window.api(`/system/cron/${this._gcSchedule.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled, schedule }),
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `Update failed (${response.status})`);
+        }
+      } else if (enabled) {
+        // Create new
+        const response = await window.api('/system/cron', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: 'gc-scheduled',
+            task_type: 'gc',
+            schedule,
+            args: {},
+            enabled: true,
+          }),
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `Create failed (${response.status})`);
+        }
+      }
+      this._showFeedback('Garbage collection schedule saved.', false);
+      this.fetchGcSchedule();
+    } catch (error) {
+      this._showFeedback(error.message, true);
+    }
+  }
+
+  async handleGcRunNow() {
+    try {
+      const response = await window.api('/system/tasks/gc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `GC failed (${response.status})`);
+      }
+      this._showFeedback('Garbage collection started. Check the Tasks page for progress.', false);
     } catch (error) {
       this._showFeedback(error.message, true);
     }
