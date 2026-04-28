@@ -57,7 +57,8 @@ async function api(path, options = {}) {
 
   if (response.status === 401 && !AUTH._isShareSession) {
     AUTH.clear();
-    navigate();
+    localStorage.removeItem('aeordb-file-browser');
+    window.location.replace('/system/portal/');
     throw new Error('Unauthorized');
   }
 
@@ -289,8 +290,7 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 document.getElementById('logout-button').addEventListener('click', () => {
   AUTH.clear();
   localStorage.removeItem('aeordb-file-browser');
-  authDisabled = false;
-  setPageParam('dashboard');
+  window.location.replace('/system/portal/');
 });
 
 // Listen for browser back/forward navigation
