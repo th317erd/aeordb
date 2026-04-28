@@ -269,7 +269,7 @@ class AeorSettings extends HTMLElement {
         throw new Error(text || `Save failed (${response.status})`);
       }
       flashButton(btn, true, 'Saved!');
-      this.fetchConfig();
+      setTimeout(() => this.fetchConfig(), 5500);
     } catch (error) {
       flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
@@ -442,7 +442,7 @@ class AeorSettings extends HTMLElement {
         }
       }
       flashButton(btn, true, 'Saved!');
-      this.fetchGcSchedule();
+      setTimeout(() => this.fetchGcSchedule(), 5500);
     } catch (error) {
       flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
