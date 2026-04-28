@@ -270,6 +270,8 @@ curl -X DELETE http://localhost:6830/system/tasks/task-uuid-here \
 
 ## Cron Scheduling
 
+> **Tip:** The portal Settings page provides an intuitive UI for scheduling garbage collection. Navigate to Settings → Garbage Collector to configure.
+
 ### GET /system/cron
 
 List all cron schedules.

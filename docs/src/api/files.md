@@ -17,6 +17,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | POST | `/files/share-link` | Create a share link (scoped API key + JWT URL) | Yes (root) | 201, 400, 403, 500 |
 | GET | `/files/share-links?path=` | List active share links for a path | Yes (root) | 200, 403, 500 |
 | DELETE | `/files/share-links/{key_id}` | Revoke a share link | Yes (root) | 200, 403, 404, 500 |
+| GET | `/files/shared-with-me` | List paths shared with the current user | Yes | 200, 403, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 > **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
@@ -27,7 +28,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 
 Store a file at the given path. Parent directories are created automatically. If a file already exists at the path, it is overwritten (creating a new version).
 
-**Body limit:** 100 MB (inline uploads). For files larger than 100 MB, use the [chunked upload protocol](./upload-protocol.md).
+**Streaming uploads:** Files are streamed in 256 KB chunks -- the server never buffers the full file in memory. Files up to the router-level limit (10 GB) are supported. For resumable uploads of very large files, see the [chunked upload protocol](./upload-protocol.md).
 
 ### Request
 
@@ -72,7 +73,7 @@ curl -X PUT http://localhost:6830/files/data/report.pdf \
 | 400 | Invalid input (e.g., empty path) |
 | 404 | Parent path references a non-existent entity |
 | 409 | Path conflict (e.g., file exists where directory expected) |
-| 413 | Payload exceeds 100 MB inline upload limit (use chunked upload protocol) |
+| 413 | Payload exceeds the router-level body limit (10 GB) |
 | 500 | Internal storage failure |
 
 ---
@@ -124,7 +125,7 @@ Each entry includes `path`, `hash`, and numeric `entry_type` fields. Symlink ent
 
 Entry types: `2` = file, `3` = directory, `8` = symlink.
 
-> **Scoped key access:** When a directory listing is accessed with a scoped API key, each item in the response includes an `effective_permissions` field -- an 8-character crudlify string indicating what operations the key is allowed to perform on that item. Ancestor directory items (directories leading to the scoped path) receive read+list permissions only.
+> **Effective permissions:** When a directory listing is accessed with a scoped API key or as a non-root user, each item in the response includes an `effective_permissions` field -- an 8-character crudlify string indicating what operations the caller can perform on that item. Ancestor directory items (directories leading to the scoped path) receive read+list permissions only.
 
 ```json
 {
@@ -254,7 +255,7 @@ If both `snapshot` and `version` are provided, `snapshot` takes precedence. Retu
 
 ## DELETE /files/{path}
 
-Delete a file at the given path. Creates a `DeletionRecord` and removes the file from its parent directory listing. Directories cannot be deleted directly -- delete all files within first.
+Delete a file or empty directory at the given path. Creates a `DeletionRecord` and removes the entry from its parent directory listing. The handler tries file deletion first, then directory deletion, then returns 404. Non-empty directories return 400 with "Directory is not empty (N children)".
 
 ### Request
 
@@ -288,7 +289,8 @@ curl -X DELETE http://localhost:6830/files/data/report.pdf \
 
 | Status | Condition |
 |--------|-----------|
-| 404 | File not found |
+| 400 | Directory is not empty |
+| 404 | Path not found (neither file nor directory) |
 | 500 | Internal deletion failure |
 
 ---
@@ -751,6 +753,46 @@ curl -X DELETE http://localhost:6830/files/share-links/a1b2c3d4-... \
 | 403 | Non-root user attempted to create, list, or revoke share links |
 | 404 | Share link not found (revoke) |
 | 500 | Internal failure creating or revoking share link |
+
+---
+
+## Shared With Me
+
+### GET /files/shared-with-me
+
+List paths that have been shared with the current user. Scans all `.permissions` files to find paths where the calling user has group-level access. This is used by the portal to discover entry points when the user has no root-level permissions.
+
+**Auth:** Requires a user-bound token. Share tokens receive 403. Root users receive an empty list (they already have access to everything).
+
+**Response:** `200 OK`
+
+```json
+{
+  "paths": [
+    {
+      "path": "/photos/vacation/",
+      "permissions": ".r..l...",
+      "path_pattern": null
+    }
+  ]
+}
+```
+
+Each entry includes the shared `path`, the `permissions` string granted, and an optional `path_pattern` (non-null when the share targets a specific file within a directory).
+
+**Example:**
+
+```bash
+curl http://localhost:6830/files/shared-with-me \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Error Responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 403 | Called with a share token instead of a user token |
+| 500 | Internal failure scanning permissions |
 
 ---
 
