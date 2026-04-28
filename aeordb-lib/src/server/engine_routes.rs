@@ -11,6 +11,7 @@ use axum::{
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 
+use uuid::Uuid;
 use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse, error_codes};
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -429,6 +430,49 @@ fn apply_listing_filters(
   Ok(())
 }
 
+/// Compute effective_permissions for each listing item using the permission
+/// resolver. Only runs for non-root users when items don't already have
+/// effective_permissions (i.e., regular user/group shares, not scoped API keys).
+fn attach_effective_permissions(
+  listing: &mut [serde_json::Value],
+  user_id: &Uuid,
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  group_cache: &std::sync::Arc<crate::engine::GroupCache>,
+  permissions_cache: &std::sync::Arc<crate::engine::PermissionsCache>,
+) {
+  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+
+  if crate::engine::is_root(user_id) { return; }
+
+  let resolver = PermissionResolver::new(engine, group_cache, permissions_cache);
+  let ops = [
+    ('c', CrudlifyOp::Create), ('r', CrudlifyOp::Read), ('u', CrudlifyOp::Update),
+    ('d', CrudlifyOp::Delete), ('l', CrudlifyOp::List), ('i', CrudlifyOp::Invoke),
+    ('f', CrudlifyOp::Deploy), ('y', CrudlifyOp::Configure),
+  ];
+
+  for entry in listing.iter_mut() {
+    // Skip items that already have effective_permissions (set by key rules filter)
+    if entry.get("effective_permissions").is_some() { continue; }
+
+    let path = match entry["path"].as_str() {
+      Some(p) => p.to_string(),
+      None => continue,
+    };
+
+    let mut flags = ['-'; 8];
+    for (i, (ch, op)) in ops.iter().enumerate() {
+      if resolver.check_permission(user_id, &path, *op).unwrap_or(false) {
+        flags[i] = *ch;
+      }
+    }
+    let perm_str: String = flags.iter().collect();
+    if let Some(obj) = entry.as_object_mut() {
+      obj.insert("effective_permissions".to_string(), serde_json::Value::String(perm_str));
+    }
+  }
+}
+
 /// Handle a symlink path: resolve and produce the appropriate file or
 /// directory response, or return an error for dangling / cyclic symlinks.
 fn handle_symlink_resolution(
@@ -660,6 +704,7 @@ fn handle_directory_listing(
   offset: Option<usize>,
   sort: Option<&str>,
   order: Option<&str>,
+  state: Option<&AppState>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -667,7 +712,15 @@ fn handle_directory_listing(
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
       match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => paginated_listing_response(listing, limit, offset, sort, order),
+        Ok(()) => {
+          // Attach effective_permissions for non-root users
+          if let Some(st) = state {
+            if let Ok(uid) = uuid::Uuid::parse_str(user_id_str) {
+              attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache, &st.permissions_cache);
+            }
+          }
+          paginated_listing_response(listing, limit, offset, sort, order)
+        }
         Err(response) => response,
       }
     }
@@ -759,7 +812,7 @@ pub async fn engine_get(
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref())
+  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref(), Some(&state))
 }
 
 
