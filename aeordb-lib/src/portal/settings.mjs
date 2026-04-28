@@ -336,6 +336,12 @@ class AeorSettings extends HTMLElement {
           deleted files, and old versions that are no longer referenced. It runs safely
           in the background without affecting reads or writes. A snapshot is automatically
           created before each run as a safety net.
+          <br><br>
+          Garbage collection can be resource-intensive on large databases.
+          A weekly or monthly schedule is sufficient for most workflows.
+          Consider running more frequently if your environment regularly
+          experiences interrupted uploads, frequent file deletions, or
+          heavy version churn.
         </div>
       </div>
 
