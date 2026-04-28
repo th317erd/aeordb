@@ -353,9 +353,9 @@ class AeorSettings extends HTMLElement {
           <div class="form-group">
             <label class="form-label">Run every</label>
             <select class="form-input" id="gc-frequency">
-              <option value="0 3 * * *" ${schedule === '0 3 * * *' ? 'selected' : ''}>Day (3:00 AM)</option>
-              <option value="0 3 * * 0" ${schedule === '0 3 * * 0' ? 'selected' : ''}>Week (Sunday 3:00 AM)</option>
-              <option value="0 3 1 * *" ${schedule === '0 3 1 * *' ? 'selected' : ''}>Month (1st, 3:00 AM)</option>
+              <option value="0 3 * * *" ${schedule === '0 3 * * *' ? 'selected' : ''}>Every Day (3:00 AM)</option>
+              <option value="0 3 * * 0" ${schedule === '0 3 * * 0' ? 'selected' : ''}>Every Week (Sunday 3:00 AM)</option>
+              <option value="0 3 1 * *" ${schedule === '0 3 1 * *' ? 'selected' : ''}>Every Month (1st, 3:00 AM)</option>
               <option value="custom" ${!['0 3 * * *', '0 3 * * 0', '0 3 1 * *'].includes(schedule) ? 'selected' : ''}>Custom cron expression</option>
             </select>
           </div>
