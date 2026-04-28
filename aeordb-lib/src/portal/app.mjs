@@ -128,6 +128,11 @@ class AeorLogin extends HTMLElement {
       }
 
       const data = await response.json();
+      // Clear previous session's file browser state to prevent data leakage
+      // between different user accounts on the same browser.
+      localStorage.removeItem('aeordb-file-browser');
+      sessionStorage.removeItem('aeordb_share_token');
+      AUTH._isShareSession = false;
       AUTH.setToken(data.token);
       navigate();
     } catch (error) {
@@ -281,6 +286,7 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 // Logout button
 document.getElementById('logout-button').addEventListener('click', () => {
   AUTH.clear();
+  localStorage.removeItem('aeordb-file-browser');
   authDisabled = false;
   setPageParam('dashboard');
 });
