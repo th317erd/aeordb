@@ -284,7 +284,7 @@ impl StorageEngine {
     let mut hot_entries_to_replay: Vec<KVEntry> = Vec::new();
     if let Some(hdir) = hot_dir {
       let db_name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-      let hot_pattern = format!("{}-hot", db_name);
+      let hot_pattern = format!(".aeordb-{}-hot", db_name);
       if let Ok(dir_entries) = std::fs::read_dir(hdir) {
         for dir_entry in dir_entries.flatten() {
           let name = dir_entry.file_name();

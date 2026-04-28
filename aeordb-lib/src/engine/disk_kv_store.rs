@@ -833,7 +833,7 @@ impl DiskKVStore {
     /// is truncated after each flush. Hot file rotation is not needed for
     /// correctness -- the single file provides adequate crash recovery.
     fn init_hot_file(hot_dir: &Path, db_name: &str) -> EngineResult<(File, PathBuf)> {
-        let hot_name = format!("{}-hot001", db_name);
+        let hot_name = format!(".aeordb-{}-hot001", db_name);
         let hot_path = hot_dir.join(hot_name);
 
         let file = OpenOptions::new()
