@@ -1,6 +1,6 @@
 'use strict';
 
-import { escapeHtml } from '/system/portal/shared/utils.js';
+import { escapeHtml, flashButton } from '/system/portal/shared/utils.js';
 
 class AeorSettings extends HTMLElement {
   constructor() {
@@ -256,6 +256,7 @@ class AeorSettings extends HTMLElement {
 
   async handleSave(event) {
     event.preventDefault();
+    const btn = this.querySelector('#email-config-form button[type="submit"]');
     try {
       const payload = this._buildPayload();
       const response = await window.api('/system/email-config', {
@@ -267,9 +268,10 @@ class AeorSettings extends HTMLElement {
         const text = await response.text();
         throw new Error(text || `Save failed (${response.status})`);
       }
-      this._showFeedback('Email configuration saved successfully.', false);
+      flashButton(btn, true, 'Saved!');
       this.fetchConfig();
     } catch (error) {
+      flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
     }
   }
@@ -277,6 +279,7 @@ class AeorSettings extends HTMLElement {
   async handleTestEmail() {
     const recipient = window.prompt('Enter recipient email address for test:');
     if (!recipient) return;
+    const btn = this.querySelector('#test-email-button');
     try {
       const response = await window.api('/system/email-test', {
         method: 'POST',
@@ -287,8 +290,9 @@ class AeorSettings extends HTMLElement {
         const text = await response.text();
         throw new Error(text || `Test email failed (${response.status})`);
       }
-      this._showFeedback(`Test email sent to ${recipient}.`, false);
+      flashButton(btn, true, 'Sent!');
     } catch (error) {
+      flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
     }
   }
@@ -402,6 +406,7 @@ class AeorSettings extends HTMLElement {
   }
 
   async handleGcSave() {
+    const btn = this.querySelector('#gc-save-button');
     const enabled = this.querySelector('#gc-enabled').checked;
     const freqSelect = this.querySelector('#gc-frequency');
     const schedule = freqSelect.value === 'custom'
@@ -410,7 +415,6 @@ class AeorSettings extends HTMLElement {
 
     try {
       if (this._gcSchedule) {
-        // Update existing
         const response = await window.api(`/system/cron/${this._gcSchedule.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -421,7 +425,6 @@ class AeorSettings extends HTMLElement {
           throw new Error(text || `Update failed (${response.status})`);
         }
       } else if (enabled) {
-        // Create new
         const response = await window.api('/system/cron', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -438,14 +441,16 @@ class AeorSettings extends HTMLElement {
           throw new Error(text || `Create failed (${response.status})`);
         }
       }
-      this._showFeedback('Garbage collection schedule saved.', false);
+      flashButton(btn, true, 'Saved!');
       this.fetchGcSchedule();
     } catch (error) {
+      flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
     }
   }
 
   async handleGcRunNow() {
+    const btn = this.querySelector('#gc-run-now-button');
     try {
       const response = await window.api('/system/tasks/gc', {
         method: 'POST',
@@ -456,8 +461,9 @@ class AeorSettings extends HTMLElement {
         const text = await response.text();
         throw new Error(text || `GC failed (${response.status})`);
       }
-      this._showFeedback('Garbage collection started. Check the Tasks page for progress.', false);
+      flashButton(btn, true, 'Started!');
     } catch (error) {
+      flashButton(btn, false, 'Error');
       this._showFeedback(error.message, true);
     }
   }
