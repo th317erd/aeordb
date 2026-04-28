@@ -222,8 +222,18 @@ function navigate() {
   }
 
   // Show sidebar when logged in
+  if (sidebar) sidebar.style.display = 'flex';
   const mobileTopBar = document.querySelector('.mobile-top-bar');
   if (mobileTopBar) mobileTopBar.style.display = '';
+
+  // Hide admin sidebar items for non-root users
+  const isRoot = AUTH.currentUserId && AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    const pg = link.dataset.page;
+    if (pg === 'users' || pg === 'groups' || pg === 'settings') {
+      link.style.display = isRoot ? '' : 'none';
+    }
+  });
 
   // Hide login if it exists
   const login = main.querySelector('aeor-login');
