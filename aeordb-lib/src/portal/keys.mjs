@@ -1,6 +1,6 @@
 'use strict';
 
-import { escapeHtml } from '/system/portal/shared/utils.js';
+import { escapeHtml } from '/shared/utils.js';
 
 class AeorKeys extends HTMLElement {
   constructor() {
@@ -438,7 +438,7 @@ class AeorKeys extends HTMLElement {
     // If we revoked the current session key, log out
     if (revokingCurrentSession) {
       window.AUTH.clear();
-      window.location.href = '/system/portal';
+      window.location.href = '/';
       return;
     }
 

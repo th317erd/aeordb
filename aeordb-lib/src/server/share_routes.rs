@@ -534,7 +534,7 @@ async fn send_share_notifications(
         };
 
         let portal_url = format!(
-            "/system/portal/?page=files&path={}",
+            "/?page=files&path={}",
             paths.first().map(|p| p.as_str()).unwrap_or("/"),
         );
         let (subject, html, text) = crate::engine::email_template::build_share_notification(

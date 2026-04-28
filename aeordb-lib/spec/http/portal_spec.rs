@@ -75,7 +75,7 @@ async fn test_portal_index_returns_html() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal")
+    .uri(""/")
     .body(Body::empty())
     .unwrap();
 
@@ -109,7 +109,7 @@ async fn test_portal_index_slash_returns_html() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal/")
+    .uri("/")
     .body(Body::empty())
     .unwrap();
 
@@ -135,7 +135,7 @@ async fn test_portal_app_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal/app.mjs")
+    .uri("/app.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -157,7 +157,7 @@ async fn test_portal_dashboard_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal/dashboard.mjs")
+    .uri("/dashboard.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -179,7 +179,7 @@ async fn test_portal_users_mjs_returns_javascript() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal/users.mjs")
+    .uri("/users.mjs")
     .body(Body::empty())
     .unwrap();
 
@@ -201,7 +201,7 @@ async fn test_portal_unknown_asset_returns_404() {
 
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal/nonexistent.js")
+    .uri("/nonexistent.js")
     .body(Body::empty())
     .unwrap();
 
@@ -216,7 +216,7 @@ async fn test_portal_assets_require_no_auth() {
   // Deliberately omit Authorization header.
   let request = Request::builder()
     .method("GET")
-    .uri("/system/portal")
+    .uri(""/")
     .body(Body::empty())
     .unwrap();
 

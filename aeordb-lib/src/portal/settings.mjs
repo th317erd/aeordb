@@ -1,6 +1,6 @@
 'use strict';
 
-import { escapeHtml, flashButton } from '/system/portal/shared/utils.js';
+import { escapeHtml, flashButton } from '/shared/utils.js';
 
 class AeorSettings extends HTMLElement {
   constructor() {

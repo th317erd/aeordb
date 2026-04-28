@@ -1,6 +1,6 @@
 'use strict';
 
-import { escapeHtml } from '/system/portal/shared/utils.js';
+import { escapeHtml } from '/shared/utils.js';
 
 class AeorGroups extends HTMLElement {
   constructor() {

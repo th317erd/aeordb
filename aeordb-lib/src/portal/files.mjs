@@ -1,6 +1,6 @@
 'use strict';
 
-import '/system/portal/shared/components/aeor-file-browser-portal.js';
+import '/shared/components/aeor-file-browser-portal.js';
 
 class AeorFiles extends HTMLElement {
   connectedCallback() {

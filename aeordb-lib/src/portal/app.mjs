@@ -1,13 +1,13 @@
 'use strict';
 
-import { escapeHtml } from '/system/portal/shared/utils.js';
-import '/system/portal/shared/components/aeor-crudlify.js';
-import '/system/portal/dashboard.mjs';
-import '/system/portal/users.mjs';
-import '/system/portal/groups.mjs';
-import '/system/portal/files.mjs';
-import '/system/portal/keys.mjs';
-import '/system/portal/settings.mjs';
+import { escapeHtml } from '/shared/utils.js';
+import '/shared/components/aeor-crudlify.js';
+import '/dashboard.mjs';
+import '/users.mjs';
+import '/groups.mjs';
+import '/files.mjs';
+import '/keys.mjs';
+import '/settings.mjs';
 
 // Auth state management
 // Share sessions (via ?token= links) use sessionStorage so the token is scoped
@@ -58,7 +58,7 @@ async function api(path, options = {}) {
   if (response.status === 401 && !AUTH._isShareSession) {
     AUTH.clear();
     localStorage.removeItem('aeordb-file-browser');
-    window.location.replace('/system/portal/');
+    window.location.replace('/');
     throw new Error('Unauthorized');
   }
 
@@ -300,7 +300,7 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 document.getElementById('logout-button').addEventListener('click', () => {
   AUTH.clear();
   localStorage.removeItem('aeordb-file-browser');
-  window.location.replace('/system/portal/');
+  window.location.replace('/');
 });
 
 // Listen for browser back/forward navigation

@@ -46,9 +46,10 @@ pub async fn portal_index() -> Html<&'static str> {
 
 /// Serve portal JS assets with correct content type.
 pub async fn portal_asset(
-    axum::extract::Path(filename): axum::extract::Path<String>,
+    request: axum::http::request::Parts,
 ) -> impl IntoResponse {
-    let (content, content_type) = match filename.as_str() {
+    let filename = request.uri.path().trim_start_matches('/');
+    let (content, content_type) = match filename {
         "app.mjs" => (PORTAL_APP_MJS, "application/javascript; charset=utf-8"),
         "dashboard.mjs" => (PORTAL_DASHBOARD_MJS, "application/javascript; charset=utf-8"),
         "users.mjs" => (PORTAL_USERS_MJS, "application/javascript; charset=utf-8"),

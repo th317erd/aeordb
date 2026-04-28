@@ -8,7 +8,7 @@ import {
   formatBytesRate,
   formatPercent,
   formatUptime,
-} from '/system/portal/shared/utils.js';
+} from '/shared/utils.js';
 
 const COUNT_DEFINITIONS = [
   { key: 'files',       label: 'Files',       format: formatNumber },
