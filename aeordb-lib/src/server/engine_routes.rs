@@ -960,9 +960,29 @@ pub async fn engine_delete_file(
         .into_response()
     }
     Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
+      // File not found — try as an empty directory
+      match directory_ops.delete_directory(&ctx, &path) {
+        Ok(()) => {
+          (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "directory" })))
+            .into_response()
+        }
+        Err(EngineError::NotFound(_)) => {
+          ErrorResponse::new(format!("Not found: {}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response()
+        }
+        Err(EngineError::InvalidInput(msg)) => {
+          ErrorResponse::new(msg)
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response()
+        }
+        Err(error) => {
+          tracing::error!("Engine: failed to delete directory '{}': {}", path, error);
+          ErrorResponse::new(format!("Failed to delete: {}", error))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response()
+        }
+      }
     }
     Err(error) => {
       tracing::error!("Engine: failed to delete file '{}': {}", path, error);

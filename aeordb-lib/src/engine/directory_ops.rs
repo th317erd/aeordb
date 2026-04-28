@@ -691,6 +691,41 @@ impl<'a> DirectoryOps<'a> {
     Ok(())
   }
 
+  /// Delete an empty directory. Returns an error if the directory has children.
+  pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot delete root directory".to_string()));
+    }
+
+    // Verify the directory exists and is empty
+    let children = self.list_directory(&normalized)?;
+    if !children.is_empty() {
+      return Err(EngineError::InvalidInput(
+        format!("Directory '{}' is not empty ({} children)", normalized, children.len()),
+      ));
+    }
+
+    // Mark the directory index entry as deleted
+    let dir_key = directory_path_hash(&normalized, &algo)?;
+    self.engine.mark_entry_deleted(&dir_key)?;
+
+    // Remove from parent listing
+    self.remove_from_parent_directory(&normalized)?;
+
+    // Update counters
+    self.engine.counters().decrement_directories();
+
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [{
+      "path": normalized,
+      "entry_type": "directory",
+    }]}));
+
+    Ok(())
+  }
+
   /// List the children of a directory.
   ///
   /// If the directory index or child entries are corrupt, logs a warning
