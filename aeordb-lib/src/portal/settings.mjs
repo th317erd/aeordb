@@ -328,9 +328,10 @@ class AeorSettings extends HTMLElement {
     const schedule = gc ? gc.schedule : '0 3 * * *';
 
     container.innerHTML = `
-      <div class="card" style="margin-bottom:20px;">
-        <div style="color:var(--text-muted);font-size:0.9rem;line-height:1.6;margin-bottom:20px;">
-          The <strong style="color:var(--text);">Garbage Collector</strong> reclaims disk space
+      <div style="display:flex;gap:12px;align-items:flex-start;padding:16px;margin-bottom:20px;background:rgba(56,139,253,0.08);border:1px solid rgba(56,139,253,0.25);border-radius:8px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        <div style="color:#58a6ff;font-size:0.9rem;line-height:1.6;">
+          The <strong>Garbage Collector</strong> reclaims disk space
           by removing unreachable data — orphaned file chunks from interrupted uploads,
           deleted files, and old versions that are no longer referenced. It runs safely
           in the background without affecting reads or writes. A snapshot is automatically
