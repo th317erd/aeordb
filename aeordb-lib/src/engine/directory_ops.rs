@@ -253,15 +253,30 @@ impl<'a> DirectoryOps<'a> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
   }
 
-  /// Store a file from pre-collected chunks (already split into 256KB pieces).
-  /// Each chunk is stored individually — the full file is never in memory at once.
-  /// `chunks` is a Vec of raw chunk data; `total_size` is the sum of all chunk sizes.
-  /// `first_bytes` is the first ≤8KB of the file for content-type detection.
-  pub fn store_file_from_chunks(
+  /// Store a single data chunk and return its hash. Deduplicates automatically.
+  /// Used by streaming upload to store chunks as they arrive without buffering.
+  pub fn store_chunk(&self, data: &[u8]) -> EngineResult<Vec<u8>> {
+    let algo = self.engine.hash_algo();
+    let chunk_key = chunk_content_hash(data, &algo)?;
+    if !self.engine.has_entry(&chunk_key)? {
+      self.engine.store_entry(EntryType::Chunk, &chunk_key, data)?;
+      self.engine.counters().increment_chunks();
+      self.engine.counters().add_chunk_data_size(data.len() as u64);
+    } else {
+      self.engine.counters().increment_chunks_deduped();
+    }
+    Ok(chunk_key)
+  }
+
+  /// Finalize a file from pre-stored chunk hashes.
+  /// Chunks must already be stored via `store_chunk()`. This method creates
+  /// the FileRecord, updates directory indexes, and emits events.
+  /// `first_bytes` is the first ≤8KB for content-type detection.
+  pub fn finalize_file(
     &self,
     ctx: &RequestContext,
     path: &str,
-    chunks: &[Vec<u8>],
+    chunk_hashes: Vec<Vec<u8>>,
     total_size: u64,
     content_type: Option<&str>,
     first_bytes: &[u8],
@@ -279,25 +294,6 @@ impl<'a> DirectoryOps<'a> {
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
     let hash_length = algo.hash_length();
 
-    // Store each chunk
-    let mut chunk_hashes = Vec::with_capacity(chunks.len());
-    for chunk_data in chunks {
-      let chunk_key = chunk_content_hash(chunk_data, &algo)?;
-      if !self.engine.has_entry(&chunk_key)? {
-        if sys_flags != 0 {
-          self.engine.store_entry_with_flags(EntryType::Chunk, &chunk_key, chunk_data, sys_flags)?;
-        } else {
-          self.engine.store_entry(EntryType::Chunk, &chunk_key, chunk_data)?;
-        }
-        self.engine.counters().increment_chunks();
-        self.engine.counters().add_chunk_data_size(chunk_data.len() as u64);
-      } else {
-        self.engine.counters().increment_chunks_deduped();
-      }
-      chunk_hashes.push(chunk_key);
-    }
-
-    // Check for existing file
     let file_key = file_path_hash(&normalized, &algo)?;
     let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
       Some((header, _key, value)) => {

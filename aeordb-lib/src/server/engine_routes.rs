@@ -210,10 +210,12 @@ pub async fn engine_store_file(
       .into_response();
   }
 
-  // Stream the body in 256KB chunks — never buffer the full file in memory.
-  // Each chunk is stored individually as it arrives.
+  // Stream the body in 256KB chunks — each chunk is stored to disk as it
+  // arrives. Only the 32-byte hash is kept in memory, not the chunk data.
+  // Memory usage: ~32 bytes per chunk regardless of file size.
   let chunk_size = crate::engine::directory_ops::DEFAULT_CHUNK_SIZE;
-  let mut chunks: Vec<Vec<u8>> = Vec::new();
+  let directory_ops = DirectoryOps::new(&state.engine);
+  let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
   let mut buffer = Vec::with_capacity(chunk_size);
   let mut first_bytes = Vec::new();
   let mut total_size: u64 = 0;
@@ -222,6 +224,12 @@ pub async fn engine_store_file(
   while let Some(chunk_result) = data_stream.next().await {
     match chunk_result {
       Ok(data) => {
+        // Capture first bytes for content-type detection
+        if first_bytes.len() < 8192 {
+          let need = (8192 - first_bytes.len()).min(data.len());
+          first_bytes.extend_from_slice(&data[..need]);
+        }
+
         let mut offset = 0;
         while offset < data.len() {
           let space = chunk_size - buffer.len();
@@ -229,15 +237,18 @@ pub async fn engine_store_file(
           buffer.extend_from_slice(&data[offset..offset + take]);
           offset += take;
 
-          // Capture first bytes for content-type detection
-          if first_bytes.len() < 8192 {
-            let need = 8192 - first_bytes.len();
-            first_bytes.extend_from_slice(&data[offset.saturating_sub(take)..offset.min(offset.saturating_sub(take) + need)]);
-          }
-
           if buffer.len() >= chunk_size {
             total_size += buffer.len() as u64;
-            chunks.push(std::mem::replace(&mut buffer, Vec::with_capacity(chunk_size)));
+            let filled = std::mem::replace(&mut buffer, Vec::with_capacity(chunk_size));
+            match directory_ops.store_chunk(&filled) {
+              Ok(hash) => chunk_hashes.push(hash),
+              Err(error) => {
+                tracing::error!("Failed to store chunk: {}", error);
+                return ErrorResponse::new("Failed to store upload chunk")
+                  .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                  .into_response();
+              }
+            }
           }
         }
       }
@@ -252,7 +263,15 @@ pub async fn engine_store_file(
   // Flush remaining buffer as the last chunk
   if !buffer.is_empty() {
     total_size += buffer.len() as u64;
-    chunks.push(buffer);
+    match directory_ops.store_chunk(&buffer) {
+      Ok(hash) => chunk_hashes.push(hash),
+      Err(error) => {
+        tracing::error!("Failed to store final chunk: {}", error);
+        return ErrorResponse::new("Failed to store upload chunk")
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
+    }
   }
 
   let content_type = headers
@@ -260,10 +279,9 @@ pub async fn engine_store_file(
     .and_then(|value| value.to_str().ok());
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let directory_ops = DirectoryOps::new(&state.engine);
 
-  let file_record = match directory_ops.store_file_from_chunks(
-    &ctx, &path, &chunks, total_size, content_type, &first_bytes,
+  let file_record = match directory_ops.finalize_file(
+    &ctx, &path, chunk_hashes, total_size, content_type, &first_bytes,
   ) {
     Ok(record) => record,
     Err(error) => {
