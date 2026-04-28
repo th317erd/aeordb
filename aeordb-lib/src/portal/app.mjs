@@ -201,7 +201,9 @@ function navigate() {
   }
 
   if (!AUTH.token && !authDisabled) {
-    // Hide all pages, show login
+    // Hide all pages, show login. Remove any open modals/overlays
+    // left over from the previous session.
+    document.querySelectorAll('.modal-overlay, .aeor-modal__overlay, aeor-modal').forEach((m) => m.remove());
     hideAllPages(main);
     let login = main.querySelector('aeor-login');
     if (!login) {
