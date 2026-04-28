@@ -106,7 +106,7 @@ pub struct ConflictVersionInfo {
 ///
 /// If `since_root_hash` is None, returns the entire tree as "added".
 /// If `paths_filter` is Some, only entries matching the glob patterns are included.
-/// If `include_system` is false, entries under `/.system/` are excluded.
+/// If `include_system` is false, entries under `/.aeordb-system/` are excluded.
 ///
 /// NOTE: If `since_root_hash` refers to a hash that does not exist in the engine,
 /// `walk_version_tree` returns an empty tree, causing the diff to treat all current

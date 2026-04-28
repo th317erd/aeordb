@@ -126,7 +126,7 @@ pub async fn share(
     for raw_path in &body.paths {
         let normalized = normalize_path(raw_path);
 
-        if normalized.starts_with("/.system") {
+        if normalized.starts_with("/.aeordb-") {
             return ErrorResponse::new("Cannot share system paths")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
@@ -159,9 +159,9 @@ pub async fn share(
 
         // Read existing .permissions or start empty
         let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-            format!("{}.permissions", perm_dir)
+            format!("{}.aeordb-permissions", perm_dir)
         } else {
-            format!("{}/.permissions", perm_dir)
+            format!("{}/.aeordb-permissions", perm_dir)
         };
 
         let mut perms = match ops.read_file(&perm_file_path) {
@@ -270,9 +270,9 @@ pub async fn list_shares(
     };
 
     let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-        format!("{}.permissions", perm_dir)
+        format!("{}.aeordb-permissions", perm_dir)
     } else {
-        format!("{}/.permissions", perm_dir)
+        format!("{}/.aeordb-permissions", perm_dir)
     };
 
     let perms = match ops.read_file(&perm_file_path) {
@@ -372,9 +372,9 @@ pub async fn unshare(
     };
 
     let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-        format!("{}.permissions", perm_dir)
+        format!("{}.aeordb-permissions", perm_dir)
     } else {
-        format!("{}/.permissions", perm_dir)
+        format!("{}/.aeordb-permissions", perm_dir)
     };
 
     let mut perms = match ops.read_file(&perm_file_path) {
@@ -459,7 +459,7 @@ pub async fn shared_with_me(
     // Scan all .permissions files
     let ops = DirectoryOps::new(&state.engine);
     let perm_files = match crate::engine::directory_listing::list_directory_recursive(
-        &state.engine, "/", -1, Some(".permissions"),
+        &state.engine, "/", -1, Some(".aeordb-permissions"),
     ) {
         Ok(entries) => entries,
         Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
@@ -480,10 +480,10 @@ pub async fn shared_with_me(
         // Check if any link in this .permissions file matches the user's groups
         for link in &perms.links {
             if user_groups.contains(&link.group) {
-                // Extract the directory path (strip /.permissions suffix)
-                let dir_path = if entry.path.ends_with("/.permissions") {
-                    entry.path[..entry.path.len() - "/.permissions".len()].to_string()
-                } else if entry.path == "/.permissions" {
+                // Extract the directory path (strip /.aeordb-permissions suffix)
+                let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
+                    entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
+                } else if entry.path == "/.aeordb-permissions" {
                     "/".to_string()
                 } else {
                     continue;

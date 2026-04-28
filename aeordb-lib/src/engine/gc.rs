@@ -254,7 +254,7 @@ fn mark_system_entries(
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
-  let system_prefixes = ["/.system", "/.config"];
+  let system_prefixes = ["/.aeordb-system", "/.aeordb-config"];
 
   for prefix in &system_prefixes {
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;

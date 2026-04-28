@@ -194,7 +194,7 @@ fn execute_reindex(
     let config_path = if path.ends_with('/') {
         format!("{}.config/indexes.json", path)
     } else {
-        format!("{}/.config/indexes.json", path)
+        format!("{}/.aeordb-config/indexes.json", path)
     };
     ops.read_file(&config_path)
         .map_err(|e| format!("cannot read index config at {}: {}", config_path, e))?;

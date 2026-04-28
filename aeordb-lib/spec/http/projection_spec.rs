@@ -59,7 +59,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
   } else {
-    format!("{}/.config/indexes.json", parent_path)
+    format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
   ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();

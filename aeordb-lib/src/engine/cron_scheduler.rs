@@ -10,7 +10,7 @@ use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{TaskQueue, TaskStatus};
 
-const CRON_CONFIG_PATH: &str = "/.config/cron.json";
+const CRON_CONFIG_PATH: &str = "/.aeordb-config/cron.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronSchedule {
@@ -31,7 +31,7 @@ pub struct CronConfig {
     pub schedules: Vec<CronSchedule>,
 }
 
-/// Load cron config from `/.config/cron.json` in the engine.
+/// Load cron config from `/.aeordb-config/cron.json` in the engine.
 /// Returns empty vec if the file is not found or cannot be parsed.
 pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
     let ops = DirectoryOps::new(engine);
@@ -39,7 +39,7 @@ pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
         Ok(data) => match serde_json::from_slice::<CronConfig>(&data) {
             Ok(config) => config.schedules,
             Err(e) => {
-                tracing::warn!("Failed to parse /.config/cron.json: {} — schedules disabled", e);
+                tracing::warn!("Failed to parse /.aeordb-config/cron.json: {} — schedules disabled", e);
                 Vec::new()
             }
         },
@@ -47,7 +47,7 @@ pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
     }
 }
 
-/// Save cron config to `/.config/cron.json` in the engine.
+/// Save cron config to `/.aeordb-config/cron.json` in the engine.
 pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let ctx = RequestContext::system();

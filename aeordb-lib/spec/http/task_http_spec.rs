@@ -343,7 +343,7 @@ async fn test_auto_trigger_on_indexes_json_store() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/files/data/.config/indexes.json")
+        .uri("/files/data/.aeordb-config/indexes.json")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&indexes_json).unwrap()))
@@ -573,7 +573,7 @@ async fn test_auto_trigger_cancels_existing_reindex() {
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
     let request = Request::builder()
         .method("PUT")
-        .uri("/files/data/.config/indexes.json")
+        .uri("/files/data/.aeordb-config/indexes.json")
         .header("authorization", &auth)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"fields":[]}"#))

@@ -172,13 +172,13 @@ impl TestHarness {
     );
   }
 
-  /// Set .permissions at a path using the root JWT via PUT /engine/{path}/.permissions.
+  /// Set .permissions at a path using the root JWT via PUT /engine/{path}/.aeordb-permissions.
   async fn set_permissions(&self, path: &str, links: serde_json::Value) {
     let permissions_body = serde_json::json!({ "links": links });
     let permissions_path = if path == "/" || path.ends_with('/') {
       format!("{}.permissions", path)
     } else {
-      format!("{}/.permissions", path)
+      format!("{}/.aeordb-permissions", path)
     };
 
     let uri = format!("/files/{}", permissions_path.trim_start_matches('/'));

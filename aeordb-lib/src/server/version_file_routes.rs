@@ -35,7 +35,7 @@ pub async fn file_history(
     Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
-    // Block ALL access to /.system/ via API — system data is only accessible
+    // Block ALL access to /.aeordb-system/ via API — system data is only accessible
     // through the internal system_store module, never through HTTP endpoints.
     if is_system_path(&path) {
         return ErrorResponse::new(format!("Not found: {}", path))
@@ -166,7 +166,7 @@ pub async fn file_restore(
     Path(path): Path<String>,
     Json(payload): Json<RestoreRequest>,
 ) -> Response {
-    // Block ALL access to /.system/ via API — system data is only accessible
+    // Block ALL access to /.aeordb-system/ via API — system data is only accessible
     // through the internal system_store module, never through HTTP endpoints.
     if is_system_path(&path) {
         return ErrorResponse::new(format!("Not found: {}", path))

@@ -1,7 +1,7 @@
 //! Client sync E2E tests.
 //!
 //! These tests verify that non-root JWT callers can use the /sync/diff and
-//! /sync/chunks endpoints, with proper /.system/ filtering and API key
+//! /sync/chunks endpoints, with proper /.aeordb-system/ filtering and API key
 //! scoping applied.
 
 use std::sync::Arc;
@@ -272,7 +272,7 @@ async fn test_client_sync_with_jwt() {
     assert!(paths.contains(&"/public/file.txt".to_string()));
 }
 
-/// Non-root JWT sync excludes /.system/ paths.
+/// Non-root JWT sync excludes /.aeordb-system/ paths.
 #[tokio::test]
 async fn test_client_sync_excludes_system() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -298,17 +298,17 @@ async fn test_client_sync_excludes_system() {
         "should include public file, got: {:?}",
         paths
     );
-    // No /.system/ paths should appear.
+    // No /.aeordb-system/ paths should appear.
     for path in &paths {
         assert!(
-            !path.starts_with("/.system/"),
+            !path.starts_with("/.aeordb-system/"),
             "system path should be filtered out: {}",
             path
         );
     }
 }
 
-/// Root JWT sync includes /.system/ paths.
+/// Root JWT sync includes /.aeordb-system/ paths.
 #[tokio::test]
 async fn test_root_sync_includes_system() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -333,8 +333,8 @@ async fn test_root_sync_includes_system() {
         "should include public file"
     );
     // Root should see system paths (at least the one we stored).
-    let has_system = paths.iter().any(|p| p.starts_with("/.system/"));
-    assert!(has_system, "root should see /.system/ paths, got: {:?}", paths);
+    let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
+    assert!(has_system, "root should see /.aeordb-system/ paths, got: {:?}", paths);
 }
 
 /// Non-root JWT + paths filter only returns matching paths.
@@ -699,7 +699,7 @@ async fn test_scoped_key_incremental_sync() {
     );
 }
 
-/// Non-root JWT with empty API key rules gets full access (minus /.system/).
+/// Non-root JWT with empty API key rules gets full access (minus /.aeordb-system/).
 #[tokio::test]
 async fn test_non_root_empty_rules_sees_all_user_files() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -725,7 +725,7 @@ async fn test_non_root_empty_rules_sees_all_user_files() {
     assert!(paths.contains(&"/a/file.txt".to_string()));
     assert!(paths.contains(&"/b/file.txt".to_string()));
     for path in &paths {
-        assert!(!path.starts_with("/.system/"), "system paths filtered: {}", path);
+        assert!(!path.starts_with("/.aeordb-system/"), "system paths filtered: {}", path);
     }
 }
 
@@ -781,7 +781,7 @@ async fn test_jwt_wrong_signing_key_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Root JWT sees /.system/ paths; non-root JWT does not -- same data.
+/// Root JWT sees /.aeordb-system/ paths; non-root JWT does not -- same data.
 #[tokio::test]
 async fn test_root_vs_client_system_visibility() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -826,10 +826,10 @@ async fn test_root_vs_client_system_visibility() {
     assert!(client_paths.contains(&"/public/file.txt".to_string()));
 
     // Only root should see system entries.
-    let root_has_system = root_paths.iter().any(|p| p.starts_with("/.system/"));
-    let client_has_system = client_paths.iter().any(|p| p.starts_with("/.system/"));
-    assert!(root_has_system, "root should see /.system/");
-    assert!(!client_has_system, "client should NOT see /.system/");
+    let root_has_system = root_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
+    let client_has_system = client_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
+    assert!(root_has_system, "root should see /.aeordb-system/");
+    assert!(!client_has_system, "client should NOT see /.aeordb-system/");
 }
 
 /// Scoped key with no matching rule for a path blocks it.
@@ -1016,7 +1016,7 @@ async fn test_root_incremental_includes_system() {
         paths.contains(&"/public/new_file.txt".to_string()),
         "should include new public file"
     );
-    let has_system = paths.iter().any(|p| p.starts_with("/.system/"));
+    let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
     assert!(has_system, "root incremental should include new system files");
 }
 

@@ -54,7 +54,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
   let perm_path = if dir_path == "/" || dir_path.ends_with('/') {
     format!("{}.permissions", dir_path)
   } else {
-    format!("{}/.permissions", dir_path)
+    format!("{}/.aeordb-permissions", dir_path)
   };
   let data = permissions.serialize();
   directory_ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
@@ -849,11 +849,11 @@ fn test_crudlify_op_from_http_method() {
   // HEAD -> Read
   assert_eq!(http_to_crudlify(&Method::HEAD, "myapp/data.json", &state), CrudlifyOp::Read);
   // PUT to .permissions -> Configure
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.permissions", &state), CrudlifyOp::Configure);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-permissions", &state), CrudlifyOp::Configure);
   // PUT to .config -> Configure
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.config", &state), CrudlifyOp::Configure);
   // PUT to .functions -> Deploy
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.functions", &state), CrudlifyOp::Deploy);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-functions", &state), CrudlifyOp::Deploy);
   // PUT to new file -> Create (file doesn't exist)
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/newfile.json", &state), CrudlifyOp::Create);
   // POST to /plugins/{name}/invoke -> Invoke

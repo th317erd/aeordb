@@ -93,7 +93,7 @@ fn setup_with_trigram_config(
         field_name, source
     );
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
     )
@@ -444,7 +444,7 @@ fn test_json_file_fuzzy_still_works() {
     // Config with trigram index but NO parser (expects JSON data)
     let config = r#"{"indexes":[{"name":"name","type":"trigram"}]}"#;
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
     )

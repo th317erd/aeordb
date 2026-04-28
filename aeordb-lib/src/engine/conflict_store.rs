@@ -4,14 +4,14 @@ use crate::engine::merge::ConflictEntry;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
-/// Store a conflict as a regular database entry under `/.conflicts/`.
+/// Store a conflict as a regular database entry under `/.aeordb-conflicts/`.
 ///
 /// Structure:
-///   `/.conflicts/{path}/.meta` — JSON metadata with winner/loser details
+///   `/.aeordb-conflicts/{path}/.meta` — JSON metadata with winner/loser details
 ///
 /// Since conflicts are stored as normal files in the directory tree,
 /// they automatically sync to peers and are covered by GC (the walk
-/// from HEAD traverses all directories including `/.conflicts/`).
+/// from HEAD traverses all directories including `/.aeordb-conflicts/`).
 pub fn store_conflict(
     engine: &StorageEngine,
     ctx: &RequestContext,
@@ -54,7 +54,7 @@ pub fn store_conflict(
 
 /// List all unresolved conflicts.
 ///
-/// Walks the `/.conflicts/` directory tree recursively, collecting
+/// Walks the `/.aeordb-conflicts/` directory tree recursively, collecting
 /// every `.meta` file it finds.
 pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Value>> {
     let ops = DirectoryOps::new(engine);

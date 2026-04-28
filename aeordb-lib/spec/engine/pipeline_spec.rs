@@ -21,7 +21,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
   } else {
-    format!("{}/.config/indexes.json", parent_path)
+    format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
   ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
@@ -101,7 +101,7 @@ fn test_system_path_indexes() {
 
   // Store a file at .indexes path — should not trigger indexing
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing(&ctx, "/data/.indexes/something.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.aeordb-indexes/something.json", &data[..], Some("application/json")).unwrap();
 
   // Verify no indexes at /data/.indexes
   let index_manager = IndexManager::new(&engine);
@@ -118,10 +118,10 @@ fn test_system_path_config() {
 
   // Store a JSON file at .config path — should not trigger indexing pipeline
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing(&ctx, "/data/.config/settings.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.aeordb-config/settings.json", &data[..], Some("application/json")).unwrap();
 
   // File should still be stored
-  let stored = ops.read_file("/data/.config/settings.json").unwrap();
+  let stored = ops.read_file("/data/.aeordb-config/settings.json").unwrap();
   assert_eq!(stored, data.to_vec());
 }
 
@@ -185,10 +185,10 @@ fn test_store_to_config_does_not_index() {
 
   // Store a file under .config (not indexes.json, a different file)
   let data = br#"{"setting":"value"}"#;
-  ops.store_file_with_indexing(&ctx, "/myapp/.config/other.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/myapp/.aeordb-config/other.json", &data[..], Some("application/json")).unwrap();
 
   // File should exist
-  let stored = ops.read_file("/myapp/.config/other.json").unwrap();
+  let stored = ops.read_file("/myapp/.aeordb-config/other.json").unwrap();
   assert_eq!(stored, data.to_vec());
 
   // No indexes at /myapp/.config
@@ -374,7 +374,7 @@ fn test_pipeline_type_array_expansion() {
   let config_json = br#"{"indexes":[{"name":"title","type":["string","trigram"]}]}"#;
   let ops = DirectoryOps::new(&engine);
   ops.store_file(&ctx,
-    "/articles/.config/indexes.json",
+    "/articles/.aeordb-config/indexes.json",
     &config_json[..],
     Some("application/json"),
   ).unwrap();

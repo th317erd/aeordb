@@ -70,10 +70,10 @@ fn test_parse_auth_uri_file() {
 
 #[test]
 fn test_parse_auth_uri_file_with_tilde() {
-  let result = parse_auth_uri("file://~/.config/aeordb/identity").unwrap();
+  let result = parse_auth_uri("file://~/.aeordb-config/aeordb/identity").unwrap();
   // The tilde should be expanded to the home directory.
   let home = std::env::var("HOME").unwrap();
-  let expected = format!("{}/.config/aeordb/identity", home);
+  let expected = format!("{}/.aeordb-config/aeordb/identity", home);
   assert_eq!(result, AuthMode::File(expected));
 }
 
@@ -167,7 +167,7 @@ fn test_resolve_auth_mode_default_self() {
   // Remove env var, ensure no default identity file exists.
   std::env::remove_var("AEORDB_AUTH");
   let result = resolve_auth_mode(None);
-  // Should be SelfContained (unless ~/.config/aeordb/identity exists).
+  // Should be SelfContained (unless ~/.aeordb-config/aeordb/identity exists).
   // We don't create that file in tests, so this should be SelfContained.
   assert!(
     result == AuthMode::SelfContained || matches!(result, AuthMode::File(_)),

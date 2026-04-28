@@ -40,7 +40,7 @@ pub fn parse_auth_uri(uri: &str) -> Result<AuthMode, String> {
 /// Resolve which auth mode to use, checking (in priority order):
 /// 1. CLI flag (highest priority)
 /// 2. AEORDB_AUTH environment variable
-/// 3. Default identity file at ~/.config/aeordb/identity
+/// 3. Default identity file at ~/.aeordb-config/aeordb/identity
 /// 4. Fallback: SelfContained
 pub fn resolve_auth_mode(cli_flag: Option<&str>) -> AuthMode {
   // 1. CLI flag (highest priority)
@@ -55,8 +55,8 @@ pub fn resolve_auth_mode(cli_flag: Option<&str>) -> AuthMode {
     }
   }
 
-  // 3. Check for ~/.config/aeordb/identity
-  let default_identity = expand_tilde("~/.config/aeordb/identity");
+  // 3. Check for ~/.aeordb-config/aeordb/identity
+  let default_identity = expand_tilde("~/.aeordb-config/aeordb/identity");
   if std::path::Path::new(&default_identity).exists() {
     return AuthMode::File(default_identity);
   }

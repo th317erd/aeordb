@@ -66,7 +66,7 @@ pub fn export_snapshot(
 /// Write all entries from a VersionTree into an output engine.
 /// Returns (chunks_written, files_written, directories_written).
 ///
-/// SECURITY: All entries under /.system/ are filtered out. Exports must
+/// SECURITY: All entries under /.aeordb-system/ are filtered out. Exports must
 /// contain only user data, never system internals (JWT keys, API key
 /// hashes, refresh tokens, user records).
 fn write_tree_to_engine(
@@ -79,7 +79,7 @@ fn write_tree_to_engine(
     let mut dirs_written = 0u64;
 
     // Collect chunk hashes referenced by non-system files only, so we don't
-    // export chunks that belong exclusively to /.system/ files.
+    // export chunks that belong exclusively to /.aeordb-system/ files.
     let mut user_chunk_hashes = std::collections::HashSet::new();
     for (path, (_file_hash, record)) in &tree.files {
         if !is_system_path(path) {
@@ -100,7 +100,7 @@ fn write_tree_to_engine(
     // Write FileRecords at both content-hash and path-hash keys.
     // The tree walker stores content hashes as file_hash, but read_file
     // looks up by path hash, so both must be present in the exported database.
-    // SECURITY: Skip all files under /.system/.
+    // SECURITY: Skip all files under /.aeordb-system/.
     let file_algo = output.hash_algo();
     for (path, (file_hash, _record)) in &tree.files {
         if is_system_path(path) {
@@ -121,7 +121,7 @@ fn write_tree_to_engine(
     // Write DirectoryIndexes at both content-hash and path-hash keys.
     // The tree walker stores content hashes as dir_hash, but list_directory
     // looks up by path hash, so both must be present in the exported database.
-    // SECURITY: Skip all directories under /.system/.
+    // SECURITY: Skip all directories under /.aeordb-system/.
     let algo = output.hash_algo();
     for (path, (dir_hash, _data)) in &tree.directories {
         if is_system_path(path) {
@@ -140,7 +140,7 @@ fn write_tree_to_engine(
     }
 
     // Write symlink entries at both content-hash and path-hash keys.
-    // SECURITY: Skip all symlinks under /.system/.
+    // SECURITY: Skip all symlinks under /.aeordb-system/.
     let symlink_algo = output.hash_algo();
     for (path, (symlink_hash, _record)) in &tree.symlinks {
         if is_system_path(path) {

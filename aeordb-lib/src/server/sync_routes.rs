@@ -79,9 +79,9 @@ pub struct SyncChunksRequest {
 
 /// Describes who is calling the sync endpoint and what access they have.
 pub enum SyncCaller {
-    /// Root JWT (nil UUID) -- full access including /.system/.
+    /// Root JWT (nil UUID) -- full access including /.aeordb-system/.
     RootUser,
-    /// Non-root JWT -- /.system/ filtered out, API key rules applied.
+    /// Non-root JWT -- /.aeordb-system/ filtered out, API key rules applied.
     ScopedUser {
         // TODO: Use for per-user sync audit logging and rate limiting.
         #[allow(dead_code)]
@@ -91,7 +91,7 @@ pub enum SyncCaller {
 }
 
 impl SyncCaller {
-    /// Whether this caller should see /.system/ entries.
+    /// Whether this caller should see /.aeordb-system/ entries.
     fn include_system(&self) -> bool {
         matches!(self, SyncCaller::RootUser)
     }
@@ -244,7 +244,7 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
 }
 
 /// Build a full sync response (no since_root_hash -- everything is "added").
-/// When `include_system` is false, entries under /.system/ are excluded.
+/// When `include_system` is false, entries under /.aeordb-system/ are excluded.
 fn build_full_sync_response(
     tree: &VersionTree,
     path_filter: &Option<Vec<String>>,
@@ -326,7 +326,7 @@ fn filter_and_collect<I, T, O>(
 }
 
 /// Build a diff-based sync response from a TreeDiff.
-/// When `include_system` is false, entries under /.system/ are excluded.
+/// When `include_system` is false, entries under /.aeordb-system/ are excluded.
 fn build_sync_response_from_diff(
     diff: &TreeDiff,
     _current_tree: &VersionTree,

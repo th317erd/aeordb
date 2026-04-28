@@ -365,7 +365,7 @@ async fn test_rename_across_system_boundary_returns_404() {
     let (_app, jwt_manager, engine, _temp_dir) = test_app();
     let auth = bearer_token(&jwt_manager);
 
-    // All /.system/ paths are invisible via the API — renaming to a
+    // All /.aeordb-system/ paths are invisible via the API — renaming to a
     // .system/ destination returns 404, never revealing .system/ exists.
     store_file(&engine, "/user-file.txt", b"user data");
 
@@ -375,7 +375,7 @@ async fn test_rename_across_system_boundary_returns_404() {
         .uri("/files/user-file.txt")
         .header("content-type", "application/json")
         .header("authorization", &auth)
-        .body(Body::from(r#"{"to":"/.system/stolen.txt"}"#))
+        .body(Body::from(r#"{"to":"/.aeordb-system/stolen.txt"}"#))
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();

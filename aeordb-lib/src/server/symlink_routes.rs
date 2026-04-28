@@ -35,7 +35,7 @@ pub async fn create_symlink(
         }
     };
 
-    // Block ALL users from creating symlinks that point to /.system/ paths —
+    // Block ALL users from creating symlinks that point to /.aeordb-system/ paths —
     // system data is invisible through the API for all users, including root.
     let normalized_target = normalize_path(target);
     if is_system_path(&normalized_target) {
@@ -44,7 +44,7 @@ pub async fn create_symlink(
             .into_response();
     }
 
-    // Block ALL users from creating symlinks under /.system/ paths
+    // Block ALL users from creating symlinks under /.aeordb-system/ paths
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {
         return ErrorResponse::new(format!("Not found: {}", path))
@@ -86,7 +86,7 @@ pub async fn get_symlink(
     Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
-    // Block ALL access to /.system/ via API — system data is only accessible
+    // Block ALL access to /.aeordb-system/ via API — system data is only accessible
     // through the internal system_store module, never through HTTP endpoints.
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {
@@ -127,7 +127,7 @@ pub async fn delete_symlink(
     Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
 ) -> Response {
-    // Block ALL access to /.system/ via API — system data is only accessible
+    // Block ALL access to /.aeordb-system/ via API — system data is only accessible
     // through the internal system_store module, never through HTTP endpoints.
     let normalized_path = normalize_path(&path);
     if is_system_path(&normalized_path) {

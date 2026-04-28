@@ -88,7 +88,7 @@ fn test_e2e_parser_deploy_and_store() {
             {"name": "content", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store a text file — this should trigger the parser pipeline
@@ -146,7 +146,7 @@ fn test_e2e_parser_query_u64_after_store() {
     let ops = DirectoryOps::new(&engine);
     // Index word_count as u64 — Eq queries on u64 use the scalar path (no recheck)
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"word_count","source":["metadata","word_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -249,7 +249,7 @@ fn test_e2e_non_json_without_parser_skips() {
 
     // Config has indexes but NO parser
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"indexes":[{"name":"title","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -283,7 +283,7 @@ fn test_e2e_parser_with_source_path_resolution() {
     let ops = DirectoryOps::new(&engine);
     // Use nested source path: metadata.line_count
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"lines","source":["metadata","line_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -321,7 +321,7 @@ fn test_e2e_parser_logging_on_failure() {
 
     // Config references a parser that doesn't exist
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"nonexistent-parser","logging":true,"indexes":[{"name":"title","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -362,7 +362,7 @@ fn test_e2e_parser_multiple_files_distinct_queries() {
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"word_count","source":["metadata","word_count"],"type":"u64"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -490,7 +490,7 @@ fn test_e2e_parser_file_data_preserved() {
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"content","source":["text"],"type":"trigram"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -523,7 +523,7 @@ fn test_e2e_parser_empty_file() {
 
     let ops = DirectoryOps::new(&engine);
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"parser":"plaintext-parser","indexes":[{"name":"content","source":["text"],"type":"trigram"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -563,7 +563,7 @@ fn test_e2e_no_parser_json_fallback() {
     let ops = DirectoryOps::new(&engine);
     // Config with no parser — expects raw JSON data
     ops.store_file(&ctx,
-        "/docs/.config/indexes.json",
+        "/docs/.aeordb-config/indexes.json",
         r#"{"indexes":[{"name":"name","type":"string"}]}"#.as_bytes(),
         Some("application/json"),
     )
@@ -623,7 +623,7 @@ fn test_e2e_parser_contains_on_trigram_field() {
             {"name": "text", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store a text file
@@ -686,7 +686,7 @@ fn test_e2e_parser_similar_on_trigram_field() {
             {"name": "text", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store two files
@@ -764,7 +764,7 @@ fn test_e2e_parser_contains_no_match() {
             {"name": "text", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     ops.store_file_with_full_pipeline(&ctx,
@@ -827,7 +827,7 @@ fn test_e2e_parser_string_eq_on_title() {
             {"name": "title", "source": ["title"], "type": "string"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store a file whose first line is the title
@@ -886,7 +886,7 @@ fn test_e2e_parser_content_type_auto_routing() {
 
     // Deploy global content-type -> parser mapping
     let parsers_json = r#"{"text/plain": "plaintext-parser"}"#;
-    ops.store_file(&ctx, "/.config/parsers.json", parsers_json.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/.aeordb-config/parsers.json", parsers_json.as_bytes(), Some("application/json"))
         .expect("store parsers.json");
 
     // Index config at /auto/ with NO parser field — relies on content-type routing
@@ -895,7 +895,7 @@ fn test_e2e_parser_content_type_auto_routing() {
             {"name": "word_count", "source": ["metadata", "word_count"], "type": "u64"}
         ]
     }"#;
-    ops.store_file(&ctx, "/auto/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/auto/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store auto config");
 
     // "one two three four five" = 5 words
@@ -958,7 +958,7 @@ fn test_e2e_parser_multiple_files_trigram_contains() {
             {"name": "text", "source": ["text"], "type": "trigram"}
         ]
     }"#;
-    ops.store_file(&ctx, "/docs/.config/indexes.json", config.as_bytes(), Some("application/json"))
+    ops.store_file(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json"))
         .expect("store config");
 
     // Store 3 files with distinct content

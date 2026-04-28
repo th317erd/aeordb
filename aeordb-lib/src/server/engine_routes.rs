@@ -202,7 +202,7 @@ pub async fn engine_store_file(
   headers: HeaderMap,
   body: Body,
 ) -> Response {
-  // Block ALL access to /.system/ via API — system data is only accessible
+  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
     return ErrorResponse::new(format!("Not found: {}", path))
@@ -294,9 +294,9 @@ pub async fn engine_store_file(
   };
 
   // Auto-trigger reindex when indexes.json is stored
-  if path.ends_with("/.config/indexes.json") || path.ends_with(".config/indexes.json") {
+  if path.ends_with("/.aeordb-config/indexes.json") || path.ends_with(".config/indexes.json") {
     if let Some(ref queue) = state.task_queue {
-      let parent = path.trim_end_matches("/.config/indexes.json")
+      let parent = path.trim_end_matches("/.aeordb-config/indexes.json")
         .trim_end_matches(".config/indexes.json");
       let parent = if parent.is_empty() { "/" } else { parent };
       let reindex_path = format!("/{}", parent.trim_start_matches('/'));
@@ -450,11 +450,11 @@ fn apply_listing_filters(
     }
   }
 
-  // Filter /.system/ from ALL listings — system data is invisible through
+  // Filter /.aeordb-system/ from ALL listings — system data is invisible through
   // the API for all users, including root.
   listing.retain(|entry| {
     let path = entry["path"].as_str().unwrap_or("");
-    !path.starts_with("/.system")
+    !path.starts_with("/.aeordb-")
   });
 
   Ok(())
@@ -518,7 +518,7 @@ fn handle_symlink_resolution(
 
   match resolve_symlink(engine, path) {
     Ok(ResolvedTarget::File(ref file_record)) => {
-      // Block ALL access to symlinks resolving to /.system/ paths — system
+      // Block ALL access to symlinks resolving to /.aeordb-system/ paths — system
       // data is invisible through the API for all users, including root.
       if is_system_path(&file_record.path) {
         return ErrorResponse::new(format!("Not found: {}", path))
@@ -555,7 +555,7 @@ fn handle_symlink_resolution(
       build_file_streaming_response(engine, file_record, Some(symlink_target))
     }
     Ok(ResolvedTarget::Directory(dir_path)) => {
-      // Block ALL access to symlinks resolving to /.system/ directories —
+      // Block ALL access to symlinks resolving to /.aeordb-system/ directories —
       // system data is invisible through the API for all users, including root.
       if is_system_path(&dir_path) {
         return ErrorResponse::new(format!("Not found: {}", path))
@@ -780,7 +780,7 @@ pub async fn engine_get(
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  // Block ALL access to /.system/ via API — system data is only accessible
+  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
     return ErrorResponse::new(format!("Not found: {}", path))
@@ -942,7 +942,7 @@ pub async fn engine_delete_file(
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block ALL access to /.system/ via API — system data is only accessible
+  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
     return ErrorResponse::new(format!("Not found: {}", path))
@@ -1017,7 +1017,7 @@ pub async fn engine_head(
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block ALL access to /.system/ via API — system data is only accessible
+  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
     return ErrorResponse::new(format!("Not found: {}", path))
@@ -1983,7 +1983,7 @@ pub async fn query_endpoint(
     Ok(paginated) => {
       let response_items: Vec<serde_json::Value> = paginated.results
         .iter()
-        // Filter /.system/ paths from query results — system data is invisible
+        // Filter /.aeordb-system/ paths from query results — system data is invisible
         // through the API for all users, including root.
         .filter(|result| !is_system_path(&result.file_record.path))
         .map(|result| {
@@ -2121,7 +2121,7 @@ pub async fn engine_rename(
     }
   };
 
-  // Block ALL access to /.system/ via API — system data is only accessible
+  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) || is_system_path(destination) {
     return ErrorResponse::new(format!("Not found: {}", path))

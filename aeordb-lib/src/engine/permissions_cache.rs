@@ -95,9 +95,9 @@ impl PermissionsCache {
     let directory_ops = DirectoryOps::new(engine);
 
     let permissions_path = if path == "/" || path.ends_with('/') {
-      format!("{}.permissions", path)
+      format!("{}.aeordb-permissions", path)
     } else {
-      format!("{}/.permissions", path)
+      format!("{}/.aeordb-permissions", path)
     };
 
     match directory_ops.read_file(&permissions_path) {

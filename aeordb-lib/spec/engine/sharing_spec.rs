@@ -39,7 +39,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     let perm_path = if dir_path == "/" || dir_path.ends_with('/') {
         format!("{}.permissions", dir_path)
     } else {
-        format!("{}/.permissions", dir_path)
+        format!("{}/.aeordb-permissions", dir_path)
     };
     let data = permissions.serialize();
     directory_ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
@@ -333,7 +333,7 @@ async fn share_endpoint_creates_permissions() {
 
     // Verify the .permissions file was created with correct link
     let ops = DirectoryOps::new(&engine);
-    let perm_data = ops.read_file("/photos/.permissions").unwrap();
+    let perm_data = ops.read_file("/photos/.aeordb-permissions").unwrap();
     let perms = PathPermissions::deserialize(&perm_data).unwrap();
 
     let expected_group = format!("user:{}", target_user_id);
@@ -399,7 +399,7 @@ async fn share_endpoint_updates_existing() {
 
     // Verify only ONE link exists (updated, not duplicated)
     let ops = DirectoryOps::new(&engine);
-    let perm_data = ops.read_file("/data/.permissions").unwrap();
+    let perm_data = ops.read_file("/data/.aeordb-permissions").unwrap();
     let perms = PathPermissions::deserialize(&perm_data).unwrap();
 
     let expected_group = format!("user:{}", target_user_id);
@@ -469,7 +469,7 @@ async fn unshare_removes_link() {
 
     // Verify the link was removed from .permissions
     let ops = DirectoryOps::new(&engine);
-    let perm_data = ops.read_file("/docs/.permissions").unwrap();
+    let perm_data = ops.read_file("/docs/.aeordb-permissions").unwrap();
     let perms = PathPermissions::deserialize(&perm_data).unwrap();
 
     let matching = perms.links.iter().find(|l| l.group == expected_group);

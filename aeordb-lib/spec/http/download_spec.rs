@@ -147,7 +147,7 @@ async fn download_zip_skips_system_paths() {
     store_test_files(&engine);
     let auth = bearer_token(&jwt_manager);
 
-    let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.system/config"] });
+    let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.aeordb-system/config"] });
     let request = Request::builder()
         .method("POST")
         .uri("/files/download")

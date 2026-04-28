@@ -378,7 +378,7 @@ fn test_compression_with_indexing_via_config() {
   // Store a config that enables zstd compression
   let config_json = r#"{"compression":"zstd","indexes":[{"name":"name","type":"string"}]}"#;
   ops.store_file(&ctx,
-    "/data/.config/indexes.json",
+    "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
   ).unwrap();
@@ -406,7 +406,7 @@ fn test_compression_config_skips_small_data() {
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
   ops.store_file(&ctx,
-    "/data/.config/indexes.json",
+    "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
   ).unwrap();
@@ -433,7 +433,7 @@ fn test_compression_config_skips_images() {
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
   ops.store_file(&ctx,
-    "/images/.config/indexes.json",
+    "/images/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
   ).unwrap();
@@ -493,7 +493,7 @@ fn test_no_compression_config_means_no_compression() {
   // Config WITHOUT compression field
   let config_json = r#"{"indexes":[{"name":"name","type":"string"}]}"#;
   ops.store_file(&ctx,
-    "/data/.config/indexes.json",
+    "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
   ).unwrap();

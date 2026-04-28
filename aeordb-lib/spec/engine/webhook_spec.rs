@@ -187,7 +187,7 @@ fn test_load_webhook_config_from_database() {
     let ctx = RequestContext::system();
 
     let config_json = r#"{"webhooks":[{"id":"wh1","url":"https://example.com","events":["entries_created"],"secret":"test-secret"}]}"#;
-    ops.store_file(&ctx, "/.config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_some());
@@ -210,7 +210,7 @@ fn test_load_webhook_config_invalid_json() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    ops.store_file(&ctx, "/.config/webhooks.json", b"not json", Some("text/plain")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", b"not json", Some("text/plain")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_none());
@@ -223,7 +223,7 @@ fn test_load_webhook_config_empty_json_object() {
     let ctx = RequestContext::system();
 
     // Valid JSON but missing "webhooks" key
-    ops.store_file(&ctx, "/.config/webhooks.json", b"{}", Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", b"{}", Some("application/json")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_none());
@@ -235,7 +235,7 @@ fn test_load_webhook_config_empty_webhooks_array() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    ops.store_file(&ctx, "/.config/webhooks.json", b"{\"webhooks\":[]}", Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", b"{\"webhooks\":[]}", Some("application/json")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_some());
@@ -248,7 +248,7 @@ fn test_load_webhook_config_invalid_utf8() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    ops.store_file(&ctx, "/.config/webhooks.json", &[0xFF, 0xFE, 0xFD], Some("application/octet-stream")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", &[0xFF, 0xFE, 0xFD], Some("application/octet-stream")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_none());
@@ -262,7 +262,7 @@ fn test_load_webhook_config_partial_invalid_webhooks() {
 
     // Array contains a webhook missing required fields -- whole parse fails
     let json = r#"{"webhooks":[{"id":"wh1"}]}"#;
-    ops.store_file(&ctx, "/.config/webhooks.json", json.as_bytes(), Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", json.as_bytes(), Some("application/json")).unwrap();
 
     let registry = load_webhook_config(&engine);
     assert!(registry.is_none());
@@ -278,7 +278,7 @@ fn test_load_webhook_config_multiple_webhooks() {
         {"id":"wh1","url":"https://a.com","events":["entries_created"],"secret":"s1"},
         {"id":"wh2","url":"https://b.com","events":["entries_deleted"],"secret":"s2","active":false}
     ]}"#;
-    ops.store_file(&ctx, "/.config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
     let registry = load_webhook_config(&engine).unwrap();
     assert_eq!(registry.webhooks.len(), 2);
@@ -426,7 +426,7 @@ async fn test_webhook_dispatcher_receives_events() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     let config_json = r#"{"webhooks":[{"id":"wh1","url":"https://httpbin.org/post","events":["entries_created"],"secret":"test"}]}"#;
-    ops.store_file(&ctx, "/.config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/.aeordb-config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
     // Spawn the dispatcher
     let handle = aeordb::engine::webhook::spawn_webhook_dispatcher(bus.clone(), engine.clone(), tokio_util::sync::CancellationToken::new());
@@ -455,7 +455,7 @@ async fn test_webhook_dispatcher_reloads_config_on_change() {
     let event = EngineEvent::new(
         "entries_created",
         "system",
-        serde_json::json!({"entries": [{"path": "/.config/webhooks.json"}]}),
+        serde_json::json!({"entries": [{"path": "/.aeordb-config/webhooks.json"}]}),
     );
     bus.emit(event);
 

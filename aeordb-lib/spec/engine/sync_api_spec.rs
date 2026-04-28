@@ -128,7 +128,7 @@ fn test_compute_diff_with_paths_filter() {
 fn test_compute_diff_excludes_system() {
     let (engine, _temp) = create_temp_engine_for_tests();
     store_file(&engine, "/user/doc.txt", b"user doc");
-    store_file(&engine, "/.system/config.json", b"system config");
+    store_file(&engine, "/.aeordb-system/config.json", b"system config");
 
     // With include_system=false
     let diff = compute_sync_diff(&engine, None, None, false).unwrap();
@@ -154,7 +154,7 @@ fn test_compute_diff_excludes_system() {
         .map(|f| f.path.as_str())
         .collect();
     assert!(
-        all_paths.contains(&"/.system/config.json"),
+        all_paths.contains(&"/.aeordb-system/config.json"),
         "system files should be present when include_system=true"
     );
 }

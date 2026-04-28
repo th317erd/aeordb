@@ -1,6 +1,6 @@
 //! System store: typed system data operations backed by `DirectoryOps`.
 //!
-//! All data is stored as regular files under `/.system/` in the directory
+//! All data is stored as regular files under `/.aeordb-system/` in the directory
 //! tree, which means system data automatically participates in replication
 //! and versioning.
 //!
@@ -32,7 +32,7 @@ pub fn store_config(
     value: &[u8],
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/config/{}", key);
+    let path = format!("/.aeordb-system/config/{}", key);
     ops.store_file(ctx, &path, value, Some("application/octet-stream"))?;
     Ok(())
 }
@@ -40,7 +40,7 @@ pub fn store_config(
 /// Retrieve a config value by key.
 pub fn get_config(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/config/{}", key);
+    let path = format!("/.aeordb-system/config/{}", key);
     match ops.read_file(&path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
@@ -85,7 +85,7 @@ fn store_api_key_unchecked(
     record: &ApiKeyRecord,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/api-keys/{}", record.key_id);
+    let path = format!("/.aeordb-system/api-keys/{}", record.key_id);
     let json = serde_json::to_vec(record)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -99,7 +99,7 @@ pub fn get_api_key_by_prefix(
     key_id_prefix: &str,
 ) -> EngineResult<Option<ApiKeyRecord>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/api-keys") {
+    let entries = match ops.list_directory("/.aeordb-system/api-keys") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
@@ -117,7 +117,7 @@ pub fn get_api_key_by_prefix(
             continue;
         }
 
-        let path = format!("/.system/api-keys/{}", entry.name);
+        let path = format!("/.aeordb-system/api-keys/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
                 return Ok(Some(record));
@@ -130,7 +130,7 @@ pub fn get_api_key_by_prefix(
 /// List all API key records.
 pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/api-keys") {
+    let entries = match ops.list_directory("/.aeordb-system/api-keys") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -138,7 +138,7 @@ pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> 
 
     let mut records = Vec::new();
     for entry in &entries {
-        let path = format!("/.system/api-keys/{}", entry.name);
+        let path = format!("/.aeordb-system/api-keys/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
                 records.push(record);
@@ -156,7 +156,7 @@ pub fn revoke_api_key(
     key_id: Uuid,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/api-keys/{}", key_id);
+    let path = format!("/.aeordb-system/api-keys/{}", key_id);
     let data = match ops.read_file(&path) {
         Ok(data) => data,
         Err(EngineError::NotFound(_)) => return Ok(false),
@@ -187,7 +187,7 @@ pub fn store_user(
     validate_user_id(&user.user_id)?;
 
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/users/{}", user.user_id);
+    let path = format!("/.aeordb-system/users/{}", user.user_id);
     let json = serde_json::to_vec(user)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -210,7 +210,7 @@ pub fn store_user(
 /// Retrieve a user by user_id.
 pub fn get_user(engine: &StorageEngine, user_id: &Uuid) -> EngineResult<Option<User>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/users/{}", user_id);
+    let path = format!("/.aeordb-system/users/{}", user_id);
     match ops.read_file(&path) {
         Ok(data) => {
             let user: User = serde_json::from_slice(&data)
@@ -225,7 +225,7 @@ pub fn get_user(engine: &StorageEngine, user_id: &Uuid) -> EngineResult<Option<U
 /// List all users.
 pub fn list_users(engine: &StorageEngine) -> EngineResult<Vec<User>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/users") {
+    let entries = match ops.list_directory("/.aeordb-system/users") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -233,7 +233,7 @@ pub fn list_users(engine: &StorageEngine) -> EngineResult<Vec<User>> {
 
     let mut users = Vec::new();
     for entry in &entries {
-        let path = format!("/.system/users/{}", entry.name);
+        let path = format!("/.aeordb-system/users/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(user) = serde_json::from_slice::<User>(&data) {
                 users.push(user);
@@ -259,7 +259,7 @@ pub fn update_user(
     validate_user_id(&user.user_id)?;
 
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/users/{}", user.user_id);
+    let path = format!("/.aeordb-system/users/{}", user.user_id);
     let json = serde_json::to_vec(user)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -269,7 +269,7 @@ pub fn update_user(
 /// Count all users.
 pub fn count_users(engine: &StorageEngine) -> EngineResult<u64> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/users") {
+    let entries = match ops.list_directory("/.aeordb-system/users") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(0),
         Err(error) => return Err(error),
@@ -285,7 +285,7 @@ pub fn delete_user(
     user_id: &Uuid,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/users/{}", user_id);
+    let path = format!("/.aeordb-system/users/{}", user_id);
     match ops.delete_file(ctx, &path) {
         Ok(()) => {}
         Err(EngineError::NotFound(_)) => return Ok(false),
@@ -310,7 +310,7 @@ pub fn store_group(
     group: &Group,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/groups/{}", group.name);
+    let path = format!("/.aeordb-system/groups/{}", group.name);
     let json = serde_json::to_vec(group)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -320,7 +320,7 @@ pub fn store_group(
 /// Retrieve a group by name.
 pub fn get_group(engine: &StorageEngine, name: &str) -> EngineResult<Option<Group>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/groups/{}", name);
+    let path = format!("/.aeordb-system/groups/{}", name);
     match ops.read_file(&path) {
         Ok(data) => {
             let group: Group = serde_json::from_slice(&data)
@@ -335,7 +335,7 @@ pub fn get_group(engine: &StorageEngine, name: &str) -> EngineResult<Option<Grou
 /// List all groups.
 pub fn list_groups(engine: &StorageEngine) -> EngineResult<Vec<Group>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/groups") {
+    let entries = match ops.list_directory("/.aeordb-system/groups") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -343,7 +343,7 @@ pub fn list_groups(engine: &StorageEngine) -> EngineResult<Vec<Group>> {
 
     let mut groups = Vec::new();
     for entry in &entries {
-        let path = format!("/.system/groups/{}", entry.name);
+        let path = format!("/.aeordb-system/groups/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(group) = serde_json::from_slice::<Group>(&data) {
                 groups.push(group);
@@ -370,7 +370,7 @@ pub fn delete_group(
     name: &str,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/groups/{}", name);
+    let path = format!("/.aeordb-system/groups/{}", name);
     match ops.delete_file(ctx, &path) {
         Ok(()) => Ok(true),
         Err(EngineError::NotFound(_)) => Ok(false),
@@ -392,7 +392,7 @@ pub fn store_permissions(
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let path_hash = blake3::hash(path.as_bytes());
-    let store_path = format!("/.system/permissions/{}", path_hash.to_hex());
+    let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
     ops.store_file(ctx, &store_path, permissions_json, Some("application/json"))?;
     Ok(())
 }
@@ -401,7 +401,7 @@ pub fn store_permissions(
 pub fn get_permissions(engine: &StorageEngine, path: &str) -> EngineResult<Option<Vec<u8>>> {
     let ops = DirectoryOps::new(engine);
     let path_hash = blake3::hash(path.as_bytes());
-    let store_path = format!("/.system/permissions/{}", path_hash.to_hex());
+    let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
     match ops.read_file(&store_path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
@@ -420,7 +420,7 @@ pub fn store_magic_link(
     record: &MagicLinkRecord,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/magic-links/{}", record.code_hash);
+    let path = format!("/.aeordb-system/magic-links/{}", record.code_hash);
     let json = serde_json::to_vec(record)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -433,7 +433,7 @@ pub fn get_magic_link(
     code_hash: &str,
 ) -> EngineResult<Option<MagicLinkRecord>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/magic-links/{}", code_hash);
+    let path = format!("/.aeordb-system/magic-links/{}", code_hash);
     match ops.read_file(&path) {
         Ok(data) => {
             let record: MagicLinkRecord = serde_json::from_slice(&data)
@@ -470,7 +470,7 @@ pub fn store_refresh_token(
     record: &RefreshTokenRecord,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/refresh-tokens/{}", record.token_hash);
+    let path = format!("/.aeordb-system/refresh-tokens/{}", record.token_hash);
     let json = serde_json::to_vec(record)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -483,7 +483,7 @@ pub fn get_refresh_token(
     token_hash: &str,
 ) -> EngineResult<Option<RefreshTokenRecord>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/refresh-tokens/{}", token_hash);
+    let path = format!("/.aeordb-system/refresh-tokens/{}", token_hash);
     match ops.read_file(&path) {
         Ok(data) => {
             let record: RefreshTokenRecord = serde_json::from_slice(&data)
@@ -503,7 +503,7 @@ pub fn revoke_refresh_token(
     token_hash: &str,
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/refresh-tokens/{}", token_hash);
+    let path = format!("/.aeordb-system/refresh-tokens/{}", token_hash);
     let data = match ops.read_file(&path) {
         Ok(data) => data,
         Err(EngineError::NotFound(_)) => return Ok(false),
@@ -539,14 +539,14 @@ pub fn cleanup_expired_tokens(
     let mut links_cleaned = 0;
 
     // Clean up refresh tokens
-    let token_entries = match ops.list_directory("/.system/refresh-tokens") {
+    let token_entries = match ops.list_directory("/.aeordb-system/refresh-tokens") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => Vec::new(),
         Err(e) => return Err(e),
     };
 
     for entry in &token_entries {
-        let path = format!("/.system/refresh-tokens/{}", entry.name);
+        let path = format!("/.aeordb-system/refresh-tokens/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<RefreshTokenRecord>(&data) {
                 if record.is_revoked || record.expires_at < now {
@@ -558,14 +558,14 @@ pub fn cleanup_expired_tokens(
     }
 
     // Clean up magic links
-    let link_entries = match ops.list_directory("/.system/magic-links") {
+    let link_entries = match ops.list_directory("/.aeordb-system/magic-links") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => Vec::new(),
         Err(e) => return Err(e),
     };
 
     for entry in &link_entries {
-        let path = format!("/.system/magic-links/{}", entry.name);
+        let path = format!("/.aeordb-system/magic-links/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             if let Ok(record) = serde_json::from_slice::<MagicLinkRecord>(&data) {
                 if record.is_used || record.expires_at < now {
@@ -604,14 +604,14 @@ pub fn store_node_id(
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let value = node_id.to_le_bytes().to_vec();
-    ops.store_file(ctx, "/.system/cluster/node_id", &value, Some("application/octet-stream"))?;
+    ops.store_file(ctx, "/.aeordb-system/cluster/node_id", &value, Some("application/octet-stream"))?;
     Ok(())
 }
 
 /// Load the persisted node identifier, if any.
 pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.system/cluster/node_id") {
+    match ops.read_file("/.aeordb-system/cluster/node_id") {
         Ok(data) if data.len() == 8 => {
             Ok(Some(u64::from_le_bytes(data[..8].try_into().unwrap())))
         }
@@ -630,14 +630,14 @@ pub fn store_peer_configs(
     let ops = DirectoryOps::new(engine);
     let json = serde_json::to_vec(peers)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, "/.system/cluster/peers", &json, Some("application/json"))?;
+    ops.store_file(ctx, "/.aeordb-system/cluster/peers", &json, Some("application/json"))?;
     Ok(())
 }
 
 /// Load persisted peer configurations.
 pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.system/cluster/peers") {
+    match ops.read_file("/.aeordb-system/cluster/peers") {
         Ok(data) => {
             let peers: Vec<PeerConfig> = serde_json::from_slice(&data)
                 .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
@@ -672,7 +672,7 @@ pub fn store_plugin(
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let safe_key = encode_plugin_key(key);
-    let path = format!("/.system/plugins/{}", safe_key);
+    let path = format!("/.aeordb-system/plugins/{}", safe_key);
     ops.store_file(ctx, &path, encoded, Some("application/octet-stream"))?;
     Ok(())
 }
@@ -681,7 +681,7 @@ pub fn store_plugin(
 pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
     let ops = DirectoryOps::new(engine);
     let safe_key = encode_plugin_key(key);
-    let path = format!("/.system/plugins/{}", safe_key);
+    let path = format!("/.aeordb-system/plugins/{}", safe_key);
     match ops.read_file(&path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
@@ -693,7 +693,7 @@ pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<
 /// Plugin keys are encoded with '::' replacing '/' for flat storage.
 pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>)>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.system/plugins") {
+    let entries = match ops.list_directory("/.aeordb-system/plugins") {
         Ok(entries) => entries,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -701,7 +701,7 @@ pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>
 
     let mut results = Vec::new();
     for entry in &entries {
-        let path = format!("/.system/plugins/{}", entry.name);
+        let path = format!("/.aeordb-system/plugins/{}", entry.name);
         if let Ok(data) = ops.read_file(&path) {
             let original_key = decode_plugin_key(&entry.name);
             results.push((original_key, data));
@@ -719,7 +719,7 @@ pub fn remove_plugin(
 ) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
     let safe_key = encode_plugin_key(key);
-    let path = format!("/.system/plugins/{}", safe_key);
+    let path = format!("/.aeordb-system/plugins/{}", safe_key);
     match ops.delete_file(ctx, &path) {
         Ok(()) => Ok(true),
         Err(EngineError::NotFound(_)) => Ok(false),
@@ -739,7 +739,7 @@ pub fn store_peer_sync_state(
     state: &crate::engine::sync_engine::PeerSyncState,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/sync-peers/{}", peer_node_id);
+    let path = format!("/.aeordb-system/sync-peers/{}", peer_node_id);
     let json = serde_json::to_vec(state)
         .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     ops.store_file(ctx, &path, &json, Some("application/json"))?;
@@ -752,7 +752,7 @@ pub fn get_peer_sync_state(
     peer_node_id: u64,
 ) -> EngineResult<Option<crate::engine::sync_engine::PeerSyncState>> {
     let ops = DirectoryOps::new(engine);
-    let path = format!("/.system/sync-peers/{}", peer_node_id);
+    let path = format!("/.aeordb-system/sync-peers/{}", peer_node_id);
     match ops.read_file(&path) {
         Ok(data) => {
             let state: crate::engine::sync_engine::PeerSyncState = serde_json::from_slice(&data)
@@ -771,8 +771,8 @@ pub fn get_peer_sync_state(
 /// Migrate data from legacy system paths to their new canonical names.
 ///
 /// Path renames:
-///   `/.system/apikeys/`       -> `/.system/api-keys/`
-///   `/.system/cluster/sync/`  -> `/.system/sync-peers/`
+///   `/.aeordb-system/apikeys/`       -> `/.aeordb-system/api-keys/`
+///   `/.aeordb-system/cluster/sync/`  -> `/.aeordb-system/sync-peers/`
 ///
 /// This function is idempotent: if the old path does not exist (or is empty),
 /// it is silently skipped. Safe to call on every startup.
@@ -780,8 +780,8 @@ pub fn migrate_system_paths(engine: &StorageEngine) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let ctx = RequestContext::system();
 
-    migrate_directory(&ops, &ctx, "/.system/apikeys", "/.system/api-keys")?;
-    migrate_directory(&ops, &ctx, "/.system/cluster/sync", "/.system/sync-peers")?;
+    migrate_directory(&ops, &ctx, "/.aeordb-system/apikeys", "/.aeordb-system/api-keys")?;
+    migrate_directory(&ops, &ctx, "/.aeordb-system/cluster/sync", "/.aeordb-system/sync-peers")?;
 
     Ok(())
 }

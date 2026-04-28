@@ -6,7 +6,7 @@ const SIGNING_KEY_MIN_LENGTH: usize = 32;
 
 /// Check if this node has a valid JWT signing key in system store.
 ///
-/// The JWT signing key is stored at `/.system/config/jwt_signing_key` and must
+/// The JWT signing key is stored at `/.aeordb-system/config/jwt_signing_key` and must
 /// be at least 32 bytes (an Ed25519 seed).
 pub fn has_signing_key(engine: &StorageEngine) -> bool {
     match system_store::get_config(engine, "jwt_signing_key") {

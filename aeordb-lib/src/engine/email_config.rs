@@ -5,7 +5,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
-const EMAIL_CONFIG_PATH: &str = "/.system/email-config.json";
+const EMAIL_CONFIG_PATH: &str = "/.aeordb-system/email-config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "provider")]

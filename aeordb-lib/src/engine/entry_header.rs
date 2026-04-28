@@ -8,7 +8,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 pub const ENTRY_MAGIC: u32 = 0x0AE012DB;
 pub const CURRENT_ENTRY_VERSION: u8 = 0;
 
-/// Flag: entry belongs to /.system/ — root-only access.
+/// Flag: entry belongs to /.aeordb-system/ — root-only access.
 pub const FLAG_SYSTEM: u8 = 0x01;
 
 #[derive(Debug, Clone)]

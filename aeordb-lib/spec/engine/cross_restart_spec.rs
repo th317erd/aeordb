@@ -382,7 +382,7 @@ fn test_indexes_persist_across_restart() {
       logging: false,
     };
     let config_data = config.serialize();
-    ops.store_file(&ctx, "/people/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/people/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     // Store files with indexing
     ops.store_file_with_indexing(&ctx,
@@ -431,7 +431,7 @@ fn test_index_values_persist_across_restart() {
       logging: false,
     };
     let config_data = config.serialize();
-    ops.store_file(&ctx, "/contacts/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "/contacts/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     ops.store_file_with_indexing(&ctx,
       "/contacts/john.json",

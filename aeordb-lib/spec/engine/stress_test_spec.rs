@@ -124,7 +124,7 @@ fn test_stress_query_indexed_files() {
     });
     ops.store_file(
         &ctx,
-        "/people/.config/indexes.json",
+        "/people/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json"),
     )
@@ -267,7 +267,7 @@ fn test_stress_concurrent_writes_during_queries() {
     });
     ops.store_file(
         &ctx,
-        "/data/.config/indexes.json",
+        "/data/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json"),
     )
@@ -388,7 +388,7 @@ fn test_stress_wasm_query_vs_direct_query() {
     });
     ops.store_file(
         &ctx,
-        "/scores/.config/indexes.json",
+        "/scores/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json"),
     )
@@ -769,7 +769,7 @@ fn test_stress_index_cardinality() {
             {"name": "category", "type": "string", "source": ["category"]}
         ]
     });
-    ops.store_file(&ctx, "/card/.config/indexes.json",
+    ops.store_file(&ctx, "/card/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json")).unwrap();
 
@@ -1120,7 +1120,7 @@ fn test_stress_query_many_results() {
     });
     ops.store_file(
         &ctx,
-        "/many/.config/indexes.json",
+        "/many/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json"),
     )
@@ -1345,7 +1345,7 @@ fn test_stress_mixed_workload() {
     });
     ops.store_file(
         &ctx,
-        "/mix/.config/indexes.json",
+        "/mix/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json"),
     )

@@ -29,7 +29,7 @@ pub struct CorsConfig {
 pub struct CorsState {
     /// Origins from the CLI --cors flag (None = no CORS at all).
     pub default_origins: Option<Vec<String>>,
-    /// Per-path rules from /.config/cors.json.
+    /// Per-path rules from /.aeordb-config/cors.json.
     pub rules: Vec<CorsRule>,
 }
 
@@ -59,15 +59,15 @@ pub fn parse_cors_origins(flag: &str) -> Vec<String> {
         .collect()
 }
 
-/// Load per-path CORS rules from /.config/cors.json in the engine.
+/// Load per-path CORS rules from /.aeordb-config/cors.json in the engine.
 /// Returns an empty Vec if the file does not exist or is invalid.
 pub fn load_cors_config(engine: &StorageEngine) -> Vec<CorsRule> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.config/cors.json") {
+    match ops.read_file("/.aeordb-config/cors.json") {
         Ok(data) => match serde_json::from_slice::<CorsConfig>(&data) {
             Ok(config) => config.rules,
             Err(e) => {
-                tracing::warn!("Failed to parse /.config/cors.json: {}", e);
+                tracing::warn!("Failed to parse /.aeordb-config/cors.json: {}", e);
                 vec![]
             }
         },

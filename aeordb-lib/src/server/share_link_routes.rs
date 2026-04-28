@@ -105,7 +105,7 @@ pub async fn create_share_link(
     // 2b. Block sharing of system paths.
     for raw_path in &body.paths {
         let normalized = normalize_path(raw_path);
-        if normalized.starts_with("/.system") {
+        if normalized.starts_with("/.aeordb-") {
             return ErrorResponse::new("Cannot share system paths")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();

@@ -209,9 +209,9 @@ async fn save_smtp_config() {
     assert_eq!(json["provider"], "smtp");
     assert_eq!(json["from_address"], "test@example.com");
 
-    // Verify storage: read the config back from /.system/email-config.json
+    // Verify storage: read the config back from /.aeordb-system/email-config.json
     let ops = aeordb::engine::DirectoryOps::new(&engine);
-    let data = ops.read_file("/.system/email-config.json").expect("email config should be stored");
+    let data = ops.read_file("/.aeordb-system/email-config.json").expect("email config should be stored");
     let stored: serde_json::Value = serde_json::from_slice(&data).expect("stored config should be valid JSON");
     assert_eq!(stored["provider"], "smtp");
     assert_eq!(stored["host"], "smtp.example.com");

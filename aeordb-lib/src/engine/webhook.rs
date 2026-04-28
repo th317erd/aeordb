@@ -6,7 +6,7 @@ use crate::engine::event_bus::EventBus;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::directory_ops::DirectoryOps;
 
-const WEBHOOK_CONFIG_PATH: &str = "/.config/webhooks.json";
+const WEBHOOK_CONFIG_PATH: &str = "/.aeordb-config/webhooks.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
@@ -129,7 +129,7 @@ async fn deliver_webhook(webhook: &WebhookConfig, event: &EngineEvent) {
 /// Spawn a background task that subscribes to the EventBus and delivers
 /// matching events to registered webhook URLs.
 ///
-/// The dispatcher loads webhook config from `/.config/webhooks.json` on start
+/// The dispatcher loads webhook config from `/.aeordb-config/webhooks.json` on start
 /// and reloads it when that file changes.
 pub fn spawn_webhook_dispatcher(
     bus: Arc<EventBus>,

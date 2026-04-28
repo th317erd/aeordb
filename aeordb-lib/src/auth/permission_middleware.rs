@@ -20,8 +20,8 @@ use crate::server::state::AppState;
 pub struct ActiveKeyRules(pub Vec<KeyRule>);
 
 /// Special file names that map to Configure or Deploy operations.
-const CONFIGURE_FILES: &[&str] = &[".config", ".permissions"];
-const DEPLOY_FILES: &[&str] = &[".functions"];
+const CONFIGURE_FILES: &[&str] = &[".aeordb-config", ".aeordb-permissions"];
+const DEPLOY_FILES: &[&str] = &[".aeordb-functions"];
 
 /// Axum middleware that checks crudlify permissions on `/files/` routes.
 ///
@@ -294,7 +294,7 @@ pub async fn permission_middleware(
 
 /// Map an HTTP method and path to a CrudlifyOp.
 ///
-/// - PUT to .config/.permissions -> Configure
+/// - PUT to .config/.aeordb-permissions -> Configure
 /// - PUT to .functions -> Deploy
 /// - PUT (new file) -> Create, PUT (existing file) -> Update
 /// - GET on directory (ends with '/') -> List

@@ -29,7 +29,7 @@ pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>>
 fn is_internal_path(path: &str) -> bool {
   let normalized = normalize_path(path);
   let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
-  segments.iter().any(|s| *s == ".logs" || *s == ".indexes" || *s == ".config")
+  segments.iter().any(|s| *s == ".logs" || *s == ".aeordb-indexes" || *s == ".aeordb-config")
 }
 
 /// Compute the domain-prefixed hash for a directory path.
@@ -100,7 +100,7 @@ pub fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec
   algo.compute_hash(&input)
 }
 
-/// Compute the hash for a system chunk (/.system/ data).
+/// Compute the hash for a system chunk (/.aeordb-system/ data).
 /// Uses "system::" domain prefix — cryptographically separated from user "chunk:" domain.
 pub fn system_chunk_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
     let mut input = Vec::with_capacity(8 + data.len());
@@ -129,10 +129,10 @@ pub fn system_file_identity_hash(
     algo.compute_hash(&input)
 }
 
-/// Check if a path is under the /.system/ directory.
+/// Check if a path is under the /.aeordb-system/ directory.
 pub fn is_system_path(path: &str) -> bool {
     let normalized = crate::engine::path_utils::normalize_path(path);
-    normalized.starts_with("/.system/") || normalized == "/.system"
+    normalized.starts_with("/.aeordb-") || normalized == "/.aeordb-system"
 }
 
 /// Compute the domain-prefixed hash for a deletion record.
@@ -903,7 +903,7 @@ impl<'a> DirectoryOps<'a> {
     let config_path = if parent.ends_with('/') {
       format!("{}.config/indexes.json", parent)
     } else {
-      format!("{}/.config/indexes.json", parent)
+      format!("{}/.aeordb-config/indexes.json", parent)
     };
 
     match self.read_file(&config_path) {

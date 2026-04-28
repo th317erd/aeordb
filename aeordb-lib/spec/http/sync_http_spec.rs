@@ -318,7 +318,7 @@ async fn test_sync_diff_empty_database() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response.into_body()).await;
 
-    // Filter out /.system/ entries
+    // Filter out /.aeordb-system/ entries
     let added: Vec<_> = json["changes"]["files_added"].as_array().unwrap()
         .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system")).collect();
     assert!(added.is_empty(), "No user files should be added on empty db");

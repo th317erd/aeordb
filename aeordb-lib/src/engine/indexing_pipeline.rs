@@ -132,7 +132,7 @@ impl<'a> IndexingPipeline<'a> {
     let config_path = if parent.ends_with('/') {
       format!("{}.config/indexes.json", parent)
     } else {
-      format!("{}/.config/indexes.json", parent)
+      format!("{}/.aeordb-config/indexes.json", parent)
     };
 
     let ops = DirectoryOps::new(self.engine);
@@ -264,7 +264,7 @@ impl<'a> IndexingPipeline<'a> {
       .map_err(|e| EngineError::NotFound(format!("Mapper '{}' failed: {}", plugin_name, e)))
   }
 
-  /// Look up a parser name from the global registry at /.config/parsers.json
+  /// Look up a parser name from the global registry at /.aeordb-config/parsers.json
   fn lookup_parser_by_content_type(&self, content_type: Option<&str>) -> Option<String> {
     let ct = content_type?;
     // Don't look up JSON — it's handled natively
@@ -273,7 +273,7 @@ impl<'a> IndexingPipeline<'a> {
     }
 
     let ops = DirectoryOps::new(self.engine);
-    match ops.read_file("/.config/parsers.json") {
+    match ops.read_file("/.aeordb-config/parsers.json") {
       Ok(data) => {
         let text = std::str::from_utf8(&data).ok()?;
         let registry: serde_json::Value = serde_json::from_str(text).ok()?;

@@ -139,7 +139,7 @@ impl TestHarness {
         let permissions_path = if path == "/" || path.ends_with('/') {
             format!("{}.permissions", path)
         } else {
-            format!("{}/.permissions", path)
+            format!("{}/.aeordb-permissions", path)
         };
         let uri = format!("/files/{}", permissions_path.trim_start_matches('/'));
         let request = Request::builder()
@@ -226,18 +226,18 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 // ===========================================================================
-// 1. GET /files/.system/* returns 404 for ALL users including root
+// 1. GET /files/.aeordb-system/* returns 404 for ALL users including root
 // ===========================================================================
 
 #[tokio::test]
 async fn test_system_get_returns_404_for_root() {
     let harness = TestHarness::new();
     // Seed .system/ data directly via engine (API blocks it now)
-    harness.store_file_via_engine("/.system/config/jwt_signing_key", b"super-secret-key");
+    harness.store_file_via_engine("/.aeordb-system/config/jwt_signing_key", b"super-secret-key");
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/config/jwt_signing_key")
+        .uri("/files/.aeordb-system/config/jwt_signing_key")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -246,7 +246,7 @@ async fn test_system_get_returns_404_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root GET of /.system/ path should return 404"
+        "Root GET of /.aeordb-system/ path should return 404"
     );
 }
 
@@ -254,13 +254,13 @@ async fn test_system_get_returns_404_for_root() {
 async fn test_system_get_returns_404_for_non_root() {
     let harness = TestHarness::new();
     harness.setup_open_permissions().await;
-    harness.store_file_via_engine("/.system/config/test.json", b"secret");
+    harness.store_file_via_engine("/.aeordb-system/config/test.json", b"secret");
 
     let non_root_jwt = harness.make_non_root_user("alice").await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/config/test.json")
+        .uri("/files/.aeordb-system/config/test.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -272,12 +272,12 @@ async fn test_system_get_returns_404_for_non_root() {
 #[tokio::test]
 async fn test_system_get_returns_404_not_403() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/secret.bin", b"classified");
+    harness.store_file_via_engine("/.aeordb-system/secret.bin", b"classified");
 
     // Root user should get 404, not 403
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/secret.bin")
+        .uri("/files/.aeordb-system/secret.bin")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -288,17 +288,17 @@ async fn test_system_get_returns_404_not_403() {
 }
 
 // ===========================================================================
-// 2. GET /files/.system/ (directory listing) returns 404 for ALL users
+// 2. GET /files/.aeordb-system/ (directory listing) returns 404 for ALL users
 // ===========================================================================
 
 #[tokio::test]
 async fn test_system_directory_listing_returns_404_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/test.json", b"root-only");
+    harness.store_file_via_engine("/.aeordb-system/config/test.json", b"root-only");
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/")
+        .uri("/files/.aeordb-system/")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -307,7 +307,7 @@ async fn test_system_directory_listing_returns_404_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root listing of /.system/ should return 404"
+        "Root listing of /.aeordb-system/ should return 404"
     );
 }
 
@@ -315,13 +315,13 @@ async fn test_system_directory_listing_returns_404_for_root() {
 async fn test_system_directory_listing_returns_404_for_non_root() {
     let harness = TestHarness::new();
     harness.setup_open_permissions().await;
-    harness.store_file_via_engine("/.system/config/test.json", b"hidden");
+    harness.store_file_via_engine("/.aeordb-system/config/test.json", b"hidden");
 
     let non_root_jwt = harness.make_non_root_user("bob").await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/")
+        .uri("/files/.aeordb-system/")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -330,7 +330,7 @@ async fn test_system_directory_listing_returns_404_for_non_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Non-root should not be able to list /.system/"
+        "Non-root should not be able to list /.aeordb-system/"
     );
 }
 
@@ -341,7 +341,7 @@ async fn test_system_directory_listing_returns_404_for_non_root() {
 #[tokio::test]
 async fn test_root_listing_hides_system_directory() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/test.json", b"hidden");
+    harness.store_file_via_engine("/.aeordb-system/config/test.json", b"hidden");
     harness.store_file_via_api("data/readme.txt", b"visible").await;
 
     // Recursive listing from data/ with depth=-1 should NOT show .system
@@ -370,7 +370,7 @@ async fn test_root_listing_hides_system_directory() {
 }
 
 // ===========================================================================
-// 4. PUT /files/.system/* blocked for ALL users
+// 4. PUT /files/.aeordb-system/* blocked for ALL users
 // ===========================================================================
 
 #[tokio::test]
@@ -379,7 +379,7 @@ async fn test_system_put_blocked_for_root() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/files/.system/config/evil.json")
+        .uri("/files/.aeordb-system/config/evil.json")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
         .body(Body::from(b"should-not-store".to_vec()))
@@ -389,7 +389,7 @@ async fn test_system_put_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root PUT to /.system/ should return 404"
+        "Root PUT to /.aeordb-system/ should return 404"
     );
 }
 
@@ -401,7 +401,7 @@ async fn test_system_put_blocked_for_non_root() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/files/.system/config/evil.json")
+        .uri("/files/.aeordb-system/config/evil.json")
         .header("content-type", "application/json")
         .header("authorization", &non_root_jwt)
         .body(Body::from(b"should-not-store".to_vec()))
@@ -411,22 +411,22 @@ async fn test_system_put_blocked_for_non_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Non-root PUT to /.system/ should return 404"
+        "Non-root PUT to /.aeordb-system/ should return 404"
     );
 }
 
 // ===========================================================================
-// 5. DELETE /files/.system/* blocked for ALL users
+// 5. DELETE /files/.aeordb-system/* blocked for ALL users
 // ===========================================================================
 
 #[tokio::test]
 async fn test_system_delete_blocked_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/victim.json", b"data");
+    harness.store_file_via_engine("/.aeordb-system/config/victim.json", b"data");
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/files/.system/config/victim.json")
+        .uri("/files/.aeordb-system/config/victim.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -435,7 +435,7 @@ async fn test_system_delete_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root DELETE of /.system/ path should return 404"
+        "Root DELETE of /.aeordb-system/ path should return 404"
     );
 }
 
@@ -443,13 +443,13 @@ async fn test_system_delete_blocked_for_root() {
 async fn test_system_delete_blocked_for_non_root() {
     let harness = TestHarness::new();
     harness.setup_open_permissions().await;
-    harness.store_file_via_engine("/.system/config/victim.json", b"data");
+    harness.store_file_via_engine("/.aeordb-system/config/victim.json", b"data");
 
     let non_root_jwt = harness.make_non_root_user("dave").await;
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/files/.system/config/victim.json")
+        .uri("/files/.aeordb-system/config/victim.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -458,22 +458,22 @@ async fn test_system_delete_blocked_for_non_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Non-root DELETE of /.system/ path should return 404"
+        "Non-root DELETE of /.aeordb-system/ path should return 404"
     );
 }
 
 // ===========================================================================
-// 6. HEAD /files/.system/* blocked for ALL users
+// 6. HEAD /files/.aeordb-system/* blocked for ALL users
 // ===========================================================================
 
 #[tokio::test]
 async fn test_system_head_blocked_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/metadata.json", b"meta");
+    harness.store_file_via_engine("/.aeordb-system/config/metadata.json", b"meta");
 
     let request = Request::builder()
         .method("HEAD")
-        .uri("/files/.system/config/metadata.json")
+        .uri("/files/.aeordb-system/config/metadata.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -482,7 +482,7 @@ async fn test_system_head_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root HEAD of /.system/ path should return 404"
+        "Root HEAD of /.aeordb-system/ path should return 404"
     );
 }
 
@@ -490,13 +490,13 @@ async fn test_system_head_blocked_for_root() {
 async fn test_system_head_blocked_for_non_root() {
     let harness = TestHarness::new();
     harness.setup_open_permissions().await;
-    harness.store_file_via_engine("/.system/config/metadata.json", b"meta");
+    harness.store_file_via_engine("/.aeordb-system/config/metadata.json", b"meta");
 
     let non_root_jwt = harness.make_non_root_user("eve").await;
 
     let request = Request::builder()
         .method("HEAD")
-        .uri("/files/.system/config/metadata.json")
+        .uri("/files/.aeordb-system/config/metadata.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -505,7 +505,7 @@ async fn test_system_head_blocked_for_non_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Non-root HEAD of /.system/ path should return 404"
+        "Non-root HEAD of /.aeordb-system/ path should return 404"
     );
 }
 
@@ -522,14 +522,14 @@ async fn test_symlink_to_system_blocked_for_root() {
         .uri("/links/sneaky-link")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
-        .body(Body::from(r#"{"target":"/.system/config/jwt_signing_key"}"#))
+        .body(Body::from(r#"{"target":"/.aeordb-system/config/jwt_signing_key"}"#))
         .unwrap();
 
     let response = harness.app().oneshot(request).await.unwrap();
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root creating symlink TO /.system/ should return 404"
+        "Root creating symlink TO /.aeordb-system/ should return 404"
     );
 }
 
@@ -544,14 +544,14 @@ async fn test_symlink_to_system_blocked_for_non_root() {
         .uri("/links/sneaky-link")
         .header("content-type", "application/json")
         .header("authorization", &non_root_jwt)
-        .body(Body::from(r#"{"target":"/.system/config/jwt_signing_key"}"#))
+        .body(Body::from(r#"{"target":"/.aeordb-system/config/jwt_signing_key"}"#))
         .unwrap();
 
     let response = harness.app().oneshot(request).await.unwrap();
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Non-root creating symlink TO /.system/ should return 404"
+        "Non-root creating symlink TO /.aeordb-system/ should return 404"
     );
 }
 
@@ -565,7 +565,7 @@ async fn test_symlink_at_system_path_blocked_for_root() {
 
     let request = Request::builder()
         .method("PUT")
-        .uri("/links/.system/config/my-link")
+        .uri("/links/.aeordb-system/config/my-link")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
         .body(Body::from(r#"{"target":"/data/public-file"}"#))
@@ -575,7 +575,7 @@ async fn test_symlink_at_system_path_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root creating symlink AT /.system/ should return 404"
+        "Root creating symlink AT /.aeordb-system/ should return 404"
     );
 }
 
@@ -593,25 +593,25 @@ async fn test_rename_to_system_blocked_for_root() {
         .uri("/rename/public/test.txt")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
-        .body(Body::from(r#"{"to":"/.system/stolen-data.txt"}"#))
+        .body(Body::from(r#"{"to":"/.aeordb-system/stolen-data.txt"}"#))
         .unwrap();
 
     let response = harness.app().oneshot(request).await.unwrap();
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root renaming TO /.system/ should return 404"
+        "Root renaming TO /.aeordb-system/ should return 404"
     );
 }
 
 #[tokio::test]
 async fn test_rename_from_system_blocked_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/secret.json", b"secret");
+    harness.store_file_via_engine("/.aeordb-system/config/secret.json", b"secret");
 
     let request = Request::builder()
         .method("POST")
-        .uri("/rename/.system/config/secret.json")
+        .uri("/rename/.aeordb-system/config/secret.json")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
         .body(Body::from(r#"{"to":"/data/exfiltrated.json"}"#))
@@ -621,7 +621,7 @@ async fn test_rename_from_system_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root renaming FROM /.system/ should return 404"
+        "Root renaming FROM /.aeordb-system/ should return 404"
     );
 }
 
@@ -632,7 +632,7 @@ async fn test_rename_from_system_blocked_for_root() {
 #[tokio::test]
 async fn test_query_results_exclude_system_paths() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/key.json", b"secret-key");
+    harness.store_file_via_engine("/.aeordb-system/config/key.json", b"secret-key");
     harness.store_file_via_api("data/public.txt", b"public-data").await;
 
     // Query with @size gt 0 -- should match both files but only return public one
@@ -671,7 +671,7 @@ async fn test_query_results_exclude_system_paths() {
 #[tokio::test]
 async fn test_recursive_listing_excludes_system_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/deep/nested.json", b"hidden");
+    harness.store_file_via_engine("/.aeordb-system/deep/nested.json", b"hidden");
     harness.store_file_via_api("data/visible.txt", b"visible").await;
 
     // Recursive listing from data/ with depth=-1 as root
@@ -705,7 +705,7 @@ async fn test_recursive_listing_excludes_system_for_non_root() {
     let harness = TestHarness::new();
     harness.setup_open_permissions().await;
 
-    harness.store_file_via_engine("/.system/deep/nested.json", b"hidden");
+    harness.store_file_via_engine("/.aeordb-system/deep/nested.json", b"hidden");
     harness.store_file_via_api("data/visible.txt", b"visible").await;
 
     let non_root_jwt = harness.make_non_root_user("grace").await;
@@ -797,10 +797,10 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
 
     let non_root_jwt = harness.make_non_root_user("ivan").await;
 
-    // Non-root accessing nonexistent /.system/ file -> 404
+    // Non-root accessing nonexistent /.aeordb-system/ file -> 404
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/does-not-exist.json")
+        .uri("/files/.aeordb-system/does-not-exist.json")
         .header("authorization", &non_root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -808,10 +808,10 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
     let response = harness.app().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    // Root accessing nonexistent /.system/ file -> also 404
+    // Root accessing nonexistent /.aeordb-system/ file -> also 404
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/does-not-exist.json")
+        .uri("/files/.aeordb-system/does-not-exist.json")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -829,11 +829,11 @@ async fn test_internal_engine_access_still_works() {
     let harness = TestHarness::new();
 
     // Store via engine (bypassing HTTP)
-    harness.store_file_via_engine("/.system/config/internal.json", b"engine-data");
+    harness.store_file_via_engine("/.aeordb-system/config/internal.json", b"engine-data");
 
     // Read via engine (bypassing HTTP) -- should succeed
     let ops = DirectoryOps::new(&harness.engine);
-    let result = ops.read_file("/.system/config/internal.json");
+    let result = ops.read_file("/.aeordb-system/config/internal.json");
     assert!(result.is_ok(), "Internal engine read of .system/ should succeed");
     assert_eq!(result.unwrap(), b"engine-data");
 }
@@ -848,7 +848,7 @@ async fn test_file_history_blocked_for_system_path() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/versions/history/.system/config/jwt_signing_key")
+        .uri("/versions/history/.aeordb-system/config/jwt_signing_key")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -871,7 +871,7 @@ async fn test_file_restore_blocked_for_system_path() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/versions/restore/.system/config/jwt_signing_key")
+        .uri("/versions/restore/.aeordb-system/config/jwt_signing_key")
         .header("content-type", "application/json")
         .header("authorization", &harness.root_jwt)
         .body(Body::from(r#"{"snapshot":"v1"}"#))
@@ -886,18 +886,18 @@ async fn test_file_restore_blocked_for_system_path() {
 }
 
 // ===========================================================================
-// 17. Sub-directory listing of /.system/config/ blocked for root
+// 17. Sub-directory listing of /.aeordb-system/config/ blocked for root
 // ===========================================================================
 
 #[tokio::test]
 async fn test_system_config_listing_blocked_for_root() {
     let harness = TestHarness::new();
-    harness.store_file_via_engine("/.system/config/a.json", b"aaa");
-    harness.store_file_via_engine("/.system/config/b.json", b"bbb");
+    harness.store_file_via_engine("/.aeordb-system/config/a.json", b"aaa");
+    harness.store_file_via_engine("/.aeordb-system/config/b.json", b"bbb");
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.system/config/")
+        .uri("/files/.aeordb-system/config/")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -906,6 +906,6 @@ async fn test_system_config_listing_blocked_for_root() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "Root listing of /.system/config/ should return 404"
+        "Root listing of /.aeordb-system/config/ should return 404"
     );
 }

@@ -26,7 +26,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
   } else {
-    format!("{}/.config/indexes.json", parent_path)
+    format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
   ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
@@ -202,8 +202,8 @@ fn test_index_manager_backward_compat() {
   let hash_length = engine.hash_algo().hash_length();
   let data = index.serialize(hash_length);
 
-  // Store at legacy path: /data/.indexes/score.idx
-  ops.store_file(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
+  // Store at legacy path: /data/.aeordb-indexes/score.idx
+  ops.store_file(&ctx, "/data/.aeordb-indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
   // load_index should find it via the old path
   let index_manager = IndexManager::new(&engine);

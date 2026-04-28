@@ -57,7 +57,7 @@ fn test_system_file_identity_hash() {
     let chunk_hashes = vec![chunk_hash];
 
     let hash = system_file_identity_hash(
-        "/.system/config/key",
+        "/.aeordb-system/config/key",
         Some("application/json"),
         &chunk_hashes,
         &algo,
@@ -72,16 +72,16 @@ fn test_system_file_identity_hash() {
 #[test]
 fn test_is_system_path() {
     // Positive cases
-    assert!(is_system_path("/.system/config/key"), "/.system/config/key is a system path");
+    assert!(is_system_path("/.aeordb-system/config/key"), "/.aeordb-system/config/key is a system path");
     assert!(is_system_path("/.system"), "/.system is a system path");
-    assert!(is_system_path("/.system/"), "/.system/ is a system path");
-    assert!(is_system_path("/.system/deeply/nested/path"), "deeply nested system path");
+    assert!(is_system_path("/.aeordb-system/"), "/.aeordb-system/ is a system path");
+    assert!(is_system_path("/.aeordb-system/deeply/nested/path"), "deeply nested system path");
 
     // Negative cases
     assert!(!is_system_path("/regular/path"), "/regular/path is not a system path");
     assert!(!is_system_path("/.systems/"), "/.systems/ is not a system path (note the 's')");
     assert!(!is_system_path("/.systemic/data"), "/.systemic/data is not a system path");
-    assert!(!is_system_path("/data/.system/nested"), "/data/.system/nested is not a system path");
+    assert!(!is_system_path("/data/.aeordb-system/nested"), "/data/.aeordb-system/nested is not a system path");
     assert!(!is_system_path("/"), "root is not a system path");
     assert!(!is_system_path(""), "empty string is not a system path");
 }
@@ -208,7 +208,7 @@ fn test_system_file_identity_hash_differs_from_user() {
     use aeordb::engine::file_identity_hash;
 
     let algo = HashAlgorithm::Blake3_256;
-    let path = "/.system/config/key";
+    let path = "/.aeordb-system/config/key";
     let content_type = Some("text/plain");
     let chunk_data = b"shared chunk";
     let chunk_hash = chunk_content_hash(chunk_data, &algo).unwrap();
@@ -228,8 +228,8 @@ fn test_system_file_identity_hash_differs_from_user() {
 #[test]
 fn test_is_system_path_normalization() {
     // Paths with redundant slashes or dots should still be detected
-    assert!(is_system_path("/.system/./config"), "normalized dotted path should be system");
-    assert!(is_system_path("/.system//double-slash"), "double-slash should normalize");
+    assert!(is_system_path("/.aeordb-system/./config"), "normalized dotted path should be system");
+    assert!(is_system_path("/.aeordb-system//double-slash"), "double-slash should normalize");
 }
 
 // ─── 12. FLAG_SYSTEM is only the lowest bit ─────────────────────────────────

@@ -16,7 +16,7 @@ fn store_index_config(engine: &aeordb::engine::storage_engine::StorageEngine, pa
     let config = serde_json::json!({
         "indexes": [{"name": "count", "type": "u64", "source": ["count"], "min": 0, "max": 200}]
     });
-    let config_path = format!("{}/.config/indexes.json", parent);
+    let config_path = format!("{}/.aeordb-config/indexes.json", parent);
     ops.store_file(
         &ctx,
         &config_path,

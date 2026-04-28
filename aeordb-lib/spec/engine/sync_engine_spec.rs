@@ -372,11 +372,11 @@ fn test_local_sync_cycle_conflict_same_file() {
     // The file should still exist
     assert!(file_exists(&engine_a, "/shared.txt"));
 
-    // Conflicts should be stored in /.conflicts/
+    // Conflicts should be stored in /.aeordb-conflicts/
     let conflicts = list_conflicts(&engine_a).unwrap();
     assert!(
         !conflicts.is_empty(),
-        "Conflicts should be stored in /.conflicts/"
+        "Conflicts should be stored in /.aeordb-conflicts/"
     );
 }
 

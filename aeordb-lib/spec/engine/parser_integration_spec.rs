@@ -29,7 +29,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let config_path = if parent_path.ends_with('/') {
     format!("{}.config/indexes.json", parent_path)
   } else {
-    format!("{}/.config/indexes.json", parent_path)
+    format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
   ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
@@ -372,7 +372,7 @@ fn test_parser_not_configured_uses_raw_json() {
 #[test]
 fn test_content_type_registry_lookup() {
   let ctx = RequestContext::system();
-  // Store /.config/parsers.json with a mapping, then verify the pipeline
+  // Store /.aeordb-config/parsers.json with a mapping, then verify the pipeline
   // attempts to use the mapped parser for that content type.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -380,7 +380,7 @@ fn test_content_type_registry_lookup() {
 
   // Store content-type registry
   let registry = br#"{"application/pdf":"/parsers/pdf","text/csv":"/parsers/csv"}"#;
-  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   // Store index config with NO explicit parser (should fall back to registry)
   let config = PathIndexConfig {
@@ -417,7 +417,7 @@ fn test_content_type_registry_not_found() {
 
   // Store registry with only PDF
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -459,7 +459,7 @@ fn test_content_type_json_skips_registry() {
 
   // Store registry that maps application/json to a parser (should be ignored)
   let registry = br#"{"application/json":"/parsers/should_not_be_used"}"#;
-  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -491,7 +491,7 @@ fn test_content_type_json_skips_registry() {
 
 #[test]
 fn test_content_type_registry_not_exists() {
-  // When /.config/parsers.json doesn't exist, lookup returns None
+  // When /.aeordb-config/parsers.json doesn't exist, lookup returns None
   // and falls back to raw JSON parsing.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -955,7 +955,7 @@ fn test_explicit_parser_overrides_content_type_registry() {
 
   // Store registry
   let registry = br#"{"application/pdf":"/parsers/registry_pdf"}"#;
-  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let engine_arc = Arc::new(StorageEngine::create(
     dir.path().join("pm.aeor").to_str().unwrap()
@@ -991,7 +991,7 @@ fn test_content_type_none_skips_registry() {
   let ops = DirectoryOps::new(&engine);
 
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file(&ctx, "/.config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,

@@ -709,8 +709,8 @@ async fn test_query_filters_denied_results() {
     let config_data = config.serialize();
 
     // Set up index configs first
-    ops.store_file(&ctx, "allowed/.config/indexes.json", &config_data, Some("application/json")).unwrap();
-    ops.store_file(&ctx, "denied/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "allowed/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "denied/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     // Store indexed files using full pipeline to trigger indexing
     ops.store_file_with_full_pipeline(
@@ -794,8 +794,8 @@ async fn test_query_unscoped_no_filtering() {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
     let config_data = config.serialize();
-    ops.store_file(&ctx, "a/.config/indexes.json", &config_data, Some("application/json")).unwrap();
-    ops.store_file(&ctx, "b/.config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "a/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file(&ctx, "b/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     ops.store_file_with_full_pipeline(
         &ctx, "a/doc.json", br#"{"name": "a-doc"}"#,
