@@ -295,6 +295,7 @@ pub async fn list_key_assignable_users(
       Ok(users) => {
         let mut items: Vec<serde_json::Value> = users
           .iter()
+          .filter(|u| u.is_active)
           .map(|u| serde_json::json!({
             "user_id": u.user_id,
             "username": u.username,
