@@ -9,7 +9,7 @@ pub fn build_share_notification(
     let subject = format!("{} shared files with you", sharer_name);
 
     let perm_label = match permissions {
-        "cr..l..." | "-r--l---" => "View only",
+        "cr..l..." | ".r..l..." | "-r--l---" => "View only",
         "crudl..." => "Can edit",
         "crudlify" => "Full access",
         _ => permissions,
