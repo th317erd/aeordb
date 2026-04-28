@@ -253,6 +253,137 @@ impl<'a> DirectoryOps<'a> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
   }
 
+  /// Store a file from pre-collected chunks (already split into 256KB pieces).
+  /// Each chunk is stored individually — the full file is never in memory at once.
+  /// `chunks` is a Vec of raw chunk data; `total_size` is the sum of all chunk sizes.
+  /// `first_bytes` is the first ≤8KB of the file for content-type detection.
+  pub fn store_file_from_chunks(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    chunks: &[Vec<u8>],
+    total_size: u64,
+    content_type: Option<&str>,
+    first_bytes: &[u8],
+  ) -> EngineResult<FileRecord> {
+    let timer_start = std::time::Instant::now();
+    let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+    }
+
+    let algo = self.engine.hash_algo();
+    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
+    let hash_length = algo.hash_length();
+
+    // Store each chunk
+    let mut chunk_hashes = Vec::with_capacity(chunks.len());
+    for chunk_data in chunks {
+      let chunk_key = chunk_content_hash(chunk_data, &algo)?;
+      if !self.engine.has_entry(&chunk_key)? {
+        if sys_flags != 0 {
+          self.engine.store_entry_with_flags(EntryType::Chunk, &chunk_key, chunk_data, sys_flags)?;
+        } else {
+          self.engine.store_entry(EntryType::Chunk, &chunk_key, chunk_data)?;
+        }
+        self.engine.counters().increment_chunks();
+        self.engine.counters().add_chunk_data_size(chunk_data.len() as u64);
+      } else {
+        self.engine.counters().increment_chunks_deduped();
+      }
+      chunk_hashes.push(chunk_key);
+    }
+
+    // Check for existing file
+    let file_key = file_path_hash(&normalized, &algo)?;
+    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
+      Some((header, _key, value)) => {
+        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+        (Some(existing.created_at), Some(existing.total_size))
+      }
+      None => (None, None),
+    };
+
+    let mut file_record = FileRecord::new(
+      normalized.clone(),
+      Some(detected_content_type.clone()),
+      total_size,
+      chunk_hashes,
+    );
+
+    if let Some(original_created_at) = existing_created_at {
+      file_record.created_at = original_created_at;
+    }
+
+    let file_value = file_record.serialize(hash_length)?;
+    let file_content_key = file_content_hash(&file_value, &algo)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_content_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+    }
+
+    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+    }
+
+    if sys_flags != 0 {
+      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_key, &file_value, sys_flags)?;
+    } else {
+      self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+    }
+
+    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
+    let child = ChildEntry {
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: identity_key,
+      total_size,
+      created_at: file_record.created_at,
+      updated_at: file_record.updated_at,
+      name: file_name(&normalized).unwrap_or("").to_string(),
+      content_type: Some(detected_content_type.clone()),
+      virtual_time: now_vt,
+      node_id: 0,
+    };
+
+    self.update_parent_directories(&normalized, child)?;
+
+    let counters = self.engine.counters();
+    counters.increment_writes();
+    counters.add_bytes_written(total_size);
+    if existing_created_at.is_none() {
+      counters.increment_files();
+      counters.add_logical_data_size(total_size);
+    } else if let Some(old_size) = existing_total_size {
+      if total_size > old_size {
+        counters.add_logical_data_size(total_size - old_size);
+      }
+    }
+
+    let entry_data = EntryEventData {
+      path: normalized,
+      entry_type: "file".to_string(),
+      content_type: file_record.content_type.clone(),
+      size: file_record.total_size,
+      hash: hex::encode(file_record.chunk_hashes.first().unwrap_or(&vec![])),
+      created_at: file_record.created_at,
+      updated_at: file_record.updated_at,
+      previous_hash: None,
+    };
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
+
+    let elapsed = timer_start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
+
+    Ok(file_record)
+  }
+
   /// Store a file with compression at the given path, splitting data into chunks.
   /// Creates intermediate directories as needed and updates HEAD.
   /// Chunks are compressed individually using the specified algorithm.

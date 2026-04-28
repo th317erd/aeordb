@@ -138,11 +138,8 @@ fn paginated_listing_response(
 // Engine file routes
 // ---------------------------------------------------------------------------
 
-/// Maximum body size for inline PUT /engine/{path} uploads (2 GB).
-/// Files larger than this should use the chunked upload protocol
-/// (PUT /upload/chunks/{hash} + POST /upload/commit) which streams
-/// each 256 KB chunk individually and avoids buffering the full file.
-pub const MAX_INLINE_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// Upload streaming: the PUT handler reads the body in 256KB chunks and stores
+// each chunk individually. The full file is never in memory at once.
 
 // ---------------------------------------------------------------------------
 // POST /files/mkdir — create an empty directory
@@ -195,9 +192,9 @@ pub async fn mkdir(
 /// PUT /engine/*path -- store a file via the custom storage engine.
 ///
 /// Accepts the request body as a stream and buffers up to
-/// `MAX_INLINE_UPLOAD_BYTES` (100 MB). Payloads exceeding this limit
-/// receive a 413 Payload Too Large response directing the caller to
-/// use the chunked upload protocol instead.
+/// The body is streamed in 256KB chunks and stored individually —
+/// the full file is never buffered in memory. Supports files up to
+/// the router-level body limit (10 GB).
 pub async fn engine_store_file(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
@@ -213,27 +210,36 @@ pub async fn engine_store_file(
       .into_response();
   }
 
-  // Stream the body into memory with a hard cap to prevent OOM.
-  // The router-level body limit is 10 GB (shared with chunk uploads),
-  // but this handler enforces a tighter 100 MB limit for inline files.
-  let mut collected = Vec::new();
+  // Stream the body in 256KB chunks — never buffer the full file in memory.
+  // Each chunk is stored individually as it arrives.
+  let chunk_size = crate::engine::directory_ops::DEFAULT_CHUNK_SIZE;
+  let mut chunks: Vec<Vec<u8>> = Vec::new();
+  let mut buffer = Vec::with_capacity(chunk_size);
+  let mut first_bytes = Vec::new();
+  let mut total_size: u64 = 0;
   let mut data_stream = body.into_data_stream();
+
   while let Some(chunk_result) = data_stream.next().await {
     match chunk_result {
-      Ok(chunk) => {
-        if collected.len() + chunk.len() > MAX_INLINE_UPLOAD_BYTES {
-          return ErrorResponse::new(format!(
-            "Payload exceeds maximum inline upload size of {} bytes. \
-             Use the chunked upload protocol (PUT /upload/chunks/{{hash}} + \
-             POST /upload/commit) for files larger than {} MB.",
-            MAX_INLINE_UPLOAD_BYTES,
-            MAX_INLINE_UPLOAD_BYTES / (1024 * 1024),
-          ))
-            .with_code(error_codes::PAYLOAD_TOO_LARGE)
-            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
-            .into_response();
+      Ok(data) => {
+        let mut offset = 0;
+        while offset < data.len() {
+          let space = chunk_size - buffer.len();
+          let take = space.min(data.len() - offset);
+          buffer.extend_from_slice(&data[offset..offset + take]);
+          offset += take;
+
+          // Capture first bytes for content-type detection
+          if first_bytes.len() < 8192 {
+            let need = 8192 - first_bytes.len();
+            first_bytes.extend_from_slice(&data[offset.saturating_sub(take)..offset.min(offset.saturating_sub(take) + need)]);
+          }
+
+          if buffer.len() >= chunk_size {
+            total_size += buffer.len() as u64;
+            chunks.push(std::mem::replace(&mut buffer, Vec::with_capacity(chunk_size)));
+          }
         }
-        collected.extend_from_slice(&chunk);
       }
       Err(_error) => {
         return ErrorResponse::new("Failed to read request body: the upload stream was interrupted or contained invalid data")
@@ -243,6 +249,12 @@ pub async fn engine_store_file(
     }
   }
 
+  // Flush remaining buffer as the last chunk
+  if !buffer.is_empty() {
+    total_size += buffer.len() as u64;
+    chunks.push(buffer);
+  }
+
   let content_type = headers
     .get("content-type")
     .and_then(|value| value.to_str().ok());
@@ -250,8 +262,8 @@ pub async fn engine_store_file(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let directory_ops = DirectoryOps::new(&state.engine);
 
-  let file_record = match directory_ops.store_file_with_full_pipeline(
-    &ctx, &path, &collected, content_type, Some(&*state.plugin_manager)
+  let file_record = match directory_ops.store_file_from_chunks(
+    &ctx, &path, &chunks, total_size, content_type, &first_bytes,
   ) {
     Ok(record) => record,
     Err(error) => {
