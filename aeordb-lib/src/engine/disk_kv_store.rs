@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -11,7 +10,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
 use crate::engine::kv_pages::*;
 use crate::engine::kv_snapshot::ReadSnapshot;
-use crate::engine::kv_stages::KV_STAGES;
+use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
@@ -37,11 +36,13 @@ pub struct DiskKVStore {
     db_file: File,
     /// Offset of the KV block within the database file.
     kv_block_offset: u64,
+    /// Size of the KV block in bytes (pages must fit within this).
+    kv_block_length: u64,
     /// Offset of the hot tail within the database file.
     hot_tail_offset: u64,
     /// Whether the hot tail is enabled (false for temp stores during resize).
     hot_tail_enabled: bool,
-    /// Current stage in the KV_STAGES table.
+    /// Current stage in the KV_STAGE_SIZES table.
     stage: usize,
     /// Hash algorithm (determines hash_length for page layout).
     hash_algo: HashAlgorithm,
@@ -74,12 +75,15 @@ impl DiskKVStore {
         hot_tail_offset: u64,
         stage: usize,
     ) -> EngineResult<Self> {
-        let stage = stage.min(KV_STAGES.len() - 1);
-        let (_block_size, bucket_count) = KV_STAGES[stage];
+        let stage = stage.min(KV_STAGE_SIZES.len() - 1);
         let hash_length = hash_algo.hash_length();
+        let psize = page_size(hash_length);
+        let (_block_size, bucket_count) = stage_params(stage, psize);
+        // kv_block_length is the actual allocated space (may be larger than stage needs)
+        let kv_block_length = hot_tail_offset.saturating_sub(kv_block_offset);
 
         // Write empty pages for all buckets at kv_block_offset
-        let empty_page = vec![0u8; page_size(hash_length)];
+        let empty_page = vec![0u8; psize];
         db_file.seek(SeekFrom::Start(kv_block_offset))?;
         for _ in 0..bucket_count {
             db_file.write_all(&empty_page)?;
@@ -88,7 +92,7 @@ impl DiskKVStore {
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
         let shared_nvt = Arc::new(nvt.clone());
-        let pages = Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count]);
+        let pages = Arc::new(vec![vec![0u8; psize]; bucket_count]);
         let initial_snapshot = ReadSnapshot::new(
             HashMap::new(),
             Arc::clone(&shared_nvt),
@@ -104,6 +108,7 @@ impl DiskKVStore {
             write_buffer: HashMap::new(),
             db_file,
             kv_block_offset,
+            kv_block_length,
             hot_tail_offset,
             hot_tail_enabled: true,
             stage,
@@ -132,10 +137,11 @@ impl DiskKVStore {
         stage: usize,
         hot_entries: Vec<KVEntry>,
     ) -> EngineResult<Self> {
-        let stage = stage.min(KV_STAGES.len() - 1);
-        let (_block_size, bucket_count) = KV_STAGES[stage];
+        let stage = stage.min(KV_STAGE_SIZES.len() - 1);
         let hash_length = hash_algo.hash_length();
         let psize = page_size(hash_length);
+        let (_block_size, bucket_count) = stage_params(stage, psize);
+        let kv_block_length = hot_tail_offset.saturating_sub(kv_block_offset);
 
         // Rebuild entry count by reading each page header
         let mut entry_count = 0;
@@ -186,6 +192,7 @@ impl DiskKVStore {
             write_buffer,
             db_file,
             kv_block_offset,
+            kv_block_length,
             hot_tail_offset,
             hot_tail_enabled: true,
             stage,
@@ -202,7 +209,7 @@ impl DiskKVStore {
 
     /// Create a temporary KV store for resize operations. No hot tail.
     pub fn create_temp(
-        mut db_file: File,
+        db_file: File,
         hash_algo: HashAlgorithm,
         kv_block_offset: u64,
         stage: usize,
@@ -385,23 +392,46 @@ impl DiskKVStore {
         self.db_file.sync_data()?;
         self.write_buffer.clear();
 
-        // Flush hot buffer and clear hot tail (data is now in KV pages)
+        if !overflow_entries.is_empty() {
+            // Publish snapshot BEFORE resize so iter_all sees flushed entries
+            self.publish_snapshot_incremental(&modified_buckets);
+            let old_stage = self.stage;
+            self.resize_to_next_stage()?;
+            if self.stage > old_stage {
+                // Resize succeeded — re-insert overflow and flush again
+                for entry in overflow_entries {
+                    self.write_buffer.insert(entry.hash.clone(), entry);
+                }
+                return self.flush();
+            } else {
+                // Resize blocked (block too small) — keep overflow in write buffer.
+                // They're queryable via snapshot and will be persisted in the hot tail.
+                for entry in overflow_entries {
+                    self.write_buffer.insert(entry.hash.clone(), entry);
+                }
+                // Write overflow entries to hot tail for crash recovery
+                if self.hot_tail_enabled {
+                    let hash_length = self.hash_algo.hash_length();
+                    let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+                    hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+                    self.db_file.sync_data()?;
+                }
+                self.publish_snapshot_incremental(&modified_buckets);
+                self.publish_buffer_only();
+                let elapsed = timer_start.elapsed().as_secs_f64();
+                metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
+                return Ok(());
+            }
+        }
+
+        // All entries flushed to pages — clear hot tail
         self.flush_hot_buffer()?;
         if self.transaction_depth == 0 && self.hot_tail_enabled {
-            // Write empty hot tail
             let hash_length = self.hash_algo.hash_length();
             let _ = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &[], hash_length);
         }
 
         self.publish_snapshot_incremental(&modified_buckets);
-
-        if !overflow_entries.is_empty() {
-            self.resize_to_next_stage()?;
-            for entry in overflow_entries {
-                self.write_buffer.insert(entry.hash.clone(), entry);
-            }
-            return self.flush();
-        }
 
         let elapsed = timer_start.elapsed().as_secs_f64();
         metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
@@ -413,23 +443,35 @@ impl DiskKVStore {
     /// Currently creates a temp sidecar for migration. In the future, this will
     /// do in-place expansion via background WAL relocation (Task 6).
     pub fn resize_to_next_stage(&mut self) -> EngineResult<()> {
-        let new_stage = (self.stage + 1).min(KV_STAGES.len() - 1);
+        let new_stage = (self.stage + 1).min(KV_STAGE_SIZES.len() - 1);
         if new_stage == self.stage {
             return Err(EngineError::IoError(std::io::Error::other(
                 "KV store at maximum stage — cannot resize further",
             )));
         }
 
+        let hash_length = self.hash_algo.hash_length();
+        let psize = page_size(hash_length);
+        let (_block_size, new_bucket_count) = stage_params(new_stage, psize);
+
+        // Check that new pages fit within the KV block
+        let new_pages_size = (new_bucket_count as u64) * (psize as u64);
+        if new_pages_size > self.kv_block_length {
+            // Can't resize in-place — the KV block is too small.
+            // Overflow entries will remain in the write buffer (still queryable
+            // via snapshot). StorageEngine must expand the block before resize.
+            tracing::warn!(
+                "KV resize blocked: stage {} needs {}B but block is {}B. Overflow entries stay in write buffer.",
+                new_stage, new_pages_size, self.kv_block_length,
+            );
+            return Ok(());
+        }
+
         // Read all non-deleted entries
         let all_entries = self.iter_all()?;
 
-        // For now, resize by rebuilding in place (zero pages + re-insert).
-        // The full background relocation (Task 6) will replace this.
-        let (_block_size, new_bucket_count) = KV_STAGES[new_stage];
-        let hash_length = self.hash_algo.hash_length();
-
         // Zero-fill new pages
-        let empty_page = vec![0u8; page_size(hash_length)];
+        let empty_page = vec![0u8; psize];
         for bucket in 0..new_bucket_count {
             let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
             self.db_file.seek(SeekFrom::Start(offset))?;

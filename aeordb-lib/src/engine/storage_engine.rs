@@ -1,5 +1,4 @@
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -122,11 +121,6 @@ pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   pub(crate) kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
-  /// Path to the `.kv` sidecar file, stored at construction time so that
-  /// `stats()` can read its metadata without locking `kv_writer`.
-  /// (Used in stats() — dead_code analysis misses it through RwLock indirection.)
-  #[allow(dead_code)]
-  kv_path: String,
   // The VoidManager tracks reclaimable space for future void-reuse optimization.
   // Currently, find_void is not called by any production code -- new entries always
   // append. When void reuse is implemented, store_entry will check find_void
@@ -149,15 +143,6 @@ impl StorageEngine {
   /// Acquire an exclusive advisory file lock. Returns the locked file handle
   /// which must be kept alive for the duration of the engine's lifetime.
   /// If another process already holds the lock, returns an error immediately.
-  /// Derive the KV sidecar path from the DB path.
-  /// e.g., `/path/to/test.aeordb` → `/path/to/.aeordb-test.kv`
-  fn derive_kv_path(db_path: &str) -> String {
-    let p = Path::new(db_path);
-    let dir = p.parent().unwrap_or_else(|| Path::new("."));
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-    dir.join(format!(".aeordb-{}.kv", stem)).to_string_lossy().to_string()
-  }
-
   fn acquire_file_lock(lock_path: &str) -> EngineResult<std::fs::File> {
     let lock_file = OpenOptions::new()
       .write(true)
@@ -228,8 +213,6 @@ impl StorageEngine {
         writer.update_header(&header)?;
     }
 
-    let kv_path = Self::derive_kv_path(path); // kept for legacy compat
-
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
     let void_manager = VoidManager::new(hash_algo);
@@ -238,7 +221,6 @@ impl StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
-      kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
@@ -272,7 +254,6 @@ impl StorageEngine {
       writer.set_offset(file_header.hot_tail_offset);
     }
 
-    let kv_path = Self::derive_kv_path(path); // kept for struct field compat
     let mut void_manager = VoidManager::new(hash_algo);
 
     let kv_block_offset = file_header.kv_block_offset;
@@ -398,7 +379,6 @@ impl StorageEngine {
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
-      kv_path,
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
@@ -408,56 +388,6 @@ impl StorageEngine {
     engine.counters.store(initialized);
 
     Ok(engine)
-  }
-
-  /// After hot file replay, check if replayed FileRecords are properly
-  /// listed in their parent directories. If not, re-propagate.
-  fn recover_orphaned_files(engine: &StorageEngine, file_record_hashes: &[Vec<u8>]) {
-    let hash_length = engine.hash_algo().hash_length();
-    let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
-    let ctx = crate::engine::request_context::RequestContext::system();
-
-    for hash in file_record_hashes {
-      match engine.get_entry(hash) {
-        Ok(Some((header, _key, value))) => {
-          match crate::engine::file_record::FileRecord::deserialize(
-            &value, hash_length, header.entry_version,
-          ) {
-            Ok(record) => {
-              let path = &record.path;
-              if let Some(parent) = crate::engine::path_utils::parent_path(path) {
-                match ops.list_directory(&parent) {
-                  Ok(children) => {
-                    let file_name = crate::engine::path_utils::file_name(path).unwrap_or("");
-                    let is_listed = children.iter().any(|c| c.name == file_name);
-                    if !is_listed {
-                      tracing::info!(
-                        "Recovering orphaned file '{}' — adding to parent directory",
-                        path,
-                      );
-                      // Re-store the file record at the path key to trigger directory propagation.
-                      // The simplest approach: read the data back and store it again.
-                      // Chunk dedup prevents duplicate storage. This is a recovery path.
-                      if let Ok(data) = ops.read_file(path) {
-                        let ct = record.content_type.as_deref();
-                        if let Err(e) = ops.store_file(&ctx, path, &data, ct) {
-                          tracing::warn!("Failed to recover orphaned file '{}': {}", path, e);
-                        }
-                      }
-                    }
-                  }
-                  Err(_) => {} // Parent doesn't exist or corrupt — skip
-                }
-              }
-            }
-            Err(e) => {
-              tracing::debug!("Skipping non-parseable file record during recovery: {}", e);
-            }
-          }
-        }
-        _ => {} // Entry not found — skip
-      }
-    }
   }
 
   /// Open an existing database file.
@@ -545,9 +475,6 @@ impl StorageEngine {
       ))?;
 
     let offset = writer.append_entry(entry_type, key, value, 0)?;
-    kv.set_hot_tail_offset(writer.current_offset());
-
-    // Update hot tail offset to after the new entry
     kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
@@ -1099,9 +1026,9 @@ impl StorageEngine {
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
 
-    // L9: Use stored kv_path instead of locking kv_writer just to get the path.
-    let kv_size_bytes = std::fs::metadata(&self.kv_path)
-      .map(|m| m.len())
+    // KV block is inside the main .aeordb file. Report its size from the header.
+    let kv_size_bytes = self.writer.read()
+      .map(|w| w.file_header().kv_block_length)
       .unwrap_or(0);
 
     // PERF(M4): This iter_all() + type counting is O(n) over all KV entries.
@@ -1166,8 +1093,6 @@ impl StorageEngine {
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
 
-    // Get path info while holding minimal locks
-    let kv_path = self.kv_path.clone();
     let hash_algo = self.hash_algo;
 
     // Scan the append log (needs read lock on writer)
@@ -1195,8 +1120,6 @@ impl StorageEngine {
     // Writer lock released here
 
     // Create fresh KV in-file at existing offsets
-    let db_path = &kv_path.replace(".aeordb-", "").replace(".kv", ".aeordb");
-    // Get current offsets from the old KV
     let kv_block_offset;
     let hot_tail_offset;
     {
@@ -1257,6 +1180,27 @@ impl StorageEngine {
     }
   }
 
+  /// Try to flush the hot buffer if the KV lock is available.
+  /// Used by the 250ms timer task — non-blocking, skips if writer is busy.
+  pub fn try_flush_hot_buffer(&self) {
+    if let Ok(mut kv) = self.kv_writer.try_lock() {
+      if kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0 {
+        if let Err(e) = kv.flush_hot_buffer() {
+          tracing::warn!("Timer flush failed: {}", e);
+        }
+        // Also persist the header with current hot_tail_offset
+        if let Ok(mut writer) = self.writer.try_write() {
+          let mut header = writer.file_header().clone();
+          header.hot_tail_offset = kv.hot_tail_offset();
+          header.entry_count = kv.len() as u64;
+          if let Err(e) = writer.update_header(&header) {
+            tracing::warn!("Timer header update failed: {}", e);
+          }
+        }
+      }
+    }
+  }
+
   /// Gracefully shut down the engine: flush all buffers and sync to disk.
   ///
   /// This is a best-effort operation. Errors during individual flush steps
@@ -1285,9 +1229,18 @@ impl StorageEngine {
       }
     }
 
-    // Step 3: Sync the WAL file
+    // Step 3: Persist header with current hot_tail_offset and sync WAL
     match self.writer.write() {
       Ok(mut writer) => {
+        // Update header with final offsets
+        if let Ok(kv) = self.kv_writer.lock() {
+          let mut header = writer.file_header().clone();
+          header.hot_tail_offset = kv.hot_tail_offset();
+          header.entry_count = kv.len() as u64;
+          if let Err(e) = writer.update_header(&header) {
+            tracing::error!("Header update failed during shutdown: {}", e);
+          }
+        }
         if let Err(e) = writer.sync() {
           tracing::error!("WAL sync failed during shutdown: {}", e);
         }

@@ -99,7 +99,7 @@ pub use file_record::FileRecord;
 pub use hash_algorithm::HashAlgorithm;
 pub use disk_kv_store::DiskKVStore;
 pub use kv_pages::{
-  KV_STAGES, MAX_ENTRIES_PER_PAGE,
+  KV_STAGE_SIZES, MAX_ENTRIES_PER_PAGE,
   page_size, bucket_page_offset, serialize_page, deserialize_page,
   find_in_page, upsert_in_page, stage_for_count,
 };

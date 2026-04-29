@@ -696,3 +696,8 @@ path = "benches/stress_benchmark.rs"
 [[bin]]
 name = "gc-investigate"
 path = "benches/gc_investigate.rs"
+
+[[test]]
+name = "single_file_spec"
+path = "spec/engine/single_file_spec.rs"
+

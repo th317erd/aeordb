@@ -130,6 +130,21 @@ pub async fn run(
   // multi-node support is wired up.
   let heartbeat_handle = spawn_heartbeat(event_bus.clone(), 1, cancel.clone());
 
+  // Start the KV hot buffer flush timer (250ms).
+  // Flushes buffered KV entries to the hot tail for crash recovery.
+  {
+    let engine_for_timer = engine.clone();
+    let cancel_for_timer = cancel.clone();
+    tokio::spawn(async move {
+      let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+      loop {
+        interval.tick().await;
+        if cancel_for_timer.is_cancelled() { break; }
+        engine_for_timer.try_flush_hot_buffer();
+      }
+    });
+  }
+
   // Start the rate sampler (1 Hz) and metrics pulse (15s) for detailed stats.
   let counters = engine.counters().clone();
   let rate_trackers = Arc::new(RateTrackerSet::new());

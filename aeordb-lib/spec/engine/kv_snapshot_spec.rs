@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -37,13 +37,29 @@ fn make_deleted_entry(seed: u8, offset: u64) -> KVEntry {
     }
 }
 
-/// Read all pages from a KV file into memory.
-fn read_pages_from_kv(kv_path: &std::path::Path, bucket_count: usize, hash_length: usize) -> Vec<Vec<u8>> {
-    let mut file = File::open(kv_path).unwrap();
+/// Create an in-file DiskKVStore at stage 0 inside a temp .aeordb file.
+fn create_temp_kv_store(dir: &std::path::Path) -> DiskKVStore {
+    let db_path = dir.join("test.aeordb");
+    // Create the file and write a minimal header so DiskKVStore can use it
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
+    let kv_block_offset = 256u64; // after file header
+    let kv_block_length = aeordb::engine::kv_stages::initial_block_size();
+    let hot_tail_offset = kv_block_offset + kv_block_length;
+    DiskKVStore::create(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 0).unwrap()
+}
+
+/// Read all pages from an in-file KV at kv_block_offset.
+fn read_pages_from_file(
+    db_path: &std::path::Path,
+    kv_block_offset: u64,
+    bucket_count: usize,
+    hash_length: usize,
+) -> Vec<Vec<u8>> {
+    let mut file = File::open(db_path).unwrap();
     let psize = page_size(hash_length);
     let mut pages = Vec::with_capacity(bucket_count);
     for bucket in 0..bucket_count {
-        let offset = bucket_page_offset(bucket, hash_length);
+        let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
         let mut page_data = vec![0u8; psize];
         file.seek(SeekFrom::Start(offset)).unwrap();
         file.read_exact(&mut page_data).unwrap();
@@ -58,15 +74,19 @@ fn create_flushed_store(
     dir: &std::path::Path,
     entries: &[KVEntry],
 ) -> (usize, Arc<Vec<Vec<u8>>>) {
-    let kv_path = dir.join("test.kv");
-    let mut store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
+    let db_path = dir.join("test.aeordb");
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
+    let kv_block_offset = 256u64;
+    let kv_block_length = aeordb::engine::kv_stages::initial_block_size();
+    let hot_tail_offset = kv_block_offset + kv_block_length;
+    let mut store = DiskKVStore::create(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 0).unwrap();
     for entry in entries {
-        store.insert(entry.clone());
+        store.insert(entry.clone()).unwrap();
     }
     store.flush().unwrap();
     let bucket_count = store.bucket_count();
     let hash_length = HashAlgorithm::Blake3_256.hash_length();
-    let pages = read_pages_from_kv(&kv_path, bucket_count, hash_length);
+    let pages = read_pages_from_file(&db_path, kv_block_offset, bucket_count, hash_length);
     (bucket_count, Arc::new(pages))
 }
 
@@ -89,9 +109,7 @@ fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Vec<u8>>> {
 #[test]
 fn test_snapshot_get_finds_entry_in_buffer() {
     let dir = tempdir().unwrap();
-    let kv_path = dir.path().join("empty.kv");
-    // Create an empty store just so we have a valid .kv file
-    let store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
+    let store = create_temp_kv_store(dir.path());
     let bucket_count = store.bucket_count();
     drop(store);
 
@@ -116,8 +134,7 @@ fn test_snapshot_get_finds_entry_in_buffer() {
 #[test]
 fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
     let dir = tempdir().unwrap();
-    let kv_path = dir.path().join("empty.kv");
-    let store = DiskKVStore::create(&kv_path, HashAlgorithm::Blake3_256, None).unwrap();
+    let store = create_temp_kv_store(dir.path());
     let bucket_count = store.bucket_count();
     drop(store);
 

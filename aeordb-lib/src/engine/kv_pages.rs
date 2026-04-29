@@ -1,8 +1,7 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 
-// Re-export stage table from the kv_stages module for backward compat.
-pub use crate::engine::kv_stages::KV_STAGES;
+pub use crate::engine::kv_stages::KV_STAGE_SIZES;
 
 /// Maximum entries per bucket page.
 pub const MAX_ENTRIES_PER_PAGE: usize = 32;
@@ -116,12 +115,14 @@ pub fn upsert_in_page(entries: &mut Vec<KVEntry>, entry: KVEntry) -> bool {
 
 /// Determine the appropriate stage index for a given total entry count.
 /// Returns the lowest stage whose bucket_count * MAX_ENTRIES_PER_PAGE > entry_count.
-pub fn stage_for_count(entry_count: usize, _hash_length: usize) -> usize {
-    for (stage, (_block_size, buckets)) in KV_STAGES.iter().enumerate() {
+pub fn stage_for_count(entry_count: usize, hash_length: usize) -> usize {
+    let psize = page_size(hash_length);
+    for (stage, &block_size) in KV_STAGE_SIZES.iter().enumerate() {
+        let buckets = crate::engine::kv_stages::buckets_for_block(block_size, psize);
         let capacity = buckets * MAX_ENTRIES_PER_PAGE;
         if entry_count < capacity {
             return stage;
         }
     }
-    KV_STAGES.len() - 1
+    KV_STAGE_SIZES.len() - 1
 }
