@@ -1264,6 +1264,20 @@ impl StorageEngine {
   }
 }
 
+impl Drop for StorageEngine {
+  fn drop(&mut self) {
+    // Ensure all data is flushed to disk when the engine is dropped,
+    // even if the caller forgot to call shutdown(). This prevents data
+    // loss (e.g., API keys written by bootstrap but never persisted).
+    if let Ok(mut kv) = self.kv_writer.lock() {
+      let _ = kv.flush();
+    }
+    if let Ok(mut writer) = self.writer.write() {
+      let _ = writer.sync_all();
+    }
+  }
+}
+
 /// RAII guard that begins a transaction on creation and ends it on drop.
 ///
 /// While this guard is alive, `DiskKVStore::flush()` will skip truncating the
