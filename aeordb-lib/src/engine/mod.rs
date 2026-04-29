@@ -43,6 +43,7 @@ pub mod integrity_scanner;
 pub mod native_parsers;
 pub mod json_parser;
 pub mod kv_pages;
+pub mod kv_stages;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod kv_snapshot;

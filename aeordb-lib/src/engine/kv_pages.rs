@@ -1,18 +1,8 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 
-/// Stage table for KV block growth.
-/// Each stage: (max_file_size_bytes, nvt_bucket_count)
-pub const KV_STAGES: &[(u64, usize)] = &[
-    (64 * 1024,              1_024),   // Stage 0: 64KB, 1K buckets
-    (256 * 1024,             4_096),   // Stage 1: 256KB, 4K buckets
-    (1024 * 1024,            8_192),   // Stage 2: 1MB, 8K buckets
-    (4 * 1024 * 1024,       16_384),   // Stage 3: 4MB, 16K buckets
-    (16 * 1024 * 1024,      32_768),   // Stage 4: 16MB, 32K buckets
-    (64 * 1024 * 1024,      65_536),   // Stage 5: 64MB, 64K buckets
-    (256 * 1024 * 1024,     65_536),   // Stage 6: 256MB, 64K buckets
-    (1024 * 1024 * 1024,   131_072),   // Stage 7: 1GB, 128K buckets
-];
+// Re-export stage table from the kv_stages module for backward compat.
+pub use crate::engine::kv_stages::KV_STAGES;
 
 /// Maximum entries per bucket page.
 pub const MAX_ENTRIES_PER_PAGE: usize = 32;
