@@ -13,6 +13,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord, NO_EXPIRY_SENTINEL, MAX_EXPIRY_DAYS};
 use crate::engine::api_key_rules::KeyRule;
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::user::is_root;
 
@@ -115,12 +116,16 @@ pub async fn create_share_link(
     // 3. Build rules: one rule per shared path, then deny-all fallback.
     //    The permission middleware uses ancestor-aware matching for share keys,
     //    so parent directories are automatically navigable without explicit rules.
+    let directory_ops = DirectoryOps::new(&state.engine);
     let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() + 1);
     for path in &body.paths {
-        if path.ends_with('/') {
-            // Directory: allow everything inside + the directory itself
+        // Detect directories: explicit trailing slash or exists as directory in DB
+        let is_dir = path.ends_with('/')
+            || directory_ops.list_directory(&normalize_path(path)).is_ok();
+        if is_dir {
+            let dir_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
             rules.push(KeyRule {
-                glob: format!("{}**", path),
+                glob: format!("{}**", dir_path),
                 permitted: body.permissions.clone(),
             });
         } else {
@@ -213,9 +218,13 @@ pub async fn create_share_link(
         }
     };
 
-    // 9. Build URL.
+    // 9. Build URL — use the glob to determine the shared path for the URL.
+    //    For directories, the glob is "/path/**" so we strip the "**" to get "/path/".
     let base = body.base_url.unwrap_or_default();
-    let encoded_path = simple_url_encode(&first_path);
+    let url_path = rules.first()
+        .map(|r| r.glob.trim_end_matches("**").to_string())
+        .unwrap_or(first_path.clone());
+    let encoded_path = simple_url_encode(&url_path);
     let url = format!(
         "{}/?token={}&path={}&perm={}",
         base.trim_end_matches('/'),
