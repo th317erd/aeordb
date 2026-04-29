@@ -21,6 +21,9 @@ pub struct FileHeader {
   pub resize_in_progress: bool,
   pub buffer_kvs_offset: u64,
   pub buffer_nvt_offset: u64,
+  pub hot_tail_offset: u64,
+  pub kv_block_stage: u8,
+  pub resize_target_stage: u8,
   pub backup_type: u8,        // 0=normal, 1=full export, 2=patch
   pub base_hash: Vec<u8>,     // source version hash
   pub target_hash: Vec<u8>,   // destination version hash
@@ -48,6 +51,9 @@ impl FileHeader {
       resize_in_progress: false,
       buffer_kvs_offset: 0,
       buffer_nvt_offset: 0,
+      hot_tail_offset: 0,
+      kv_block_stage: 0,
+      resize_target_stage: 0,
       backup_type: 0,
       base_hash: vec![0u8; hash_length],
       target_hash: vec![0u8; hash_length],
@@ -123,6 +129,18 @@ impl FileHeader {
     // buffer_nvt_offset: 8 bytes
     buffer[offset..offset + 8].copy_from_slice(&self.buffer_nvt_offset.to_le_bytes());
     offset += 8;
+
+    // hot_tail_offset: 8 bytes
+    buffer[offset..offset + 8].copy_from_slice(&self.hot_tail_offset.to_le_bytes());
+    offset += 8;
+
+    // kv_block_stage: 1 byte
+    buffer[offset] = self.kv_block_stage;
+    offset += 1;
+
+    // resize_target_stage: 1 byte
+    buffer[offset] = self.resize_target_stage;
+    offset += 1;
 
     // backup_type: 1 byte
     buffer[offset] = self.backup_type;
@@ -213,6 +231,18 @@ impl FileHeader {
     let buffer_nvt_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
     offset += 8;
 
+    // hot_tail_offset: 8 bytes
+    let hot_tail_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    offset += 8;
+
+    // kv_block_stage: 1 byte
+    let kv_block_stage = bytes[offset];
+    offset += 1;
+
+    // resize_target_stage: 1 byte
+    let resize_target_stage = bytes[offset];
+    offset += 1;
+
     // backup_type: 1 byte
     let backup_type = bytes[offset];
     offset += 1;
@@ -241,6 +271,9 @@ impl FileHeader {
       resize_in_progress,
       buffer_kvs_offset,
       buffer_nvt_offset,
+      hot_tail_offset,
+      kv_block_stage,
+      resize_target_stage,
       backup_type,
       base_hash,
       target_hash,
