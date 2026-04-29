@@ -109,7 +109,7 @@ pub async fn run(
       println!("==========================================================");
       println!();
     }
-    drop(engine);
+    engine.shutdown().ok();
   }
 
   let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
