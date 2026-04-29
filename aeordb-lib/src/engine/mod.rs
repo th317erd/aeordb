@@ -30,6 +30,7 @@ pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
 pub mod gc;
+pub mod hot_tail;
 pub mod group;
 pub mod health;
 pub mod phonetic;
