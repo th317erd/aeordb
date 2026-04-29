@@ -60,6 +60,31 @@ impl AppendWriter {
     })
   }
 
+  pub fn file_path(&self) -> &Path {
+    &self.file_path
+  }
+
+  /// Set the current write offset. Used after KV block creation to skip
+  /// past the reserved space at the head of the file.
+  pub fn set_offset(&mut self, offset: u64) {
+    self.current_offset = offset;
+  }
+
+  /// Current write offset (end of WAL entries, before hot tail).
+  pub fn current_offset(&self) -> u64 {
+    self.current_offset
+  }
+
+  /// Update the file header in place (seek to 0, write 256 bytes, sync).
+  pub fn update_header(&mut self, header: &FileHeader) -> EngineResult<()> {
+    self.file_header = header.clone();
+    let bytes = header.serialize();
+    self.file.seek(SeekFrom::Start(0))?;
+    self.file.write_all(&bytes)?;
+    self.file.sync_data()?;
+    Ok(())
+  }
+
   pub fn append_entry(
     &mut self,
     entry_type: EntryType,

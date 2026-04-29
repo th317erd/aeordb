@@ -24,8 +24,26 @@ pub struct EntryScanner {
 
 impl EntryScanner {
   pub fn new(mut file: File) -> EngineResult<Self> {
-    let file_length = file.seek(SeekFrom::End(0))?;
-    let start_offset = FILE_HEADER_SIZE as u64;
+    // Read header to determine where the WAL starts (after KV block)
+    file.seek(SeekFrom::Start(0))?;
+    let mut header_bytes = [0u8; FILE_HEADER_SIZE];
+    file.read_exact(&mut header_bytes)?;
+    let header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+
+    // WAL starts after KV block. If hot_tail_offset is set, use it as the
+    // start of the WAL area (kv_block_offset + kv_block_length).
+    let start_offset = if header.hot_tail_offset > 0 && header.kv_block_length > 0 {
+      header.kv_block_offset + header.kv_block_length
+    } else {
+      FILE_HEADER_SIZE as u64
+    };
+
+    // Scan up to hot_tail_offset (not EOF, which includes the hot tail data)
+    let file_length = if header.hot_tail_offset > 0 {
+      header.hot_tail_offset
+    } else {
+      file.seek(SeekFrom::End(0))?
+    };
     file.seek(SeekFrom::Start(start_offset))?;
 
     Ok(EntryScanner {

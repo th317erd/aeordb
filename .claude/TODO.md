@@ -180,3 +180,21 @@
 - [ ] Fork merging (true merge with conflict detection)
 - [ ] Encryption, vaults, zero-knowledge multi-user storage
 - [ ] Multi-database sharding
+
+---
+
+## In Progress: Single-File Database Refactor
+
+### Phase 1: Foundations (independent)
+- [ ] Task 1: Hot tail format (`hot_tail.rs` + tests)
+- [ ] Task 2: KV stage table (`kv_stages.rs`)
+- [ ] Task 3: FileHeader updates (`hot_tail_offset`, `kv_block_stage`, `resize_target_stage`)
+
+### Phase 2: Core Rewrite (sequential)
+- [ ] Task 4: DiskKVStore — in-file KV pages + hot tail (major rewrite)
+- [ ] Task 5: StorageEngine — single-file create/open, no sidecars, timer flush
+- [ ] Task 6: KV resize — background batch relocation, expand KV in place
+
+### Phase 3: Verification
+- [ ] Task 7: Integration tests (single-file lifecycle, crash recovery, resize)
+- [ ] Task 8: Full verification (stress test, no sidecars, docs)

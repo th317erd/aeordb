@@ -1,38 +1,46 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::hot_tail;
 use crate::engine::kv_pages::*;
 use crate::engine::kv_snapshot::ReadSnapshot;
+use crate::engine::kv_stages::KV_STAGES;
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
 
-/// Number of buffered writes before auto-flush to disk.
+/// Number of buffered writes before auto-flush to KV bucket pages.
 const WRITE_BUFFER_THRESHOLD: usize = 512;
 
-/// Number of entries buffered before flushing to the hot file.
-const HOT_BUFFER_THRESHOLD: usize = 10;
+/// Number of entries buffered before flushing to the hot tail.
+const HOT_BUFFER_THRESHOLD: usize = 1_000;
 
-/// A disk-resident KV store backed by NVT-indexed bucket pages.
+/// A disk-resident KV store using NVT-indexed bucket pages inside the main
+/// database file. No sidecar files — the KV block lives at the head of the
+/// .aeordb file and the hot tail dangles off the end.
 ///
-/// The KV data lives in a separate `.kv` file. Lookups flow through:
-/// write_buffer -> NVT bucket -> disk page scan.
+/// Lookup flow: write_buffer → NVT bucket → disk page scan.
 pub struct DiskKVStore {
     /// NVT for O(1) bucket lookup from hash bytes.
     nvt: NormalizedVectorTable,
     /// Write buffer: absorbs recent inserts before flushing to disk.
     write_buffer: HashMap<Vec<u8>, KVEntry>,
-    /// File handle for the KV pages on disk.
-    kv_file: File,
-    /// Path to the KV file.
-    kv_path: PathBuf,
+    /// File handle for the main .aeordb database file.
+    /// KV pages are at kv_block_offset; hot tail at hot_tail_offset.
+    db_file: File,
+    /// Offset of the KV block within the database file.
+    kv_block_offset: u64,
+    /// Offset of the hot tail within the database file.
+    hot_tail_offset: u64,
+    /// Whether the hot tail is enabled (false for temp stores during resize).
+    hot_tail_enabled: bool,
     /// Current stage in the KV_STAGES table.
     stage: usize,
     /// Hash algorithm (determines hash_length for page layout).
@@ -41,86 +49,45 @@ pub struct DiskKVStore {
     entry_count: usize,
     /// Number of buckets at the current stage.
     bucket_count: usize,
-    /// Write-ahead journal file for crash recovery. None = disabled (tests).
-    hot_file: Option<File>,
-    /// Path to the hot file on disk.
-    hot_path: Option<PathBuf>,
-    /// Micro-buffer of entries pending write to the hot file.
+    /// Micro-buffer of entries pending write to the hot tail.
     hot_buffer: Vec<KVEntry>,
     /// Shared snapshot for lock-free readers. Updated after every mutation.
     snapshot: Arc<ArcSwap<ReadSnapshot>>,
     /// Shared NVT wrapped in Arc — re-cloned only on flush/resize.
     shared_nvt: Arc<NormalizedVectorTable>,
     /// Set to true when a corrupt KV page is detected and zeroed during flush.
-    /// The engine should trigger a full KV rebuild when this flag is set.
     pub needs_rebuild: bool,
-    /// Transaction nesting depth. When > 0, flush() skips truncating the hot
-    /// file so that crash recovery can replay all entries written during the
-    /// transaction. Decremented by end_transaction(); truncation happens when
-    /// the depth returns to 0.
+    /// Transaction nesting depth. When > 0, flush() skips clearing the hot tail.
     pub transaction_depth: u32,
 }
 
 impl DiskKVStore {
-    /// Create a new disk KV store at the given path.
-    /// Writes empty pages for stage 0.
-    /// When `hot_dir` is Some, a write-ahead hot file is created for crash recovery.
-    pub fn create(path: &Path, hash_algo: HashAlgorithm, hot_dir: Option<&Path>) -> EngineResult<Self> {
-        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
-            // Derive db_name: "test.aeordb.kv" -> stem "test.aeordb" -> stem "test"
-            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-            let db_name = std::path::Path::new(kv_stem)
-                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
-            let (f, p) = Self::init_hot_file(dir, db_name)?;
-            (Some(f), Some(p))
-        } else {
-            (None, None)
-        };
-
-        Self::init_at_stage(path, hash_algo, 0, hot_file, hot_path)
-    }
-
-    /// Create a new disk KV store at the given path with a specific stage.
-    /// Used during resize operations. No hot file -- callers manage their own journaling.
-    pub fn create_at_stage(
-        path: &Path,
+    /// Create a new in-file KV store. Writes empty bucket pages at kv_block_offset.
+    ///
+    /// `db_file` is a clone of the main .aeordb file handle.
+    /// `kv_block_offset` is where the KV block starts (typically 256, after file header).
+    /// `hot_tail_offset` is where the hot tail lives (end of the file).
+    pub fn create(
+        mut db_file: File,
         hash_algo: HashAlgorithm,
+        kv_block_offset: u64,
+        hot_tail_offset: u64,
         stage: usize,
     ) -> EngineResult<Self> {
         let stage = stage.min(KV_STAGES.len() - 1);
-        Self::init_at_stage(path, hash_algo, stage, None, None)
-    }
-
-    /// Shared initialization: create a new KV file at the given stage, write empty
-    /// pages, build NVT + snapshot, and return the assembled `DiskKVStore`.
-    fn init_at_stage(
-        path: &Path,
-        hash_algo: HashAlgorithm,
-        stage: usize,
-        hot_file: Option<File>,
-        hot_path: Option<PathBuf>,
-    ) -> EngineResult<Self> {
         let (_block_size, bucket_count) = KV_STAGES[stage];
         let hash_length = hash_algo.hash_length();
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(EngineError::from)?;
-
-        // Write empty pages for all buckets
+        // Write empty pages for all buckets at kv_block_offset
         let empty_page = vec![0u8; page_size(hash_length)];
+        db_file.seek(SeekFrom::Start(kv_block_offset))?;
         for _ in 0..bucket_count {
-            file.write_all(&empty_page)?;
+            db_file.write_all(&empty_page)?;
         }
-        file.sync_all()?;
+        db_file.sync_data()?;
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
-
         let shared_nvt = Arc::new(nvt.clone());
-        let kv_path = path.to_path_buf();
         let pages = Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count]);
         let initial_snapshot = ReadSnapshot::new(
             HashMap::new(),
@@ -135,14 +102,14 @@ impl DiskKVStore {
         Ok(DiskKVStore {
             nvt,
             write_buffer: HashMap::new(),
-            kv_file: file,
-            kv_path,
+            db_file,
+            kv_block_offset,
+            hot_tail_offset,
+            hot_tail_enabled: true,
             stage,
             hash_algo,
             entry_count: 0,
             bucket_count,
-            hot_file,
-            hot_path,
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
@@ -151,103 +118,80 @@ impl DiskKVStore {
         })
     }
 
-    /// Open an existing disk KV store from a `.kv` file.
-    /// Rebuilds entry count by scanning page headers.
-    /// When `hot_dir` is Some, a write-ahead hot file is created for crash recovery.
-    pub fn open(path: &Path, hash_algo: HashAlgorithm, hot_dir: Option<&Path>) -> EngineResult<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(EngineError::from)?;
-
-        let file_size = file.metadata()?.len();
+    /// Open an existing in-file KV store by reading bucket pages from the database file.
+    ///
+    /// `db_file` is a clone of the main .aeordb file handle.
+    /// `kv_block_offset` and `hot_tail_offset` come from the file header.
+    /// `stage` comes from the file header's `kv_block_stage`.
+    /// `hot_entries` are entries loaded from the hot tail (passed in by StorageEngine).
+    pub fn open(
+        mut db_file: File,
+        hash_algo: HashAlgorithm,
+        kv_block_offset: u64,
+        hot_tail_offset: u64,
+        stage: usize,
+        hot_entries: Vec<KVEntry>,
+    ) -> EngineResult<Self> {
+        let stage = stage.min(KV_STAGES.len() - 1);
+        let (_block_size, bucket_count) = KV_STAGES[stage];
         let hash_length = hash_algo.hash_length();
-        let psize = page_size(hash_length) as u64;
+        let psize = page_size(hash_length);
 
-        if psize == 0 {
-            return Err(EngineError::CorruptEntry {
-                offset: 0,
-                reason: "Zero page size".to_string(),
-            });
-        }
-
-        // Determine stage from file size: find the largest stage whose
-        // bucket_count * page_size matches the file size.
-        let mut stage = 0;
-        let mut bucket_count = KV_STAGES[0].1;
-        for (s, (_block_size, buckets)) in KV_STAGES.iter().enumerate() {
-            let expected_size = *buckets as u64 * psize;
-            if file_size >= expected_size {
-                stage = s;
-                bucket_count = *buckets;
-            }
-        }
-
-        // Rebuild entry count by reading each page header (2 bytes each)
+        // Rebuild entry count by reading each page header
         let mut entry_count = 0;
         let mut header_buf = [0u8; 2];
         for bucket in 0..bucket_count {
-            let offset = bucket as u64 * psize;
-            if offset + 2 > file_size {
-                break;
-            }
-            file.seek(SeekFrom::Start(offset))?;
-            if file.read_exact(&mut header_buf).is_ok() {
-                let count = u16::from_le_bytes(header_buf) as usize;
-                entry_count += count;
+            let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
+            db_file.seek(SeekFrom::Start(offset))?;
+            if db_file.read_exact(&mut header_buf).is_ok() {
+                entry_count += u16::from_le_bytes(header_buf) as usize;
             }
         }
 
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
-
-        let (hot_file, hot_path) = if let Some(dir) = hot_dir {
-            // Derive db_name: "test.aeordb.kv" → stem "test.aeordb" → stem "test"
-            let kv_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-            let db_name = std::path::Path::new(kv_stem)
-                .file_stem().and_then(|s| s.to_str()).unwrap_or(kv_stem);
-            let (f, p) = Self::init_hot_file(dir, db_name)?;
-            (Some(f), Some(p))
-        } else {
-            (None, None)
-        };
-
         let shared_nvt = Arc::new(nvt.clone());
-        let kv_path = path.to_path_buf();
+
         // Read all pages for initial snapshot
         let pages = {
-            let psize = page_size(hash_length);
             let mut pages = Vec::with_capacity(bucket_count);
             for bucket in 0..bucket_count {
-                let offset = bucket_page_offset(bucket, hash_length);
+                let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
                 let mut page_data = vec![0u8; psize];
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(&mut page_data)?;
+                db_file.seek(SeekFrom::Start(offset))?;
+                db_file.read_exact(&mut page_data)?;
                 pages.push(page_data);
             }
             Arc::new(pages)
         };
+
+        // Pre-populate write buffer with hot entries (not yet flushed to pages)
+        let mut write_buffer = HashMap::new();
+        for entry in hot_entries {
+            write_buffer.insert(entry.hash.clone(), entry);
+        }
+        let hot_count = write_buffer.len();
+
         let initial_snapshot = ReadSnapshot::new(
-            HashMap::new(),
+            write_buffer.clone(),
             Arc::clone(&shared_nvt),
             bucket_count,
             hash_algo,
-            entry_count,
+            entry_count + hot_count,
             pages,
         );
         let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
 
         Ok(DiskKVStore {
             nvt,
-            write_buffer: HashMap::new(),
-            kv_file: file,
-            kv_path,
+            write_buffer,
+            db_file,
+            kv_block_offset,
+            hot_tail_offset,
+            hot_tail_enabled: true,
             stage,
             hash_algo,
-            entry_count,
+            entry_count: entry_count + hot_count,
             bucket_count,
-            hot_file,
-            hot_path,
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
@@ -256,42 +200,45 @@ impl DiskKVStore {
         })
     }
 
+    /// Create a temporary KV store for resize operations. No hot tail.
+    pub fn create_temp(
+        mut db_file: File,
+        hash_algo: HashAlgorithm,
+        kv_block_offset: u64,
+        stage: usize,
+    ) -> EngineResult<Self> {
+        let mut store = Self::create(db_file, hash_algo, kv_block_offset, 0, stage)?;
+        store.hot_tail_enabled = false;
+        Ok(store)
+    }
+
+    // ========================================================================
+    // Core KV operations
+    // ========================================================================
+
     /// Look up an entry by hash.
-    /// Search order: write_buffer -> disk page.
+    /// Search order: write_buffer → disk page.
     pub fn get(&mut self, hash: &[u8]) -> Option<KVEntry> {
-        // 1. Check write buffer first (most recent writes)
         if let Some(entry) = self.write_buffer.get(hash) {
-            if entry.is_deleted() {
-                return None;
-            }
+            if entry.is_deleted() { return None; }
             return Some(entry.clone());
         }
 
-        // 2. Read from disk via NVT bucket mapping
         let bucket_index = self.nvt.bucket_for_value(hash);
         let hash_length = self.hash_algo.hash_length();
-        let offset = bucket_page_offset(bucket_index, hash_length);
+        let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
         let psize = page_size(hash_length);
 
         let mut page_data = vec![0u8; psize];
-        if self.kv_file.seek(SeekFrom::Start(offset)).is_err() {
-            return None;
-        }
-        if self.kv_file.read_exact(&mut page_data).is_err() {
-            return None;
-        }
+        if self.db_file.seek(SeekFrom::Start(offset)).is_err() { return None; }
+        if self.db_file.read_exact(&mut page_data).is_err() { return None; }
 
         let entries = deserialize_page(&page_data, hash_length).ok()?;
         let found = find_in_page(&entries, hash)?.clone();
-
         Some(found)
     }
 
-    /// Insert or update an entry in the write buffer.
-    /// Auto-flushes when the buffer exceeds WRITE_BUFFER_THRESHOLD.
-    /// Also journals the entry to the hot file buffer for crash recovery.
-    /// H9: Returns Result so callers can detect flush/hot-buffer failures
-    /// instead of silently losing writes.
+    /// Insert or update an entry.
     pub fn insert(&mut self, entry: KVEntry) -> EngineResult<()> {
         let is_new = !self.write_buffer.contains_key(&entry.hash)
             && !self.entry_exists_on_disk(&entry.hash);
@@ -302,8 +249,8 @@ impl DiskKVStore {
             self.entry_count += 1;
         }
 
-        // Journal to hot file buffer
-        if self.hot_file.is_some() {
+        // Journal to hot buffer
+        if self.hot_tail_enabled {
             self.hot_buffer.push(entry);
             if self.hot_buffer.len() >= HOT_BUFFER_THRESHOLD {
                 self.flush_hot_buffer()?;
@@ -324,9 +271,7 @@ impl DiskKVStore {
         Ok(())
     }
 
-    /// Bulk insert entries without snapshot publishing, hot file journaling,
-    /// or disk dedup checks. Used during resize where all entries are known-unique
-    /// and the store is a temporary target. Call `flush()` after all inserts.
+    /// Bulk insert without snapshot publishing or hot journaling.
     pub fn bulk_insert(&mut self, entries: &[KVEntry]) {
         for entry in entries {
             self.write_buffer.insert(entry.hash.clone(), entry.clone());
@@ -340,16 +285,10 @@ impl DiskKVStore {
         }
     }
 
-    /// Flush write buffer to disk without publishing a snapshot.
-    /// Used by `bulk_insert` during resize to avoid O(entries × pages) I/O.
     fn flush_no_snapshot(&mut self) -> EngineResult<()> {
-        if self.write_buffer.is_empty() {
-            return Ok(());
-        }
+        if self.write_buffer.is_empty() { return Ok(()); }
 
         let hash_length = self.hash_algo.hash_length();
-        let mut overflow_entries: Vec<KVEntry> = Vec::new();
-
         let buffer_entries: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
         let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
         for entry in buffer_entries {
@@ -358,79 +297,51 @@ impl DiskKVStore {
         }
 
         for (bucket_index, new_entries) in by_bucket {
-            let offset = bucket_page_offset(bucket_index, hash_length);
+            let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
             let psize = page_size(hash_length);
 
             let mut page_data = vec![0u8; psize];
-            self.kv_file.seek(SeekFrom::Start(offset))?;
-            self.kv_file.read_exact(&mut page_data)?;
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            self.db_file.read_exact(&mut page_data)?;
 
             let mut existing = match deserialize_page(&page_data, hash_length) {
                 Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!(
-                        "Corrupt KV page at bucket {}: {}. Resetting page to empty.",
-                        bucket_index, e
-                    );
+                Err(_) => {
                     let empty_page = vec![0u8; psize];
-                    self.kv_file.seek(SeekFrom::Start(offset))?;
-                    self.kv_file.write_all(&empty_page)?;
+                    self.db_file.seek(SeekFrom::Start(offset))?;
+                    self.db_file.write_all(&empty_page)?;
                     self.needs_rebuild = true;
                     Vec::new()
                 }
             };
 
             for entry in new_entries {
-                if !upsert_in_page(&mut existing, entry.clone()) {
-                    overflow_entries.push(entry);
-                }
+                upsert_in_page(&mut existing, entry);
             }
 
             let serialized = serialize_page(&existing, hash_length);
-            self.kv_file.seek(SeekFrom::Start(offset))?;
-            self.kv_file.write_all(&serialized)?;
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            self.db_file.write_all(&serialized)?;
         }
 
-        self.kv_file.sync_data()?;
+        self.db_file.sync_data()?;
         self.write_buffer.clear();
-
-        if !overflow_entries.is_empty() {
-            // During bulk insert into a temp store, overflow shouldn't happen
-            // (the store was created at the right stage). If it does, just
-            // put them back in the buffer for the caller to handle.
-            for entry in overflow_entries {
-                self.write_buffer.insert(entry.hash.clone(), entry);
-            }
-        }
-
         Ok(())
     }
 
-    /// Check if an entry exists on disk by consulting the in-memory snapshot
-    /// instead of performing direct disk I/O.
     fn entry_exists_on_disk(&self, hash: &[u8]) -> bool {
         let current = self.snapshot.load();
-        // get_raw includes deleted entries — fine for the dedup check
-        // (we want to know if the hash exists at all, regardless of deletion state).
         current.get_raw(hash).is_some()
     }
 
-    /// Flush the write buffer to disk.
-    /// Groups entries by bucket, reads each affected page, merges, writes back.
-    /// If any bucket page overflows (> MAX_ENTRIES_PER_PAGE), automatically
-    /// resizes to the next stage and retries the flush.
+    /// Flush the write buffer to KV bucket pages.
     pub fn flush(&mut self) -> EngineResult<()> {
-        if self.write_buffer.is_empty() {
-            return Ok(());
-        }
+        if self.write_buffer.is_empty() { return Ok(()); }
         let timer_start = std::time::Instant::now();
 
         let hash_length = self.hash_algo.hash_length();
         let mut overflow_entries: Vec<KVEntry> = Vec::new();
 
-        // Collect entries to flush WITHOUT draining the buffer yet.
-        // The buffer stays intact so concurrent readers (via snapshot) can
-        // still find these entries while we're writing disk pages.
         let buffer_entries: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
         let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
         for entry in buffer_entries {
@@ -438,65 +349,52 @@ impl DiskKVStore {
             by_bucket.entry(bucket).or_default().push(entry);
         }
 
-        // Track which buckets are modified for incremental snapshot publishing
         let modified_buckets: Vec<usize> = by_bucket.keys().cloned().collect();
 
-        // For each affected bucket: read page, merge, write back
         for (bucket_index, new_entries) in by_bucket {
-            let offset = bucket_page_offset(bucket_index, hash_length);
+            let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
             let psize = page_size(hash_length);
 
-            // Read existing page
             let mut page_data = vec![0u8; psize];
-            self.kv_file.seek(SeekFrom::Start(offset))?;
-            self.kv_file.read_exact(&mut page_data)?;
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            self.db_file.read_exact(&mut page_data)?;
 
             let mut existing = match deserialize_page(&page_data, hash_length) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!(
-                        "Corrupt KV page at bucket {}: {}. Resetting page to empty.",
-                        bucket_index, e
-                    );
+                    tracing::warn!("Corrupt KV page at bucket {}: {}. Resetting.", bucket_index, e);
                     let empty_page = vec![0u8; psize];
-                    self.kv_file.seek(SeekFrom::Start(offset))?;
-                    self.kv_file.write_all(&empty_page)?;
+                    self.db_file.seek(SeekFrom::Start(offset))?;
+                    self.db_file.write_all(&empty_page)?;
                     self.needs_rebuild = true;
                     Vec::new()
                 }
             };
 
-            // Merge new entries into existing page
             for entry in new_entries {
                 if !upsert_in_page(&mut existing, entry.clone()) {
                     overflow_entries.push(entry);
                 }
             }
 
-            // Write merged page back
             let serialized = serialize_page(&existing, hash_length);
-            self.kv_file.seek(SeekFrom::Start(offset))?;
-            self.kv_file.write_all(&serialized)?;
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            self.db_file.write_all(&serialized)?;
         }
 
-        self.kv_file.sync_data()?;
-
-        // NOW drain the buffer — disk pages are stable, safe for readers.
+        self.db_file.sync_data()?;
         self.write_buffer.clear();
 
-        // Hot file: flush remaining buffer, then truncate (all data is on KV pages now).
-        // Skip truncation inside a transaction so crash recovery can replay all entries.
+        // Flush hot buffer and clear hot tail (data is now in KV pages)
         self.flush_hot_buffer()?;
-        if self.transaction_depth == 0 {
-            self.truncate_hot_file()?;
+        if self.transaction_depth == 0 && self.hot_tail_enabled {
+            // Write empty hot tail
+            let hash_length = self.hash_algo.hash_length();
+            let _ = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &[], hash_length);
         }
 
-        // Incremental snapshot publish — only re-read modified pages from disk.
-        // Unmodified pages are shared via Arc from the previous snapshot.
         self.publish_snapshot_incremental(&modified_buckets);
 
-        // Handle overflows: resize to next stage and retry
-        // resize_to_next_stage() does a full page re-read since ALL pages change.
         if !overflow_entries.is_empty() {
             self.resize_to_next_stage()?;
             for entry in overflow_entries {
@@ -505,16 +403,15 @@ impl DiskKVStore {
             return self.flush();
         }
 
-        // Record flush latency (only on non-overflow path to avoid double counting)
         let elapsed = timer_start.elapsed().as_secs_f64();
         metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
 
         Ok(())
     }
 
-    /// Resize the KV store to the next stage (more buckets, larger file).
-    /// Reads all entries from the current file, creates a new file at the
-    /// next stage, inserts all non-deleted entries, and swaps the files.
+    /// Resize the KV store to the next stage.
+    /// Currently creates a temp sidecar for migration. In the future, this will
+    /// do in-place expansion via background WAL relocation (Task 6).
     pub fn resize_to_next_stage(&mut self) -> EngineResult<()> {
         let new_stage = (self.stage + 1).min(KV_STAGES.len() - 1);
         if new_stage == self.stage {
@@ -523,63 +420,43 @@ impl DiskKVStore {
             )));
         }
 
-        // Read all non-deleted entries from current file
+        // Read all non-deleted entries
         let all_entries = self.iter_all()?;
 
-        // Create new store at a temp path with the next stage
-        let temp_path = self.kv_path.with_extension("kv.resize");
-        let _ = std::fs::remove_file(&temp_path);
+        // For now, resize by rebuilding in place (zero pages + re-insert).
+        // The full background relocation (Task 6) will replace this.
+        let (_block_size, new_bucket_count) = KV_STAGES[new_stage];
+        let hash_length = self.hash_algo.hash_length();
 
-        let mut new_store = DiskKVStore::create_at_stage(
-            &temp_path, self.hash_algo, new_stage,
-        )?;
-
-        // Bulk insert all entries (no snapshot publishing, no hot file, no dedup checks)
-        new_store.bulk_insert(&all_entries);
-        new_store.flush_no_snapshot()?;
-
-        // Drop the new store (closes its file handle) so the temp file
-        // can be renamed on all platforms. Clear its write buffer first
-        // to prevent the Drop impl from trying to flush.
-        new_store.write_buffer.clear();
-        drop(new_store);
-
-        // Swap files: rename temp -> current path
-        std::fs::rename(&temp_path, &self.kv_path)?;
-
-        // Ensure the rename is durable by fsyncing the parent directory
-        if let Some(parent) = self.kv_path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        // Zero-fill new pages
+        let empty_page = vec![0u8; page_size(hash_length)];
+        for bucket in 0..new_bucket_count {
+            let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            self.db_file.write_all(&empty_page)?;
         }
-
-        // Reopen at the original path
-        self.kv_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.kv_path)?;
+        self.db_file.sync_data()?;
 
         // Update internal state
         self.stage = new_stage;
-        self.bucket_count = KV_STAGES[new_stage].1;
-        self.nvt = NormalizedVectorTable::new(
-            Box::new(HashConverter), self.bucket_count,
-        );
-        self.entry_count = all_entries.len();
+        self.bucket_count = new_bucket_count;
+        self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
+        self.entry_count = 0;
 
-        // Publish full snapshot with fresh NVT clone (bucket layout changed — ALL pages differ)
+        // Re-insert all entries
+        self.bulk_insert(&all_entries);
+        self.flush_no_snapshot()?;
+
+        self.entry_count = all_entries.len();
         self.publish_full_snapshot_with_new_nvt();
 
         Ok(())
     }
 
-    /// Check if an entry exists by hash.
     pub fn contains(&mut self, hash: &[u8]) -> bool {
         self.get(hash).is_some()
     }
 
-    /// Mark an entry as deleted by setting the KV_FLAG_DELETED flag.
     pub fn mark_deleted(&mut self, hash: &[u8]) {
         if let Some(mut entry) = self.get(hash) {
             entry.type_flags |= KV_FLAG_DELETED;
@@ -589,8 +466,6 @@ impl DiskKVStore {
         }
     }
 
-    /// Batch mark entries as deleted. Publishes snapshot once at the end.
-    /// Used by GC sweep to avoid O(n²) buffer cloning.
     pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) {
         for hash in hashes {
             if let Some(mut entry) = self.get(hash) {
@@ -598,31 +473,25 @@ impl DiskKVStore {
                 self.write_buffer.insert(hash.clone(), entry);
                 self.entry_count = self.entry_count.saturating_sub(1);
             }
-
-            // Flush if buffer gets large to avoid unbounded memory growth
             if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
                 if let Err(e) = self.flush() {
                     tracing::warn!("Flush failed during mark_deleted_batch: {}", e);
                 }
             }
         }
-        // One publish at the end
         self.publish_buffer_only();
     }
 
-    /// Iterate all entries: reads every page from disk and merges with write buffer.
-    /// Excludes deleted entries.
     pub fn iter_all(&mut self) -> EngineResult<Vec<KVEntry>> {
         let hash_length = self.hash_algo.hash_length();
         let psize = page_size(hash_length);
         let mut all: HashMap<Vec<u8>, KVEntry> = HashMap::new();
 
-        // Read all pages from disk
         for bucket in 0..self.bucket_count {
-            let offset = bucket_page_offset(bucket, hash_length);
+            let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
             let mut page_data = vec![0u8; psize];
-            self.kv_file.seek(SeekFrom::Start(offset))?;
-            if self.kv_file.read_exact(&mut page_data).is_ok() {
+            self.db_file.seek(SeekFrom::Start(offset))?;
+            if self.db_file.read_exact(&mut page_data).is_ok() {
                 if let Ok(entries) = deserialize_page(&page_data, hash_length) {
                     for entry in entries {
                         all.insert(entry.hash.clone(), entry);
@@ -631,35 +500,17 @@ impl DiskKVStore {
             }
         }
 
-        // Merge write buffer (buffer takes priority)
         for (hash, entry) in &self.write_buffer {
             all.insert(hash.clone(), entry.clone());
         }
 
-        // Filter out deleted entries
-        Ok(all
-            .into_values()
-            .filter(|e| !e.is_deleted())
-            .collect())
+        Ok(all.into_values().filter(|e| !e.is_deleted()).collect())
     }
 
-    /// Total entry count (non-deleted).
-    pub fn len(&self) -> usize {
-        self.entry_count
-    }
+    pub fn len(&self) -> usize { self.entry_count }
+    pub fn is_empty(&self) -> bool { self.entry_count == 0 }
+    pub fn write_buffer_len(&self) -> usize { self.write_buffer.len() }
 
-    /// Whether the store has zero entries.
-    pub fn is_empty(&self) -> bool {
-        self.entry_count == 0
-    }
-
-    /// Number of entries currently buffered in the write buffer.
-    pub fn write_buffer_len(&self) -> usize {
-        self.write_buffer.len()
-    }
-
-    /// Update type_flags for an entry identified by hash.
-    /// Returns true if the entry was found and updated.
     pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> bool {
         if let Some(mut entry) = self.get(hash) {
             let entry_type = entry.type_flags & 0x0F;
@@ -672,8 +523,6 @@ impl DiskKVStore {
         }
     }
 
-    /// Update file offset for an entry identified by hash.
-    /// Returns true if the entry was found and updated.
     pub fn update_offset(&mut self, hash: &[u8], new_offset: u64) -> bool {
         if let Some(mut entry) = self.get(hash) {
             entry.offset = new_offset;
@@ -685,59 +534,38 @@ impl DiskKVStore {
         }
     }
 
-    /// Current stage index.
-    pub fn stage(&self) -> usize {
-        self.stage
-    }
+    pub fn stage(&self) -> usize { self.stage }
+    pub fn bucket_count(&self) -> usize { self.bucket_count }
+    pub fn hash_algo(&self) -> HashAlgorithm { self.hash_algo }
+    pub fn hot_tail_offset(&self) -> u64 { self.hot_tail_offset }
 
-    /// Current bucket count.
-    pub fn bucket_count(&self) -> usize {
-        self.bucket_count
-    }
-
-    /// Path to the KV file.
-    pub fn path(&self) -> &Path {
-        &self.kv_path
-    }
-
-    /// Hash algorithm in use.
-    pub fn hash_algo(&self) -> HashAlgorithm {
-        self.hash_algo
+    /// Update the hot tail offset (called by StorageEngine after a WAL append).
+    pub fn set_hot_tail_offset(&mut self, offset: u64) {
+        self.hot_tail_offset = offset;
     }
 
     // ========================================================================
-    // Snapshot publishing methods
+    // Snapshot publishing
     // ========================================================================
 
-    /// Read all KV pages into memory for a snapshot.
-    /// Returns an Arc-wrapped Vec of page data, one per bucket.
     fn read_all_pages(&mut self) -> Arc<Vec<Vec<u8>>> {
         let hash_length = self.hash_algo.hash_length();
         let psize = page_size(hash_length);
         let mut pages = Vec::with_capacity(self.bucket_count);
-
         for bucket in 0..self.bucket_count {
-            let offset = bucket_page_offset(bucket, hash_length);
+            let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
             let mut page_data = vec![0u8; psize];
-            if self.kv_file.seek(SeekFrom::Start(offset)).is_ok() {
-                if self.kv_file.read_exact(&mut page_data).is_ok() {
+            if self.db_file.seek(SeekFrom::Start(offset)).is_ok() {
+                if self.db_file.read_exact(&mut page_data).is_ok() {
                     pages.push(page_data);
                     continue;
                 }
             }
-            // If read fails, push empty page
             pages.push(vec![0u8; psize]);
         }
-
         Arc::new(pages)
     }
 
-    /// Cheap publish: clone buffer + reuse existing pages (Arc clone = atomic op).
-    /// Called on every insert/mutation. Does NOT read pages from disk.
-    ///
-    /// PERF(M5): This clones the write_buffer HashMap on every mutation (~25KB at 512 entries).
-    /// For higher throughput, consider using a persistent/immutable HashMap (e.g., `im::HashMap`)
-    /// which would make snapshot publishing O(1) via structural sharing instead of O(n) cloning.
     fn publish_buffer_only(&mut self) {
         let current_pages = {
             let current = self.snapshot.load();
@@ -754,8 +582,6 @@ impl DiskKVStore {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// Publish a full snapshot by re-reading ALL pages from disk.
-    /// Used after resize_to_next_stage where all pages change.
     fn publish_full_snapshot(&mut self) {
         let pages = self.read_all_pages();
         let snapshot = ReadSnapshot::new(
@@ -769,32 +595,23 @@ impl DiskKVStore {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// Incremental snapshot publish: only re-read modified pages from disk.
-    /// Unmodified pages are shared via Arc from the previous snapshot.
     fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) {
-        // Only re-clone the NVT if the bucket count changed (e.g. after a resize).
-        // The NVT is determined entirely by bucket_count, so if it hasn't changed
-        // the existing Arc is still valid and we avoid an expensive clone.
         if self.shared_nvt.bucket_count() != self.nvt.bucket_count() {
             self.shared_nvt = Arc::new(self.nvt.clone());
         }
 
-        // Get current pages from existing snapshot
         let current = self.snapshot.load();
         let old_pages = current.pages();
-
-        // Clone the outer Vec (just pointers), but share unmodified inner Vecs
         let mut new_pages = (**old_pages).clone();
 
-        // Only read modified pages from disk
         let hash_length = self.hash_algo.hash_length();
         let psize = page_size(hash_length);
         for &bucket in modified_buckets {
             if bucket < new_pages.len() {
-                let offset = bucket_page_offset(bucket, hash_length);
+                let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
                 let mut page_data = vec![0u8; psize];
-                if self.kv_file.seek(SeekFrom::Start(offset)).is_ok() {
-                    let _ = self.kv_file.read_exact(&mut page_data);
+                if self.db_file.seek(SeekFrom::Start(offset)).is_ok() {
+                    let _ = self.db_file.read_exact(&mut page_data);
                 }
                 new_pages[bucket] = page_data;
             }
@@ -811,132 +628,50 @@ impl DiskKVStore {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// Publish a full snapshot with a fresh NVT clone (called after resize).
     fn publish_full_snapshot_with_new_nvt(&mut self) {
         self.shared_nvt = Arc::new(self.nvt.clone());
         self.publish_full_snapshot();
     }
 
-    /// Get a reference to the ArcSwap for readers to load snapshots from.
     pub fn snapshot_handle(&self) -> &Arc<ArcSwap<ReadSnapshot>> {
         &self.snapshot
     }
 
     // ========================================================================
-    // Hot file (write-ahead journal) methods
+    // Hot tail (replaces hot file)
     // ========================================================================
 
-    /// Initialize the hot file. Called during create/open.
-    ///
-    /// The "001" suffix in the hot file name is a vestige of planned rotation
-    /// that was never implemented. All hot writes go to this single file, which
-    /// is truncated after each flush. Hot file rotation is not needed for
-    /// correctness -- the single file provides adequate crash recovery.
-    fn init_hot_file(hot_dir: &Path, db_name: &str) -> EngineResult<(File, PathBuf)> {
-        let hot_name = format!(".aeordb-{}-hot001", db_name);
-        let hot_path = hot_dir.join(hot_name);
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&hot_path)
-            .map_err(|e| EngineError::IoError(std::io::Error::other(
-                format!(
-                    "Cannot open hot file at {}: {}. \
-                     The database cannot start without a hot file for crash recovery. \
-                     Check permissions and disk space, or specify --hot-dir to use a different location.",
-                    hot_path.display(), e
-                ),
-            )))?;
-
-        Ok((file, hot_path))
-    }
-
-    /// Flush the hot buffer to the hot file on disk.
+    /// Flush the hot buffer to the hot tail at the end of the database file.
     pub fn flush_hot_buffer(&mut self) -> EngineResult<()> {
-        if self.hot_buffer.is_empty() || self.hot_file.is_none() {
+        if self.hot_buffer.is_empty() || !self.hot_tail_enabled {
             return Ok(());
         }
 
         let hash_length = self.hash_algo.hash_length();
-        let entry_size = hash_length + 1 + 8;
 
-        if let Some(ref mut file) = self.hot_file {
-            for entry in &self.hot_buffer {
-                let mut buf = Vec::with_capacity(entry_size);
-                let hash_bytes = &entry.hash;
-                buf.extend_from_slice(&hash_bytes[..hash_length.min(hash_bytes.len())]);
-                // Pad if hash is shorter than hash_length
-                if hash_bytes.len() < hash_length {
-                    buf.extend(std::iter::repeat(0u8).take(hash_length - hash_bytes.len()));
-                }
-                buf.push(entry.type_flags);
-                buf.extend_from_slice(&entry.offset.to_le_bytes());
-                file.write_all(&buf)?;
-            }
-            file.sync_data()?;
-            self.hot_buffer.clear();
-        }
+        // Collect ALL entries that need to be in the hot tail:
+        // everything in the write buffer (these haven't been flushed to pages yet)
+        let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+
+        hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+        self.db_file.sync_data()?;
+        self.hot_buffer.clear();
 
         Ok(())
     }
 
-    /// Read entries from a hot file on disk.
-    pub fn read_hot_file(path: &Path, hash_length: usize) -> EngineResult<Vec<KVEntry>> {
-        let mut file = File::open(path)?;
-        let file_size = file.metadata()?.len() as usize;
-        let entry_size = hash_length + 1 + 8;
-
-        if file_size == 0 {
-            return Ok(Vec::new());
-        }
-
-        let entry_count = file_size / entry_size;
-        let mut entries = Vec::with_capacity(entry_count);
-
-        let mut buf = vec![0u8; entry_size];
-        for _ in 0..entry_count {
-            if file.read_exact(&mut buf).is_err() {
-                break; // truncated entry at end — skip
-            }
-            let hash = buf[..hash_length].to_vec();
-            let type_flags = buf[hash_length];
-            let offset = u64::from_le_bytes(buf[hash_length + 1..hash_length + 9].try_into().unwrap());
-            entries.push(KVEntry { type_flags, hash, offset });
-        }
-
-        Ok(entries)
-    }
-
-    /// Truncate the hot file (after successful KV flush).
-    /// H8: fsync after truncation ensures the truncate is durable — without it,
-    /// a crash could leave stale entries on disk that get replayed on restart.
-    pub(crate) fn truncate_hot_file(&mut self) -> EngineResult<()> {
-        if let Some(ref mut file) = self.hot_file {
-            file.set_len(0)?;
-            file.sync_all()?;
-            file.seek(SeekFrom::Start(0))?;
-        }
-        Ok(())
-    }
-
-    /// Return the path to the hot file, if one is configured.
-    pub fn hot_path(&self) -> Option<&Path> {
-        self.hot_path.as_deref()
-    }
-
-    /// Return the number of entries currently in the hot buffer (for testing).
+    /// Number of entries in the hot buffer.
     pub fn hot_buffer_len(&self) -> usize {
         self.hot_buffer.len()
     }
-
 }
 
 impl Drop for DiskKVStore {
     fn drop(&mut self) {
-        // Best-effort flush of any remaining write buffer entries to disk.
-        if let Err(e) = self.flush() {
-            tracing::error!("DiskKVStore: flush failed during drop: {}", e);
+        if !self.write_buffer.is_empty() {
+            if let Err(e) = self.flush() {
+                tracing::error!("DiskKVStore: failed to flush on drop: {}", e);
+            }
         }
     }
 }

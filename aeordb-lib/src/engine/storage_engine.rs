@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -187,19 +188,47 @@ impl StorageEngine {
 
   /// Create a new database file at the given path with an optional hot directory
   /// for crash-recovery write-ahead logging.
-  pub fn create_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
-    // Acquire advisory file lock to prevent multiple processes from opening
-    // the same database. The lock is held for the lifetime of the engine.
+  ///
+  /// NOTE: `hot_dir` is ignored — hot data is stored in the hot tail at the end
+  /// of the main .aeordb file. The parameter is kept for API backward compat.
+  pub fn create_with_hot_dir(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
-    let writer = AppendWriter::create(Path::new(path))?;
+    let mut writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
 
-    let kv_path = Self::derive_kv_path(path);
-    // Remove stale KV file if it exists (e.g. from a previous failed create)
-    let _ = std::fs::remove_file(&kv_path);
-    let kv_store = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
+    // Open a second file handle for the KV store (same .aeordb file)
+    let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
+    let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+    let hash_length = hash_algo.hash_length();
+    let kv_block_length = crate::engine::kv_stages::initial_block_size();
+    // hot_tail_offset = after header + KV block
+    let hot_tail_offset = kv_block_offset + kv_block_length;
+
+    let kv_store = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
+
+    // Set the append writer's offset past the KV block so WAL entries
+    // don't overwrite the KV pages.
+    writer.set_offset(hot_tail_offset);
+
+    // Write empty hot tail
+    {
+        let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+        let _ = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &[], hash_length);
+    }
+
+    // Update file header with KV layout info
+    {
+        let mut header = writer.file_header().clone();
+        header.kv_block_offset = kv_block_offset;
+        header.kv_block_length = kv_block_length;
+        header.kv_block_stage = 0;
+        header.hot_tail_offset = hot_tail_offset;
+        writer.update_header(&header)?;
+    }
+
+    let kv_path = Self::derive_kv_path(path); // kept for legacy compat
 
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
@@ -222,102 +251,53 @@ impl StorageEngine {
 
   /// Internal open logic shared by `open` and `open_for_import`.
   ///
-  /// If the `.kv` file already exists on disk, it is opened directly — no
-  /// full entry scan is needed for the KV index. We still scan for void
-  /// entries (they're tracked in-memory, not persisted in the KV file).
+  /// The KV block and hot tail are inside the .aeordb file. On open:
+  /// 1. Read file header for KV/hot tail offsets
+  /// 2. Read hot tail entries (crash recovery buffer)
+  /// 3. Open KV store from in-file bucket pages
+  /// 4. Scan WAL for void entries (in-memory optimization)
   ///
-  /// If the `.kv` file does NOT exist, we create it and populate it from a
-  /// full scan of the main `.aeordb` file, including deletion replay.
-  ///
-  /// When `hot_dir` is Some, hot files are replayed into the KV store on open,
-  /// then deleted. A new hot file is initialized for ongoing crash recovery.
-  fn open_internal(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
-    // Acquire advisory file lock to prevent multiple processes from opening
-    // the same database. The lock is held for the lifetime of the engine.
+  /// If the hot tail is corrupt, falls back to a full WAL scan rebuild.
+  fn open_internal(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
-    let writer = AppendWriter::open(Path::new(path))?;
+    let mut writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
-
-    let kv_path = Self::derive_kv_path(path);
-
-    let mut void_manager = VoidManager::new(hash_algo);
-
-    // Decide whether to reuse the existing .kv file or rebuild from scan.
-    // The .kv is valid if:
-    //   1. It exists and has a valid file size (multiple of page_size)
-    //   2. It can be opened without errors
-    //   3. It's not stale — if the .aeordb has data, the .kv must have entries
-    let aeordb_has_entries = writer.file_size() > crate::engine::file_header::FILE_HEADER_SIZE as u64;
     let hash_length = hash_algo.hash_length();
-    let min_kv_size = crate::engine::kv_pages::KV_STAGES[0].1 as u64
-      * crate::engine::kv_pages::page_size(hash_length) as u64;
+    let file_header = writer.file_header().clone();
 
-    let kv_is_valid = if Path::new(&kv_path).exists() {
-      // Check file size first — a valid .kv is at least stage-0 size
-      let kv_file_size = std::fs::metadata(&kv_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-      if kv_file_size < min_kv_size {
-        // Too small to be a valid .kv — remove and rebuild
-        let _ = std::fs::remove_file(&kv_path);
-        false
-      } else {
-        match DiskKVStore::open(Path::new(&kv_path), hash_algo, None) {
-          Ok(kv) => {
-            if aeordb_has_entries && kv.len() == 0 {
-              // Stale .kv — remove and rebuild
-              drop(kv);
-              let _ = std::fs::remove_file(&kv_path);
-              false
-            } else {
-              // Valid — close and re-open below
-              drop(kv);
-              true
-            }
-          }
-          Err(_) => {
-            // Corrupt .kv — remove and rebuild
-            let _ = std::fs::remove_file(&kv_path);
-            false
-          }
-        }
-      }
-    } else {
-      false
-    };
-
-    // Collect hot file entries to replay (before opening the KV store).
-    let mut hot_entries_to_replay: Vec<KVEntry> = Vec::new();
-    if let Some(hdir) = hot_dir {
-      let db_name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("db");
-      let hot_pattern = format!(".aeordb-{}-hot", db_name);
-      if let Ok(dir_entries) = std::fs::read_dir(hdir) {
-        for dir_entry in dir_entries.flatten() {
-          let name = dir_entry.file_name();
-          let name_str = name.to_string_lossy();
-          if name_str.starts_with(&hot_pattern) {
-            let hash_length = hash_algo.hash_length();
-            if let Ok(hot_entries) = DiskKVStore::read_hot_file(&dir_entry.path(), hash_length) {
-              if !hot_entries.is_empty() {
-                hot_entries_to_replay.extend(hot_entries);
-              }
-            }
-            // Delete the hot file after reading
-            let _ = std::fs::remove_file(dir_entry.path());
-          }
-        }
-      }
+    // Set writer offset to hot_tail_offset so new entries go before the hot tail
+    if file_header.hot_tail_offset > 0 {
+      writer.set_offset(file_header.hot_tail_offset);
     }
 
-    let kv_store = if kv_is_valid {
-      // KV file is valid — open it directly (skip full KV rebuild).
-      let kv = DiskKVStore::open(Path::new(&kv_path), hash_algo, hot_dir)?;
+    let kv_path = Self::derive_kv_path(path); // kept for struct field compat
+    let mut void_manager = VoidManager::new(hash_algo);
 
-      // Still scan for void entries (they're an in-memory optimization,
-      // not persisted in the KV file).
+    let kv_block_offset = file_header.kv_block_offset;
+    let kv_block_stage = file_header.kv_block_stage as usize;
+    let hot_tail_offset = file_header.hot_tail_offset;
+    let kv_block_valid = kv_block_offset > 0 && hot_tail_offset > kv_block_offset;
+
+    // Read hot tail entries from end of file
+    let hot_entries = if hot_tail_offset > 0 {
+      let mut f = OpenOptions::new().read(true).open(path)?;
+      crate::engine::hot_tail::read_hot_tail(&mut f, hot_tail_offset, hash_length)
+        .unwrap_or_default()
+    } else {
+      Vec::new()
+    };
+
+    let kv_store = if kv_block_valid {
+      // KV block is in the file — open from in-file pages
+      let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
+      let kv = DiskKVStore::open(
+        kv_file, hash_algo, kv_block_offset, hot_tail_offset,
+        kv_block_stage, hot_entries,
+      )?;
+
+      // Scan for void entries (in-memory, not in KV)
       let scanner = writer.scan_entries()?;
       for scanned_result in scanner {
         let scanned = match scanned_result {
@@ -334,8 +314,13 @@ impl StorageEngine {
 
       kv
     } else {
-      // No KV file — create and populate from a full entry scan.
-      let mut kv = DiskKVStore::create(Path::new(&kv_path), hash_algo, hot_dir)?;
+      // No valid KV block — create from full WAL scan (dirty startup)
+      let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+      let kv_block_length = crate::engine::kv_stages::initial_block_size();
+      let hot_tail_offset = kv_block_offset + kv_block_length;
+
+      let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
+      let mut kv = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
 
       // First pass: rebuild KV store from entry headers, collecting deletion records.
       // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
@@ -404,40 +389,8 @@ impl StorageEngine {
       kv
     };
 
-    // H13: Warn if the KV store looks significantly stale compared to the
-    // .aeordb file header's entry count. This can happen if the .kv file was
-    // copied from an older backup or the process crashed after writing entries
-    // but before flushing the KV. The hot file mechanism should recover recent
-    // writes, but a large gap suggests the .kv file should be deleted to force
-    // a full rebuild.
-    if aeordb_has_entries {
-      let file_entry_count = writer.file_header().entry_count;
-      if file_entry_count > 100 && kv_store.len() < (file_entry_count as usize / 4) {
-        tracing::warn!(
-          "KV store may be stale: {} entries vs ~{} in .aeordb file header. \
-           The hot file should recover recent writes, but consider deleting \
-           the .kv file to force a full rebuild if data appears missing.",
-          kv_store.len(), file_entry_count
-        );
-      }
-    }
-
-    // Replay hot entries into the KV store, then flush
-    let mut kv_store = kv_store;
-    let mut replayed_file_record_hashes: Vec<Vec<u8>> = Vec::new();
-
-    if !hot_entries_to_replay.is_empty() {
-      tracing::info!("Replaying {} hot file entries", hot_entries_to_replay.len());
-      for entry in &hot_entries_to_replay {
-        if entry.entry_type() == crate::engine::kv_store::KV_TYPE_FILE_RECORD {
-          replayed_file_record_hashes.push(entry.hash.clone());
-        }
-      }
-      for entry in hot_entries_to_replay {
-        kv_store.insert(entry)?;
-      }
-      kv_store.flush()?;
-    }
+    // Hot tail entries are already loaded into the DiskKVStore write buffer
+    // by DiskKVStore::open() — no separate replay step needed.
 
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
@@ -453,11 +406,6 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
-
-    // Recovery: re-propagate orphaned files from incomplete transactions
-    if !replayed_file_record_hashes.is_empty() {
-      Self::recover_orphaned_files(&engine, &replayed_file_record_hashes);
-    }
 
     Ok(engine)
   }
@@ -597,6 +545,10 @@ impl StorageEngine {
       ))?;
 
     let offset = writer.append_entry(entry_type, key, value, 0)?;
+    kv.set_hot_tail_offset(writer.current_offset());
+
+    // Update hot tail offset to after the new entry
+    kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
@@ -634,6 +586,7 @@ impl StorageEngine {
       ))?;
 
     let offset = writer.append_entry_with_compression(entry_type, key, value, flags, CompressionAlgorithm::None)?;
+    kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
@@ -679,6 +632,7 @@ impl StorageEngine {
       0,
       compression_algo,
     )?;
+    kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
@@ -718,6 +672,7 @@ impl StorageEngine {
       flags,
       compression_algo,
     )?;
+    kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
@@ -879,6 +834,7 @@ impl StorageEngine {
       ))?;
 
     let offset = writer.append_entry(entry_type, key, value, 0)?;
+    kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: kv_type,
@@ -923,6 +879,7 @@ impl StorageEngine {
         &entry.value,
         0, // flags
       )?;
+    kv.set_hot_tail_offset(writer.current_offset());
       offsets.push(offset);
     }
 
@@ -1237,13 +1194,21 @@ impl StorageEngine {
     };
     // Writer lock released here
 
-    // Delete old KV and create fresh
-    let _ = std::fs::remove_file(&kv_path);
-    let mut new_kv = DiskKVStore::create(
-      std::path::Path::new(&kv_path),
-      hash_algo,
-      None,
+    // Create fresh KV in-file at existing offsets
+    let db_path = &kv_path.replace(".aeordb-", "").replace(".kv", ".aeordb");
+    // Get current offsets from the old KV
+    let kv_block_offset;
+    let hot_tail_offset;
+    {
+      let old_kv = self.kv_writer.lock()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+      hot_tail_offset = old_kv.hot_tail_offset();
+    }
+    let kv_file = OpenOptions::new().read(true).write(true).open(
+      self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?.file_path()
     )?;
+    let mut new_kv = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
 
     // Insert all entries
     let mut count = 0;
@@ -1285,8 +1250,8 @@ impl StorageEngine {
     if let Ok(mut kv) = self.kv_writer.lock() {
       kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
       if kv.transaction_depth == 0 {
-        if let Err(e) = kv.truncate_hot_file() {
-          tracing::warn!("Failed to truncate hot file after transaction: {}", e);
+        if let Err(e) = kv.flush_hot_buffer() {
+          tracing::warn!("Failed to flush hot buffer after transaction: {}", e);
         }
       }
     }
