@@ -139,15 +139,9 @@ impl AppendWriter {
     self.file.write_all(key)?;
     self.file.write_all(value)?;
 
-    // Flush data to disk. We use sync_data() instead of sync_all() because we only
-    // need data durability — not metadata (timestamps, file size). sync_data() skips
-    // the metadata fsync, saving one syscall per write. The metadata is non-critical
-    // for crash recovery since we rebuild state from entry contents, not file metadata.
-    //
-    // PERF(H14): For further throughput gains, consider group commit (batch fsync
-    // across multiple entries) or skipping per-entry fsync entirely when a hot file
-    // provides crash recovery journaling.
-    self.file.sync_data()?;
+    // No per-entry fsync — the hot tail (flushed every 250ms) provides crash
+    // recovery. WAL data reaches disk via the periodic timer sync in
+    // try_flush_hot_buffer(). This eliminates ~4,000 fsync calls per 1GB upload.
 
     self.current_offset = entry_offset + total_length as u64;
     self.file_header.entry_count += 1;
@@ -232,8 +226,14 @@ impl AppendWriter {
     Ok(total_length)
   }
 
-  /// Sync the file to disk. Call after batch nosync operations.
+  /// Sync WAL data to disk. Uses sync_data() (skips metadata fsync).
   pub fn sync(&mut self) -> EngineResult<()> {
+    self.file.sync_data()?;
+    Ok(())
+  }
+
+  /// Full sync including metadata. Use for shutdown.
+  pub fn sync_all(&mut self) -> EngineResult<()> {
     self.file.sync_all()?;
     Ok(())
   }

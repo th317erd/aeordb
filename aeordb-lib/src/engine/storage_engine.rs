@@ -1183,6 +1183,15 @@ impl StorageEngine {
   /// Try to flush the hot buffer if the KV lock is available.
   /// Used by the 250ms timer task — non-blocking, skips if writer is busy.
   pub fn try_flush_hot_buffer(&self) {
+    // Sync WAL data to disk first — entries written since last sync are in the
+    // OS page cache. This must happen BEFORE writing the hot tail, so that any
+    // offsets referenced by the hot tail point to durable data.
+    if let Ok(mut writer) = self.writer.try_write() {
+      if let Err(e) = writer.sync() {
+        tracing::warn!("Timer WAL sync failed: {}", e);
+      }
+    }
+
     if let Ok(mut kv) = self.kv_writer.try_lock() {
       if kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
@@ -1241,7 +1250,7 @@ impl StorageEngine {
             tracing::error!("Header update failed during shutdown: {}", e);
           }
         }
-        if let Err(e) = writer.sync() {
+        if let Err(e) = writer.sync_all() {
           tracing::error!("WAL sync failed during shutdown: {}", e);
         }
       }
