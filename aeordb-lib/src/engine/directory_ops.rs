@@ -865,8 +865,18 @@ impl<'a> DirectoryOps<'a> {
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash("/", &algo)?;
 
+    // If the root directory exists and has children, leave it alone.
     if self.engine.has_entry(&dir_key)? {
-      return Ok(());
+      match self.list_directory("/") {
+        Ok(children) if !children.is_empty() => return Ok(()),
+        _ => {
+          // Root entry exists but is empty or unreadable — continue to
+          // create a fresh one. This self-heals after a repair where the
+          // root directory's children list was overwritten by a previous
+          // startup on a corrupt database.
+          tracing::debug!("Root directory exists but is empty, will recreate");
+        }
+      }
     }
 
     self.engine.store_entry(
@@ -887,6 +897,65 @@ impl<'a> DirectoryOps<'a> {
     self.engine.update_head(&content_key)?;
 
     Ok(())
+  }
+
+  /// Rebuild the directory tree by scanning all file records in the KV and
+  /// re-propagating their parent directories up to root. Used by `verify --repair`
+  /// when the root directory is empty but files exist (e.g., after a KV rebuild
+  /// where the root directory entry was overwritten by a prior corrupt session).
+  pub fn rebuild_directory_tree(&self, ctx: &RequestContext) -> EngineResult<usize> {
+    let hash_length = self.engine.hash_algo().hash_length();
+    let snapshot = self.engine.kv_snapshot.load();
+    let all_entries = snapshot.iter_all()?;
+
+    let mut paths_propagated = 0;
+    let mut file_records_found = 0;
+    let mut skipped_system = 0;
+    let mut skipped_error = 0;
+    for entry in &all_entries {
+      let kv_type = entry.type_flags & 0x0F;
+      if kv_type != crate::engine::kv_store::KV_TYPE_FILE_RECORD { continue; }
+      file_records_found += 1;
+
+      // Read the file record to get its path
+      match self.engine.get_entry(&entry.hash) {
+        Ok(Some((header, _key, value))) => {
+          match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+            Ok(record) => {
+              let path = &record.path;
+              if path.is_empty() || path.starts_with("/.aeordb-") { skipped_system += 1; continue; }
+
+              // Build child entry and propagate to parents
+              let child = ChildEntry {
+                name: crate::engine::path_utils::file_name(path).unwrap_or("").to_string(),
+                entry_type: crate::engine::entry_type::EntryType::FileRecord.to_u8(),
+                hash: entry.hash.clone(),
+                total_size: record.total_size,
+                content_type: record.content_type.clone(),
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                virtual_time: 0,
+                node_id: 0,
+              };
+              if let Err(e) = self.update_parent_directories(path, child) {
+                tracing::debug!("Skipping path '{}' during rebuild: {}", path, e);
+                continue;
+              }
+              paths_propagated += 1;
+            }
+            Err(_) => { skipped_error += 1; continue; }
+          }
+        }
+        _ => { skipped_error += 1; continue; }
+      }
+    }
+
+    tracing::debug!(
+      file_records_found, paths_propagated, skipped_system, skipped_error,
+      "rebuild_directory_tree complete"
+    );
+
+    Ok(paths_propagated)
   }
 
   /// Detect the compression algorithm for a file based on its parent's index config.

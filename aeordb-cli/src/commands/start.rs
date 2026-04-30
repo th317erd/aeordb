@@ -98,10 +98,11 @@ pub async fn run(
   }
   println!();
 
-  // For SelfContained mode, bootstrap the root key using the engine before
-  // building the app (preserves existing behavior).
+  // Build the app (single engine open — no separate bootstrap engine).
+  let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
+
+  // For SelfContained mode, bootstrap the root key using the already-open engine.
   if auth_mode == AuthMode::SelfContained {
-    let engine = create_engine_with_hot_dir(database, Some(hot_dir_ref));
     if let Some(root_key) = bootstrap_root_key(&engine).unwrap_or(None) {
       println!("==========================================================");
       println!("  ROOT API KEY (shown once, save it now!):");
@@ -109,10 +110,7 @@ pub async fn run(
       println!("==========================================================");
       println!();
     }
-    engine.shutdown().ok();
   }
-
-  let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode(database, &auth_mode, Some(hot_dir_ref), cors_flag);
 
   if let Some(root_key) = file_bootstrap_key {
     println!("==========================================================");

@@ -144,6 +144,24 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         ));
     }
 
+    // Repair 3: Rebuild directory tree after KV rebuild to ensure
+    // directory entries reflect the current file set (not stale empty entries
+    // from a previous broken session).
+    if report.missing_kv_entries > 0 && report.file_records > 0 {
+        let ops = DirectoryOps::new(engine);
+        let ctx = crate::engine::request_context::RequestContext::system();
+        match ops.rebuild_directory_tree(&ctx) {
+            Ok(count) => {
+                report.repairs.push(format!(
+                    "Directory tree rebuilt ({} paths re-propagated)", count
+                ));
+            }
+            Err(e) => {
+                report.repairs.push(format!("Directory tree rebuild failed: {}", e));
+            }
+        }
+    }
+
     // Persist repairs to disk
     if !report.repairs.is_empty() {
         match engine.shutdown() {
