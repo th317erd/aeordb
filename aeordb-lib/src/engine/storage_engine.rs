@@ -647,9 +647,17 @@ impl StorageEngine {
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    let (header, key, value) = writer.read_entry_at_shared(kv_entry.offset)?;
-
-    Ok(Some((header, key, value)))
+    let result = writer.read_entry_at_shared(kv_entry.offset);
+    if result.is_err() {
+      tracing::debug!(
+        offset = kv_entry.offset,
+        hash = %hex::encode(&hash[..8.min(hash.len())]),
+        type_flags = kv_entry.type_flags,
+        kv_block_end = 256 + 65536,
+        "get_entry: read failed at KV offset"
+      );
+    }
+    result.map(|t| Some(t))
   }
 
   /// Retrieve an entry by hash with BLAKE3 hash verification.
