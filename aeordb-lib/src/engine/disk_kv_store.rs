@@ -591,6 +591,11 @@ impl DiskKVStore {
     pub fn is_empty(&self) -> bool { self.entry_count == 0 }
     pub fn write_buffer_len(&self) -> usize { self.write_buffer.len() }
 
+    /// Look up an entry in the write buffer only (no disk read).
+    pub fn get_buffered(&self, hash: &[u8]) -> Option<&KVEntry> {
+        self.write_buffer.get(hash)
+    }
+
     /// Clear the write buffer without flushing. Used before dropping a KV
     /// store that is being replaced (e.g., after rebuild_kv) to prevent
     /// the Drop impl from overwriting newly-rebuilt pages with stale data.

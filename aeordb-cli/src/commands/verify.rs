@@ -27,7 +27,57 @@ pub fn run(database: &str, repair: bool) {
     let report = if repair {
         println!("Running with --repair...");
         println!();
-        verify::verify_and_repair(&engine, database)
+        // Phase 1: Verify to determine what's needed
+        let initial = verify::verify(&engine, database);
+
+        if initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0 {
+            // Check if KV expansion is needed
+            let hash_length = engine.hash_algo().hash_length();
+            let psize = aeordb::engine::kv_pages::page_size(hash_length);
+            let needed_stage = aeordb::engine::kv_pages::stage_for_count(
+                initial.valid_entries as usize, hash_length,
+            );
+            let (needed_size, _) = aeordb::engine::kv_stages::stage_params(needed_stage, psize);
+            let current_size = engine.writer_read_lock()
+                .map(|w| w.file_header().kv_block_length)
+                .unwrap_or(0);
+
+            if needed_size > current_size && current_size > 0 {
+                // Phase 2: Expand KV block (requires dropping the engine)
+                println!("Expanding KV block: {} → {} bytes (stage {})", current_size, needed_size, needed_stage);
+                engine.shutdown().ok();
+                drop(engine);
+
+                match aeordb::engine::kv_expand::expand_kv_block(database, needed_stage, hash_length) {
+                    Ok((_size, _stage, delta)) => {
+                        println!("WAL entries relocated forward by {} bytes", delta);
+                    }
+                    Err(e) => {
+                        eprintln!("KV expansion failed: {}", e);
+                        process::exit(1);
+                    }
+                }
+
+                // Phase 3: Reopen and rebuild
+                let engine2 = match StorageEngine::open(database) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("Failed to reopen after expansion: {}", e);
+                        process::exit(1);
+                    }
+                };
+
+                let report = verify::verify_and_repair(&engine2, database);
+                // engine2 is dropped here (shutdown called by verify_and_repair)
+                report
+            } else {
+                // No expansion needed — repair in place
+                verify::verify_and_repair(&engine, database)
+            }
+        } else {
+            // No KV issues — just run repair for other issues
+            verify::verify_and_repair(&engine, database)
+        }
     } else {
         verify::verify(&engine, database)
     };

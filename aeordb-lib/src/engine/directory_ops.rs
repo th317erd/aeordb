@@ -950,12 +950,143 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
+    // Also discover directories from KV entries and propagate them up
+    // to root. This rebuilds the root directory even when file records
+    // are at corrupt offsets.
+    let mut dirs_propagated = 0;
+    self.rebuild_dirs_from_kv(&mut dirs_propagated);
+
     tracing::debug!(
-      file_records_found, paths_propagated, skipped_system, skipped_error,
+      file_records_found, paths_propagated, skipped_system, skipped_error, dirs_propagated,
       "rebuild_directory_tree complete"
     );
 
-    Ok(paths_propagated)
+    Ok(paths_propagated + dirs_propagated)
+  }
+
+  /// Discover directories by scanning all directory entries in the KV,
+  /// reading their children, and building a path map by brute-force
+  /// trying candidate paths. Then propagate each to its parent.
+  fn rebuild_dirs_from_kv(&self, count: &mut usize) {
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let snapshot = self.engine.kv_snapshot.load();
+    let all = match snapshot.iter_all() {
+      Ok(e) => e,
+      Err(_) => return,
+    };
+
+    // Collect all directory entries that have children
+    let mut dir_hashes: std::collections::HashMap<Vec<u8>, Vec<ChildEntry>> = std::collections::HashMap::new();
+    for entry in &all {
+      let kv_type = entry.type_flags & 0x0F;
+      if kv_type != crate::engine::kv_store::KV_TYPE_DIRECTORY { continue; }
+
+      if let Ok(Some((header, _key, value))) = self.engine.get_entry(&entry.hash) {
+        if value.is_empty() { continue; }
+        // Try both flat and B-tree formats
+        if let Ok(children) = crate::engine::directory_entry::deserialize_child_entries(
+          &value, hash_length, header.entry_version
+        ) {
+          if !children.is_empty() {
+            dir_hashes.insert(entry.hash.clone(), children);
+          }
+        }
+      }
+    }
+
+    if dir_hashes.is_empty() { return; }
+
+    // Discover paths: start with "/" and walk children.
+    // For each child that's a directory, compute directory_path_hash and
+    // check if it matches a known hash. Iterate until no new paths found.
+    let mut known: Vec<(String, Vec<ChildEntry>)> = Vec::new();
+
+    // Seed: try root "/"
+    if let Ok(root_hash) = directory_path_hash("/", &algo) {
+      if let Some(children) = dir_hashes.get(&root_hash) {
+        known.push(("/".to_string(), children.clone()));
+      }
+    }
+
+    // If root itself is empty/missing, try to discover top-level dirs
+    // by checking ALL child names from ALL directory entries as potential
+    // top-level paths.
+    if known.is_empty() {
+      for (_hash, children) in &dir_hashes {
+        for child in children {
+          if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() { continue; }
+          let candidate = format!("/{}", child.name);
+          if let Ok(candidate_hash) = directory_path_hash(&candidate, &algo) {
+            if dir_hashes.contains_key(&candidate_hash) {
+              if !known.iter().any(|(p, _)| *p == "/") {
+                // We found a top-level dir — seed with a synthetic root
+                known.push(("/".to_string(), Vec::new()));
+              }
+              if let Some(dir_children) = dir_hashes.get(&candidate_hash) {
+                if !known.iter().any(|(p, _)| *p == candidate) {
+                  known.push((candidate, dir_children.clone()));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Walk deeper
+    let mut depth = 0;
+    loop {
+      let mut found_new = false;
+      depth += 1;
+      if depth > 50 { break; }
+      let snapshot: Vec<(String, Vec<ChildEntry>)> = known.clone();
+      for (parent, children) in &snapshot {
+        for child in children {
+          if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() { continue; }
+          let child_path = if *parent == "/" {
+            format!("/{}", child.name)
+          } else {
+            format!("{}/{}", parent.trim_end_matches('/'), child.name)
+          };
+          if known.iter().any(|(p, _)| *p == child_path) { continue; }
+          if let Ok(child_hash) = directory_path_hash(&child_path, &algo) {
+            if let Some(dir_children) = dir_hashes.get(&child_hash) {
+              known.push((child_path, dir_children.clone()));
+              found_new = true;
+            }
+          }
+        }
+      }
+      if !found_new { break; }
+    }
+
+    // Propagate each discovered directory to its parent
+    for (dir_path, _children) in &known {
+      if *dir_path == "/" { continue; }
+      // Read the actual directory content and propagate as a child entry
+      if let Ok(dir_children) = self.list_directory(dir_path) {
+        if dir_children.is_empty() { continue; }
+      }
+      let now_ms = chrono::Utc::now().timestamp_millis();
+      if let Ok(content_hash) = directory_path_hash(dir_path, &algo) {
+        let dir_name = crate::engine::path_utils::file_name(dir_path).unwrap_or("").to_string();
+        let child = ChildEntry {
+          name: dir_name,
+          entry_type: crate::engine::entry_type::EntryType::DirectoryIndex.to_u8(),
+          hash: content_hash,
+          total_size: 0,
+          content_type: None,
+          created_at: now_ms,
+          updated_at: now_ms,
+          virtual_time: 0,
+          node_id: 0,
+        };
+        if self.update_parent_directories(dir_path, child).is_ok() {
+          *count += 1;
+        }
+      }
+    }
   }
 
   /// Detect the compression algorithm for a file based on its parent's index config.

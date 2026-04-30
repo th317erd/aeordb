@@ -115,7 +115,10 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
     report
 }
 
-/// Run verify with auto-repair.
+/// Run verify with auto-repair (KV rebuild + directory tree rebuild).
+///
+/// For KV block expansion, use the CLI's verify command which handles
+/// the engine drop/reopen cycle needed for WAL relocation.
 pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport {
     let mut report = verify(engine, db_path);
 
@@ -134,7 +137,7 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         }
     }
 
-    // Repair 2: Note corrupt entries for quarantine
+    // Repair 2: Note corrupt entries
     if report.corrupt_hash > 0 || report.corrupt_header > 0 {
         report.repairs.push(format!(
             "Found {} corrupt entries ({} hash failures + {} header failures)",
@@ -144,9 +147,7 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         ));
     }
 
-    // Repair 3: Rebuild directory tree after KV rebuild to ensure
-    // directory entries reflect the current file set (not stale empty entries
-    // from a previous broken session).
+    // Repair 3: Rebuild directory tree
     if report.missing_kv_entries > 0 && report.file_records > 0 {
         let ops = DirectoryOps::new(engine);
         let ctx = crate::engine::request_context::RequestContext::system();

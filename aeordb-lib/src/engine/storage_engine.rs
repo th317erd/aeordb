@@ -1120,7 +1120,10 @@ impl StorageEngine {
     let hash_algo = self.hash_algo;
 
     // Scan the append log (needs read lock on writer)
-    let entries: Vec<(u8, Vec<u8>, u64)> = {
+    // For directory entries, we track value_length so we can prefer
+    // entries with children over empty entries (e.g., root directory
+    // overwritten by ensure_root_directory on a corrupt session).
+    let entries: Vec<(u8, Vec<u8>, u64, u32)> = {
       let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       tracing::debug!(
@@ -1137,6 +1140,7 @@ impl StorageEngine {
               scanned.header.entry_type.to_kv_type(),
               scanned.key.clone(),
               scanned.offset,
+              scanned.header.value_length,
             ));
           }
           Err(e) => {
@@ -1198,7 +1202,24 @@ impl StorageEngine {
     // multiple auto-flush cycles (each auto-flush overwrites the same
     // bucket pages, potentially evicting entries from earlier flushes).
     let mut count = 0;
-    for (type_flags, hash, offset) in &entries {
+    let dir_type = crate::engine::kv_store::KV_TYPE_DIRECTORY;
+    for (type_flags, hash, offset, value_length) in &entries {
+      let kv_type = *type_flags & 0x0F;
+
+      // For directory entries: if we already have a non-empty version,
+      // don't overwrite it with an empty one. This prevents
+      // ensure_root_directory's empty write from clobbering a valid
+      // directory with children.
+      if kv_type == dir_type && *value_length == 0 {
+        if let Some(existing) = new_kv.get_buffered(hash) {
+          if existing.offset != *offset {
+            // Already have a (possibly non-empty) version — skip the empty one
+            count += 1;
+            continue;
+          }
+        }
+      }
+
       let kv_entry = KVEntry {
         type_flags: *type_flags,
         hash: hash.clone(),
