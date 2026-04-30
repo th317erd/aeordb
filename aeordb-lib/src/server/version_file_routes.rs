@@ -110,7 +110,7 @@ pub async fn file_history(
         } else if entry.found && previous_found && entry.content_hash != previous_hash {
             Some("modified")
         } else if entry.found && previous_found && entry.content_hash == previous_hash {
-            Some("unchanged")
+            None // skip unchanged — only show snapshots where the file changed
         } else if !entry.found && previous_found {
             Some("deleted")
         } else {
