@@ -733,8 +733,26 @@ impl<'a> DirectoryOps<'a> {
     let hash_length = algo.hash_length();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
+    if normalized == "/" {
+      let snapshot = self.engine.kv_snapshot.load();
+      if let Some(kv_entry) = snapshot.get(&dir_key) {
+        tracing::debug!(
+          kv_offset = kv_entry.offset,
+          kv_type = kv_entry.type_flags,
+          "list_directory: root KV entry"
+        );
+      }
+    }
     match self.engine.get_entry(&dir_key) {
       Ok(Some((header, _key, value))) => {
+        if normalized == "/" {
+          tracing::debug!(
+            value_len = value.len(),
+            is_btree = if value.is_empty() { false } else { crate::engine::btree::is_btree_format(&value) },
+            first_bytes = %if value.is_empty() { "empty".to_string() } else { hex::encode(&value[..value.len().min(16)]) },
+            "list_directory: root entry"
+          );
+        }
         if value.is_empty() {
           return Ok(Vec::new());
         }
@@ -1260,6 +1278,13 @@ impl<'a> DirectoryOps<'a> {
         Some(parent) => parent,
         None => return Ok(()), // root has no parent
       };
+
+      // Don't propagate system paths (/.aeordb-*) to root — they're accessed
+      // directly and listing root would filter them anyway. This prevents
+      // system path operations from clobbering a recovered root directory.
+      if parent == "/" && is_system_path(&current_child_path) {
+        return Ok(());
+      }
 
       let dir_key = directory_path_hash(&parent, &algo)?;
 
