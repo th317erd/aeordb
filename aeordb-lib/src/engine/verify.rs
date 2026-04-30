@@ -144,9 +144,16 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         ));
     }
 
-    // Repair 3: Re-verify after repairs
+    // Persist repairs to disk
     if !report.repairs.is_empty() {
-        report.repairs.push("Re-running verification after repairs...".to_string());
+        match engine.shutdown() {
+            Ok(()) => {
+                report.repairs.push("Repairs persisted to disk.".to_string());
+            }
+            Err(e) => {
+                report.repairs.push(format!("Warning: failed to persist repairs: {}", e));
+            }
+        }
     }
 
     report
@@ -215,12 +222,35 @@ fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
         Err(_) => {}
     }
 
-    // Compare against scanned count -- if KV has fewer entries than the scan found,
-    // some are missing from the index
-    if report.kv_entries < report.valid_entries {
-        report.missing_kv_entries = report.valid_entries - report.kv_entries;
-    } else if report.kv_entries > report.valid_entries {
-        report.stale_kv_entries = report.kv_entries - report.valid_entries;
+    // Count unique hashes from the WAL scan (not total entries, since
+    // duplicate hashes are expected — e.g., file records stored at both
+    // content hash and identity hash, or entries updated in place).
+    let unique_hashes = {
+        let writer = match engine.writer_read_lock() {
+            Ok(w) => w,
+            Err(_) => {
+                report.missing_kv_entries = report.valid_entries.saturating_sub(report.kv_entries);
+                return;
+            }
+        };
+        match writer.scan_entries() {
+            Ok(scanner) => {
+                let mut seen = std::collections::HashSet::new();
+                for result in scanner {
+                    if let Ok(scanned) = result {
+                        seen.insert(scanned.key);
+                    }
+                }
+                seen.len() as u64
+            }
+            Err(_) => report.valid_entries,
+        }
+    };
+
+    if report.kv_entries < unique_hashes {
+        report.missing_kv_entries = unique_hashes - report.kv_entries;
+    } else if report.kv_entries > unique_hashes {
+        report.stale_kv_entries = report.kv_entries - unique_hashes;
     }
 }
 

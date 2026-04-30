@@ -2,8 +2,16 @@ use std::process;
 
 use aeordb::engine::StorageEngine;
 use aeordb::engine::verify;
+use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 
 pub fn run(database: &str, repair: bool) {
+    // Initialize logging so debug/trace output works with AEORDB_LOG env var.
+    initialize_logging(&LogConfig {
+        format: LogFormat::Pretty,
+        level: "warn".to_string(),
+        ..LogConfig::default()
+    });
+
     println!("AeorDB Integrity Check");
     println!("=======================");
     println!();

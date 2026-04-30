@@ -30,19 +30,29 @@ impl EntryScanner {
     file.read_exact(&mut header_bytes)?;
     let header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
 
-    // WAL starts after KV block. If hot_tail_offset is set, use it as the
-    // start of the WAL area (kv_block_offset + kv_block_length).
-    let start_offset = if header.hot_tail_offset > 0 && header.kv_block_length > 0 {
-      header.kv_block_offset + header.kv_block_length
+    // Determine WAL scan range based on layout.
+    // Standard layout: [Header] [KV block] [WAL] [Hot tail]
+    //   → start = kv_block_offset + kv_block_length, end = hot_tail_offset
+    // Legacy layout:   [Header] [WAL] [KV block] [Hot tail]
+    //   → start = FILE_HEADER_SIZE, end = kv_block_offset (KV is after WAL)
+    // No KV layout:    [Header] [WAL]
+    //   → start = FILE_HEADER_SIZE, end = EOF
+    let header_end = FILE_HEADER_SIZE as u64;
+    let (start_offset, file_length) = if header.kv_block_offset > 0 && header.kv_block_length > 0 {
+      if header.kv_block_offset == header_end {
+        // Standard: KV at head, WAL after
+        let start = header.kv_block_offset + header.kv_block_length;
+        let end = if header.hot_tail_offset > start { header.hot_tail_offset } else { file.seek(SeekFrom::End(0))? };
+        (start, end)
+      } else {
+        // Legacy repair: KV placed after WAL
+        let end = header.kv_block_offset; // WAL ends where KV block starts
+        (header_end, end)
+      }
     } else {
-      FILE_HEADER_SIZE as u64
-    };
-
-    // Scan up to hot_tail_offset (not EOF, which includes the hot tail data)
-    let file_length = if header.hot_tail_offset > 0 {
-      header.hot_tail_offset
-    } else {
-      file.seek(SeekFrom::End(0))?
+      // No KV block at all
+      let end = if header.hot_tail_offset > 0 { header.hot_tail_offset } else { file.seek(SeekFrom::End(0))? };
+      (header_end, end)
     };
     file.seek(SeekFrom::Start(start_offset))?;
 

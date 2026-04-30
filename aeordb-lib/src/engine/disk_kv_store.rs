@@ -78,9 +78,17 @@ impl DiskKVStore {
         let stage = stage.min(KV_STAGE_SIZES.len() - 1);
         let hash_length = hash_algo.hash_length();
         let psize = page_size(hash_length);
-        let (_block_size, bucket_count) = stage_params(stage, psize);
-        // kv_block_length is the actual allocated space (may be larger than stage needs)
-        let kv_block_length = hot_tail_offset.saturating_sub(kv_block_offset);
+        let (block_size, bucket_count) = stage_params(stage, psize);
+        // kv_block_length is the stage's block size — NOT the distance to hot_tail.
+        // The WAL entries sit between the KV block and the hot tail.
+        let kv_block_length = block_size;
+
+        tracing::debug!(
+            kv_block_offset, kv_block_length, hot_tail_offset, stage, bucket_count, psize,
+            pages_bytes = bucket_count * psize,
+            max_entries = bucket_count * MAX_ENTRIES_PER_PAGE,
+            "DiskKVStore::create"
+        );
 
         // Write empty pages for all buckets at kv_block_offset
         let empty_page = vec![0u8; psize];
@@ -137,11 +145,18 @@ impl DiskKVStore {
         stage: usize,
         hot_entries: Vec<KVEntry>,
     ) -> EngineResult<Self> {
+        let hot_entry_count = hot_entries.len();
         let stage = stage.min(KV_STAGE_SIZES.len() - 1);
         let hash_length = hash_algo.hash_length();
         let psize = page_size(hash_length);
-        let (_block_size, bucket_count) = stage_params(stage, psize);
-        let kv_block_length = hot_tail_offset.saturating_sub(kv_block_offset);
+        let (block_size, bucket_count) = stage_params(stage, psize);
+        let kv_block_length = block_size;
+
+        tracing::debug!(
+            kv_block_offset, kv_block_length, hot_tail_offset, stage, bucket_count,
+            hot_entry_count,
+            "DiskKVStore::open"
+        );
 
         // Rebuild entry count by reading each page header
         let mut entry_count = 0;
@@ -345,6 +360,14 @@ impl DiskKVStore {
     pub fn flush(&mut self) -> EngineResult<()> {
         if self.write_buffer.is_empty() { return Ok(()); }
         let timer_start = std::time::Instant::now();
+        tracing::debug!(
+            write_buffer_len = self.write_buffer.len(),
+            bucket_count = self.bucket_count,
+            stage = self.stage,
+            kv_block_offset = self.kv_block_offset,
+            kv_block_length = self.kv_block_length,
+            "flush: starting"
+        );
 
         let hash_length = self.hash_algo.hash_length();
         let mut overflow_entries: Vec<KVEntry> = Vec::new();
@@ -392,6 +415,12 @@ impl DiskKVStore {
         self.db_file.sync_data()?;
         self.write_buffer.clear();
 
+        tracing::debug!(
+            overflow_count = overflow_entries.len(),
+            modified_buckets = modified_buckets.len(),
+            "flush: pages written"
+        );
+
         if !overflow_entries.is_empty() {
             // Publish snapshot BEFORE resize so iter_all sees flushed entries
             self.publish_snapshot_incremental(&modified_buckets);
@@ -413,6 +442,11 @@ impl DiskKVStore {
                 if self.hot_tail_enabled {
                     let hash_length = self.hash_algo.hash_length();
                     let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+                    tracing::debug!(
+                        overflow_count = all_hot.len(),
+                        hot_tail_offset = self.hot_tail_offset,
+                        "flush: writing overflow entries to hot tail (resize blocked)"
+                    );
                     hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
                     self.db_file.sync_data()?;
                 }
@@ -425,6 +459,10 @@ impl DiskKVStore {
         }
 
         // All entries flushed to pages — clear hot tail
+        tracing::debug!(
+            hot_tail_offset = self.hot_tail_offset,
+            "flush: all entries fit in pages, clearing hot tail"
+        );
         self.flush_hot_buffer()?;
         if self.transaction_depth == 0 && self.hot_tail_enabled {
             let hash_length = self.hash_algo.hash_length();
@@ -552,6 +590,20 @@ impl DiskKVStore {
     pub fn len(&self) -> usize { self.entry_count }
     pub fn is_empty(&self) -> bool { self.entry_count == 0 }
     pub fn write_buffer_len(&self) -> usize { self.write_buffer.len() }
+
+    /// Clear the write buffer without flushing. Used before dropping a KV
+    /// store that is being replaced (e.g., after rebuild_kv) to prevent
+    /// the Drop impl from overwriting newly-rebuilt pages with stale data.
+    pub fn clear_write_buffer(&mut self) { self.write_buffer.clear(); }
+
+    /// Insert an entry into the write buffer without triggering auto-flush
+    /// or hot buffer journaling. Used by rebuild_kv to accumulate all entries
+    /// before a single flush, preventing page clobbering across flush cycles.
+    pub fn buffer_only(&mut self, entry: KVEntry) {
+        let is_new = !self.write_buffer.contains_key(&entry.hash);
+        self.write_buffer.insert(entry.hash.clone(), entry);
+        if is_new { self.entry_count += 1; }
+    }
 
     pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> bool {
         if let Some(mut entry) = self.get(hash) {

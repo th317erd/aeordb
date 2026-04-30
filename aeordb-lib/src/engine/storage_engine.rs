@@ -261,6 +261,17 @@ impl StorageEngine {
     let hot_tail_offset = file_header.hot_tail_offset;
     let kv_block_valid = kv_block_offset > 0 && hot_tail_offset > kv_block_offset;
 
+    tracing::debug!(
+      kv_block_offset,
+      kv_block_length = file_header.kv_block_length,
+      kv_block_stage,
+      hot_tail_offset,
+      kv_block_valid,
+      entry_count = file_header.entry_count,
+      writer_offset = writer.current_offset(),
+      "open_internal: file header loaded"
+    );
+
     // Read hot tail entries from end of file
     let hot_entries = if hot_tail_offset > 0 {
       let mut f = OpenOptions::new().read(true).open(path)?;
@@ -269,6 +280,11 @@ impl StorageEngine {
     } else {
       Vec::new()
     };
+
+    tracing::debug!(
+      hot_entries_loaded = hot_entries.len(),
+      "open_internal: hot tail read"
+    );
 
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
@@ -1099,6 +1115,11 @@ impl StorageEngine {
     let entries: Vec<(u8, Vec<u8>, u64)> = {
       let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      tracing::debug!(
+        writer_offset = writer.current_offset(),
+        file_path = %writer.file_path().display(),
+        "rebuild_kv: scanning WAL"
+      );
       let scanner = writer.scan_entries()?;
       let mut collected = Vec::new();
       for result in scanner {
@@ -1118,22 +1139,56 @@ impl StorageEngine {
       collected
     };
     // Writer lock released here
+    tracing::debug!(scanned_entries = entries.len(), "rebuild_kv: WAL scan complete");
 
-    // Create fresh KV in-file at existing offsets
-    let kv_block_offset;
-    let hot_tail_offset;
-    {
-      let old_kv = self.kv_writer.lock()
+    // Read layout info from the file header
+    let (kv_block_offset, file_path, existing_stage) = {
+      let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
-      hot_tail_offset = old_kv.hot_tail_offset();
-    }
-    let kv_file = OpenOptions::new().read(true).write(true).open(
-      self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?.file_path()
-    )?;
-    let mut new_kv = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
+      let header = writer.file_header();
+      (header.kv_block_offset, writer.file_path().to_path_buf(), header.kv_block_stage as usize)
+    };
 
-    // Insert all entries
+    let hash_length = hash_algo.hash_length();
+    let psize = crate::engine::kv_pages::page_size(hash_length);
+
+    // Determine KV block position, size, and stage.
+    // hot_tail_offset = end of WAL = writer.current_offset()
+    let wal_end = {
+      let writer = self.writer.read()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      writer.current_offset()
+    };
+
+    let (kv_offset, block_size, hot_offset, rebuild_stage) = if kv_block_offset > 0 {
+      // Normal single-file layout: KV at head, hot tail after WAL
+      let (bs, _) = crate::engine::kv_stages::stage_params(existing_stage, psize);
+      (kv_block_offset, bs, wal_end, existing_stage)
+    } else {
+      // Legacy database (pre single-file refactor): no KV block on disk.
+      // Place KV block at the end of the WAL, sized to fit all entries.
+      let writer = self.writer.read()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let wal_end = writer.current_offset();
+      let target_stage = crate::engine::kv_pages::stage_for_count(entries.len(), hash_length);
+      let (bs, _) = crate::engine::kv_stages::stage_params(target_stage, psize);
+      tracing::info!("Legacy database: placing KV block at WAL end (offset {}), stage {} ({}B)", wal_end, target_stage, bs);
+      (wal_end, bs, wal_end + bs, target_stage)
+    };
+
+    tracing::debug!(
+      kv_offset, block_size, hot_offset, rebuild_stage, wal_end,
+      kv_block_offset_from_header = kv_block_offset,
+      "rebuild_kv: creating new KV store"
+    );
+
+    let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
+    let mut new_kv = DiskKVStore::create(kv_file, hash_algo, kv_offset, hot_offset, rebuild_stage)?;
+
+    // Insert all entries with auto-flush disabled. We want a single flush
+    // at the end so that page writes don't clobber each other across
+    // multiple auto-flush cycles (each auto-flush overwrites the same
+    // bucket pages, potentially evicting entries from earlier flushes).
     let mut count = 0;
     for (type_flags, hash, offset) in &entries {
       let kv_entry = KVEntry {
@@ -1141,16 +1196,54 @@ impl StorageEngine {
         hash: hash.clone(),
         offset: *offset,
       };
-      new_kv.insert(kv_entry)?;
+      new_kv.buffer_only(kv_entry);
       count += 1;
     }
 
+    tracing::debug!(
+      inserted = count,
+      write_buffer_len = new_kv.write_buffer_len(),
+      "rebuild_kv: all entries inserted, flushing"
+    );
+
     new_kv.flush()?;
 
-    // Swap the KV writer
+    tracing::debug!(
+      write_buffer_after_flush = new_kv.write_buffer_len(),
+      "rebuild_kv: flush complete"
+    );
+
+    // Swap the KV writer. Clear the old KV's write buffer first so its
+    // Drop impl doesn't flush stale data over the rebuilt pages.
     let mut kv_lock = self.kv_writer.lock()
       .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    kv_lock.clear_write_buffer();
     *kv_lock = new_kv;
+
+    // Update the file header with the current hot_tail_offset so the
+    // hot tail entries (overflow from the KV page capacity) are found on reopen.
+    {
+      let mut writer = self.writer.write()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let mut header = writer.file_header().clone();
+      let final_stage = kv_lock.stage();
+      let (final_block_size, _) = crate::engine::kv_stages::stage_params(final_stage, psize);
+      header.kv_block_offset = kv_offset;
+      header.kv_block_length = final_block_size;
+      // Hot tail goes after the WAL, not after the KV block
+      header.hot_tail_offset = wal_end;
+      header.entry_count = count as u64;
+      header.kv_block_stage = final_stage as u8;
+      tracing::debug!(
+        kv_block_offset = header.kv_block_offset,
+        kv_block_length = header.kv_block_length,
+        hot_tail_offset = header.hot_tail_offset,
+        kv_block_stage = header.kv_block_stage,
+        entry_count = header.entry_count,
+        "rebuild_kv: updating file header"
+      );
+      writer.update_header(&header)?;
+    }
 
     let elapsed = timer.elapsed();
     tracing::info!("KV rebuild complete: {} entries indexed in {:.2}s", count, elapsed.as_secs_f64());
