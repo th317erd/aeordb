@@ -19,6 +19,11 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
     // If repairing without --force-fix-in-place, work on a copy.
     let work_path = if repair && !force_fix_in_place {
         let repaired_path = format!("{}.repaired", database);
+        if std::path::Path::new(&repaired_path).exists() {
+            eprintln!("Error: {} already exists.", repaired_path);
+            eprintln!("Remove it first, or use --force-fix-in-place to repair the original.");
+            process::exit(1);
+        }
         println!("Creating repaired copy: {}", repaired_path);
         if let Err(e) = std::fs::copy(database, &repaired_path) {
             eprintln!("Failed to copy database: {}", e);
@@ -165,7 +170,30 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
     if report.has_issues() {
         println!("Status: ISSUES FOUND");
         if !repair {
-            println!("  Run with --repair to auto-fix recoverable issues.");
+            println!();
+            if report.missing_kv_entries > 0 {
+                println!("  KV index is incomplete ({} entries missing from index).", report.missing_kv_entries);
+                println!("  The data is in the WAL but the index doesn't point to it.");
+                println!("  Repair will rebuild the KV index from the WAL.");
+            }
+            if report.stale_kv_entries > 0 {
+                println!("  KV index has {} stale entries pointing to outdated data.", report.stale_kv_entries);
+                println!("  Repair will rebuild the KV index from the WAL.");
+            }
+            if report.corrupt_hash > 0 {
+                println!("  {} entries have corrupt content (hash mismatch).", report.corrupt_hash);
+                println!("  These entries may have been damaged by disk errors.");
+            }
+            if report.corrupt_header > 0 {
+                println!("  {} entries have corrupt headers.", report.corrupt_header);
+                println!("  These entries are unreadable and will be skipped.");
+            }
+            if !report.missing_children.is_empty() {
+                println!("  {} files are listed in directories but can't be read.", report.missing_children.len());
+            }
+            println!();
+            println!("  Run with --repair to auto-fix recoverable issues:");
+            println!("    aeordb verify --repair -D {}", database);
         }
         process::exit(2);
     } else {
