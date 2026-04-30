@@ -257,6 +257,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/files/share-link", post(share_link_routes::create_share_link))
     .route("/files/share-links", get(share_link_routes::list_share_links))
     .route("/files/share-links/{key_id}", delete(share_link_routes::revoke_share_link))
+    .route("/files/deleted", get(engine_routes::list_deleted_files))
     // The wildcard MUST be last among /files/ routes
     .route(
       "/files/{*path}",

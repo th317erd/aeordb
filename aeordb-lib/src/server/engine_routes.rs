@@ -1012,6 +1012,40 @@ pub async fn engine_delete_file(
 }
 
 /// HEAD /engine/*path -- return metadata as headers.
+/// List deleted files in a directory.
+/// GET /files/deleted?path=/some/dir/
+pub async fn list_deleted_files(
+  State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
+  AxumQuery(params): AxumQuery<std::collections::HashMap<String, String>>,
+) -> Response {
+  let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
+  let ops = DirectoryOps::new(&state.engine);
+
+  match ops.list_deleted(dir_path) {
+    Ok(records) => {
+      let items: Vec<serde_json::Value> = records.iter().map(|r| {
+        let name = crate::engine::path_utils::file_name(&r.path).unwrap_or("").to_string();
+        serde_json::json!({
+          "path": r.path,
+          "name": name,
+          "deleted_at": r.deleted_at,
+          "reason": r.reason,
+        })
+      }).collect();
+      (StatusCode::OK, Json(serde_json::json!({
+        "items": items,
+        "total": items.len(),
+      }))).into_response()
+    }
+    Err(e) => {
+      ErrorResponse::new(format!("Failed to list deleted files: {}", e))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
 pub async fn engine_head(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,

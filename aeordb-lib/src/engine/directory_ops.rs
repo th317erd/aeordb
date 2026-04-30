@@ -878,6 +878,44 @@ impl<'a> DirectoryOps<'a> {
     self.engine.has_entry(&dir_key)
   }
 
+  /// List deleted files whose paths are under the given directory.
+  /// Returns a list of (path, deleted_at) tuples.
+  pub fn list_deleted(&self, dir_path: &str) -> EngineResult<Vec<crate::engine::deletion_record::DeletionRecord>> {
+    let normalized = normalize_path(dir_path);
+    let prefix = if normalized == "/" { "/".to_string() } else { format!("{}/", normalized.trim_end_matches('/')) };
+
+    let deletion_entries = self.engine.entries_by_type(
+      crate::engine::kv_store::KV_TYPE_DELETION,
+    )?;
+
+    let mut results = Vec::new();
+    for (_hash, value) in &deletion_entries {
+      if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value) {
+        if record.path.starts_with("/.aeordb-") { continue; }
+        // Check if this deletion is a direct child of the requested directory
+        if record.path.starts_with(&prefix) || (normalized == "/" && record.path.starts_with('/')) {
+          let remainder = if normalized == "/" {
+            &record.path[1..]
+          } else {
+            &record.path[prefix.len()..]
+          };
+          // Direct child: no further slashes in the remainder
+          if !remainder.contains('/') && !remainder.is_empty() {
+            results.push(record);
+          }
+        }
+      }
+    }
+
+    // Sort by deleted_at descending (most recent first)
+    results.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    // Deduplicate by path (keep most recent deletion)
+    let mut seen = std::collections::HashSet::new();
+    results.retain(|r| seen.insert(r.path.clone()));
+
+    Ok(results)
+  }
+
   /// Ensure the root directory exists. Called during database creation.
   pub fn ensure_root_directory(&self, _ctx: &RequestContext) -> EngineResult<()> {
     let algo = self.engine.hash_algo();
