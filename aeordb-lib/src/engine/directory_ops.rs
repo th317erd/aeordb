@@ -624,8 +624,15 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.
+  /// Takes an auto-snapshot before delete (throttled to once per minute).
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+
+    // Auto-snapshot before delete (at most once per minute)
+    if !is_system_path(&normalized) {
+      self.auto_snapshot_before_delete(ctx);
+    }
+
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -914,6 +921,49 @@ impl<'a> DirectoryOps<'a> {
     results.retain(|r| seen.insert(r.path.clone()));
 
     Ok(results)
+  }
+
+  /// Take an auto-snapshot before a delete operation, throttled to at most
+  /// once per minute to avoid snapshot spam during bulk deletes.
+  fn auto_snapshot_before_delete(&self, ctx: &RequestContext) {
+    use std::sync::atomic::Ordering;
+    let now = chrono::Utc::now().timestamp_millis();
+    let last = self.engine.last_auto_snapshot.load(Ordering::Relaxed);
+    let elapsed = now - last;
+
+    // Throttle: at most once per 60 seconds
+    if elapsed < 60_000 && last > 0 {
+      return;
+    }
+
+    // Try to claim the slot (CAS prevents races)
+    if self.engine.last_auto_snapshot
+      .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed)
+      .is_err()
+    {
+      return; // another thread beat us
+    }
+
+    let vm = crate::engine::version_manager::VersionManager::new(self.engine);
+    let pad = |n: u32, d: usize| -> String { format!("{:0>width$}", n, width = d) };
+    let dt = chrono::Utc::now();
+    let name = format!(
+      "auto-{}-{}-{} {}:{}:{}.{}",
+      dt.format("%Y"), dt.format("%m"), dt.format("%d"),
+      dt.format("%H"), dt.format("%M"), dt.format("%S"),
+      pad(dt.timestamp_subsec_millis(), 3),
+    );
+
+    match vm.create_snapshot(ctx, &name, std::collections::HashMap::new()) {
+      Ok(_) => {
+        tracing::info!(snapshot = %name, "Auto-snapshot before delete");
+      }
+      Err(e) => {
+        tracing::warn!("Auto-snapshot failed: {}", e);
+        // Reset timestamp so next delete can try again
+        self.engine.last_auto_snapshot.store(last, Ordering::Relaxed);
+      }
+    }
   }
 
   /// Restore a deleted file by un-marking it in the KV and re-adding
