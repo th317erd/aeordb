@@ -1249,6 +1249,12 @@ impl StorageEngine {
     kv_lock.clear_write_buffer();
     *kv_lock = new_kv;
 
+    // Update the shared snapshot handle to the new KV's snapshot.
+    // Without this, readers (including rebuild_directory_tree) would
+    // still see the old/empty snapshot.
+    let new_snapshot = Arc::clone(&kv_lock.snapshot_handle().load());
+    self.kv_snapshot.store(new_snapshot);
+
     // Update the file header with the current hot_tail_offset so the
     // hot tail entries (overflow from the KV page capacity) are found on reopen.
     {

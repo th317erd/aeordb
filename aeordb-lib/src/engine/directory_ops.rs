@@ -874,7 +874,7 @@ impl<'a> DirectoryOps<'a> {
           // create a fresh one. This self-heals after a repair where the
           // root directory's children list was overwritten by a previous
           // startup on a corrupt database.
-          tracing::debug!("Root directory exists but is empty, will recreate");
+          tracing::warn!("Root directory exists but is empty, will recreate");
         }
       }
     }
@@ -978,28 +978,44 @@ impl<'a> DirectoryOps<'a> {
 
     // Collect all directory entries that have children
     let mut dir_hashes: std::collections::HashMap<Vec<u8>, Vec<ChildEntry>> = std::collections::HashMap::new();
+    let mut dir_count = 0;
+    let mut dir_empty = 0;
+    let mut dir_read_err = 0;
+    let mut dir_parse_err = 0;
     for entry in &all {
       let kv_type = entry.type_flags & 0x0F;
       if kv_type != crate::engine::kv_store::KV_TYPE_DIRECTORY { continue; }
+      dir_count += 1;
 
-      if let Ok(Some((header, _key, value))) = self.engine.get_entry(&entry.hash) {
-        if value.is_empty() { continue; }
-        // Try both flat and B-tree formats
-        if let Ok(children) = crate::engine::directory_entry::deserialize_child_entries(
-          &value, hash_length, header.entry_version
-        ) {
-          if !children.is_empty() {
-            dir_hashes.insert(entry.hash.clone(), children);
+      match self.engine.get_entry(&entry.hash) {
+        Ok(Some((header, _key, value))) => {
+          if value.is_empty() { dir_empty += 1; continue; }
+          let children = if crate::engine::btree::is_btree_format(&value) {
+            crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length).ok()
+          } else {
+            crate::engine::directory_entry::deserialize_child_entries(
+              &value, hash_length, header.entry_version
+            ).ok()
+          };
+          match children {
+            Some(c) if !c.is_empty() => { dir_hashes.insert(entry.hash.clone(), c); }
+            Some(_) => { dir_empty += 1; }
+            None => { dir_parse_err += 1; }
           }
         }
+        Ok(None) => { dir_read_err += 1; }
+        Err(_) => { dir_read_err += 1; }
       }
     }
 
+    tracing::debug!(
+      dir_count, dir_empty, dir_read_err, dir_parse_err,
+      dir_with_children = dir_hashes.len(),
+      "rebuild_dirs_from_kv: scanned directory entries"
+    );
     if dir_hashes.is_empty() { return; }
 
     // Discover paths: start with "/" and walk children.
-    // For each child that's a directory, compute directory_path_hash and
-    // check if it matches a known hash. Iterate until no new paths found.
     let mut known: Vec<(String, Vec<ChildEntry>)> = Vec::new();
 
     // Seed: try root "/"
@@ -1009,16 +1025,23 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
+    tracing::debug!(root_found = !known.is_empty(), "rebuild_dirs_from_kv: root check");
+
     // If root itself is empty/missing, try to discover top-level dirs
     // by checking ALL child names from ALL directory entries as potential
     // top-level paths.
     if known.is_empty() {
+      let mut candidates_tried = 0;
+      let mut candidates_found = 0;
       for (_hash, children) in &dir_hashes {
         for child in children {
           if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() { continue; }
           let candidate = format!("/{}", child.name);
+          candidates_tried += 1;
           if let Ok(candidate_hash) = directory_path_hash(&candidate, &algo) {
             if dir_hashes.contains_key(&candidate_hash) {
+              candidates_found += 1;
+              tracing::debug!(path = %candidate, "rebuild_dirs_from_kv: discovered top-level dir");
               if !known.iter().any(|(p, _)| *p == "/") {
                 // We found a top-level dir — seed with a synthetic root
                 known.push(("/".to_string(), Vec::new()));
@@ -1032,7 +1055,10 @@ impl<'a> DirectoryOps<'a> {
           }
         }
       }
+      tracing::debug!(candidates_tried, candidates_found, "rebuild_dirs_from_kv: top-level discovery done");
     }
+
+    tracing::debug!(known_paths = known.len(), "rebuild_dirs_from_kv: before deep walk");
 
     // Walk deeper
     let mut depth = 0;
@@ -1061,9 +1087,11 @@ impl<'a> DirectoryOps<'a> {
       if !found_new { break; }
     }
 
+    tracing::debug!(total_known = known.len(), "rebuild_dirs_from_kv: propagating directories");
     // Propagate each discovered directory to its parent
     for (dir_path, _children) in &known {
       if *dir_path == "/" { continue; }
+      tracing::debug!(dir_path = %dir_path, "rebuild_dirs_from_kv: propagating");
       // Read the actual directory content and propagate as a child entry
       if let Ok(dir_children) = self.list_directory(dir_path) {
         if dir_children.is_empty() { continue; }
