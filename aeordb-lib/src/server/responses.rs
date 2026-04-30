@@ -108,6 +108,7 @@ impl From<&crate::engine::FileRecord> for EngineFileResponse {
 
 #[derive(Debug, Serialize)]
 pub struct SnapshotResponse {
+  pub id: String,
   pub name: String,
   pub root_hash: String,
   pub created_at: i64,
@@ -117,6 +118,7 @@ pub struct SnapshotResponse {
 impl From<&crate::engine::SnapshotInfo> for SnapshotResponse {
   fn from(info: &crate::engine::SnapshotInfo) -> Self {
     Self {
+      id: info.id(),
       name: info.name.clone(),
       root_hash: hex::encode(&info.root_hash),
       created_at: info.created_at,

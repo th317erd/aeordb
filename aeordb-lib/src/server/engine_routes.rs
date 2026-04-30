@@ -1311,7 +1311,10 @@ pub struct CreateSnapshotRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct RestoreSnapshotRequest {
-  pub name: String,
+  /// Snapshot ID (hex root hash) — authoritative identifier.
+  pub id: Option<String>,
+  /// Snapshot name — fallback for backward compatibility.
+  pub name: Option<String>,
 }
 
 /// POST /version/snapshot -- create a named snapshot of the current HEAD.
@@ -1389,21 +1392,30 @@ pub async fn snapshot_restore(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.restore_snapshot(&ctx, &payload.name) {
+  // Resolve snapshot: id takes precedence over name
+  let identifier = payload.id.as_deref()
+    .or(payload.name.as_deref())
+    .unwrap_or("");
+
+  let snapshot = match version_manager.resolve_snapshot(identifier) {
+    Ok(s) => s,
+    Err(_) => {
+      return ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", identifier))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  };
+
+  match version_manager.restore_snapshot(&ctx, &snapshot.name) {
     Ok(()) => {
       (
         StatusCode::OK,
-        Json(serde_json::json!({ "restored": true, "name": payload.name })),
+        Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name })),
       )
         .into_response()
     }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", payload.name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
     Err(error) => {
-      tracing::error!("Engine: failed to restore snapshot '{}': {}", payload.name, error);
+      tracing::error!("Engine: failed to restore snapshot '{}': {}", snapshot.name, error);
       ErrorResponse::new(format!("Failed to restore snapshot: {}", error))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
@@ -1411,11 +1423,12 @@ pub async fn snapshot_restore(
   }
 }
 
-/// DELETE /version/snapshot/:name -- delete a named snapshot (requires root).
+/// DELETE /version/snapshot/:id_or_name -- delete a snapshot (requires root).
+/// Accepts either a snapshot ID (hex root hash) or name.
 pub async fn snapshot_delete(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
-  Path(name): Path<String>,
+  Path(id_or_name): Path<String>,
 ) -> Response {
   let user_id = match uuid::Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
@@ -1434,21 +1447,27 @@ pub async fn snapshot_delete(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
-  match version_manager.delete_snapshot(&ctx, &name) {
+  let snapshot = match version_manager.resolve_snapshot(&id_or_name) {
+    Ok(s) => s,
+    Err(_) => {
+      return ErrorResponse::new(format!("Snapshot not found: '{}'", id_or_name))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  };
+
+  let snap_id = snapshot.id();
+  let snap_name = snapshot.name.clone();
+  match version_manager.delete_snapshot(&ctx, &snap_name) {
     Ok(()) => {
       (
         StatusCode::OK,
-        Json(serde_json::json!({ "deleted": true, "name": name })),
+        Json(serde_json::json!({ "deleted": true, "id": snap_id, "name": snap_name })),
       )
         .into_response()
     }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
     Err(error) => {
-      tracing::error!("Engine: failed to delete snapshot '{}': {}", name, error);
+      tracing::error!("Engine: failed to delete snapshot '{}': {}", snap_name, error);
       ErrorResponse::new(format!("Failed to delete snapshot: {}", error))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()

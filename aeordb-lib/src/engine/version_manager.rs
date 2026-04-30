@@ -11,7 +11,7 @@ use crate::engine::storage_engine::StorageEngine;
 /// Information about a named snapshot (a saved point-in-time reference).
 #[derive(Debug, Clone)]
 pub struct SnapshotInfo {
-  /// Human-readable snapshot name.
+  /// Human-readable snapshot name (display only).
   pub name: String,
   /// Content-addressed root hash at the time of the snapshot.
   pub root_hash: Vec<u8>,
@@ -19,6 +19,13 @@ pub struct SnapshotInfo {
   pub created_at: i64,
   /// Arbitrary key-value metadata attached to the snapshot.
   pub metadata: HashMap<String, String>,
+}
+
+impl SnapshotInfo {
+  /// Unique identifier for this snapshot (hex-encoded root hash).
+  pub fn id(&self) -> String {
+    hex::encode(&self.root_hash)
+  }
 }
 
 /// Information about a named fork (an isolated branch of writes).
@@ -428,6 +435,33 @@ impl<'a> VersionManager<'a> {
 
     snapshots.sort_by_key(|snapshot| snapshot.created_at);
     Ok(snapshots)
+  }
+
+  /// Find a snapshot by its ID (hex-encoded root hash).
+  pub fn get_snapshot_by_id(&self, id: &str) -> EngineResult<Option<SnapshotInfo>> {
+    let target_hash = hex::decode(id)
+      .map_err(|_| EngineError::InvalidInput(format!("Invalid snapshot ID: {}", id)))?;
+    let snapshots = self.list_snapshots()?;
+    Ok(snapshots.into_iter().find(|s| s.root_hash == target_hash))
+  }
+
+  /// Resolve a snapshot identifier — tries ID (hex hash) first, then name.
+  pub fn resolve_snapshot(&self, identifier: &str) -> EngineResult<SnapshotInfo> {
+    // Try as ID first (64-char hex string)
+    if identifier.len() == 64 && identifier.chars().all(|c| c.is_ascii_hexdigit()) {
+      if let Some(snap) = self.get_snapshot_by_id(identifier)? {
+        return Ok(snap);
+      }
+    }
+    // Fall back to name lookup
+    let hash_length = self.engine.hash_algo().hash_length();
+    let key = self.snapshot_key(identifier)?;
+    match self.engine.get_entry(&key)? {
+      Some((_header, _key, value)) => {
+        Ok(SnapshotInfo::deserialize(&value, hash_length, 0)?)
+      }
+      None => Err(EngineError::NotFound(format!("Snapshot not found: {}", identifier))),
+    }
   }
 
   /// Delete a named snapshot by marking its KV entry as deleted and

@@ -18,7 +18,11 @@ use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct RestoreRequest {
+    /// Snapshot ID (hex root hash) — preferred.
+    pub id: Option<String>,
+    /// Snapshot name — fallback.
     pub snapshot: Option<String>,
+    /// Direct version hash — for advanced use.
     pub version: Option<String>,
 }
 
@@ -64,6 +68,7 @@ pub async fn file_history(
 
     // Resolve file at each snapshot
     struct FileAtVersion {
+        snapshot_id: String,
         snapshot_name: String,
         timestamp: i64,
         content_hash: Vec<u8>,
@@ -78,6 +83,7 @@ pub async fn file_history(
         match resolve_file_at_version(&state.engine, &snapshot.root_hash, &path) {
             Ok((file_hash, file_record)) => {
                 entries.push(FileAtVersion {
+                    snapshot_id: snapshot.id(),
                     snapshot_name: snapshot.name.clone(),
                     timestamp: snapshot.created_at,
                     content_hash: file_hash,
@@ -88,6 +94,7 @@ pub async fn file_history(
             }
             Err(_) => {
                 entries.push(FileAtVersion {
+                    snapshot_id: snapshot.id(),
                     snapshot_name: snapshot.name.clone(),
                     timestamp: snapshot.created_at,
                     content_hash: Vec::new(),
@@ -120,6 +127,7 @@ pub async fn file_history(
 
         if let Some(change) = change_type {
             let mut obj = serde_json::json!({
+                "id": entry.snapshot_id,
                 "snapshot": entry.snapshot_name,
                 "timestamp": entry.timestamp,
                 "change_type": change,
@@ -191,8 +199,20 @@ pub async fn file_restore(
 
     let vm = VersionManager::new(&state.engine);
 
-    // Resolve root hash: snapshot takes precedence
-    let (root_hash, source_label) = if let Some(ref snapshot_name) = payload.snapshot {
+    // Resolve root hash: id takes precedence, then snapshot name, then version hash
+    let (root_hash, source_label) = if let Some(ref snapshot_id) = payload.id {
+        match vm.resolve_snapshot(snapshot_id) {
+            Ok(snap) => {
+                let label = format!("snapshot '{}' ({})", snap.name, snap.id());
+                (snap.root_hash, label)
+            }
+            Err(_) => {
+                return ErrorResponse::new(format!("Snapshot not found: '{}'", snapshot_id))
+                    .with_status(StatusCode::NOT_FOUND)
+                    .into_response();
+            }
+        }
+    } else if let Some(ref snapshot_name) = payload.snapshot {
         match vm.resolve_root_hash(Some(snapshot_name)) {
             Ok(hash) => (hash, format!("snapshot '{}'", snapshot_name)),
             Err(_) => {
