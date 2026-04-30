@@ -143,9 +143,16 @@ enum Commands {
     /// Path to the database file (default: "data.aeordb")
     #[arg(short = 'D', long, default_value = "data.aeordb")]
     database: String,
-    /// Auto-repair recoverable issues (rebuild KV, quarantine corrupt entries)
+    /// Auto-repair recoverable issues (rebuild KV, quarantine corrupt entries).
+    /// By default, repairs are written to a copy (<database>.repaired).
+    /// Use --force-fix-in-place to modify the original file directly.
     #[arg(long)]
     repair: bool,
+    /// Apply repairs directly to the original database file instead of
+    /// creating a repaired copy. Use when disk space is limited or the
+    /// database is too large to copy.
+    #[arg(long)]
+    force_fix_in_place: bool,
   },
   /// Run garbage collection to reclaim unreachable entries
   Gc {
@@ -273,8 +280,8 @@ async fn main() {
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);
     }
-    Commands::Verify { database, repair } => {
-      commands::verify::run(&database, repair);
+    Commands::Verify { database, repair, force_fix_in_place } => {
+      commands::verify::run(&database, repair, force_fix_in_place);
     }
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);

@@ -4,7 +4,7 @@ use aeordb::engine::StorageEngine;
 use aeordb::engine::verify;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 
-pub fn run(database: &str, repair: bool) {
+pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
     // Initialize logging so debug/trace output works with AEORDB_LOG env var.
     initialize_logging(&LogConfig {
         format: LogFormat::Pretty,
@@ -16,7 +16,21 @@ pub fn run(database: &str, repair: bool) {
     println!("=======================");
     println!();
 
-    let engine = match StorageEngine::open(database) {
+    // If repairing without --force-fix-in-place, work on a copy.
+    let work_path = if repair && !force_fix_in_place {
+        let repaired_path = format!("{}.repaired", database);
+        println!("Creating repaired copy: {}", repaired_path);
+        if let Err(e) = std::fs::copy(database, &repaired_path) {
+            eprintln!("Failed to copy database: {}", e);
+            process::exit(1);
+        }
+        println!();
+        repaired_path
+    } else {
+        database.to_string()
+    };
+
+    let engine = match StorageEngine::open(&work_path) {
         Ok(engine) => engine,
         Err(e) => {
             eprintln!("Error opening database: {}", e);
@@ -25,10 +39,15 @@ pub fn run(database: &str, repair: bool) {
     };
 
     let report = if repair {
-        println!("Running with --repair...");
+        if force_fix_in_place {
+            println!("Running with --repair --force-fix-in-place...");
+        } else {
+            println!("Running with --repair (on copy)...");
+        }
         println!();
+
         // Phase 1: Verify to determine what's needed
-        let initial = verify::verify(&engine, database);
+        let initial = verify::verify(&engine, &work_path);
 
         if initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0 {
             // Check if KV expansion is needed
@@ -48,7 +67,7 @@ pub fn run(database: &str, repair: bool) {
                 engine.shutdown().ok();
                 drop(engine);
 
-                match aeordb::engine::kv_expand::expand_kv_block(database, needed_stage, hash_length) {
+                match aeordb::engine::kv_expand::expand_kv_block(&work_path, needed_stage, hash_length) {
                     Ok((_size, _stage, delta)) => {
                         println!("WAL entries relocated forward by {} bytes", delta);
                     }
@@ -59,7 +78,7 @@ pub fn run(database: &str, repair: bool) {
                 }
 
                 // Phase 3: Reopen and rebuild
-                let engine2 = match StorageEngine::open(database) {
+                let engine2 = match StorageEngine::open(&work_path) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("Failed to reopen after expansion: {}", e);
@@ -67,16 +86,15 @@ pub fn run(database: &str, repair: bool) {
                     }
                 };
 
-                let report = verify::verify_and_repair(&engine2, database);
-                // engine2 is dropped here (shutdown called by verify_and_repair)
+                let report = verify::verify_and_repair(&engine2, &work_path);
                 report
             } else {
                 // No expansion needed — repair in place
-                verify::verify_and_repair(&engine, database)
+                verify::verify_and_repair(&engine, &work_path)
             }
         } else {
             // No KV issues — just run repair for other issues
-            verify::verify_and_repair(&engine, database)
+            verify::verify_and_repair(&engine, &work_path)
         }
     } else {
         verify::verify(&engine, database)
@@ -152,6 +170,12 @@ pub fn run(database: &str, repair: bool) {
         process::exit(2);
     } else {
         println!("Status: OK");
+        if repair && !force_fix_in_place {
+            println!();
+            println!("Repaired copy: {}", format!("{}.repaired", database));
+            println!("To use it, replace the original:");
+            println!("  mv {}.repaired {}", database, database);
+        }
     }
 }
 
