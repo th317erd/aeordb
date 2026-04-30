@@ -1012,6 +1012,40 @@ pub async fn engine_delete_file(
 }
 
 /// HEAD /engine/*path -- return metadata as headers.
+/// Restore a deleted file.
+/// POST /files/restore { "path": "/some/file.txt" }
+pub async fn restore_deleted_file(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Json(body): Json<serde_json::Value>,
+) -> Response {
+  let path = match body.get("path").and_then(|v| v.as_str()) {
+    Some(p) => p.to_string(),
+    None => {
+      return ErrorResponse::new("Missing 'path' field")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let ops = DirectoryOps::new(&state.engine);
+
+  match ops.restore_deleted_file(&ctx, &path) {
+    Ok(()) => {
+      (StatusCode::OK, Json(serde_json::json!({
+        "restored": true,
+        "path": path,
+      }))).into_response()
+    }
+    Err(e) => {
+      ErrorResponse::new(format!("Restore failed: {}", e))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
 /// List deleted files in a directory.
 /// GET /files/deleted?path=/some/dir/
 pub async fn list_deleted_files(

@@ -916,6 +916,61 @@ impl<'a> DirectoryOps<'a> {
     Ok(results)
   }
 
+  /// Restore a deleted file by un-marking it in the KV and re-adding
+  /// it to its parent directory.
+  pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let file_key = file_path_hash(&normalized, &algo)?;
+
+    // Try to read the file record even though it's marked deleted.
+    // get_raw bypasses the deleted flag check.
+    let file_record = {
+      let snapshot = self.engine.kv_snapshot.load();
+      let kv_entry = snapshot.get_raw(&file_key)
+        .ok_or_else(|| EngineError::NotFound(format!("No record found for deleted file: {}", normalized)))?;
+
+      let writer = self.engine.writer_read_lock()?;
+      let (header, _key, value) = writer.read_entry_at_shared(kv_entry.offset)?;
+      FileRecord::deserialize(&value, hash_length, header.entry_version)?
+    };
+
+    // Re-store the file record at the path key (this creates a new WAL
+    // entry and un-marks the KV entry)
+    let file_value = file_record.serialize(hash_length)?;
+    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+
+    // Re-add to parent directory
+    let child = ChildEntry {
+      name: crate::engine::path_utils::file_name(&normalized).unwrap_or("").to_string(),
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: file_key,
+      total_size: file_record.total_size,
+      content_type: file_record.content_type.clone(),
+      created_at: file_record.created_at,
+      updated_at: chrono::Utc::now().timestamp_millis(),
+      virtual_time: 0,
+      node_id: 0,
+    };
+    self.update_parent_directories(&normalized, child)?;
+
+    self.engine.counters().increment_files();
+
+    ctx.emit(
+      crate::engine::engine_event::EVENT_ENTRIES_CREATED,
+      serde_json::json!({"entries": [{
+        "path": normalized,
+        "entry_type": "file",
+        "content_type": file_record.content_type,
+        "size": file_record.total_size,
+      }]}),
+    );
+
+    Ok(())
+  }
+
   /// Ensure the root directory exists. Called during database creation.
   pub fn ensure_root_directory(&self, _ctx: &RequestContext) -> EngineResult<()> {
     let algo = self.engine.hash_algo();
