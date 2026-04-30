@@ -665,6 +665,27 @@ impl StorageEngine {
     result.map(|t| Some(t))
   }
 
+  /// Retrieve an entry by hash, including deleted entries.
+  /// Used for version history where we need to read files that were
+  /// deleted after a snapshot was taken.
+  pub fn get_entry_including_deleted(
+    &self,
+    hash: &[u8],
+  ) -> EngineResult<Option<EntryData>> {
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get_raw(hash) {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let writer = self.writer.read()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let result = writer.read_entry_at_shared(kv_entry.offset);
+    result.map(|t| Some(t))
+  }
+
   /// Retrieve an entry by hash with BLAKE3 hash verification.
   /// Use this for user-facing reads (GET /files/) where integrity matters.
   /// Internal engine reads use `get_entry()` without verification for performance.

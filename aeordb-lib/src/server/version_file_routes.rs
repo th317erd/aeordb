@@ -92,7 +92,14 @@ pub async fn file_history(
                     found: true,
                 });
             }
-            Err(_) => {
+            Err(e) => {
+                tracing::warn!(
+                    snapshot = %snapshot.name,
+                    root_hash = %hex::encode(&snapshot.root_hash),
+                    path = %path,
+                    error = %e,
+                    "file_history: resolve failed for snapshot"
+                );
                 entries.push(FileAtVersion {
                     snapshot_id: snapshot.id(),
                     snapshot_name: snapshot.name.clone(),

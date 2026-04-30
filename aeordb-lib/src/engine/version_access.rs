@@ -20,10 +20,16 @@ pub fn resolve_file_at_version(
         return Err(EngineError::NotFound("Empty path".to_string()));
     }
 
+
     // Load the root directory
     let mut dir_data = match engine.get_entry(root_hash)? {
         Some((_header, _key, value)) => value,
         None => {
+            tracing::debug!(
+                root_hash = %hex::encode(root_hash),
+                path = %path,
+                "resolve_file_at_version: root hash not found in KV"
+            );
             return Err(EngineError::NotFound(format!(
                 "Directory not found at version for path '{}'",
                 path
@@ -33,12 +39,27 @@ pub fn resolve_file_at_version(
 
     let hash_length = engine.hash_algo().hash_length();
 
+
     // Walk intermediate directory segments
     for segment in &segments[..segments.len() - 1] {
         let children = if crate::engine::btree::is_btree_format(&dir_data) {
-            crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
+            match crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(segment = %segment, error = %e, dir_data_len = dir_data.len(),
+                        "resolve_file_at_version: btree parse failed for intermediate dir");
+                    return Err(EngineError::NotFound(format!("File '{}' not found at version", path)));
+                }
+            }
         } else {
-            deserialize_child_entries(&dir_data, hash_length, 0)?
+            match deserialize_child_entries(&dir_data, hash_length, 0) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(segment = %segment, error = %e, dir_data_len = dir_data.len(),
+                        "resolve_file_at_version: flat parse failed for intermediate dir");
+                    return Err(EngineError::NotFound(format!("File '{}' not found at version", path)));
+                }
+            }
         };
 
         let child = children
@@ -50,12 +71,35 @@ pub fn resolve_file_at_version(
                         .unwrap_or(false)
             })
             .ok_or_else(|| {
+                tracing::debug!(
+                    segment = %segment,
+                    children_count = children.len(),
+                    child_names = %children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "),
+                    "resolve_file_at_version: directory segment not found"
+                );
                 EngineError::NotFound(format!("Directory '{}' not found at version", segment))
             })?;
 
-        dir_data = match engine.get_entry(&child.hash)? {
-            Some((_header, _key, value)) => value,
-            None => {
+        dir_data = match engine.get_entry(&child.hash) {
+            Ok(Some((_header, _key, value))) => value,
+            Ok(None) => {
+                tracing::debug!(
+                    segment = %segment,
+                    child_hash = %hex::encode(&child.hash),
+                    "resolve_file_at_version: child dir content hash not found in KV"
+                );
+                return Err(EngineError::NotFound(format!(
+                    "Directory '{}' not found at version",
+                    segment
+                )));
+            }
+            Err(e) => {
+                tracing::debug!(
+                    segment = %segment,
+                    child_hash = %hex::encode(&child.hash),
+                    error = %e,
+                    "resolve_file_at_version: error reading child dir"
+                );
                 return Err(EngineError::NotFound(format!(
                     "Directory '{}' not found at version",
                     segment
@@ -67,11 +111,23 @@ pub fn resolve_file_at_version(
     // Resolve the final segment as a file
     let final_segment = segments[segments.len() - 1];
 
-    let children = if crate::engine::btree::is_btree_format(&dir_data) {
+    let children: Vec<_> = if crate::engine::btree::is_btree_format(&dir_data) {
         crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
     } else {
-        deserialize_child_entries(&dir_data, hash_length, 0)?
+        match deserialize_child_entries(&dir_data, hash_length, 0) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    dir_data_len = dir_data.len(),
+                    final_segment = %final_segment,
+                    error = %e,
+                    "resolve_file_at_version: failed to deserialize final directory"
+                );
+                return Err(EngineError::NotFound(format!("File '{}' not found at version", path)));
+            }
+        }
     };
+
 
     // Check if the final segment is a symlink — return a specific error if so
     let is_symlink = children
@@ -97,17 +153,28 @@ pub fn resolve_file_at_version(
                     .unwrap_or(false)
         })
         .ok_or_else(|| {
+            // Log what children we DO have for debugging
+            let names: Vec<String> = children.iter()
+                .map(|c| format!("{}(t={})", c.name, c.entry_type))
+                .collect();
+            tracing::debug!(
+                final_segment = %final_segment,
+                children = %names.join(", "),
+                "resolve_file_at_version: file not found in directory children"
+            );
             EngineError::NotFound(format!("File '{}' not found at version", path))
         })?;
 
-    let (header, _key, value) = match engine.get_entry(&child.hash)? {
-        Some(entry) => entry,
-        None => {
-            return Err(EngineError::NotFound(format!(
-                "File '{}' not found at version",
-                path
-            )));
+    // Use get_entry_including_deleted to find file records even if the file
+    // was deleted after the snapshot was taken.
+    let (header, _key, value) = match engine.get_entry_including_deleted(&child.hash) {
+        Err(e) => {
+            return Err(e);
         }
+        Ok(None) => {
+            return Err(EngineError::NotFound(format!("File '{}' not found at version", path)));
+        }
+        Ok(Some(entry)) => entry,
     };
 
     let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
