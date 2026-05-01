@@ -47,7 +47,7 @@ pub fn list_directory_recursive(
     }
 
     let children = if crate::engine::btree::is_btree_format(&value) {
-        crate::engine::btree::btree_list_from_node(&value, engine, hash_length)?
+        crate::engine::btree::btree_list_from_node(&value, engine, hash_length, false)?
     } else {
         deserialize_child_entries(&value, hash_length, 0)?
     };
@@ -137,6 +137,7 @@ fn walk_listing(
                                         &sub_value,
                                         engine,
                                         hash_length,
+                                        false,
                                     )?
                                 } else {
                                     deserialize_child_entries(&sub_value, hash_length, 0)?

@@ -65,8 +65,11 @@ fn walk_directory(
     return Ok(());
   }
 
-  // Load the directory entry from the engine
-  let dir_data = match engine.get_entry(dir_hash)? {
+  // Load the directory entry from the engine.
+  // Use get_entry_including_deleted() because version/snapshot trees may
+  // reference entries that have been deleted at HEAD but still exist in
+  // the snapshot being walked.
+  let dir_data = match engine.get_entry_including_deleted(dir_hash)? {
     Some((_header, _key, value)) => value,
     None => return Ok(()), // directory hash not found, skip
   };
@@ -84,7 +87,7 @@ fn walk_directory(
 
   // Parse child entries from the directory data — handle both flat and B-tree formats
   let children = if crate::engine::btree::is_btree_format(&dir_data) {
-    crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
+    crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length, true)?
   } else {
     deserialize_child_entries(&dir_data, hash_length, 0)?
   };
@@ -104,8 +107,9 @@ fn walk_directory(
         walk_directory(engine, &child.hash, &child_path, hash_length, tree, visited)?;
       }
       EntryType::FileRecord => {
-        // Load the file record using the hash stored in ChildEntry
-        if let Some((header, _key, value)) = engine.get_entry(&child.hash)? {
+        // Load the file record using the hash stored in ChildEntry.
+        // Must include deleted entries — see comment on get_entry_including_deleted above.
+        if let Some((header, _key, value)) = engine.get_entry_including_deleted(&child.hash)? {
           let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
           // Collect all chunk hashes from this file
@@ -120,7 +124,8 @@ fn walk_directory(
         }
       }
       EntryType::Symlink => {
-        if let Some((header, _key, value)) = engine.get_entry(&child.hash)? {
+        // Must include deleted entries — see comment on get_entry_including_deleted above.
+        if let Some((header, _key, value)) = engine.get_entry_including_deleted(&child.hash)? {
           let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)?;
           tree.symlinks.insert(
             child_path.clone(),

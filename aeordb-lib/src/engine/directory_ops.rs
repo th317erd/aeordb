@@ -158,15 +158,26 @@ impl EngineFileStream {
   /// Build a stream from an explicit list of chunk hashes (public entry point
   /// for hash-based retrieval where we already have the FileRecord).
   pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
-    Self::new(chunk_hashes, engine)
+    Self::new(chunk_hashes, engine, false)
   }
 
-  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+  /// Like `from_chunk_hashes` but reads chunks even if they are marked deleted.
+  /// Used for streaming files from historical snapshots.
+  pub fn from_chunk_hashes_including_deleted(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+    Self::new(chunk_hashes, engine, true)
+  }
+
+  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine, include_deleted: bool) -> EngineResult<Self> {
     let mut chunks = Vec::with_capacity(chunk_hashes.len());
 
     for hash in &chunk_hashes {
       // Chunks are user-facing data — verify integrity on read
-      match engine.get_entry_verified(hash) {
+      let result = if include_deleted {
+        engine.get_entry_verified_including_deleted(hash)
+      } else {
+        engine.get_entry_verified(hash)
+      };
+      match result {
         Ok(Some((header, _key, value))) => {
           // Decompress if the chunk was stored compressed
           if header.compression_algo != CompressionAlgorithm::None {
@@ -614,7 +625,7 @@ impl<'a> DirectoryOps<'a> {
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(elapsed);
 
-    EngineFileStream::new(file_record.chunk_hashes, self.engine)
+    EngineFileStream::new(file_record.chunk_hashes, self.engine, false)
   }
 
   /// Read a file's full content into memory.
@@ -695,8 +706,16 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Delete an empty directory. Returns an error if the directory has children.
+  ///
+  /// **TOCTOU note**: The emptiness check is not fully atomic with the deletion.
+  /// A TransactionGuard documents the atomicity boundary. After mark_entry_deleted
+  /// and remove_from_parent_directory, we re-check the raw directory data for
+  /// children. If a concurrent write sneaked in between the initial check and
+  /// the deletion, those children are now orphaned -- but we log a warning so
+  /// the condition is observable (and GC will eventually reclaim them).
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
 
     if normalized == "/" {
@@ -717,6 +736,28 @@ impl<'a> DirectoryOps<'a> {
 
     // Remove from parent listing
     self.remove_from_parent_directory(&normalized)?;
+
+    // TOCTOU re-check: verify no children were added between our emptiness
+    // check and the deletion. The directory entry is already marked deleted,
+    // so use get_entry_including_deleted to read the raw data at that offset.
+    if let Ok(Some((_header, _key, value))) = self.engine.get_entry_including_deleted(&dir_key) {
+      if !value.is_empty() {
+        let hash_length = algo.hash_length();
+        let recheck_children = if crate::engine::btree::is_btree_format(&value) {
+          crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false)
+            .unwrap_or_default()
+        } else {
+          deserialize_child_entries(&value, hash_length, 0).unwrap_or_default()
+        };
+        if !recheck_children.is_empty() {
+          tracing::warn!(
+            path = %normalized,
+            orphaned_children = recheck_children.len(),
+            "TOCTOU race in delete_directory: children were added concurrently and are now orphaned"
+          );
+        }
+      }
+    }
 
     // Update counters
     self.engine.counters().decrement_directories();
@@ -765,7 +806,7 @@ impl<'a> DirectoryOps<'a> {
         }
         if crate::engine::btree::is_btree_format(&value) {
           // B-tree format: value is the root node data
-          match crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length) {
+          match crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false) {
             Ok(children) => Ok(children),
             Err(e) => {
               tracing::warn!(
@@ -803,6 +844,7 @@ impl<'a> DirectoryOps<'a> {
   /// Create an empty directory at the given path.
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
@@ -851,6 +893,8 @@ impl<'a> DirectoryOps<'a> {
       previous_hash: None,
     };
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
+
+    self.engine.counters().increment_directories();
 
     Ok(())
   }
@@ -970,6 +1014,7 @@ impl<'a> DirectoryOps<'a> {
   /// it to its parent directory.
   pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
 
@@ -992,11 +1037,25 @@ impl<'a> DirectoryOps<'a> {
     let file_value = file_record.serialize(hash_length)?;
     self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
 
-    // Re-add to parent directory
+    // Also store at the identity key (immutable, used by ChildEntry.hash
+    // for version tree walks and GC marking — mirrors store_file_internal)
+    let identity_key = file_identity_hash(
+      &normalized,
+      file_record.content_type.as_deref(),
+      &file_record.chunk_hashes,
+      &algo,
+    )?;
+    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+
+    // Also store at the content key (immutable content-addressed entry)
+    let content_key = file_content_hash(&file_value, &algo)?;
+    self.engine.store_entry(EntryType::FileRecord, &content_key, &file_value)?;
+
+    // Re-add to parent directory using identity_key (not file_key)
     let child = ChildEntry {
       name: crate::engine::path_utils::file_name(&normalized).unwrap_or("").to_string(),
       entry_type: EntryType::FileRecord.to_u8(),
-      hash: file_key,
+      hash: identity_key,
       total_size: file_record.total_size,
       content_type: file_record.content_type.clone(),
       created_at: file_record.created_at,
@@ -1152,7 +1211,7 @@ impl<'a> DirectoryOps<'a> {
         Ok(Some((header, _key, value))) => {
           if value.is_empty() { dir_empty += 1; continue; }
           let children = if crate::engine::btree::is_btree_format(&value) {
-            crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length).ok()
+            crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false).ok()
           } else {
             crate::engine::directory_entry::deserialize_child_entries(
               &value, hash_length, header.entry_version
@@ -1477,7 +1536,8 @@ impl<'a> DirectoryOps<'a> {
           }
         }
         None => {
-          // New directory
+          // New directory (implicitly created for an intermediate parent)
+          self.engine.counters().increment_directories();
           let children = vec![current_child_entry];
           let dir_value = serialize_child_entries(&children, hash_length)?;
           let content_key = directory_content_hash(&dir_value, &algo)?;
@@ -1626,6 +1686,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let normalized_target = normalize_path(target);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -1948,6 +2009,7 @@ impl<'a> DirectoryOps<'a> {
     new_path: &str,
   ) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let new_normalized = normalize_path(new_path);
 
     // Reject root paths

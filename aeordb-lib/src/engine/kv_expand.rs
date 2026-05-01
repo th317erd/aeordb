@@ -54,7 +54,8 @@ pub fn expand_kv_block(
 
     let delta = new_block_size - old_kv_length;
     let new_wal_start = wal_start + delta;
-    let new_hot_tail = wal_end + delta;
+    // hot_tail_offset == 0 means "no hot tail"; preserve that sentinel.
+    let new_hot_tail = if old_hot_tail == 0 { 0 } else { wal_end + delta };
 
     tracing::info!(
         old_kv_length, new_block_size = new_block_size, delta, wal_size,

@@ -59,9 +59,17 @@ pub fn file_name(path: &str) -> Option<&str> {
   }
 }
 
-pub fn path_segments(path: &str) -> Vec<&str> {
-  path.trim()
-    .split('/')
-    .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-    .collect()
+pub fn path_segments(path: &str) -> Vec<String> {
+  let mut segments = Vec::new();
+  for segment in path.trim().split('/') {
+    if segment.is_empty() || segment == "." {
+      continue;
+    }
+    if segment == ".." {
+      segments.pop(); // resolve parent reference
+      continue;
+    }
+    segments.push(segment.to_string());
+  }
+  segments
 }

@@ -179,15 +179,18 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
 }
 
 fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
-    // Use the writer to scan entries
+    use crate::engine::errors::EngineError;
+
+    // Use the writer to scan entries — reporting mode yields errors
+    // for corrupt entries instead of silently skipping them.
     let writer = match engine.writer_read_lock() {
         Ok(w) => w,
         Err(_) => return,
     };
 
-    match writer.scan_entries() {
-        Ok(scanner) => {
-            for result in scanner {
+    match writer.scan_entries_reporting() {
+        Ok(mut scanner) => {
+            while let Some(result) = scanner.next() {
                 match result {
                     Ok(scanned) => {
                         report.total_entries += 1;
@@ -213,16 +216,24 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
                             }
                         }
                     }
-                    Err(e) => {
+                    Err(EngineError::CorruptEntry { ref reason, .. }) => {
                         report.total_entries += 1;
-                        let msg = format!("{}", e);
-                        if msg.contains("Hash verification") {
+                        if reason.contains("Hash verification") {
                             report.corrupt_hash += 1;
                         } else {
                             report.corrupt_header += 1;
                         }
                     }
+                    Err(_) => {
+                        report.total_entries += 1;
+                        report.corrupt_header += 1;
+                    }
                 }
+            }
+
+            // Collect skipped regions from the scanner
+            for (offset, length) in &scanner.skipped_regions {
+                report.skipped_regions.push((*offset, *length as u64));
             }
         }
         Err(_) => {}

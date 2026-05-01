@@ -433,7 +433,7 @@ fn test_btree_insert_single() {
     let root = create_empty_root(&engine);
     let new_root = btree_insert(&engine, &root, make_entry("alpha"), hl, &algo).unwrap();
 
-    let found = btree_lookup(&engine, &new_root, "alpha", hl).unwrap();
+    let found = btree_lookup(&engine, &new_root, "alpha", hl, false).unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().name, "alpha");
 }
@@ -450,7 +450,7 @@ fn test_btree_insert_multiple() {
     }
 
     for i in 0..10 {
-        let found = btree_lookup(&engine, &root, &format!("item_{:02}", i), hl).unwrap();
+        let found = btree_lookup(&engine, &root, &format!("item_{:02}", i), hl, false).unwrap();
         assert!(found.is_some(), "Could not find item_{:02}", i);
     }
 }
@@ -467,7 +467,7 @@ fn test_btree_insert_sorted_order() {
         root = btree_insert(&engine, &root, make_entry(&format!("item_{:02}", i)), hl, &algo).unwrap();
     }
 
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     let mut sorted = names.clone();
     sorted.sort();
@@ -494,7 +494,7 @@ fn test_btree_insert_causes_split() {
 
     // All entries should still be findable
     for i in 0..count {
-        let found = btree_lookup(&engine, &root, &format!("entry_{:04}", i), hl).unwrap();
+        let found = btree_lookup(&engine, &root, &format!("entry_{:04}", i), hl, false).unwrap();
         assert!(found.is_some(), "Could not find entry_{:04} after split", i);
     }
 }
@@ -509,11 +509,11 @@ fn test_btree_insert_update() {
     root = btree_insert(&engine, &root, make_entry("alpha"), hl, &algo).unwrap();
     root = btree_insert(&engine, &root, make_entry_with_hash("alpha", 0xFF), hl, &algo).unwrap();
 
-    let found = btree_lookup(&engine, &root, "alpha", hl).unwrap().unwrap();
+    let found = btree_lookup(&engine, &root, "alpha", hl, false).unwrap().unwrap();
     assert_eq!(found.hash, vec![0xFF; 32]);
 
     // Should still be only one entry
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(entries.len(), 1);
 }
 
@@ -526,7 +526,7 @@ fn test_btree_lookup_missing() {
     let mut root = create_empty_root(&engine);
     root = btree_insert(&engine, &root, make_entry("alpha"), hl, &algo).unwrap();
 
-    let found = btree_lookup(&engine, &root, "zulu", hl).unwrap();
+    let found = btree_lookup(&engine, &root, "zulu", hl, false).unwrap();
     assert!(found.is_none());
 }
 
@@ -537,7 +537,7 @@ fn test_btree_list_empty() {
     let hl = algo.hash_length();
 
     let root = create_empty_root(&engine);
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -555,9 +555,9 @@ fn test_btree_delete() {
     assert!(new_root.is_some());
     let new_root = new_root.unwrap();
 
-    let found = btree_lookup(&engine, &new_root, "alpha", hl).unwrap();
+    let found = btree_lookup(&engine, &new_root, "alpha", hl, false).unwrap();
     assert!(found.is_none());
-    let found = btree_lookup(&engine, &new_root, "bravo", hl).unwrap();
+    let found = btree_lookup(&engine, &new_root, "bravo", hl, false).unwrap();
     assert!(found.is_some());
 }
 
@@ -574,7 +574,7 @@ fn test_btree_delete_missing() {
     let result = btree_delete(&engine, &root, "nonexistent", hl, &algo).unwrap();
     assert!(result.is_some());
     // Original entry should still be there
-    let found = btree_lookup(&engine, &result.unwrap(), "alpha", hl).unwrap();
+    let found = btree_lookup(&engine, &result.unwrap(), "alpha", hl, false).unwrap();
     assert!(found.is_some());
 }
 
@@ -592,7 +592,7 @@ fn test_btree_from_entries() {
 
     // All entries findable
     for i in 0..100 {
-        let found = btree_lookup(&engine, &root, &format!("entry_{:04}", i), hl).unwrap();
+        let found = btree_lookup(&engine, &root, &format!("entry_{:04}", i), hl, false).unwrap();
         assert!(found.is_some(), "Could not find entry_{:04} after bulk build", i);
     }
 }
@@ -609,7 +609,7 @@ fn test_btree_from_entries_sorted() {
         .collect();
 
     let root = btree_from_entries(&engine, entries, hl, &algo).unwrap();
-    let listed = btree_list(&engine, &root, hl).unwrap();
+    let listed = btree_list(&engine, &root, hl, false).unwrap();
 
     for w in listed.windows(2) {
         assert!(w[0].name <= w[1].name, "List not sorted: {} > {}", w[0].name, w[1].name);
@@ -629,12 +629,12 @@ fn test_btree_large_directory() {
 
     // All findable
     for i in 0..1000 {
-        let found = btree_lookup(&engine, &root, &format!("file_{:05}", i), hl).unwrap();
+        let found = btree_lookup(&engine, &root, &format!("file_{:05}", i), hl, false).unwrap();
         assert!(found.is_some(), "Could not find file_{:05}", i);
     }
 
     // List returns correct count
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(entries.len(), 1000);
 
     // List is sorted
@@ -657,12 +657,12 @@ fn test_btree_structural_sharing() {
     root = btree_insert(&engine, &root, make_entry("bravo"), hl, &algo).unwrap();
 
     // Old root should still be valid and contain only "alpha"
-    let old_entries = btree_list(&engine, &old_root, hl).unwrap();
+    let old_entries = btree_list(&engine, &old_root, hl, false).unwrap();
     assert_eq!(old_entries.len(), 1);
     assert_eq!(old_entries[0].name, "alpha");
 
     // New root should have both
-    let new_entries = btree_list(&engine, &root, hl).unwrap();
+    let new_entries = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(new_entries.len(), 2);
 }
 
@@ -709,11 +709,11 @@ fn test_btree_many_splits() {
 
     // All findable
     for i in 0..500 {
-        let found = btree_lookup(&engine, &root, &format!("item_{:05}", i), hl).unwrap();
+        let found = btree_lookup(&engine, &root, &format!("item_{:05}", i), hl, false).unwrap();
         assert!(found.is_some(), "Could not find item_{:05} after 500 inserts", i);
     }
 
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(entries.len(), 500);
 }
 
@@ -751,12 +751,12 @@ fn test_btree_delete_from_multi_level() {
 
     // Verify deleted entries are gone
     for name in &to_delete {
-        let found = btree_lookup(&engine, &current, name, hl).unwrap();
+        let found = btree_lookup(&engine, &current, name, hl, false).unwrap();
         assert!(found.is_none(), "{} should have been deleted", name);
     }
 
     // Verify remaining entries are still present
-    let entries = btree_list(&engine, &current, hl).unwrap();
+    let entries = btree_list(&engine, &current, hl, false).unwrap();
     assert_eq!(entries.len(), count - to_delete.len());
 }
 
@@ -771,7 +771,7 @@ fn test_btree_list_from_node_leaf() {
 
     // No engine needed for leaf-only case (but signature requires it)
     let (engine, _dir) = setup_engine();
-    let entries = btree_list_from_node(&data, &engine, HASH_LENGTH).unwrap();
+    let entries = btree_list_from_node(&data, &engine, HASH_LENGTH, false).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, "alpha");
     assert_eq!(entries[1].name, "bravo");
@@ -793,8 +793,8 @@ fn test_btree_list_from_node_internal() {
     let root_data = engine.get_entry(&root_hash).unwrap().unwrap();
 
     // btree_list_from_node should produce the same result as btree_list
-    let from_node = btree_list_from_node(&root_data.2, &engine, hl).unwrap();
-    let from_hash = btree_list(&engine, &root_hash, hl).unwrap();
+    let from_node = btree_list_from_node(&root_data.2, &engine, hl, false).unwrap();
+    let from_hash = btree_list(&engine, &root_hash, hl, false).unwrap();
 
     assert_eq!(from_node.len(), from_hash.len());
     for (a, b) in from_node.iter().zip(from_hash.iter()) {
@@ -811,7 +811,7 @@ fn test_btree_from_entries_empty() {
     let hl = algo.hash_length();
 
     let root = btree_from_entries(&engine, vec![], hl, &algo).unwrap();
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -822,7 +822,7 @@ fn test_btree_from_entries_single() {
     let hl = algo.hash_length();
 
     let root = btree_from_entries(&engine, vec![make_entry("only")], hl, &algo).unwrap();
-    let entries = btree_list(&engine, &root, hl).unwrap();
+    let entries = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "only");
 }
@@ -843,7 +843,7 @@ fn test_btree_from_entries_exact_leaf_size() {
     let root_node = BTreeNode::deserialize(&root_data.2, hl).unwrap();
     assert!(root_node.is_leaf(), "Should be a single leaf for exactly MAX_LEAF entries");
 
-    let listed = btree_list(&engine, &root, hl).unwrap();
+    let listed = btree_list(&engine, &root, hl, false).unwrap();
     assert_eq!(listed.len(), BTREE_MAX_LEAF_ENTRIES);
 }
 
@@ -892,7 +892,7 @@ fn test_btree_insert_performance_1000() {
     let duration = start.elapsed();
 
     // Verify all 1000 findable
-    let listed = btree_list(&engine, &current_root, hash_length).unwrap();
+    let listed = btree_list(&engine, &current_root, hash_length, false).unwrap();
     assert_eq!(listed.len(), 1000);
 
     // Should complete in well under 5 seconds for 500 inserts
@@ -1042,7 +1042,7 @@ fn test_btree_insert_batched_single() {
 
     let (new_hash, _) = btree_insert_batched(&engine, &root_data, make_entry("alpha"), hash_length, &algo).unwrap();
 
-    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length).unwrap();
+    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length, false).unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().name, "alpha");
 }
@@ -1063,14 +1063,14 @@ fn test_btree_insert_batched_multiple_sequential() {
         current_data = new_data;
 
         // Verify findable after each insert
-        let found = btree_lookup(&engine, &new_hash, &format!("item_{:03}", i), hash_length).unwrap();
+        let found = btree_lookup(&engine, &new_hash, &format!("item_{:03}", i), hash_length, false).unwrap();
         assert!(found.is_some(), "Could not find item_{:03} after insert", i);
     }
 
     // Verify all entries
     let last_hash = BTreeNode::deserialize(&current_data, hash_length).unwrap()
         .content_hash(hash_length, &algo).unwrap();
-    let all = btree_list(&engine, &last_hash, hash_length).unwrap();
+    let all = btree_list(&engine, &last_hash, hash_length, false).unwrap();
     assert_eq!(all.len(), 20);
 }
 
@@ -1100,7 +1100,7 @@ fn test_btree_insert_batched_causes_split() {
 
     // All entries findable
     for i in 0..count {
-        let found = btree_lookup(&engine, &last_hash, &format!("entry_{:04}", i), hash_length).unwrap();
+        let found = btree_lookup(&engine, &last_hash, &format!("entry_{:04}", i), hash_length, false).unwrap();
         assert!(found.is_some(), "Could not find entry_{:04} after batched insert", i);
     }
 }
@@ -1120,12 +1120,12 @@ fn test_btree_insert_batched_correctness() {
     let (new_hash, _) = btree_insert_batched(&engine, &root_data, make_entry("f_new"), hash_length, &algo).unwrap();
 
     // Verify the new entry is findable
-    let found = btree_lookup(&engine, &new_hash, "f_new", hash_length).unwrap();
+    let found = btree_lookup(&engine, &new_hash, "f_new", hash_length, false).unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().name, "f_new");
 
     // Verify all old entries still findable
-    let all = btree_list(&engine, &new_hash, hash_length).unwrap();
+    let all = btree_list(&engine, &new_hash, hash_length, false).unwrap();
     assert_eq!(all.len(), 101);
 }
 
@@ -1148,10 +1148,10 @@ fn test_btree_insert_batched_update_existing() {
         &engine, &current_data, make_entry_with_hash("alpha", 0xFF), hash_length, &algo
     ).unwrap();
 
-    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length).unwrap().unwrap();
+    let found = btree_lookup(&engine, &new_hash, "alpha", hash_length, false).unwrap().unwrap();
     assert_eq!(found.hash, vec![0xFF; 32]);
 
-    let all = btree_list(&engine, &new_hash, hash_length).unwrap();
+    let all = btree_list(&engine, &new_hash, hash_length, false).unwrap();
     assert_eq!(all.len(), 1);
 }
 
@@ -1174,7 +1174,7 @@ fn test_btree_insert_batched_sorted_order() {
         last_hash = new_hash;
     }
 
-    let entries = btree_list(&engine, &last_hash, hash_length).unwrap();
+    let entries = btree_list(&engine, &last_hash, hash_length, false).unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     let mut sorted = names.clone();
     sorted.sort();
@@ -1211,8 +1211,8 @@ fn test_btree_insert_batched_matches_unbatched() {
     };
 
     // Both should have the same entries
-    let list1 = btree_list(&engine1, &root1, hash_length).unwrap();
-    let list2 = btree_list(&engine2, &root2_hash, hash_length).unwrap();
+    let list1 = btree_list(&engine1, &root1, hash_length, false).unwrap();
+    let list2 = btree_list(&engine2, &root2_hash, hash_length, false).unwrap();
     assert_eq!(list1.len(), list2.len());
     for (a, b) in list1.iter().zip(list2.iter()) {
         assert_eq!(a.name, b.name);
@@ -1242,7 +1242,7 @@ fn test_btree_insert_batched_performance() {
     }
     let batched_duration = start.elapsed();
 
-    let all = btree_list(&engine, &last_hash, hash_length).unwrap();
+    let all = btree_list(&engine, &last_hash, hash_length, false).unwrap();
     assert_eq!(all.len(), 1000);
 
     // Should be faster than the non-batched threshold
@@ -1270,10 +1270,10 @@ fn test_btree_insert_batched_many_splits() {
 
     // All findable
     for i in 0..500 {
-        let found = btree_lookup(&engine, &last_hash, &format!("item_{:05}", i), hash_length).unwrap();
+        let found = btree_lookup(&engine, &last_hash, &format!("item_{:05}", i), hash_length, false).unwrap();
         assert!(found.is_some(), "Could not find item_{:05} after 500 batched inserts", i);
     }
 
-    let entries = btree_list(&engine, &last_hash, hash_length).unwrap();
+    let entries = btree_list(&engine, &last_hash, hash_length, false).unwrap();
     assert_eq!(entries.len(), 500);
 }

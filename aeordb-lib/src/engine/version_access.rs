@@ -43,7 +43,7 @@ pub fn resolve_file_at_version(
     // Walk intermediate directory segments
     for segment in &segments[..segments.len() - 1] {
         let children = if crate::engine::btree::is_btree_format(&dir_data) {
-            match crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length) {
+            match crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length, true) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(segment = %segment, error = %e, dir_data_len = dir_data.len(),
@@ -112,7 +112,7 @@ pub fn resolve_file_at_version(
     let final_segment = segments[segments.len() - 1];
 
     let children: Vec<_> = if crate::engine::btree::is_btree_format(&dir_data) {
-        crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length)?
+        crate::engine::btree::btree_list_from_node(&dir_data, engine, hash_length, true)?
     } else {
         match deserialize_child_entries(&dir_data, hash_length, 0) {
             Ok(c) => c,
@@ -189,6 +189,6 @@ pub fn read_file_at_version(
     path: &str,
 ) -> EngineResult<Vec<u8>> {
     let (_hash, file_record) = resolve_file_at_version(engine, root_hash, path)?;
-    let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, engine)?;
+    let stream = EngineFileStream::from_chunk_hashes_including_deleted(file_record.chunk_hashes, engine)?;
     stream.collect_to_vec()
 }

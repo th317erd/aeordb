@@ -52,7 +52,7 @@ impl SymlinkRecord {
     pub fn deserialize(data: &[u8], version: u8) -> EngineResult<Self> {
         match version {
             0 => Self::deserialize_v0(data),
-            _ => Self::deserialize_v0(data), // future versions will have their own methods
+            _ => Err(crate::engine::errors::EngineError::InvalidEntryVersion(version)),
         }
     }
 

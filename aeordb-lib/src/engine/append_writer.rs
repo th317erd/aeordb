@@ -380,6 +380,13 @@ impl AppendWriter {
     EntryScanner::new(file)
   }
 
+  /// Like scan_entries but yields errors for corrupt entries instead of skipping.
+  /// Used by the verify tool to count corruption.
+  pub fn scan_entries_reporting(&self) -> EngineResult<EntryScanner> {
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new_reporting(file)
+  }
+
   pub fn file_header(&self) -> &FileHeader {
     &self.file_header
   }

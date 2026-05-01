@@ -897,8 +897,9 @@ async fn engine_get_at_version(
     }
   };
 
-  // Stream the file content from historical chunks
-  let file_stream = match EngineFileStream::from_chunk_hashes(
+  // Stream the file content from historical chunks (include deleted —
+  // chunks may have been marked deleted after the snapshot was taken)
+  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted(
     file_record.chunk_hashes.clone(), &state.engine,
   ) {
     Ok(stream) => stream,
@@ -1028,6 +1029,12 @@ pub async fn restore_deleted_file(
     }
   };
 
+  if is_system_path(&path) {
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
   let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let ops = DirectoryOps::new(&state.engine);
 
@@ -1054,6 +1061,13 @@ pub async fn list_deleted_files(
   AxumQuery(params): AxumQuery<std::collections::HashMap<String, String>>,
 ) -> Response {
   let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
+
+  if is_system_path(dir_path) {
+    return ErrorResponse::new(format!("Not found: {}", dir_path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
   let ops = DirectoryOps::new(&state.engine);
 
   match ops.list_deleted(dir_path) {

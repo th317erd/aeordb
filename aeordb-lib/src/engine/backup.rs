@@ -91,7 +91,7 @@ fn write_tree_to_engine(
 
     // Write only chunks referenced by user (non-system) files
     for chunk_hash in &user_chunk_hashes {
-        if let Some((_header, key, value)) = source.get_entry(chunk_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(chunk_hash)? {
             output.store_entry(EntryType::Chunk, &key, &value)?;
             chunks_written += 1;
         }
@@ -106,7 +106,7 @@ fn write_tree_to_engine(
         if is_system_path(path) {
             continue;
         }
-        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::FileRecord, &key, &value)?;
             // Also write at path-hash key (for read_file lookups)
@@ -127,7 +127,7 @@ fn write_tree_to_engine(
         if is_system_path(path) {
             continue;
         }
-        if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
             // Also write at path-hash key (for list_directory lookups)
@@ -146,7 +146,7 @@ fn write_tree_to_engine(
         if is_system_path(path) {
             continue;
         }
-        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
             // Write at content-hash key (for tree walking / snapshots)
             output.store_entry(EntryType::Symlink, &key, &value)?;
             // Also write at path-hash key (for get_symlink lookups)
@@ -222,7 +222,7 @@ pub fn create_patch(
 
     // Write only NEW chunks (chunks in target but not in base)
     for chunk_hash in &diff.new_chunks {
-        if let Some((_header, key, value)) = source.get_entry(chunk_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(chunk_hash)? {
             output.store_entry(EntryType::Chunk, &key, &value)?;
             chunks_written += 1;
         }
@@ -231,7 +231,7 @@ pub fn create_patch(
     // Write added FileRecords at both content-hash and path-hash keys
     let patch_algo = output.hash_algo();
     for (path, (file_hash, _record)) in &diff.added {
-        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
             output.store_entry(EntryType::FileRecord, &key, &value)?;
             let path_key = file_path_hash(path, &patch_algo)?;
             if path_key != key {
@@ -243,7 +243,7 @@ pub fn create_patch(
 
     // Write modified FileRecords at both content-hash and path-hash keys
     for (path, (file_hash, _record)) in &diff.modified {
-        if let Some((_header, key, value)) = source.get_entry(file_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
             output.store_entry(EntryType::FileRecord, &key, &value)?;
             let path_key = file_path_hash(path, &patch_algo)?;
             if path_key != key {
@@ -266,7 +266,7 @@ pub fn create_patch(
     // Write added symlinks at both content-hash and path-hash keys
     let symlink_algo = output.hash_algo();
     for (path, (symlink_hash, _record)) in &diff.symlinks_added {
-        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
             output.store_entry(EntryType::Symlink, &key, &value)?;
             let path_key = symlink_path_hash(path, &symlink_algo)?;
             if path_key != key {
@@ -277,7 +277,7 @@ pub fn create_patch(
 
     // Write modified symlinks at both content-hash and path-hash keys
     for (path, (symlink_hash, _record)) in &diff.symlinks_modified {
-        if let Some((_header, key, value)) = source.get_entry(symlink_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
             output.store_entry(EntryType::Symlink, &key, &value)?;
             let path_key = symlink_path_hash(path, &symlink_algo)?;
             if path_key != key {
@@ -298,7 +298,7 @@ pub fn create_patch(
     // Write changed DirectoryIndexes at both content-hash and path-hash keys
     let algo = output.hash_algo();
     for (path, (dir_hash, _data)) in &diff.changed_directories {
-        if let Some((_header, key, value)) = source.get_entry(dir_hash)? {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
             output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
             let path_key = directory_path_hash(path, &algo)?;
             if path_key != key {

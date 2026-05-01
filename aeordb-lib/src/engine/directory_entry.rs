@@ -58,7 +58,7 @@ impl ChildEntry {
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<(ChildEntry, usize)> {
     match version {
       0 => Self::deserialize_v0(data, hash_length),
-      _ => Self::deserialize_v0(data, hash_length), // future versions will have their own methods
+      _ => Err(crate::engine::errors::EngineError::InvalidEntryVersion(version)),
     }
   }
 

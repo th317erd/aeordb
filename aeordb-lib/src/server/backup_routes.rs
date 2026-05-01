@@ -1,11 +1,13 @@
 use axum::{
     Extension,
+    body::Body,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
+use tokio_util::io::ReaderStream;
 
 use super::responses::{ErrorResponse, require_root};
 use super::state::AppState;
@@ -62,37 +64,58 @@ pub async fn export_backup(
 
     match result {
         Ok(export_result) => {
-            // Read the file and stream it back
-            match std::fs::read(&output_path) {
-                Ok(data) => {
-                    let _ = std::fs::remove_file(&output_path);
-                    let hash_hex = hex::encode(&export_result.version_hash);
-                    let hash_prefix = if hash_hex.len() >= 8 {
-                        &hash_hex[..8]
-                    } else {
-                        &hash_hex
-                    };
-                    let filename = format!("export-{}.aeordb", hash_prefix);
-                    (
-                        StatusCode::OK,
-                        [
-                            ("content-type", "application/octet-stream".to_string()),
-                            (
-                                "content-disposition",
-                                format!("attachment; filename=\"{}\"", filename),
-                            ),
-                        ],
-                        data,
-                    )
-                        .into_response()
-                }
+            // Stream the file back instead of reading it all into memory
+            let file_meta = match std::fs::metadata(&output_path) {
+                Ok(m) => m,
                 Err(e) => {
                     let _ = std::fs::remove_file(&output_path);
-                    ErrorResponse::new(format!("Failed to read exported backup file: {}. The export completed but the file could not be read", e))
+                    return ErrorResponse::new(format!("Failed to stat exported backup file: {}. The export completed but the file could not be read", e))
                         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .into_response()
+                        .into_response();
                 }
-            }
+            };
+            let file_size = file_meta.len();
+
+            let file = match tokio::fs::File::open(&output_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&output_path);
+                    return ErrorResponse::new(format!("Failed to open exported backup file: {}. The export completed but the file could not be read", e))
+                        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .into_response();
+                }
+            };
+
+            // Delete the temp file once the response is dropped
+            let owned_path = output_path.clone();
+            let stream = ReaderStream::new(file);
+            let body = Body::from_stream(stream);
+
+            let hash_hex = hex::encode(&export_result.version_hash);
+            let hash_prefix = if hash_hex.len() >= 8 {
+                &hash_hex[..8]
+            } else {
+                &hash_hex
+            };
+            let filename = format!("export-{}.aeordb", hash_prefix);
+
+            // Spawn a background task to clean up the temp file after a delay,
+            // giving the stream time to finish reading.
+            tokio::spawn(async move {
+                // Wait long enough for reasonable download speeds
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                let _ = std::fs::remove_file(&owned_path);
+            });
+
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/octet-stream")
+                .header("content-disposition", format!("attachment; filename=\"{}\"", filename))
+                .header("content-length", file_size.to_string())
+                .body(body)
+                .unwrap_or_else(|_| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build export response").into_response()
+                })
         }
         Err(e) => {
             let _ = std::fs::remove_file(&output_path);

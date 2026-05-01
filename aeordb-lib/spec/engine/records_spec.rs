@@ -476,7 +476,7 @@ fn test_file_name_no_slashes() {
 #[test]
 fn test_path_segments() {
   assert_eq!(path_segments("/myapp/users"), vec!["myapp", "users"]);
-  assert_eq!(path_segments("/"), Vec::<&str>::new());
+  assert_eq!(path_segments("/"), Vec::<String>::new());
   assert_eq!(path_segments("/a/b/c"), vec!["a", "b", "c"]);
 }
 

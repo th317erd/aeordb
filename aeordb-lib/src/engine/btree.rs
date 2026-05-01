@@ -518,13 +518,22 @@ fn build_internal_level(
 }
 
 /// Look up a single child by name in a B-tree directory.
+///
+/// When `include_deleted` is true, uses `get_entry_including_deleted()` so that
+/// B-tree nodes marked as deleted (common when walking historical snapshots) are
+/// still reachable.
 pub fn btree_lookup(
     engine: &StorageEngine,
     root_hash: &[u8],
     name: &str,
     hash_length: usize,
+    include_deleted: bool,
 ) -> EngineResult<Option<ChildEntry>> {
-    let node_data = engine.get_entry(root_hash)?
+    let node_data = if include_deleted {
+        engine.get_entry_including_deleted(root_hash)?
+    } else {
+        engine.get_entry(root_hash)?
+    }
         .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
     let node = BTreeNode::deserialize(&node_data.2, hash_length)?;
 
@@ -532,18 +541,27 @@ pub fn btree_lookup(
         BTreeNode::Leaf(leaf) => Ok(leaf.find(name).cloned()),
         BTreeNode::Internal(internal) => {
             let child_idx = internal.find_child_index(name);
-            btree_lookup(engine, &internal.children[child_idx], name, hash_length)
+            btree_lookup(engine, &internal.children[child_idx], name, hash_length, include_deleted)
         }
     }
 }
 
 /// List all children in a B-tree directory (in sorted order).
+///
+/// When `include_deleted` is true, uses `get_entry_including_deleted()` so that
+/// B-tree nodes marked as deleted (common when walking historical snapshots) are
+/// still reachable.
 pub fn btree_list(
     engine: &StorageEngine,
     root_hash: &[u8],
     hash_length: usize,
+    include_deleted: bool,
 ) -> EngineResult<Vec<ChildEntry>> {
-    let node_data = engine.get_entry(root_hash)?
+    let node_data = if include_deleted {
+        engine.get_entry_including_deleted(root_hash)?
+    } else {
+        engine.get_entry(root_hash)?
+    }
         .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
     let node = BTreeNode::deserialize(&node_data.2, hash_length)?;
 
@@ -552,7 +570,7 @@ pub fn btree_list(
         BTreeNode::Internal(internal) => {
             let mut all_entries = Vec::new();
             for child_hash in &internal.children {
-                let child_entries = btree_list(engine, child_hash, hash_length)?;
+                let child_entries = btree_list(engine, child_hash, hash_length, include_deleted)?;
                 all_entries.extend(child_entries);
             }
             Ok(all_entries)
@@ -562,10 +580,15 @@ pub fn btree_list(
 
 /// List all children starting from a serialized root node.
 /// Used when the caller already has the root node data (e.g., from a path-keyed entry).
+///
+/// When `include_deleted` is true, uses `get_entry_including_deleted()` so that
+/// B-tree nodes marked as deleted (common when walking historical snapshots) are
+/// still reachable.
 pub fn btree_list_from_node(
     root_data: &[u8],
     engine: &StorageEngine,
     hash_length: usize,
+    include_deleted: bool,
 ) -> EngineResult<Vec<ChildEntry>> {
     let node = BTreeNode::deserialize(root_data, hash_length)?;
     match node {
@@ -573,7 +596,7 @@ pub fn btree_list_from_node(
         BTreeNode::Internal(internal) => {
             let mut all = Vec::new();
             for child_hash in &internal.children {
-                let entries = btree_list(engine, child_hash, hash_length)?;
+                let entries = btree_list(engine, child_hash, hash_length, include_deleted)?;
                 all.extend(entries);
             }
             Ok(all)

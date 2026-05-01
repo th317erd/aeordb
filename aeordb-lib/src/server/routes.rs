@@ -637,8 +637,8 @@ pub async fn request_magic_link(
     // Still return 200 to prevent enumeration.
   }
 
-  // In dev mode, log the magic link URL.
-  tracing::info!(
+  // Log the magic link URL at debug level only — the code is a secret.
+  tracing::debug!(
     email = %payload.email,
     magic_link_url = %format!("/auth/magic-link/verify?code={}", code),
     "Magic link generated (dev mode — not emailed)"

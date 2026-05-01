@@ -708,6 +708,27 @@ impl StorageEngine {
     Ok(Some((header, key, value)))
   }
 
+  /// Like `get_entry_verified` but includes entries marked as deleted.
+  /// Needed for reading historical chunk data when streaming files from snapshots.
+  pub fn get_entry_verified_including_deleted(
+    &self,
+    hash: &[u8],
+  ) -> EngineResult<Option<EntryData>> {
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get_raw(hash) {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let writer = self.writer.read()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let (header, key, value) = writer.read_entry_at_shared_verified(kv_entry.offset)?;
+
+    Ok(Some((header, key, value)))
+  }
+
   /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();
@@ -1060,14 +1081,14 @@ impl StorageEngine {
   /// by type, file sizes, void space, and timestamps.
   pub fn stats(&self) -> DatabaseStats {
     // 1. Lock writer for file header info and file size
-    let (entry_count, created_at, updated_at, db_file_size_bytes) = match self.writer.read() {
+    let (entry_count, created_at, updated_at, db_file_size_bytes, kv_size_bytes) = match self.writer.read() {
       Ok(writer) => {
         let fh = writer.file_header();
-        (fh.entry_count, fh.created_at, fh.updated_at, writer.file_size())
+        (fh.entry_count, fh.created_at, fh.updated_at, writer.file_size(), fh.kv_block_length)
       }
       Err(e) => {
         tracing::error!("writer lock poisoned in stats(): {}", e);
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, 0)
       }
     };
 
@@ -1075,11 +1096,6 @@ impl StorageEngine {
     let snapshot = self.kv_snapshot.load();
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
-
-    // KV block is inside the main .aeordb file. Report its size from the header.
-    let kv_size_bytes = self.writer.read()
-      .map(|w| w.file_header().kv_block_length)
-      .unwrap_or(0);
 
     // PERF(M4): This iter_all() + type counting is O(n) over all KV entries.
     // For databases with millions of entries, consider maintaining atomic counters
@@ -1346,19 +1362,29 @@ impl StorageEngine {
       }
     }
 
-    if let Ok(mut kv) = self.kv_writer.try_lock() {
+    // Extract KV state under kv lock, then drop it before acquiring writer.
+    // This avoids holding kv_writer while acquiring writer (reverse of shutdown's order).
+    let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
       if kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
           tracing::warn!("Timer flush failed: {}", e);
         }
-        // Also persist the header with current hot_tail_offset
-        if let Ok(mut writer) = self.writer.try_write() {
-          let mut header = writer.file_header().clone();
-          header.hot_tail_offset = kv.hot_tail_offset();
-          header.entry_count = kv.len() as u64;
-          if let Err(e) = writer.update_header(&header) {
-            tracing::warn!("Timer header update failed: {}", e);
-          }
+        Some((kv.hot_tail_offset(), kv.len() as u64))
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+
+    // Now persist the header with writer lock (kv lock already released)
+    if let Some((hot_tail_offset, entry_count)) = header_update {
+      if let Ok(mut writer) = self.writer.try_write() {
+        let mut header = writer.file_header().clone();
+        header.hot_tail_offset = hot_tail_offset;
+        header.entry_count = entry_count;
+        if let Err(e) = writer.update_header(&header) {
+          tracing::warn!("Timer header update failed: {}", e);
         }
       }
     }
@@ -1392,17 +1418,24 @@ impl StorageEngine {
       }
     }
 
-    // Step 3: Persist header with current hot_tail_offset and sync WAL
+    // Step 3: Extract KV metadata, then persist header and sync WAL.
+    // Extract values from kv_writer BEFORE acquiring writer to avoid
+    // nesting kv_writer inside writer (opposite of the timer's order).
+    let (hot_tail_offset, entry_count) = match self.kv_writer.lock() {
+      Ok(kv) => (kv.hot_tail_offset(), kv.len() as u64),
+      Err(e) => {
+        tracing::error!("Could not acquire KV lock for header update during shutdown: {}", e);
+        (0, 0)
+      }
+    };
+
     match self.writer.write() {
       Ok(mut writer) => {
-        // Update header with final offsets
-        if let Ok(kv) = self.kv_writer.lock() {
-          let mut header = writer.file_header().clone();
-          header.hot_tail_offset = kv.hot_tail_offset();
-          header.entry_count = kv.len() as u64;
-          if let Err(e) = writer.update_header(&header) {
-            tracing::error!("Header update failed during shutdown: {}", e);
-          }
+        let mut header = writer.file_header().clone();
+        header.hot_tail_offset = hot_tail_offset;
+        header.entry_count = entry_count;
+        if let Err(e) = writer.update_header(&header) {
+          tracing::error!("Header update failed during shutdown: {}", e);
         }
         if let Err(e) = writer.sync_all() {
           tracing::error!("WAL sync failed during shutdown: {}", e);

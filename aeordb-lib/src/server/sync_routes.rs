@@ -549,7 +549,7 @@ pub async fn sync_chunks(
             Err(_) => continue,
         };
 
-        if let Ok(Some((header, _key, value))) = state.engine.get_entry(&hash) {
+        if let Ok(Some((header, _key, value))) = state.engine.get_entry_including_deleted(&hash) {
             // Skip system entries for non-root/non-peer callers.
             if filter_system && header.is_system_entry() {
                 continue;

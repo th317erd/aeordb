@@ -191,19 +191,20 @@ fn segments_simple() {
 }
 
 #[test]
-fn segments_filters_dots() {
-    assert_eq!(path_segments("/foo/./bar/../baz"), vec!["foo", "bar", "baz"]);
+fn segments_resolves_dots() {
+    // .. is resolved (parent), . is stripped
+    assert_eq!(path_segments("/foo/./bar/../baz"), vec!["foo", "baz"]);
 }
 
 #[test]
 fn segments_root_is_empty() {
-    let result: Vec<&str> = path_segments("/");
+    let result: Vec<String> = path_segments("/");
     assert!(result.is_empty());
 }
 
 #[test]
 fn segments_empty_input() {
-    let result: Vec<&str> = path_segments("");
+    let result: Vec<String> = path_segments("");
     assert!(result.is_empty());
 }
 

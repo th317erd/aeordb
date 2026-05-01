@@ -447,7 +447,8 @@ impl DiskKVStore {
                         hot_tail_offset = self.hot_tail_offset,
                         "flush: writing overflow entries to hot tail (resize blocked)"
                     );
-                    hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+                    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+                    self.db_file.set_len(end)?; // Truncate stale trailing data
                     self.db_file.sync_data()?;
                 }
                 self.publish_snapshot_incremental(&modified_buckets);
@@ -752,7 +753,8 @@ impl DiskKVStore {
         // everything in the write buffer (these haven't been flushed to pages yet)
         let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
 
-        hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+        let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+        self.db_file.set_len(end)?; // Truncate stale trailing data
         self.db_file.sync_data()?;
         self.hot_buffer.clear();
 

@@ -51,6 +51,8 @@ pub async fn permission_middleware(
     && request_path != "/files/shares"
     && request_path != "/files/share-link"
     && request_path != "/files/shared-with-me"
+    && request_path != "/files/deleted"
+    && request_path != "/files/restore"
     && !request_path.starts_with("/files/share-links");
 
   // For non-files routes, we still need to load key rules for downstream filtering

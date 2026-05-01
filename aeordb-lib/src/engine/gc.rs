@@ -114,7 +114,9 @@ fn walk_directory_tree(
   let path_hash = engine.compute_hash(format!("dir:{}", dir_path).as_bytes())?;
   live.insert(path_hash);
 
-  let entry = match engine.get_entry(root_hash)? {
+  // Use get_entry_including_deleted: content-addressed entries may be marked
+  // deleted at HEAD but still reachable from historical snapshot roots.
+  let entry = match engine.get_entry_including_deleted(root_hash)? {
     Some(entry) => entry,
     None => return Ok(()),
   };
@@ -174,7 +176,9 @@ fn mark_file_entry(
     return Ok(());
   }
 
-  if let Some((header, _key, value)) = engine.get_entry(file_hash)? {
+  // Use get_entry_including_deleted: file entries may be deleted at HEAD
+  // but still referenced by historical snapshots.
+  if let Some((header, _key, value)) = engine.get_entry_including_deleted(file_hash)? {
     let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
     for chunk_hash in &file_record.chunk_hashes {
       live.insert(chunk_hash.clone());
@@ -212,7 +216,8 @@ fn mark_symlink_entry(
   live.insert(path_key);
 
   // Also mark the content-addressed key as live (immutable KV store entry)
-  if let Some((_header, _key, value)) = engine.get_entry(symlink_hash)? {
+  // Use _including_deleted: symlink may be deleted at HEAD but snapshot-referenced.
+  if let Some((_header, _key, value)) = engine.get_entry_including_deleted(symlink_hash)? {
     let content_key = symlink_content_hash(&value, &algo)?;
     live.insert(content_key);
   }
@@ -237,7 +242,8 @@ fn collect_btree_children(
     BTreeNode::Internal(internal) => {
       for child_hash in &internal.children {
         live.insert(child_hash.clone());
-        if let Some((_header, _key, child_data)) = engine.get_entry(child_hash)? {
+        // B-tree internal nodes may be deleted at HEAD but snapshot-referenced.
+        if let Some((_header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? {
           let sub_children = collect_btree_children(engine, &child_data, hash_length, live)?;
           all_children.extend(sub_children);
         }
@@ -258,7 +264,8 @@ fn mark_system_entries(
 
   for prefix in &system_prefixes {
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
-    if let Some((_header, _key, value)) = engine.get_entry(&dir_hash)? {
+    // System dirs may be deleted at HEAD but snapshot-referenced.
+    if let Some((_header, _key, value)) = engine.get_entry_including_deleted(&dir_hash)? {
       live.insert(dir_hash);
       if !value.is_empty() {
         if is_btree_format(&value) {
@@ -290,7 +297,9 @@ fn mark_entry_recursive(
     return Ok(());
   }
 
-  let entry = match engine.get_entry(hash)? {
+  // Use _including_deleted: system entries may reference content-addressed
+  // entries that are deleted at HEAD but still needed.
+  let entry = match engine.get_entry_including_deleted(hash)? {
     Some(entry) => entry,
     None => return Ok(()),
   };

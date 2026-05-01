@@ -24,6 +24,21 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
             eprintln!("Remove it first, or use --force-fix-in-place to repair the original.");
             process::exit(1);
         }
+        // Flush the hot tail into the main file before copying, so the
+        // repaired copy starts with a fully-consistent on-disk state.
+        println!("Flushing hot tail before copy...");
+        match StorageEngine::open(database) {
+            Ok(flush_engine) => {
+                if let Err(e) = flush_engine.shutdown() {
+                    eprintln!("Warning: hot-tail flush failed: {}", e);
+                }
+                drop(flush_engine);
+            }
+            Err(e) => {
+                eprintln!("Warning: could not open database for hot-tail flush: {}", e);
+            }
+        }
+
         println!("Creating repaired copy: {}", repaired_path);
         if let Err(e) = std::fs::copy(database, &repaired_path) {
             eprintln!("Failed to copy database: {}", e);

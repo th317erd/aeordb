@@ -32,9 +32,12 @@ pub async fn download_zip(
             .into_response();
     }
 
+    const MAX_ZIP_SIZE: u64 = 2_147_483_648; // 2 GB
+
     let ops = DirectoryOps::new(&state.engine);
     let mut zip_buffer = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut cumulative_size: u64 = 0;
 
     // Compute common path prefix so ZIP entries are relative to the user's
     // browsing context, not the DB root. E.g. selecting /docs/readme.md and
@@ -61,6 +64,14 @@ pub async fn download_zip(
             // Try as file first
             match ops.read_file(&normalized) {
                 Ok(data) => {
+                    cumulative_size += data.len() as u64;
+                    if cumulative_size > MAX_ZIP_SIZE {
+                        return ErrorResponse::new(
+                            "Download exceeds the 2 GB size limit. Select fewer files or download individually."
+                        )
+                            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+                            .into_response();
+                    }
                     let zip_entry_name = strip_prefix(&normalized, &common_prefix);
                     if zip_writer.start_file(&zip_entry_name, options).is_ok() {
                         let _ = zip_writer.write_all(&data);
@@ -68,7 +79,14 @@ pub async fn download_zip(
                 }
                 Err(crate::engine::errors::EngineError::NotFound(_)) => {
                     // Not a file — try as directory
-                    if add_directory_to_zip(&ops, &normalized, &common_prefix, &mut zip_writer, options, &mut skipped).is_err() {
+                    if add_directory_to_zip(&ops, &normalized, &common_prefix, &mut zip_writer, options, &mut skipped, &mut cumulative_size, MAX_ZIP_SIZE).is_err() {
+                        if cumulative_size > MAX_ZIP_SIZE {
+                            return ErrorResponse::new(
+                                "Download exceeds the 2 GB size limit. Select fewer files or download individually."
+                            )
+                                .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+                                .into_response();
+                        }
                         skipped.push(raw_path.clone());
                     }
                 }
@@ -112,6 +130,8 @@ fn add_directory_to_zip(
     zip_writer: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
     options: zip::write::SimpleFileOptions,
     skipped: &mut Vec<String>,
+    cumulative_size: &mut u64,
+    max_size: u64,
 ) -> Result<(), ()> {
     let entries = ops.list_directory(dir_path).map_err(|_| ())?;
 
@@ -130,9 +150,13 @@ fn add_directory_to_zip(
         }
 
         if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
-            let _ = add_directory_to_zip(ops, &normalized, common_prefix, zip_writer, options, skipped);
+            let _ = add_directory_to_zip(ops, &normalized, common_prefix, zip_writer, options, skipped, cumulative_size, max_size);
         } else if entry.entry_type == EntryType::FileRecord.to_u8() {
             if let Ok(data) = ops.read_file(&normalized) {
+                *cumulative_size += data.len() as u64;
+                if *cumulative_size > max_size {
+                    return Err(());
+                }
                 let zip_entry_name = strip_prefix(&normalized, common_prefix);
                 if zip_writer.start_file(&zip_entry_name, options).is_ok() {
                     let _ = zip_writer.write_all(&data);
