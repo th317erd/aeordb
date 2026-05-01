@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use crate::engine::compression::CompressionAlgorithm;
@@ -12,6 +13,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
   file: File,
+  reader: File,
   file_path: std::path::PathBuf,
   file_header: FileHeader,
   current_offset: u64,
@@ -30,10 +32,12 @@ impl AppendWriter {
     file.write_all(&header_bytes)?;
     file.sync_all()?;
 
+    let reader = File::open(path)?;
     let current_offset = FILE_HEADER_SIZE as u64;
 
     Ok(AppendWriter {
       file,
+      reader,
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
@@ -50,10 +54,12 @@ impl AppendWriter {
     file.read_exact(&mut header_bytes)?;
     let file_header = FileHeader::deserialize(&header_bytes)?;
 
+    let reader = File::open(path)?;
     let current_offset = file.seek(SeekFrom::End(0))?;
 
     Ok(AppendWriter {
       file,
+      reader,
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
@@ -332,12 +338,33 @@ impl AppendWriter {
   }
 
   fn read_entry_at_shared_opt(&self, offset: u64, verify: bool) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
-    // Open a FRESH file handle instead of try_clone(). On POSIX, dup() (used by
-    // try_clone) shares the seek position between the original and the clone,
-    // causing data corruption when multiple threads read concurrently.
-    let mut file = File::open(&self.file_path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let header = EntryHeader::deserialize(&mut file)?;
+    // Use pread (read_at) on a shared reader handle. read_at does not use or
+    // modify the file's seek position, so multiple concurrent readers on the
+    // same File are safe without any locking.
+
+    // First, read the fixed header to learn hash algorithm and payload sizes.
+    let mut fixed_buf = [0u8; EntryHeader::FIXED_HEADER_SIZE];
+    self.reader.read_at(&mut fixed_buf, offset)?;
+
+    // Parse hash algorithm from the fixed header to determine total header size.
+    let hash_algo_raw = u16::from_le_bytes([fixed_buf[7], fixed_buf[8]]);
+    let hash_algo = crate::engine::hash_algorithm::HashAlgorithm::from_u16(hash_algo_raw)
+      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_length = hash_algo.hash_length();
+    let full_header_size = EntryHeader::FIXED_HEADER_SIZE + hash_length;
+
+    // Parse total_length from fixed header to know the complete entry size.
+    let total_length = u32::from_le_bytes([
+      fixed_buf[27], fixed_buf[28], fixed_buf[29], fixed_buf[30],
+    ]) as usize;
+
+    // Read the entire entry (header + key + value) in a single pread call.
+    let mut entry_buf = vec![0u8; total_length];
+    self.reader.read_at(&mut entry_buf, offset)?;
+
+    // Deserialize the header from the buffer.
+    let mut cursor = Cursor::new(&entry_buf[..full_header_size]);
+    let header = EntryHeader::deserialize(&mut cursor)?;
 
     // Validate payload lengths against total_length to prevent unbounded allocation
     // from corrupt headers (H7).
@@ -354,11 +381,11 @@ impl AppendWriter {
       });
     }
 
-    let mut key = vec![0u8; header.key_length as usize];
-    file.read_exact(&mut key)?;
-
-    let mut value = vec![0u8; header.value_length as usize];
-    file.read_exact(&mut value)?;
+    let key_start = full_header_size;
+    let key_end = key_start + header.key_length as usize;
+    let value_end = key_end + header.value_length as usize;
+    let key = entry_buf[key_start..key_end].to_vec();
+    let value = entry_buf[key_end..value_end].to_vec();
 
     if verify && !header.verify(&key, &value) {
       return Err(EngineError::CorruptEntry {

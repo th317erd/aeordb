@@ -30,7 +30,7 @@ impl EntryHeader {
   /// Fixed portion size: magic(4) + entry_version(1) + entry_type(1) + flags(1)
   /// + hash_algo(2) + compression_algo(1) + encryption_algo(1)
   /// + key_length(4) + value_length(4) + timestamp(8) + total_length(4) = 31
-  const FIXED_HEADER_SIZE: usize = 31;
+  pub const FIXED_HEADER_SIZE: usize = 31;
 
   pub fn header_size(&self) -> usize {
     Self::FIXED_HEADER_SIZE + self.hash_algo.hash_length()

@@ -7,6 +7,8 @@ use rand::{Rng, SeedableRng};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::utils::format_bytes;
+
 #[derive(Args)]
 pub struct StressArgs {
   /// Target server URL
@@ -173,17 +175,6 @@ fn format_duration_millis(duration: Duration) -> String {
   format!("{millis:.1}ms")
 }
 
-fn format_file_size_human(bytes: usize) -> String {
-  if bytes >= 1_073_741_824 {
-    format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-  } else if bytes >= 1_048_576 {
-    format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-  } else if bytes >= 1024 {
-    format!("{:.1} KB", bytes as f64 / 1024.0)
-  } else {
-    format!("{bytes} B")
-  }
-}
 
 fn parse_operation_type(input: &str) -> Result<OperationType, String> {
   match input.trim().to_lowercase().as_str() {
@@ -471,7 +462,7 @@ fn print_report(
   );
   println!("  Concurrency:  {concurrency}");
   println!("  Operation:    {operation_label}");
-  println!("  File Size:    {}", format_file_size_human(file_size));
+  println!("  File Size:    {}", format_bytes(file_size as u64));
   println!();
   println!("  Total Operations:   {total_operations}");
   println!("  Throughput:         {throughput:.1} ops/sec");
@@ -544,7 +535,7 @@ pub async fn run(arguments: StressArgs) -> Result<(), String> {
     arguments.concurrency,
     duration.as_secs_f64(),
     arguments.operation,
-    format_file_size_human(file_size),
+    format_bytes(file_size as u64),
   );
 
   let written_paths: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));

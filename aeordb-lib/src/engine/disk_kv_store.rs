@@ -296,8 +296,12 @@ impl DiskKVStore {
     /// Bulk insert without snapshot publishing or hot journaling.
     pub fn bulk_insert(&mut self, entries: &[KVEntry]) {
         for entry in entries {
+            if !self.write_buffer.contains_key(&entry.hash)
+                && !self.entry_exists_on_disk(&entry.hash)
+            {
+                self.entry_count += 1;
+            }
             self.write_buffer.insert(entry.hash.clone(), entry.clone());
-            self.entry_count += 1;
 
             if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
                 if let Err(e) = self.flush_no_snapshot() {
