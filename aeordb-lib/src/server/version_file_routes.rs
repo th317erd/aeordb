@@ -1,6 +1,6 @@
 use axum::{
     Extension,
-    extract::{Path, State},
+    extract::{Path, Query as AxumQuery, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -26,6 +26,11 @@ pub struct RestoreRequest {
     pub version: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct HistoryQuery {
+    pub limit: Option<usize>,
+}
+
 /// GET /version/file-history/{*path}
 ///
 /// Returns the change history of a single file across all snapshots.
@@ -38,7 +43,9 @@ pub async fn file_history(
     State(state): State<AppState>,
     Extension(_claims): Extension<TokenClaims>,
     Path(path): Path<String>,
+    AxumQuery(query): AxumQuery<HistoryQuery>,
 ) -> Response {
+    let max_snapshots = query.limit.unwrap_or(200).min(1000);
     // Block ALL access to /.aeordb-system/ via API — system data is only accessible
     // through the internal system_store module, never through HTTP endpoints.
     if is_system_path(&path) {
@@ -60,11 +67,15 @@ pub async fn file_history(
         }
     };
 
-    // Sort by created_at ascending for comparison
+    // Sort by created_at ascending for comparison, cap to limit
     let mut sorted_snapshots = snapshots;
     sorted_snapshots.sort_by(|a, b| {
         a.created_at.cmp(&b.created_at).then_with(|| a.name.cmp(&b.name))
     });
+    // Keep only the most recent snapshots (sorted ascending, so take from the end)
+    if sorted_snapshots.len() > max_snapshots {
+        sorted_snapshots = sorted_snapshots.split_off(sorted_snapshots.len() - max_snapshots);
+    }
 
     // Resolve file at each snapshot
     struct FileAtVersion {

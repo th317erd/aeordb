@@ -833,10 +833,10 @@ impl<'a> DirectoryOps<'a> {
       Ok(None) => Err(EngineError::NotFound(normalized)),
       Err(e) => {
         tracing::warn!(
-          "Error reading directory '{}': {}. Returning empty listing.",
+          "Error reading directory '{}': {}",
           normalized, e
         );
-        Ok(Vec::new())
+        Err(e)
       }
     }
   }
