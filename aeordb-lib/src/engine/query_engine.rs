@@ -1083,7 +1083,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Collect all files under the query path via recursive directory listing.
-    let listing = match list_directory_recursive(self.engine, path, -1, None) {
+    let listing = match list_directory_recursive(self.engine, path, -1, None, None) {
       Ok(entries) => entries,
       Err(EngineError::NotFound(_)) => return Ok(HashSet::new()),
       Err(other) => return Err(other),

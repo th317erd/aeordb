@@ -678,7 +678,7 @@ fn handle_recursive_listing(
   let depth = if depth < 0 { -1 } else { depth.min(256) };
   let glob = version_query.glob.as_deref();
 
-  match list_directory_recursive(engine, path, depth, glob) {
+  match list_directory_recursive(engine, path, depth, glob, None) {
     Ok(entries) => {
       let mut listing: Vec<serde_json::Value> = entries
         .iter()

@@ -603,6 +603,81 @@ impl<'a> DirectoryOps<'a> {
     Ok(file_record)
   }
 
+  /// Restore a file from an existing FileRecord without re-reading chunk data.
+  /// The chunks must already exist in the database (e.g., from a historical snapshot).
+  /// This avoids loading the entire file into memory for large file restores.
+  pub fn restore_file_from_record(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    source_record: &FileRecord,
+  ) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let content_type = source_record.content_type.as_deref()
+      .unwrap_or("application/octet-stream");
+
+    // Preserve created_at if file already exists
+    let file_key = file_path_hash(&normalized, &algo)?;
+    let existing_created_at = match self.engine.get_entry(&file_key)? {
+      Some((header, _key, value)) => {
+        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+        Some(existing.created_at)
+      }
+      None => None,
+    };
+
+    // Create new FileRecord pointing to the same chunks
+    let mut file_record = FileRecord::new(
+      normalized.clone(),
+      Some(content_type.to_string()),
+      source_record.total_size,
+      source_record.chunk_hashes.clone(),
+    );
+    if let Some(original_created_at) = existing_created_at {
+      file_record.created_at = original_created_at;
+    }
+
+    let file_value = file_record.serialize(hash_length)?;
+
+    // Store at all three keys (content, identity, path)
+    let file_content_key = file_content_hash(&file_value, &algo)?;
+    self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
+
+    let identity_key = file_identity_hash(&normalized, Some(content_type), &file_record.chunk_hashes, &algo)?;
+    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
+    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
+
+    // Update parent directories
+    let child = ChildEntry {
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: identity_key,
+      total_size: source_record.total_size,
+      created_at: file_record.created_at,
+      updated_at: file_record.updated_at,
+      name: file_name(&normalized).unwrap_or("").to_string(),
+      content_type: Some(content_type.to_string()),
+      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+      node_id: 0,
+    };
+    self.update_parent_directories(&normalized, child)?;
+
+    ctx.emit(
+      crate::engine::engine_event::EVENT_ENTRIES_CREATED,
+      serde_json::json!({"entries": [{
+        "path": normalized,
+        "entry_type": "file",
+        "content_type": content_type,
+        "size": source_record.total_size,
+      }]}),
+    );
+
+    Ok(())
+  }
+
   /// Read a file as a streaming iterator of chunk data.
   pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream> {
     let timer_start = std::time::Instant::now();

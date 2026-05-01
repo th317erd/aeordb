@@ -66,6 +66,7 @@ pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Va
         "/.conflicts",
         -1,    // unlimited depth
         Some("*.meta"),  // glob for .meta files only
+        None,
     ) {
         Ok(e) => e,
         Err(EngineError::NotFound(_)) => return Ok(Vec::new()),

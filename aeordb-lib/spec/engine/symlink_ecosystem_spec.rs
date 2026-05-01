@@ -271,7 +271,7 @@ fn test_listing_includes_symlink_target() {
 
     store_symlink(&engine, "/link.txt", "/target.txt");
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     let symlink_entry = entries.iter().find(|e| e.name == "link.txt");
     assert!(symlink_entry.is_some(), "symlink should appear in listing");
 
@@ -288,7 +288,7 @@ fn test_listing_recursive_includes_symlinks() {
     store_file(&engine, "/a/file.txt", b"data");
     store_symlink(&engine, "/a/link", "/a/file.txt");
 
-    let entries = list_directory_recursive(&engine, "/", -1, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", -1, None, None).unwrap();
     let symlink_entry = entries.iter().find(|e| e.name == "link");
     assert!(symlink_entry.is_some(), "symlink should appear in recursive listing");
 
@@ -305,7 +305,7 @@ fn test_listing_glob_filters_symlinks() {
     store_symlink(&engine, "/link.txt", "/target1");
     store_symlink(&engine, "/link.psd", "/target2");
 
-    let entries = list_directory_recursive(&engine, "/", 0, Some("*.txt")).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, Some("*.txt"), None).unwrap();
     assert_eq!(entries.len(), 1, "glob should filter symlinks");
     assert_eq!(entries[0].name, "link.txt");
     assert_eq!(entries[0].target, Some("/target1".to_string()));
@@ -318,7 +318,7 @@ fn test_listing_files_have_no_target() {
 
     store_file(&engine, "/file.txt", b"hello");
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     let file_entry = entries.iter().find(|e| e.name == "file.txt").unwrap();
     assert_eq!(file_entry.target, None, "file entries should have target=None");
 }
@@ -331,7 +331,7 @@ fn test_listing_mixed_files_and_symlinks() {
     store_file(&engine, "/file.txt", b"hello");
     store_symlink(&engine, "/link", "/file.txt");
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     assert_eq!(entries.len(), 2);
 
     let file_entry = entries.iter().find(|e| e.name == "file.txt").unwrap();

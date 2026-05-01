@@ -456,10 +456,14 @@ pub async fn shared_with_me(
         Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
     };
 
-    // Scan all .permissions files
+    // Scan .permissions files with depth + result guardrails to avoid
+    // unbounded traversal on huge databases.
+    const MAX_SCAN_DEPTH: i32 = 10;
+    const MAX_PERM_FILES: usize = 1_000;
+
     let ops = DirectoryOps::new(&state.engine);
     let perm_files = match crate::engine::directory_listing::list_directory_recursive(
-        &state.engine, "/", -1, Some(".aeordb-permissions"),
+        &state.engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES),
     ) {
         Ok(entries) => entries,
         Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),

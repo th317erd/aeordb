@@ -28,7 +28,7 @@ fn test_list_immediate_children() {
     store_file(&engine, "/b.txt", b"bbb");
     store_file(&engine, "/sub/c.txt", b"ccc");
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     assert_eq!(entries.len(), 3); // a.txt, b.txt, sub (directory)
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -45,7 +45,7 @@ fn test_list_depth_1() {
     store_file(&engine, "/a.txt", b"aaa");
     store_file(&engine, "/sub/c.txt", b"ccc");
 
-    let entries = list_directory_recursive(&engine, "/", 1, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 1, None, None).unwrap();
     // depth=1: returns files only (recursive mode). a.txt at root + c.txt inside /sub
     assert_eq!(entries.len(), 2);
 
@@ -64,7 +64,7 @@ fn test_list_unlimited_depth() {
     store_file(&engine, "/d1/d2/c.txt", b"ccc");
     store_file(&engine, "/d1/d2/d3/d.txt", b"ddd");
 
-    let entries = list_directory_recursive(&engine, "/", -1, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", -1, None, None).unwrap();
     assert_eq!(entries.len(), 4);
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -83,7 +83,7 @@ fn test_list_glob_filter() {
     store_file(&engine, "/b.psd", b"bbb");
     store_file(&engine, "/c.txt", b"ccc");
 
-    let entries = list_directory_recursive(&engine, "/", 0, Some("*.txt")).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, Some("*.txt"), None).unwrap();
     assert_eq!(entries.len(), 2);
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -100,7 +100,7 @@ fn test_list_glob_with_depth() {
     store_file(&engine, "/sub/b.txt", b"bbb");
     store_file(&engine, "/sub/c.psd", b"ccc");
 
-    let entries = list_directory_recursive(&engine, "/", -1, Some("*.txt")).unwrap();
+    let entries = list_directory_recursive(&engine, "/", -1, Some("*.txt"), None).unwrap();
     assert_eq!(entries.len(), 2);
 
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -113,7 +113,7 @@ fn test_list_empty_directory() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create_engine(&dir);
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -122,7 +122,7 @@ fn test_list_nonexistent_directory() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create_engine(&dir);
 
-    let result = list_directory_recursive(&engine, "/nonexistent", 0, None);
+    let result = list_directory_recursive(&engine, "/nonexistent", 0, None, None);
     assert!(result.is_err());
 }
 
@@ -134,7 +134,7 @@ fn test_list_no_glob_matches() {
     store_file(&engine, "/a.txt", b"aaa");
     store_file(&engine, "/b.txt", b"bbb");
 
-    let entries = list_directory_recursive(&engine, "/", 0, Some("*.xyz")).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, Some("*.xyz"), None).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -151,7 +151,7 @@ fn test_list_depth_boundary() {
     // depth=2: recursive mode (files only). Recurses 2 levels deep from root.
     // root(depth=2) -> d1(depth=1) -> d2(depth=0, no further recursion)
     // Files found: a.txt (root), b.txt (d1), c.txt (d2). d.txt is in d3 which is beyond depth.
-    let entries = list_directory_recursive(&engine, "/", 2, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 2, None, None).unwrap();
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"a.txt"), "should contain a.txt, got: {:?}", names);
@@ -173,7 +173,7 @@ fn test_list_files_only_recursive() {
     store_file(&engine, "/a.txt", b"aaa");
     store_file(&engine, "/sub/b.txt", b"bbb");
 
-    let entries = list_directory_recursive(&engine, "/", -1, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", -1, None, None).unwrap();
     assert_eq!(entries.len(), 2);
 
     for entry in &entries {
@@ -188,7 +188,7 @@ fn test_list_includes_content_hash() {
 
     store_file(&engine, "/a.txt", b"hello world");
 
-    let entries = list_directory_recursive(&engine, "/", 0, None).unwrap();
+    let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].hash.is_empty());
 }

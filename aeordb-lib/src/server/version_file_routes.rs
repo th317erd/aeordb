@@ -10,7 +10,7 @@ use serde::Deserialize;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::version_access::{read_file_at_version, resolve_file_at_version};
+use crate::engine::version_access::resolve_file_at_version;
 use crate::engine::version_manager::VersionManager;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::request_context::RequestContext;
@@ -307,22 +307,12 @@ pub async fn file_restore(
         }
     };
 
-    // Read the historical file content
-    let content = match read_file_at_version(&state.engine, &root_hash, &path) {
-        Ok(data) => data,
-        Err(error) => {
-            return ErrorResponse::new(format!("Failed to read historical file: {}", error))
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response();
-        }
-    };
-
-    // Write the historical content to HEAD at the same path
+    // Restore the file by re-using the existing chunk hashes from the
+    // historical FileRecord. This avoids loading the entire file into memory.
     let directory_ops = DirectoryOps::new(&state.engine);
-    let content_type = file_record.content_type.as_deref();
-    let size = content.len() as u64;
+    let size = file_record.total_size;
 
-    match directory_ops.store_file(&ctx, &path, &content, content_type) {
+    match directory_ops.restore_file_from_record(&ctx, &path, &file_record) {
         Ok(_) => {}
         Err(error) => {
             return ErrorResponse::new(format!("Failed to write restored file: {}", error))

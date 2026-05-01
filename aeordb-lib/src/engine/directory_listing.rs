@@ -31,6 +31,7 @@ pub fn list_directory_recursive(
     base_path: &str,
     depth: i32,
     glob_pattern: Option<&str>,
+    max_results: Option<usize>,
 ) -> EngineResult<Vec<ListingEntry>> {
     let normalized = normalize_path(base_path);
     let algo = engine.hash_algo();
@@ -64,6 +65,7 @@ pub fn list_directory_recursive(
         recursive_mode,
         glob_pattern,
         hash_length,
+        max_results,
         &mut results,
     )?;
 
@@ -78,9 +80,16 @@ fn walk_listing(
     recursive_mode: bool,
     glob_pattern: Option<&str>,
     hash_length: usize,
+    max_results: Option<usize>,
     results: &mut Vec<ListingEntry>,
 ) -> EngineResult<()> {
     for child in children {
+        // Early-exit when the result cap has been reached
+        if let Some(cap) = max_results {
+            if results.len() >= cap {
+                return Ok(());
+            }
+        }
         let child_path = if current_path == "/" {
             format!("/{}", child.name)
         } else {
@@ -157,6 +166,7 @@ fn walk_listing(
                                 recursive_mode,
                                 glob_pattern,
                                 hash_length,
+                                max_results,
                                 results,
                             )?;
                         }
