@@ -22,7 +22,7 @@ pub fn resolve_file_at_version(
 
 
     // Load the root directory
-    let mut dir_data = match engine.get_entry(root_hash)? {
+    let mut dir_data = match engine.get_entry_including_deleted(root_hash)? {
         Some((_header, _key, value)) => value,
         None => {
             tracing::debug!(
@@ -80,7 +80,7 @@ pub fn resolve_file_at_version(
                 EngineError::NotFound(format!("Directory '{}' not found at version", segment))
             })?;
 
-        dir_data = match engine.get_entry(&child.hash) {
+        dir_data = match engine.get_entry_including_deleted(&child.hash) {
             Ok(Some((_header, _key, value))) => value,
             Ok(None) => {
                 tracing::debug!(
