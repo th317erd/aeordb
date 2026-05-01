@@ -175,6 +175,14 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
     println!("  Missing entries:    {:>8}", report.missing_kv_entries);
     println!();
 
+    println!("Snapshot Integrity:");
+    println!("  Snapshots checked:  {:>8}", report.snapshots_checked);
+    println!("  Broken snapshots:   {:>8}", report.broken_snapshots.len());
+    for bs in &report.broken_snapshots {
+        println!("    - {}", bs);
+    }
+    println!();
+
     if !report.repairs.is_empty() {
         println!("Repairs:");
         for r in &report.repairs {
@@ -206,6 +214,13 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
             }
             if !report.missing_children.is_empty() {
                 println!("  {} files are listed in directories but can't be read.", report.missing_children.len());
+            }
+            if !report.broken_snapshots.is_empty() {
+                println!("  {} snapshots reference data that no longer exists.", report.broken_snapshots.len());
+                println!("  This is typically caused by GC sweeping entries that snapshots");
+                println!("  still reference (a bug fixed in this version). The snapshot");
+                println!("  metadata is intact but the file data it points to is gone.");
+                println!("  These snapshots can be deleted with: aeordb snapshot delete <name>");
             }
             println!();
             println!("  Run with --repair to auto-fix recoverable issues:");

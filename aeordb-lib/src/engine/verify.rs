@@ -48,6 +48,10 @@ pub struct VerifyReport {
     pub stale_kv_entries: u64,
     pub missing_kv_entries: u64,
 
+    // Snapshot integrity
+    pub snapshots_checked: u64,
+    pub broken_snapshots: Vec<String>, // snapshot names with broken tree references
+
     // Issues found during repair (if --repair was used)
     pub repairs: Vec<String>,
 }
@@ -81,6 +85,8 @@ impl VerifyReport {
             kv_entries: 0,
             stale_kv_entries: 0,
             missing_kv_entries: 0,
+            snapshots_checked: 0,
+            broken_snapshots: Vec::new(),
             repairs: Vec::new(),
         }
     }
@@ -92,6 +98,7 @@ impl VerifyReport {
             || !self.unlisted_files.is_empty()
             || self.stale_kv_entries > 0
             || self.missing_kv_entries > 0
+            || !self.broken_snapshots.is_empty()
     }
 }
 
@@ -111,6 +118,9 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
 
     // Phase 3: Check directory consistency
     check_directories(engine, &mut report);
+
+    // Phase 4: Check snapshot tree integrity (detects GC damage)
+    check_snapshot_integrity(engine, &mut report);
 
     report
 }
@@ -332,6 +342,128 @@ fn check_directory_recursive(
         }
         Err(_) => {
             // Directory itself doesn't exist or is corrupt
+        }
+    }
+}
+
+/// Phase 4: Walk each snapshot's directory tree and verify all entries
+/// are reachable. Detects damage from GC sweeping snapshot-referenced data.
+fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport) {
+    use crate::engine::version_manager::VersionManager;
+
+    let vm = VersionManager::new(engine);
+    let snapshots = match vm.list_snapshots() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let hash_length = engine.hash_algo().hash_length();
+
+    for snapshot in &snapshots {
+        report.snapshots_checked += 1;
+
+        let mut missing = Vec::new();
+        walk_snapshot_tree(engine, &snapshot.root_hash, "/", hash_length, &mut missing, 0);
+
+        if !missing.is_empty() {
+            report.broken_snapshots.push(format!(
+                "{} (id: {}): {} broken references — {}",
+                snapshot.name,
+                hex::encode(&snapshot.root_hash),
+                missing.len(),
+                missing.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+            ));
+        }
+    }
+}
+
+/// Recursively walk a snapshot's directory tree, collecting paths where
+/// entries are missing (GC damage or corruption).
+fn walk_snapshot_tree(
+    engine: &StorageEngine,
+    root_hash: &[u8],
+    dir_path: &str,
+    hash_length: usize,
+    missing: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 100 { return; }
+
+    let value = match engine.get_entry_including_deleted(root_hash) {
+        Ok(Some((_header, _key, value))) => value,
+        Ok(None) => {
+            missing.push(format!("{} (dir entry missing)", dir_path));
+            return;
+        }
+        Err(_) => return,
+    };
+
+    if value.is_empty() { return; }
+
+    let children = if crate::engine::btree::is_btree_format(&value) {
+        match crate::engine::btree::btree_list_from_node(&value, engine, hash_length, true) {
+            Ok(c) => c,
+            Err(_) => {
+                missing.push(format!("{} (corrupt btree)", dir_path));
+                return;
+            }
+        }
+    } else {
+        match crate::engine::directory_entry::deserialize_child_entries(&value, hash_length, 0) {
+            Ok(c) => c,
+            Err(_) => {
+                missing.push(format!("{} (corrupt flat index)", dir_path));
+                return;
+            }
+        }
+    };
+
+    for child in &children {
+        let child_path = if dir_path == "/" {
+            format!("/{}", child.name)
+        } else {
+            format!("{}/{}", dir_path, child.name)
+        };
+
+        let child_type = crate::engine::entry_type::EntryType::from_u8(child.entry_type);
+        match child_type {
+            Ok(crate::engine::entry_type::EntryType::DirectoryIndex) => {
+                walk_snapshot_tree(engine, &child.hash, &child_path, hash_length, missing, depth + 1);
+            }
+            Ok(crate::engine::entry_type::EntryType::FileRecord) => {
+                // Verify file record and its chunks are readable
+                match engine.get_entry_including_deleted(&child.hash) {
+                    Ok(Some((header, _key, value))) => {
+                        match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+                            Ok(record) => {
+                                for chunk_hash in &record.chunk_hashes {
+                                    match engine.get_entry_including_deleted(chunk_hash) {
+                                        Ok(Some(_)) => {}
+                                        _ => {
+                                            missing.push(format!("{} (chunk {} missing)", child_path, hex::encode(chunk_hash)));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                missing.push(format!("{} (corrupt file record)", child_path));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        missing.push(format!("{} (file record missing)", child_path));
+                    }
+                    Err(_) => {
+                        missing.push(format!("{} (read error)", child_path));
+                    }
+                }
+            }
+            _ => {
+                // Symlinks and other types — just verify entry exists
+                if let Ok(None) = engine.get_entry_including_deleted(&child.hash) {
+                    missing.push(format!("{} (entry missing)", child_path));
+                }
+            }
         }
     }
 }
