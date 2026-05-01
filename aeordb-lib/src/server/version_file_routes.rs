@@ -271,10 +271,15 @@ pub async fn file_restore(
         }
     };
 
-    // Create auto-snapshot BEFORE restore (mandatory safety net)
+    // Create auto-snapshot BEFORE restore (mandatory safety net).
+    // Uses the restore lane so it doesn't interfere with delete auto-snapshots.
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+    state.engine.last_auto_snapshot_restore.store(
+      chrono::Utc::now().timestamp_millis(),
+      std::sync::atomic::Ordering::Relaxed,
+    );
     let now = chrono::Utc::now();
-    let base_name = now.format("pre-restore-%Y-%m-%dT%H-%M-%SZ").to_string();
+    let base_name = now.format("auto-pre-restore %Y-%m-%d %H:%M:%S%.3f").to_string();
 
     let auto_snapshot_name = {
         let mut name = base_name.clone();

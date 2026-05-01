@@ -135,9 +135,11 @@ pub struct StorageEngine {
   /// engine to prevent multiple processes from opening the same file
   /// simultaneously, which would cause corruption (in-process RwLock does
   /// not protect across process boundaries).
-  /// Timestamp (ms) of the last auto-snapshot before delete. Throttled to
-  /// at most once per minute to avoid snapshot spam during bulk deletes.
-  pub(crate) last_auto_snapshot: std::sync::atomic::AtomicI64,
+  /// Separate rate-limit lanes for auto-snapshots. Each lane has its own
+  /// throttle so delete/restore/manual operations don't block each other.
+  pub(crate) last_auto_snapshot_delete: std::sync::atomic::AtomicI64,
+  pub(crate) last_auto_snapshot_restore: std::sync::atomic::AtomicI64,
+  pub(crate) last_manual_snapshot: std::sync::atomic::AtomicI64,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -227,7 +229,9 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
-      last_auto_snapshot: std::sync::atomic::AtomicI64::new(0),
+      last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
+      last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
+      last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -402,7 +406,9 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
-      last_auto_snapshot: std::sync::atomic::AtomicI64::new(0),
+      last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
+      last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
+      last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));

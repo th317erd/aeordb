@@ -967,21 +967,27 @@ impl<'a> DirectoryOps<'a> {
     Ok(results)
   }
 
-  /// Take an auto-snapshot before a delete operation, throttled to at most
-  /// once per minute to avoid snapshot spam during bulk deletes.
-  fn auto_snapshot_before_delete(&self, ctx: &RequestContext) {
+  /// Take an auto-snapshot before a destructive operation.
+  /// Uses a per-lane AtomicI64 so delete/restore/manual snapshots
+  /// don't block each other. Each lane throttles independently.
+  fn auto_snapshot_throttled(
+    &self,
+    ctx: &RequestContext,
+    lane: &std::sync::atomic::AtomicI64,
+    throttle_ms: i64,
+    prefix: &str,
+  ) {
     use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp_millis();
-    let last = self.engine.last_auto_snapshot.load(Ordering::Relaxed);
+    let last = lane.load(Ordering::Relaxed);
     let elapsed = now - last;
 
-    // Throttle: at most once per 60 seconds
-    if elapsed < 60_000 && last > 0 {
+    if elapsed < throttle_ms && last > 0 {
       return;
     }
 
     // Try to claim the slot (CAS prevents races)
-    if self.engine.last_auto_snapshot
+    if lane
       .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed)
       .is_err()
     {
@@ -989,25 +995,44 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let vm = crate::engine::version_manager::VersionManager::new(self.engine);
-    let pad = |n: u32, d: usize| -> String { format!("{:0>width$}", n, width = d) };
     let dt = chrono::Utc::now();
     let name = format!(
-      "auto-{}-{}-{} {}:{}:{}.{}",
+      "{} {}-{}-{} {}:{}:{}.{:03}",
+      prefix,
       dt.format("%Y"), dt.format("%m"), dt.format("%d"),
       dt.format("%H"), dt.format("%M"), dt.format("%S"),
-      pad(dt.timestamp_subsec_millis(), 3),
+      dt.timestamp_subsec_millis(),
     );
 
     match vm.create_snapshot(ctx, &name, std::collections::HashMap::new()) {
       Ok(_) => {
-        tracing::info!(snapshot = %name, "Auto-snapshot before delete");
+        tracing::info!(snapshot = %name, "Auto-snapshot ({})", prefix);
       }
       Err(e) => {
-        tracing::warn!("Auto-snapshot failed: {}", e);
-        // Reset timestamp so next delete can try again
-        self.engine.last_auto_snapshot.store(last, Ordering::Relaxed);
+        tracing::warn!("Auto-snapshot ({}) failed: {}", prefix, e);
+        lane.store(last, Ordering::Relaxed);
       }
     }
+  }
+
+  /// Auto-snapshot before delete — own lane, 60s throttle.
+  fn auto_snapshot_before_delete(&self, ctx: &RequestContext) {
+    self.auto_snapshot_throttled(
+      ctx,
+      &self.engine.last_auto_snapshot_delete,
+      60_000,
+      "auto-pre-delete",
+    );
+  }
+
+  /// Auto-snapshot before restore — own lane, 60s throttle.
+  pub fn auto_snapshot_before_restore(&self, ctx: &RequestContext) {
+    self.auto_snapshot_throttled(
+      ctx,
+      &self.engine.last_auto_snapshot_restore,
+      60_000,
+      "auto-pre-restore",
+    );
   }
 
   /// Restore a deleted file by un-marking it in the KV and re-adding

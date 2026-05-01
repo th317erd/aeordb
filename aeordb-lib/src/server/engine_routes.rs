@@ -1337,6 +1337,26 @@ pub async fn snapshot_create(
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateSnapshotRequest>,
 ) -> Response {
+  // Manual snapshot throttle: 1 per 60 seconds (own lane, doesn't
+  // interfere with auto-snapshots from delete/restore operations)
+  {
+    use std::sync::atomic::Ordering;
+    let now = chrono::Utc::now().timestamp_millis();
+    let last = state.engine.last_manual_snapshot.load(Ordering::Relaxed);
+    let elapsed = now - last;
+    if elapsed < 60_000 && last > 0 {
+      let remaining = (60_000 - elapsed) / 1000;
+      return ErrorResponse::new(format!(
+        "Snapshot rate limited. Try again in {} seconds.", remaining
+      ))
+        .with_status(StatusCode::TOO_MANY_REQUESTS)
+        .into_response();
+    }
+    // CAS to claim the slot
+    let _ = state.engine.last_manual_snapshot
+      .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed);
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
 
