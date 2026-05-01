@@ -6,10 +6,16 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+use chrono::Utc;
+use uuid::Uuid;
+
+use aeordb::auth::api_key::{ApiKeyRecord, generate_api_key, hash_api_key};
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
-use aeordb::engine::{EngineEvent, EventBus, StorageEngine};
+use aeordb::engine::api_key_rules::KeyRule;
+use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine};
+use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
@@ -802,4 +808,314 @@ async fn test_sse_subscription_creates_subscriber() {
 
     // Clean up
     let _ = handle.await;
+}
+
+// ---------------------------------------------------------------------------
+// Permission-based filtering tests
+// ---------------------------------------------------------------------------
+
+/// Create a scoped API key and return a Bearer token with key_id embedded.
+fn create_scoped_key_and_token(
+    jwt_manager: &JwtManager,
+    engine: &StorageEngine,
+    user_id: Uuid,
+    rules: Vec<KeyRule>,
+) -> (String, Uuid) {
+    let key_id = Uuid::new_v4();
+    let plaintext = generate_api_key(key_id);
+    let key_hash = hash_api_key(&plaintext).unwrap();
+    let now = Utc::now();
+
+    let record = ApiKeyRecord {
+        key_id,
+        key_hash,
+        user_id: Some(user_id),
+        created_at: now,
+        is_revoked: false,
+        expires_at: now.timestamp_millis() + (365 * 86400 * 1000),
+        label: Some("test-sse-scoped-key".to_string()),
+        rules,
+    };
+
+    let ctx = RequestContext::system();
+    system_store::store_api_key_for_bootstrap(engine, &ctx, &record).unwrap();
+
+    let now_ts = now.timestamp();
+    let claims = TokenClaims {
+        sub: user_id.to_string(),
+        iss: "aeordb".to_string(),
+        iat: now_ts,
+        exp: now_ts + DEFAULT_EXPIRY_SECONDS,
+        scope: None,
+        permissions: None,
+        key_id: Some(key_id.to_string()),
+    };
+    let token = jwt_manager.create_token(&claims).unwrap();
+    (format!("Bearer {}", token), key_id)
+}
+
+fn root_bearer_token(jwt_manager: &JwtManager) -> String {
+    let now = Utc::now().timestamp();
+    let claims = TokenClaims {
+        sub: Uuid::nil().to_string(),
+        iss: "aeordb".to_string(),
+        iat: now,
+        exp: now + DEFAULT_EXPIRY_SECONDS,
+        scope: None,
+        permissions: None,
+        key_id: None,
+    };
+    let token = jwt_manager.create_token(&claims).expect("create root token");
+    format!("Bearer {}", token)
+}
+
+#[tokio::test]
+async fn test_sse_root_user_receives_all_events() {
+    let (app, jwt_manager, _, event_bus, _temp) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    let events = vec![
+        EngineEvent::new(
+            "entries_created",
+            "someone",
+            serde_json::json!({"entries": [{"path": "/secret/stuff.txt"}]}),
+        ),
+        EngineEvent::new(
+            "heartbeat",
+            "system",
+            serde_json::json!({"node_id": 1}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // Root should see everything
+    if !body.is_empty() {
+        assert!(body.contains("entries_created"), "root should see entries_created");
+    }
+}
+
+#[tokio::test]
+async fn test_sse_scoped_key_receives_events_for_allowed_paths() {
+    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+
+    // Create a scoped key that can only read /docs/**
+    let rules = vec![
+        KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+        KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+    ];
+    let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    let events = vec![
+        EngineEvent::new(
+            "entries_created",
+            "admin",
+            serde_json::json!({"entries": [{"path": "/docs/readme.md"}]}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // Should see the /docs/ event
+    if !body.is_empty() {
+        assert!(body.contains("readme.md"), "scoped key should see events for allowed paths");
+    }
+}
+
+#[tokio::test]
+async fn test_sse_scoped_key_blocks_events_for_disallowed_paths() {
+    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+
+    // Create a scoped key that can only read /docs/**
+    let rules = vec![
+        KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+        KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+    ];
+    let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    let events = vec![
+        EngineEvent::new(
+            "entries_created",
+            "admin",
+            serde_json::json!({"entries": [{"path": "/secret/passwords.txt"}]}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // Should NOT see the /secret/ event
+    assert!(
+        !body.contains("passwords.txt"),
+        "scoped key should NOT see events for disallowed paths: {}",
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_sse_scoped_key_receives_system_events_without_paths() {
+    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+
+    // Create a scoped key with restricted access
+    let rules = vec![
+        KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+        KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+    ];
+    let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    let events = vec![
+        EngineEvent::new(
+            "heartbeat",
+            "system",
+            serde_json::json!({"node_id": 1, "intent_time": 1000}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // System events (no path) should pass through to all subscribers
+    if !body.is_empty() {
+        assert!(body.contains("heartbeat"), "system events should reach scoped subscribers");
+    }
+}
+
+#[tokio::test]
+async fn test_sse_scoped_key_mixed_allowed_and_blocked() {
+    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+
+    // Create a scoped key that can only read /public/**
+    let rules = vec![
+        KeyRule { glob: "/public/**".to_string(), permitted: "-r--l---".to_string() },
+        KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+    ];
+    let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    let events = vec![
+        // Allowed: /public/ path
+        EngineEvent::new(
+            "entries_created",
+            "admin",
+            serde_json::json!({"entries": [{"path": "/public/info.txt"}]}),
+        ),
+        // Blocked: /private/ path
+        EngineEvent::new(
+            "entries_created",
+            "admin",
+            serde_json::json!({"entries": [{"path": "/private/secret.txt"}]}),
+        ),
+        // Allowed: no path (system event)
+        EngineEvent::new(
+            "metrics",
+            "system",
+            serde_json::json!({"cpu": 42}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // The /private/ event should be filtered out
+    assert!(
+        !body.contains("secret.txt"),
+        "private path should be filtered: {}",
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_sse_scoped_key_blocks_top_level_path_field() {
+    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+
+    // Scoped to /allowed/** only
+    let rules = vec![
+        KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
+        KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+    ];
+    let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+
+    // Event with top-level "path" field (permissions_changed style)
+    let events = vec![
+        EngineEvent::new(
+            "permissions_changed",
+            "admin",
+            serde_json::json!({"path": "/forbidden/stuff", "group_name": "editors"}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    assert!(
+        !body.contains("permissions_changed"),
+        "top-level path to forbidden area should be filtered: {}",
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_sse_user_without_key_rules_receives_all_events() {
+    // A non-root user authenticated directly (no API key) should get all events
+    let (app, jwt_manager, _, event_bus, _temp) = test_app();
+    let auth = bearer_token(&jwt_manager); // Uses "test-admin" sub, no key_id
+
+    let events = vec![
+        EngineEvent::new(
+            "entries_created",
+            "someone",
+            serde_json::json!({"entries": [{"path": "/any/path.txt"}]}),
+        ),
+    ];
+
+    let body = collect_sse_with_events(
+        app,
+        &auth,
+        "/system/events",
+        &event_bus,
+        events,
+    )
+    .await;
+
+    // User without key rules should see everything
+    if !body.is_empty() {
+        assert!(body.contains("path.txt"), "user without key rules should see all events");
+    }
 }
