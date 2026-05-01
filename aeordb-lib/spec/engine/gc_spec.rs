@@ -266,7 +266,7 @@ fn test_run_gc_end_to_end() {
 
   let result = run_gc(&engine, &ctx, false).unwrap();
 
-  assert_eq!(result.versions_scanned, 5); // HEAD + v1 + v2 + experiment + _aeordb_pre_gc_*
+  assert_eq!(result.versions_scanned, 6); // HEAD + v1 + v2 + auto-pre-delete + experiment + _aeordb_pre_gc_*
   assert!(result.live_entries > 0);
   assert!(result.garbage_entries > 0);
   assert!(result.reclaimed_bytes > 0);
