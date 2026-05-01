@@ -485,37 +485,9 @@ impl StorageEngine {
     key: &[u8],
     value: &[u8],
   ) -> EngineResult<u64> {
-    // Acquire BOTH locks before any work to close the TOCTOU gap.
-    let mut writer = self.writer.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-
-    let offset = writer.append_entry(entry_type, key, value, 0)?;
-    kv.set_hot_tail_offset(writer.current_offset());
-
-    let kv_entry = KVEntry {
-      type_flags: entry_type.to_kv_type(),
-      hash: key.to_vec(),
-      offset,
-    };
-    kv.insert(kv_entry)?;
-    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
-
-    Ok(offset)
+    self.store_entry_internal(entry_type, key, value, 0, CompressionAlgorithm::None)
   }
 
-  /// Store an entry with custom flags: append to file, register in KV store.
-  /// Returns the file offset where the entry was written.
-  ///
-  /// Both the writer and KV locks are held simultaneously to prevent a
-  /// TOCTOU gap where a crash between the disk write and the KV insert
-  /// could leave the entry on disk but missing from the index.
-  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_with_flags(
     &self,
     entry_type: EntryType,
@@ -523,39 +495,9 @@ impl StorageEngine {
     value: &[u8],
     flags: u8,
   ) -> EngineResult<u64> {
-    // Acquire BOTH locks before any work to close the TOCTOU gap.
-    let mut writer = self.writer.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-
-    let offset = writer.append_entry_with_compression(entry_type, key, value, flags, CompressionAlgorithm::None)?;
-    kv.set_hot_tail_offset(writer.current_offset());
-
-    let kv_entry = KVEntry {
-      type_flags: entry_type.to_kv_type(),
-      hash: key.to_vec(),
-      offset,
-    };
-    kv.insert(kv_entry)?;
-    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
-
-    Ok(offset)
+    self.store_entry_internal(entry_type, key, value, flags, CompressionAlgorithm::None)
   }
 
-  /// Store an entry with compression: append to file, register in KV store.
-  /// The hash is computed on the UNCOMPRESSED value (for dedup).
-  /// The compressed value is what gets written to disk.
-  /// Returns the file offset where the entry was written.
-  ///
-  /// Both the writer and KV locks are held simultaneously to prevent a
-  /// TOCTOU gap where a crash between the disk write and the KV insert
-  /// could leave the entry on disk but missing from the index.
-  /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_compressed(
     &self,
     entry_type: EntryType,
@@ -563,39 +505,9 @@ impl StorageEngine {
     value: &[u8],
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u64> {
-    // Acquire BOTH locks before any work to close the TOCTOU gap.
-    let mut writer = self.writer.write()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-    let mut kv = self.kv_writer.lock()
-      .map_err(|error| EngineError::IoError(
-        std::io::Error::other(error.to_string()),
-      ))?;
-
-    let offset = writer.append_entry_with_compression(
-      entry_type,
-      key,
-      value,
-      0,
-      compression_algo,
-    )?;
-    kv.set_hot_tail_offset(writer.current_offset());
-
-    let kv_entry = KVEntry {
-      type_flags: entry_type.to_kv_type(),
-      hash: key.to_vec(),
-      offset,
-    };
-    kv.insert(kv_entry)?;
-    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
-
-    Ok(offset)
+    self.store_entry_internal(entry_type, key, value, 0, compression_algo)
   }
 
-  /// Store an entry with both compression and custom flags.
-  /// The hash is computed on the UNCOMPRESSED value (for dedup).
-  /// The compressed value is what gets written to disk.
   pub fn store_entry_compressed_with_flags(
     &self,
     entry_type: EntryType,
@@ -604,6 +516,20 @@ impl StorageEngine {
     flags: u8,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u64> {
+    self.store_entry_internal(entry_type, key, value, flags, compression_algo)
+  }
+
+  /// Core store_entry implementation. Acquires writer + KV locks, appends
+  /// entry to WAL, and registers in KV index.
+  /// Lock order: writer first, then KV (must be consistent everywhere).
+  fn store_entry_internal(
+    &self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<u64> {
     let mut writer = self.writer.write()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
@@ -614,11 +540,7 @@ impl StorageEngine {
       ))?;
 
     let offset = writer.append_entry_with_compression(
-      entry_type,
-      key,
-      value,
-      flags,
-      compression_algo,
+      entry_type, key, value, flags, compression_algo,
     )?;
     kv.set_hot_tail_offset(writer.current_offset());
 

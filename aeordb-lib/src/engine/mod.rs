@@ -1,6 +1,7 @@
 pub mod api_key_cache;
 pub mod api_key_rules;
 pub mod append_writer;
+pub mod binary_utils;
 pub mod auto_heal;
 pub mod cluster_join;
 pub mod backup;
