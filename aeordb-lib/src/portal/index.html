@@ -236,17 +236,22 @@
     .button {
       display: inline-flex;
       align-items: center;
-      padding: 8px 16px;
+      height: 34px;
+      padding: 0 16px;
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--card);
       color: var(--text);
       font-size: 0.85rem;
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color 0.15s, background 0.15s, filter 0.15s;
+      box-sizing: border-box;
     }
 
-    .button:hover { border-color: var(--accent); background: rgba(88, 166, 255, 0.08); }
+    .button:hover {
+      background: color-mix(in srgb, var(--card) 80%, #fff);
+      border-color: var(--accent);
+    }
 
     .button-primary {
       background: var(--accent);
@@ -255,12 +260,22 @@
       font-weight: 600;
     }
 
-    .button-primary:hover { background: var(--accent-hover); }
+    .button-primary:hover {
+      filter: brightness(1.15);
+      border-color: #fff;
+    }
 
-    .button-danger { color: var(--danger); border-color: var(--danger); }
-    .button-danger:hover { background: rgba(248, 81, 73, 0.1); }
+    .button-danger {
+      color: var(--danger);
+      border-color: var(--border);
+    }
 
-    .button-small { padding: 4px 10px; font-size: 0.78rem; }
+    .button-danger:hover {
+      background: color-mix(in srgb, var(--card) 80%, #fff);
+      border-color: var(--danger);
+    }
+
+    .button-small { height: 28px; padding: 0 10px; font-size: 0.78rem; }
 
     /* Forms */
     .form-group { margin-bottom: 14px; }
