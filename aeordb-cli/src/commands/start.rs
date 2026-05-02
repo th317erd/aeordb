@@ -240,10 +240,21 @@ pub async fn run(
       server_cancel.cancel();
     };
 
-    axum::serve(listener, application)
-      .with_graceful_shutdown(shutdown_fut)
-      .await
-      .map_err(|error| format!("{}", error))
+    let serve_fut = axum::serve(listener, application)
+      .with_graceful_shutdown(shutdown_fut);
+
+    // axum's graceful shutdown waits for ALL active connections to close.
+    // Long-lived connections (SSE, slow downloads) can hang forever.
+    // Give connections 5 seconds to drain after the signal, then force exit.
+    tokio::select! {
+      result = serve_fut => result.map_err(|error| format!("{}", error)),
+      _ = async {
+        // Wait for the cancellation token (set by shutdown_signal), then timeout
+        cancel.cancelled().await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tracing::warn!("Graceful shutdown timed out after 5s — forcing exit");
+      } => Ok(()),
+    }
   };
 
   if let Err(error) = server_result {
