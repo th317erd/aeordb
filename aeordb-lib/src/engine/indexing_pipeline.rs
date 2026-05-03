@@ -4,9 +4,95 @@ use crate::engine::index_config::{PathIndexConfig, IndexFieldConfig, create_conv
 use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
-use crate::engine::source_resolver::resolve_source;
+use crate::engine::source_resolver::resolve_sources;
 use crate::engine::storage_engine::StorageEngine;
 use crate::plugins::PluginManager;
+
+/// Simple glob matching for index config path patterns.
+///
+/// Supported wildcards:
+///   - `*`  matches exactly one path segment (anything between slashes)
+///   - `**` matches zero or more path segments (any depth)
+///   - `?`  matches a single character within a segment
+///
+/// Both `pattern` and `path` are split by `/` and matched segment by segment.
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
+  let pat_segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+  let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+  glob_match_segments(&pat_segments, &path_segments)
+}
+
+fn glob_match_segments(pattern: &[&str], path: &[&str]) -> bool {
+  if pattern.is_empty() {
+    return path.is_empty();
+  }
+
+  if pattern[0] == "**" {
+    // `**` can match zero or more path segments
+    // Try consuming 0, 1, 2, ... path segments
+    for skip in 0..=path.len() {
+      if glob_match_segments(&pattern[1..], &path[skip..]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if path.is_empty() {
+    return false;
+  }
+
+  // Match current segment with possible `*` and `?` wildcards
+  if segment_matches(pattern[0], path[0]) {
+    glob_match_segments(&pattern[1..], &path[1..])
+  } else {
+    false
+  }
+}
+
+/// Match a single pattern segment against a single path segment.
+/// `*` as a whole segment matches any single segment.
+/// `?` matches exactly one character. `*` within a segment matches
+/// zero or more characters (but not `/`).
+fn segment_matches(pattern: &str, segment: &str) -> bool {
+  // Whole-segment wildcard
+  if pattern == "*" {
+    return true;
+  }
+  char_glob_match(pattern.as_bytes(), segment.as_bytes())
+}
+
+/// Character-level glob match within a single segment.
+/// Supports `*` (zero or more chars) and `?` (one char).
+fn char_glob_match(pat: &[u8], seg: &[u8]) -> bool {
+  let mut pi = 0;
+  let mut si = 0;
+  let mut star_pi: Option<usize> = None;
+  let mut star_si: usize = 0;
+
+  while si < seg.len() {
+    if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == seg[si]) {
+      pi += 1;
+      si += 1;
+    } else if pi < pat.len() && pat[pi] == b'*' {
+      star_pi = Some(pi);
+      star_si = si;
+      pi += 1;
+    } else if let Some(sp) = star_pi {
+      pi = sp + 1;
+      star_si += 1;
+      si = star_si;
+    } else {
+      return false;
+    }
+  }
+
+  while pi < pat.len() && pat[pi] == b'*' {
+    pi += 1;
+  }
+
+  pi == pat.len()
+}
 
 /// Manages the indexing pipeline for stored files.
 /// Handles: config loading, JSON parsing, parser plugin invocation,
@@ -34,10 +120,11 @@ impl<'a> IndexingPipeline<'a> {
     content_type: Option<&str>,
   ) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
 
-    let config = match self.load_config(&parent)? {
-      Some(c) => c,
+    // Find config via ancestor discovery (checks parent first, then walks up
+    // looking for glob-based configs that match this file's relative path).
+    let (config, config_dir) = match self.find_config_for_path(&normalized)? {
+      Some(pair) => pair,
       None => return Ok(()),
     };
 
@@ -64,7 +151,7 @@ impl<'a> IndexingPipeline<'a> {
         Ok(json) => json,
         Err(e) => {
           if config.logging {
-            self.log_system(&parent, "parsing.log",
+            self.log_system(&config_dir, "parsing.log",
               &format!("parser '{}' failed for {}: {}", parser, path, e));
           }
           return Ok(());
@@ -76,7 +163,7 @@ impl<'a> IndexingPipeline<'a> {
         Ok(json) => json,
         Err(e) => {
           if config.logging {
-            self.log_system(&parent, "parsing.log",
+            self.log_system(&config_dir, "parsing.log",
               &format!("parser '{}' failed for {}: {}", parser, path, e));
           }
           return Ok(());
@@ -96,7 +183,7 @@ impl<'a> IndexingPipeline<'a> {
           Ok(json) => json,
           Err(e) => {
             if config.logging {
-              self.log_system(&parent, "parsing.log",
+              self.log_system(&config_dir, "parsing.log",
                 &format!("native parser failed for {}: {}", path, e));
             }
             return Ok(());
@@ -105,7 +192,7 @@ impl<'a> IndexingPipeline<'a> {
       } else {
         // No parser could handle this content — skip indexing
         if config.logging {
-          self.log_system(&parent, "parsing.log",
+          self.log_system(&config_dir, "parsing.log",
             &format!("no parser available for {}", path));
         }
         return Ok(());
@@ -117,15 +204,70 @@ impl<'a> IndexingPipeline<'a> {
     let index_manager = IndexManager::new(self.engine);
 
     for field_config in &config.indexes {
-      if let Err(e) = self.index_field(field_config, &json_data, &file_key, &parent, &index_manager) {
+      if let Err(e) = self.index_field(field_config, &json_data, &file_key, &config_dir, &index_manager) {
         if config.logging {
-          self.log_system(&parent, "indexing.log",
+          self.log_system(&config_dir, "indexing.log",
             &format!("field '{}' indexing failed for {}: {}", field_config.name, path, e));
         }
       }
     }
 
     Ok(())
+  }
+
+  /// Find an index config for the given normalized file path.
+  ///
+  /// Discovery order:
+  /// 1. Check the file's immediate parent for a config.
+  ///    - If found and it has no glob, use it (existing behavior).
+  ///    - If found and it has a glob, test it against the filename.
+  /// 2. Walk up ancestor directories. At each ancestor, load config.
+  ///    If config has a glob, test the file's path relative to that ancestor.
+  ///
+  /// Returns `Some((config, config_owner_directory))` or `None`.
+  fn find_config_for_path(&self, normalized_path: &str) -> EngineResult<Option<(PathIndexConfig, String)>> {
+    let immediate_parent = parent_path(normalized_path).unwrap_or_else(|| "/".to_string());
+
+    // 1. Check immediate parent (non-glob configs live here)
+    if let Some(config) = self.load_config(&immediate_parent)? {
+      if config.glob.is_none() {
+        // No glob — this config applies to all direct children (existing behavior)
+        return Ok(Some((config, immediate_parent)));
+      }
+      // Has a glob — check if the filename matches
+      let filename = crate::engine::path_utils::file_name(normalized_path).unwrap_or_default();
+      if glob_matches(config.glob.as_deref().unwrap_or(""), filename) {
+        return Ok(Some((config, immediate_parent)));
+      }
+    }
+
+    // 2. Walk up ancestors looking for glob configs
+    let mut ancestor = parent_path(&immediate_parent);
+    while let Some(ref dir) = ancestor {
+      if let Some(config) = self.load_config(dir)? {
+        if let Some(ref glob_pattern) = config.glob {
+          // Compute relative path from this ancestor directory to the file
+          let prefix = if dir == "/" {
+            "/".to_string()
+          } else {
+            format!("{}/", dir)
+          };
+          if let Some(relative) = normalized_path.strip_prefix(&prefix) {
+            if glob_matches(glob_pattern, relative) {
+              return Ok(Some((config, dir.clone())));
+            }
+          }
+        }
+        // Non-glob config at ancestor — does not apply to nested files
+      }
+
+      if dir == "/" {
+        break;
+      }
+      ancestor = parent_path(dir);
+    }
+
+    Ok(None)
   }
 
   fn load_config(&self, parent: &str) -> EngineResult<Option<PathIndexConfig>> {
@@ -160,32 +302,34 @@ impl<'a> IndexingPipeline<'a> {
     parent: &str,
     index_manager: &IndexManager,
   ) -> EngineResult<()> {
-    // Resolve field value based on source type
-    let field_value = if let Some(source) = &field_config.source {
+    // Resolve field values based on source type (plural: fan-out supported)
+    let field_values: Vec<Vec<u8>> = if let Some(source) = &field_config.source {
       if let Some(obj) = source.as_object() {
         // Plugin mapper: {"plugin": "name", "args": {...}}
         if let Some(plugin_name) = obj.get("plugin").and_then(|v| v.as_str()) {
           let args = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
-          self.invoke_mapper(plugin_name, json_data, &args)?
+          vec![self.invoke_mapper(plugin_name, json_data, &args)?]
         } else {
           return Ok(()); // invalid source object
         }
       } else if let Some(segments) = source.as_array() {
-        // Array path resolution
-        match resolve_source(json_data, segments) {
-          Some(bytes) => bytes,
-          None => return Ok(()),
+        // Array path resolution — fan-out on wildcards/regex
+        let values = resolve_sources(json_data, segments);
+        if values.is_empty() {
+          return Ok(());
         }
+        values
       } else {
         return Ok(()); // invalid source type
       }
     } else {
       // Default: use field name as key
       let default_source = vec![serde_json::Value::String(field_config.name.clone())];
-      match resolve_source(json_data, &default_source) {
-        Some(bytes) => bytes,
-        None => return Ok(()),
+      let values = resolve_sources(json_data, &default_source);
+      if values.is_empty() {
+        return Ok(());
       }
+      values
     };
 
     // Load or create index
@@ -196,8 +340,11 @@ impl<'a> IndexingPipeline<'a> {
       None => index_manager.create_index(parent, &field_config.name, converter)?,
     };
 
+    // Clear old entries for this file, then insert all resolved values
     index.remove(file_key);
-    index.insert_expanded(&field_value, file_key.to_vec());
+    for value in &field_values {
+      index.insert_expanded(value, file_key.to_vec());
+    }
     index_manager.save_index(parent, &index)?;
 
     Ok(())

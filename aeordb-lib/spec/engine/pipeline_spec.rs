@@ -1,7 +1,7 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
-use aeordb::engine::indexing_pipeline::IndexingPipeline;
+use aeordb::engine::indexing_pipeline::{IndexingPipeline, glob_matches};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -51,6 +51,7 @@ fn make_config_with_logging(field_name: &str, index_type: &str, logging: bool) -
     parser: None,
     parser_memory_limit: None,
     logging,
+    glob: None,
     indexes: vec![
       IndexFieldConfig {
         name: field_name.to_string(),
@@ -555,4 +556,264 @@ fn test_pipeline_run_twice_overwrites_index() {
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/scores", "score").unwrap().unwrap();
   assert_eq!(index.len(), 1, "Overwrite should replace, not duplicate index entry");
+}
+
+// ============================================================
+// glob_matches tests
+// ============================================================
+
+#[test]
+fn test_glob_matches_single_star_segment() {
+  assert!(glob_matches("*/session.json", "s1/session.json"));
+  assert!(!glob_matches("*/session.json", "s1/notes.txt"));
+}
+
+#[test]
+fn test_glob_matches_double_star() {
+  assert!(glob_matches("**/*.json", "a/b/c/file.json"));
+  assert!(glob_matches("**/*.json", "file.json")); // ** matches zero segments
+}
+
+#[test]
+fn test_glob_matches_star_extension() {
+  assert!(glob_matches("*.json", "test.json"));
+  assert!(!glob_matches("*.json", "dir/test.json")); // * matches one segment only
+}
+
+#[test]
+fn test_glob_matches_question_mark() {
+  assert!(glob_matches("?.json", "a.json"));
+  assert!(!glob_matches("?.json", "ab.json"));
+}
+
+#[test]
+fn test_glob_matches_no_wildcards() {
+  assert!(glob_matches("exact/match.json", "exact/match.json"));
+  assert!(!glob_matches("exact/match.json", "exact/other.json"));
+}
+
+#[test]
+fn test_glob_matches_double_star_middle() {
+  // ** in the middle of a pattern
+  assert!(glob_matches("a/**/z.json", "a/b/c/z.json"));
+  assert!(glob_matches("a/**/z.json", "a/z.json")); // zero segments matched by **
+  assert!(!glob_matches("a/**/z.json", "b/c/z.json")); // first segment must be "a"
+}
+
+#[test]
+fn test_glob_matches_star_within_segment() {
+  // * inside a segment matches characters, not slashes
+  assert!(glob_matches("session-*.json", "session-001.json"));
+  assert!(!glob_matches("session-*.json", "session.json")); // `-` must be present
+}
+
+// ============================================================
+// Ancestor config discovery tests
+// ============================================================
+
+#[test]
+fn test_ancestor_glob_config_indexes_at_config_dir() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Store a glob config at /sessions/ that matches */session.json
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("*/session.json".to_string()),
+    indexes: vec![
+      IndexFieldConfig {
+        name: "status".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/sessions", &config);
+
+  // Store a file at /sessions/s1/session.json — no config at /sessions/s1
+  let data = br#"{"status":"active"}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/sessions/s1/session.json", &data[..], Some("application/json")).unwrap();
+
+  // Indexes should be created at /sessions/.indexes/ (the config owner dir)
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/sessions", "status").unwrap();
+  assert!(index.is_some(), "Expected index at /sessions/ via glob config");
+  assert_eq!(index.unwrap().len(), 1);
+
+  // And NOT at /sessions/s1/.indexes/
+  let child_indexes = index_manager.list_indexes("/sessions/s1").unwrap();
+  assert!(child_indexes.is_empty(), "No indexes should exist at /sessions/s1/");
+}
+
+#[test]
+fn test_ancestor_glob_config_non_matching_file_skipped() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Glob config at /sessions/ that only matches */session.json
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("*/session.json".to_string()),
+    indexes: vec![
+      IndexFieldConfig {
+        name: "status".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/sessions", &config);
+
+  // Store a file that does NOT match the glob
+  let data = br#"{"status":"active"}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/sessions/s1/notes.txt", &data[..], Some("application/json")).unwrap();
+
+  // No indexes should be created anywhere
+  let index_manager = IndexManager::new(&engine);
+  let parent_indexes = index_manager.list_indexes("/sessions").unwrap();
+  assert!(parent_indexes.is_empty(), "Non-matching file should not trigger indexing");
+}
+
+#[test]
+fn test_ancestor_doublestar_glob_deep_nesting() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Glob config at /data/ that matches any .json file at any depth
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*.json".to_string()),
+    indexes: vec![
+      IndexFieldConfig {
+        name: "type".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/data", &config);
+
+  // Store a deeply nested file
+  let data = br#"{"type":"report"}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/data/a/b/c/report.json", &data[..], Some("application/json")).unwrap();
+
+  // Indexes should be at /data/.indexes/
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/data", "type").unwrap();
+  assert!(index.is_some(), "Expected index at /data/ via ** glob config");
+  assert_eq!(index.unwrap().len(), 1);
+}
+
+#[test]
+fn test_immediate_parent_non_glob_takes_precedence() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Glob config at /projects/
+  let glob_config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*.json".to_string()),
+    indexes: vec![
+      IndexFieldConfig {
+        name: "global_field".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/projects", &glob_config);
+
+  // Non-glob config at /projects/myapp/ (immediate parent)
+  let local_config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "local_field".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/projects/myapp", &local_config);
+
+  // Store a file at /projects/myapp/data.json — immediate parent has a non-glob config
+  let data = br#"{"local_field":"val","global_field":"val2"}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/projects/myapp/data.json", &data[..], Some("application/json")).unwrap();
+
+  // Indexes should be at /projects/myapp/ (immediate parent wins)
+  let index_manager = IndexManager::new(&engine);
+  let local_idx = index_manager.load_index("/projects/myapp", "local_field").unwrap();
+  assert!(local_idx.is_some(), "Immediate parent non-glob config should be used");
+
+  // No indexes at /projects/ for this file
+  let global_idx = index_manager.load_index("/projects", "global_field").unwrap();
+  assert!(global_idx.is_none(), "Ancestor glob should not be used when immediate parent has non-glob config");
+}
+
+// ============================================================
+// resolve_sources (plural) fan-out tests
+// ============================================================
+
+#[test]
+fn test_pipeline_fanout_source_indexes_multiple_values() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Config with source using wildcard "" to fan out over array elements
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "tag".to_string(),
+        index_type: "string".to_string(),
+        source: Some(serde_json::json!(["tags", ""])),
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/articles", &config);
+
+  let data = br#"{"tags":["rust","database","indexing"]}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  pipeline.run(&ctx, "/articles/post.json", &data[..], Some("application/json")).unwrap();
+
+  // Index should have 3 entries (one per tag) for the same file
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/articles", "tag").unwrap();
+  assert!(index.is_some(), "Expected tag index with fan-out entries");
+  assert_eq!(index.unwrap().len(), 3, "Fan-out should create one entry per resolved value");
 }
