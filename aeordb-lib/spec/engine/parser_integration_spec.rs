@@ -72,6 +72,8 @@ fn test_parse_memory_limit_mb() {
     parser: Some("/parsers/test".to_string()),
     parser_memory_limit: Some("256mb".to_string()),
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/data", &config);
@@ -104,6 +106,8 @@ fn test_parse_memory_limit_gb() {
     parser: Some("/parsers/big".to_string()),
     parser_memory_limit: Some("1gb".to_string()),
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/bigdata", &config);
@@ -128,6 +132,8 @@ fn test_parse_memory_limit_kb() {
     parser: Some("/parsers/small".to_string()),
     parser_memory_limit: Some("512kb".to_string()),
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/smalldata", &config);
@@ -152,6 +158,8 @@ fn test_parse_memory_limit_default_on_invalid() {
     parser: Some("/parsers/fallback".to_string()),
     parser_memory_limit: Some("invalid".to_string()),
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/fallback", &config);
@@ -176,6 +184,8 @@ fn test_parse_memory_limit_plain_number() {
     parser: Some("/parsers/raw".to_string()),
     parser_memory_limit: Some("1048576".to_string()),
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/rawlimit", &config);
@@ -208,6 +218,8 @@ fn test_parser_envelope_structure() {
     parser: Some("/parsers/envelope_test".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/envelope", &config);
@@ -240,6 +252,8 @@ fn test_parser_envelope_data_is_base64() {
     parser: Some("/parsers/b64test".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/b64", &config);
@@ -279,6 +293,8 @@ fn test_parser_envelope_meta_fields() {
     parser: Some("/parsers/meta_test".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/meta", &config);
@@ -310,6 +326,8 @@ fn test_parser_envelope_filename_extraction() {
     parser: Some("/parsers/fname_test".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/docs/reports", &config);
@@ -341,6 +359,8 @@ fn test_parser_not_configured_uses_raw_json() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "title".to_string(),
@@ -387,6 +407,8 @@ fn test_content_type_registry_lookup() {
     parser: None,
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/uploads", &config);
@@ -423,6 +445,8 @@ fn test_content_type_registry_not_found() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),
@@ -465,6 +489,8 @@ fn test_content_type_json_skips_registry() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "value".to_string(),
@@ -502,6 +528,8 @@ fn test_content_type_registry_not_exists() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "key".to_string(),
@@ -546,6 +574,8 @@ fn test_plugin_mapper_source_detection() {
     parser: None,
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "computed".to_string(),
@@ -585,6 +615,8 @@ fn test_plugin_mapper_source_without_args() {
     parser: None,
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "derived".to_string(),
@@ -614,6 +646,8 @@ fn test_plugin_mapper_invalid_source_object() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "weird".to_string(),
@@ -648,6 +682,8 @@ fn test_array_source_still_works() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "nested_val".to_string(),
@@ -681,6 +717,8 @@ fn test_default_source_uses_field_name() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "email".to_string(),
@@ -719,6 +757,8 @@ fn test_pipeline_with_none_plugin_manager_parser_config() {
     parser: Some("/parsers/missing_pm".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/nopm", &config);
@@ -746,6 +786,8 @@ fn test_pipeline_with_none_plugin_manager_mapper_source() {
     parser: None,
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "mapped".to_string(),
@@ -833,6 +875,8 @@ fn test_full_pipeline_indexes_json() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "score".to_string(),
@@ -870,6 +914,8 @@ fn test_full_pipeline_skips_system_paths() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),
@@ -935,6 +981,8 @@ fn test_parser_config_with_no_memory_limit_uses_default() {
     parser: Some("/parsers/default_limit".to_string()),
     parser_memory_limit: None, // No limit specified
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/defmem", &config);
@@ -967,6 +1015,8 @@ fn test_explicit_parser_overrides_content_type_registry() {
     parser: Some("/parsers/explicit_pdf".to_string()),
     parser_memory_limit: None,
     logging: true,
+    glob: None,
+
     indexes: vec![],
   };
   store_index_config(&engine, "/override", &config);
@@ -997,6 +1047,8 @@ fn test_content_type_none_skips_registry() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "data".to_string(),
@@ -1032,6 +1084,8 @@ fn test_source_as_string_value_is_invalid() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "field".to_string(),
@@ -1065,6 +1119,8 @@ fn test_multiple_fields_mixed_sources() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       // Default source
       IndexFieldConfig {

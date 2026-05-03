@@ -32,6 +32,8 @@ fn make_simple_config(field_name: &str, index_type: &str) -> PathIndexConfig {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: field_name.to_string(),
@@ -211,6 +213,8 @@ fn test_pipeline_indexes_json_file() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -246,6 +250,8 @@ fn test_pipeline_source_path_resolution() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "title".to_string(),
@@ -280,6 +286,8 @@ fn test_pipeline_missing_source_skips_field() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "missing_field".to_string(),
@@ -520,6 +528,8 @@ fn test_pipeline_run_twice_overwrites_index() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "score".to_string(),

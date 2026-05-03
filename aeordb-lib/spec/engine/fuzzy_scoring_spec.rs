@@ -48,6 +48,8 @@ fn setup_fuzzy_engine(dir: &tempfile::TempDir, names: &[(&str, &str)]) -> Storag
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),
@@ -472,6 +474,8 @@ fn test_fuzzy_query_missing_trigram_index() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![IndexFieldConfig {
       name: "name".to_string(),
       index_type: "string".to_string(),
@@ -509,6 +513,8 @@ fn test_phonetic_query_missing_index() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![IndexFieldConfig {
       name: "name".to_string(),
       index_type: "string".to_string(),

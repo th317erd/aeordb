@@ -44,6 +44,8 @@ fn setup_30_people(dir: &tempfile::TempDir) -> StorageEngine {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "age".to_string(),
@@ -89,6 +91,8 @@ fn setup_trigram_indexed(dir: &tempfile::TempDir) -> StorageEngine {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "title".to_string(),

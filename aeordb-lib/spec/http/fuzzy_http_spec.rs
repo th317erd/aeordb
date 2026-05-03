@@ -71,6 +71,8 @@ fn setup_fuzzy_users(engine: &StorageEngine) {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),

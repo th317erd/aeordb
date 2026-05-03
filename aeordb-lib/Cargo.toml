@@ -74,6 +74,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Glob matching
 glob-match = "0.2"
 
+# Regex (source resolver fan-out)
+regex = "1"
+
 # Task scheduling
 cron = "0.13"
 

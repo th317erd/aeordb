@@ -42,6 +42,8 @@ fn setup_users_engine(dir: &tempfile::TempDir) -> StorageEngine {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -941,6 +943,8 @@ fn test_u64_eq_default_range_returns_only_matching() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "price".to_string(),
@@ -985,6 +989,8 @@ fn test_u64_eq_explicit_range_still_works() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "price".to_string(),
@@ -1027,6 +1033,8 @@ fn test_u64_eq_no_match_returns_empty() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "price".to_string(),
@@ -1070,6 +1078,8 @@ fn setup_items_with_trigram(dir: &tempfile::TempDir) -> StorageEngine {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),

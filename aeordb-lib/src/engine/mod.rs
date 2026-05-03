@@ -127,7 +127,7 @@ pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
 pub use json_parser::parse_json_fields;
-pub use source_resolver::{resolve_source, walk_path};
+pub use source_resolver::{resolve_source, resolve_sources, walk_path, walk_paths};
 pub use symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 pub use symlink_resolver::{resolve_symlink, ResolvedTarget, MAX_SYMLINK_DEPTH};
 pub use kv_resize::KVResizeManager;

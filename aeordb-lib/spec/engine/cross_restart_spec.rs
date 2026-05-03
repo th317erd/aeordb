@@ -380,6 +380,8 @@ fn test_indexes_persist_across_restart() {
       parser: None,
       parser_memory_limit: None,
       logging: false,
+      glob: None,
+
     };
     let config_data = config.serialize();
     ops.store_file(&ctx, "/people/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
@@ -429,6 +431,8 @@ fn test_index_values_persist_across_restart() {
       parser: None,
       parser_memory_limit: None,
       logging: false,
+      glob: None,
+
     };
     let config_data = config.serialize();
     ops.store_file(&ctx, "/contacts/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();

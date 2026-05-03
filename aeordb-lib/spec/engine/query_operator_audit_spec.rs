@@ -38,6 +38,8 @@ fn setup_u64_default_range_engine(dir: &tempfile::TempDir) -> StorageEngine {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "value".to_string(),

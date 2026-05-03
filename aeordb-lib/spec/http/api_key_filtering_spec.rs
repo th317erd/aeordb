@@ -693,6 +693,8 @@ async fn test_query_filters_denied_results() {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "name".to_string(),
@@ -780,6 +782,8 @@ async fn test_query_unscoped_no_filtering() {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "name".to_string(),

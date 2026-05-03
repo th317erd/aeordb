@@ -1,7 +1,10 @@
 'use strict';
 
 import { escapeHtml } from '/shared/utils.js';
+import { showToast } from '/shared/components/aeor-toasts.js';
 import '/shared/components/aeor-crudlify.js';
+
+window.aeorToast = showToast;
 import '/dashboard.mjs';
 import '/users.mjs';
 import '/groups.mjs';

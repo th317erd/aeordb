@@ -46,6 +46,8 @@ fn test_store_file_indexes_fields() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -96,6 +98,8 @@ fn test_delete_file_removes_index_entries() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -135,6 +139,8 @@ fn test_overwrite_file_updates_index() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -172,6 +178,8 @@ fn test_multiple_indexed_fields() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -297,6 +305,8 @@ fn test_index_config_serialize_deserialize_roundtrip() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -352,6 +362,8 @@ fn test_store_non_json_data_with_config_does_not_crash() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -389,6 +401,8 @@ fn test_multiple_files_indexed_together() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),

@@ -1,4 +1,4 @@
-use aeordb::engine::source_resolver::{resolve_source, walk_path};
+use aeordb::engine::source_resolver::{resolve_source, resolve_sources, walk_path, walk_paths};
 use serde_json::json;
 
 #[test]
@@ -329,4 +329,157 @@ fn test_large_index() {
   let data = json!({"items": [1]});
   let source = vec![json!("items"), json!(u64::MAX)];
   assert!(resolve_source(&data, &source).is_none());
+}
+
+// ── plural (resolve_sources / walk_paths) tests ─────────────────────
+
+#[test]
+fn resolve_sources_simple_key_returns_vec_of_one() {
+  let data = json!({"name": "Alice"});
+  let source = vec![json!("name")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0], b"Alice");
+}
+
+#[test]
+fn resolve_sources_empty_string_fans_out_array() {
+  let data = json!({"comments": [{"text": "hello"}, {"text": "world"}]});
+  let source = vec![json!("comments"), json!(""), json!("text")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 2);
+  assert_eq!(results[0], b"hello");
+  assert_eq!(results[1], b"world");
+}
+
+#[test]
+fn resolve_sources_empty_string_fans_out_object_values() {
+  let data = json!({"a": "x", "b": "y"});
+  let source = vec![json!("")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 2);
+  // serde_json objects are BTreeMap → sorted by key: a, b
+  assert_eq!(results[0], b"x");
+  assert_eq!(results[1], b"y");
+}
+
+#[test]
+fn resolve_sources_regex_filters_object_keys() {
+  let data = json!({"tag_color": "red", "tag_size": "large", "name": "foo"});
+  let source = vec![json!("/^tag_/")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 2);
+  // BTreeMap order → tag_color before tag_size
+  assert_eq!(results[0], b"red");
+  assert_eq!(results[1], b"large");
+}
+
+#[test]
+fn resolve_sources_regex_case_insensitive() {
+  let data = json!({"Name": "Alice"});
+  let source = vec![json!("/^name$/i")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0], b"Alice");
+}
+
+#[test]
+fn resolve_sources_empty_string_on_nested_arrays() {
+  // Double fan-out: first "" fans across outer array, second "" fans across inner arrays
+  let data = json!({"matrix": [[1, 2], [3, 4]]});
+  let source = vec![json!("matrix"), json!(""), json!("")];
+  let results = walk_paths(&data, &source);
+  assert_eq!(results.len(), 4);
+  assert_eq!(results[0], json!(1));
+  assert_eq!(results[1], json!(2));
+  assert_eq!(results[2], json!(3));
+  assert_eq!(results[3], json!(4));
+}
+
+#[test]
+fn resolve_sources_no_match_returns_empty() {
+  let data = json!({"name": "Alice"});
+  let source = vec![json!("missing")];
+  let results = resolve_sources(&data, &source);
+  assert!(results.is_empty());
+}
+
+// ── additional plural edge-case tests ───────────────────────────────
+
+#[test]
+fn walk_paths_empty_segments_returns_root() {
+  let data = json!({"a": 1});
+  let source: Vec<serde_json::Value> = vec![];
+  let results = walk_paths(&data, &source);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0], data);
+}
+
+#[test]
+fn resolve_sources_regex_on_array_elements() {
+  let data = json!({"items": ["apple", "apricot", "banana"]});
+  let source = vec![json!("items"), json!("/^ap/")];
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 2);
+  assert_eq!(results[0], b"apple");
+  assert_eq!(results[1], b"apricot");
+}
+
+#[test]
+fn resolve_sources_regex_no_match_returns_empty() {
+  let data = json!({"tag_color": "red"});
+  let source = vec![json!("/^zzz/")];
+  let results = resolve_sources(&data, &source);
+  assert!(results.is_empty());
+}
+
+#[test]
+fn resolve_sources_invalid_regex_treated_as_plain_key() {
+  // A string starting with `/` but with an invalid regex body should not panic;
+  // parse_regex returns None on compile failure, so it falls through to plain key lookup.
+  let data = json!({"/[invalid/": "found"});
+  let source = vec![json!("/[invalid/")];
+  // The regex `[invalid` is actually invalid (unclosed bracket).
+  // parse_regex returns None → treated as plain key lookup → finds the key.
+  let results = resolve_sources(&data, &source);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0], b"found");
+}
+
+#[test]
+fn resolve_sources_fanout_then_key_some_missing() {
+  // Fan out, but not all children have the key → only matching ones survive
+  let data = json!({"items": [{"x": 1}, {"y": 2}, {"x": 3}]});
+  let source = vec![json!("items"), json!(""), json!("x")];
+  let results = walk_paths(&data, &source);
+  assert_eq!(results.len(), 2);
+  assert_eq!(results[0], json!(1));
+  assert_eq!(results[1], json!(3));
+}
+
+#[test]
+fn resolve_sources_bool_segment_returns_empty() {
+  let data = json!({"a": 1});
+  let source = vec![json!(true)];
+  let results = resolve_sources(&data, &source);
+  assert!(results.is_empty());
+}
+
+#[test]
+fn resolve_sources_fanout_on_scalar_returns_empty() {
+  // "" on a string value (not array/object) → nothing to fan out
+  let data = json!({"name": "Alice"});
+  let source = vec![json!("name"), json!("")];
+  let results = resolve_sources(&data, &source);
+  assert!(results.is_empty());
+}
+
+#[test]
+fn resolve_sources_regex_on_numeric_array() {
+  let data = json!({"nums": [10, 200, 30, 2000]});
+  let source = vec![json!("nums"), json!("/^2/")];
+  let results = walk_paths(&data, &source);
+  assert_eq!(results.len(), 2);
+  assert_eq!(results[0], json!(200));
+  assert_eq!(results[1], json!(2000));
 }

@@ -439,6 +439,8 @@ fn test_expand_value_in_indexing_pipeline() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "name".to_string(),
@@ -485,6 +487,8 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),
@@ -520,6 +524,8 @@ fn test_expand_value_overwrite_file_updates_index() {
     parser: None,
     parser_memory_limit: None,
     logging: false,
+    glob: None,
+
     indexes: vec![
       IndexFieldConfig {
         name: "age".to_string(),

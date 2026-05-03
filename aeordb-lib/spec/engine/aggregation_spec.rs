@@ -54,6 +54,8 @@ fn setup_people_engine(dir: &tempfile::TempDir) -> StorageEngine {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "age".to_string(),
@@ -471,6 +473,8 @@ fn test_group_by_default_limit() {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "age".to_string(),

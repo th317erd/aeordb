@@ -260,6 +260,8 @@ fn phase3_query_benchmark(engine: &StorageEngine, ctx: &RequestContext) {
         parser: None,
         parser_memory_limit: None,
         logging: false,
+        glob: None,
+
         indexes: vec![
             IndexFieldConfig {
                 name: "age".to_string(),

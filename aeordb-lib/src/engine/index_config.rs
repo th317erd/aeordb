@@ -22,6 +22,7 @@ pub struct PathIndexConfig {
   pub parser: Option<String>,
   pub parser_memory_limit: Option<String>,
   pub logging: bool,
+  pub glob: Option<String>,
 }
 
 impl PathIndexConfig {
@@ -36,6 +37,9 @@ impl PathIndexConfig {
     }
     if self.logging {
       json.push_str("\"logging\":true,");
+    }
+    if let Some(ref glob) = self.glob {
+      json.push_str(&format!("\"glob\":\"{}\",", glob));
     }
     json.push_str("\"indexes\":[");
     for (position, config) in self.indexes.iter().enumerate() {
@@ -88,6 +92,8 @@ impl PathIndexConfig {
       .and_then(|v| v.as_bool())
       .unwrap_or(false);
 
+    let glob = parsed.get("glob").and_then(|v| v.as_str()).map(|s| s.to_string());
+
     let mut indexes = Vec::with_capacity(indexes_array.len());
     for item in indexes_array {
       let name = item.get("name")
@@ -130,7 +136,7 @@ impl PathIndexConfig {
       }
     }
 
-    Ok(PathIndexConfig { indexes, parser, parser_memory_limit, logging })
+    Ok(PathIndexConfig { indexes, parser, parser_memory_limit, logging, glob })
   }
 
   /// Deserialize JSON bytes and extract the optional "compression" field value.
