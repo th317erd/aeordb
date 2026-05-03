@@ -225,7 +225,7 @@ impl<'a> IndexingPipeline<'a> {
   ///    If config has a glob, test the file's path relative to that ancestor.
   ///
   /// Returns `Some((config, config_owner_directory))` or `None`.
-  fn find_config_for_path(&self, normalized_path: &str) -> EngineResult<Option<(PathIndexConfig, String)>> {
+  pub fn find_config_for_path(&self, normalized_path: &str) -> EngineResult<Option<(PathIndexConfig, String)>> {
     let immediate_parent = parent_path(normalized_path).unwrap_or_else(|| "/".to_string());
 
     // 1. Check immediate parent (non-glob configs live here)

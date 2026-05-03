@@ -190,34 +190,52 @@ fn execute_reindex(
 
     let ops = DirectoryOps::new(engine);
 
-    // Verify index config exists.
+    // Verify index config exists and load it to check for glob.
     let config_path = if path.ends_with('/') {
         format!("{}.config/indexes.json", path)
     } else {
         format!("{}/.aeordb-config/indexes.json", path)
     };
-    ops.read_file(&config_path)
+    let config_data = ops.read_file(&config_path)
         .map_err(|e| format!("cannot read index config at {}: {}", config_path, e))?;
+    let config = crate::engine::index_config::PathIndexConfig::deserialize(&config_data)
+        .map_err(|e| format!("cannot parse index config at {}: {}", config_path, e))?;
 
-    // List directory entries and filter to file records only.
-    let entries = ops
-        .list_directory(path)
-        .map_err(|e| format!("cannot list directory {}: {}", path, e))?;
+    // Build a sorted list of full file paths to reindex.
+    let prefix = path.trim_end_matches('/');
+    let mut file_paths: Vec<String> = if let Some(ref glob_pattern) = config.glob {
+        // Glob mode: recursive listing filtered by glob pattern.
+        let all_entries = crate::engine::directory_listing::list_directory_recursive(
+            engine, path, -1, None, None,
+        ).map_err(|e| format!("cannot list directory {}: {}", path, e))?;
 
-    let mut file_entries: Vec<_> = entries
-        .into_iter()
-        .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
-        .collect();
+        all_entries.into_iter()
+            .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
+            .filter(|entry| {
+                let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
+                crate::engine::indexing_pipeline::glob_matches(glob_pattern, relative)
+            })
+            .map(|entry| entry.path)
+            .collect()
+    } else {
+        // Non-glob mode: direct children only.
+        let entries = ops
+            .list_directory(path)
+            .map_err(|e| format!("cannot list directory {}: {}", path, e))?;
 
-    // Sort alphabetically by name for deterministic ordering.
-    file_entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.into_iter()
+            .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
+            .map(|entry| format!("{}/{}", prefix, entry.name))
+            .collect()
+    };
+    file_paths.sort();
 
-    // If there's a checkpoint, skip entries at or before it.
+    // If there's a checkpoint, skip paths at or before it.
     if let Some(ref checkpoint) = task.checkpoint {
-        file_entries.retain(|entry| entry.name.as_str() > checkpoint.as_str());
+        file_paths.retain(|p| p.as_str() > checkpoint.as_str());
     }
 
-    let total_count = file_entries.len();
+    let total_count = file_paths.len();
     if total_count == 0 {
         return Ok("reindexed 0 files".to_string());
     }
@@ -231,18 +249,12 @@ fn execute_reindex(
     let start = Instant::now();
 
     // Process in batches.
-    for batch in file_entries.chunks(REINDEX_BATCH_SIZE) {
+    for batch in file_paths.chunks(REINDEX_BATCH_SIZE) {
         let batch_start = Instant::now();
 
-        for entry in batch {
-            let file_path = if path.ends_with('/') {
-                format!("{}{}", path, entry.name)
-            } else {
-                format!("{}/{}", path, entry.name)
-            };
-
+        for file_path in batch {
             // Read file content.
-            let data = match ops.read_file(&file_path) {
+            let data = match ops.read_file(file_path) {
                 Ok(data) => data,
                 Err(_) => {
                     consecutive_failures += 1;
@@ -259,13 +271,13 @@ fn execute_reindex(
 
             // Get metadata for content_type.
             let content_type = ops
-                .get_metadata(&file_path)
+                .get_metadata(file_path)
                 .ok()
                 .flatten()
                 .and_then(|record| record.content_type);
 
             // Run the indexing pipeline.
-            match pipeline.run(&ctx, &file_path, &data, content_type.as_deref()) {
+            match pipeline.run(&ctx, file_path, &data, content_type.as_deref()) {
                 Ok(()) => {
                     consecutive_failures = 0;
                 }
@@ -289,9 +301,9 @@ fn execute_reindex(
             batch_times.remove(0);
         }
 
-        // Update checkpoint to the last file name in this batch.
-        if let Some(last_entry) = batch.last() {
-            let _ = queue.update_checkpoint(&task.id, &last_entry.name);
+        // Update checkpoint to the last file path in this batch.
+        if let Some(last_path) = batch.last() {
+            let _ = queue.update_checkpoint(&task.id, last_path);
         }
 
         // Compute progress and ETA.

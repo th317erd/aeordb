@@ -1549,6 +1549,20 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
+    // Also check ancestor directories for glob-based configs
+    let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
+    if let Ok(Some((_config, config_dir))) = pipeline.find_config_for_path(&normalized) {
+      if config_dir != parent {
+        let ancestor_index_names = index_manager.list_indexes(&config_dir)?;
+        for field_name in &ancestor_index_names {
+          if let Some(mut index) = index_manager.load_index(&config_dir, field_name)? {
+            index.remove(&file_key);
+            index_manager.save_index(&config_dir, &index)?;
+          }
+        }
+      }
+    }
+
     // Now delete the file itself
     self.delete_file(ctx, path)
   }
