@@ -2098,6 +2098,80 @@ impl<'a> DirectoryOps<'a> {
     Ok(new_record)
   }
 
+  /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
+  pub fn copy_file(
+    &self,
+    ctx: &RequestContext,
+    from_path: &str,
+    to_path: &str,
+  ) -> EngineResult<FileRecord> {
+    let from_normalized = normalize_path(from_path);
+    let to_normalized = normalize_path(to_path);
+
+    if from_normalized == "/" || to_normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot copy root path".to_string()));
+    }
+    if from_normalized == to_normalized {
+      return Err(EngineError::InvalidInput("Source and destination are the same".to_string()));
+    }
+    if is_system_path(&from_normalized) || is_system_path(&to_normalized) {
+      return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
+    }
+
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    // Read the source FileRecord
+    let from_key = file_path_hash(&from_normalized, &algo)?;
+    let source_record = match self.engine.get_entry(&from_key)? {
+      Some((header, _key, value)) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
+      None => return Err(EngineError::NotFound(from_normalized)),
+    };
+
+    // Use restore_file_from_record which handles all 3 keys + parent dirs
+    self.restore_file_from_record(ctx, &to_normalized, &source_record)?;
+
+    // Read back the new record
+    let to_key = file_path_hash(&to_normalized, &algo)?;
+    match self.engine.get_entry(&to_key)? {
+      Some((header, _key, value)) => Ok(FileRecord::deserialize(&value, hash_length, header.entry_version)?),
+      None => Err(EngineError::NotFound(to_normalized)),
+    }
+  }
+
+  /// Recursively copy a path (file or directory) to a new location.
+  pub fn copy_path(
+    &self,
+    ctx: &RequestContext,
+    from_path: &str,
+    to_path: &str,
+  ) -> EngineResult<Vec<String>> {
+    let from_normalized = normalize_path(from_path);
+    let to_normalized = normalize_path(to_path);
+    let mut copied = Vec::new();
+
+    // Check if source is a directory
+    let algo = self.engine.hash_algo();
+    let dir_key = directory_path_hash(&from_normalized, &algo)?;
+    if self.engine.has_entry(&dir_key)? {
+      // Directory — create destination dir and recurse
+      let _ = self.create_directory(ctx, &to_normalized);
+      let children = self.list_directory(&from_normalized)?;
+      for child in &children {
+        let child_from = format!("{}/{}", from_normalized.trim_end_matches('/'), child.name);
+        let child_to = format!("{}/{}", to_normalized.trim_end_matches('/'), child.name);
+        let sub_copied = self.copy_path(ctx, &child_from, &child_to)?;
+        copied.extend(sub_copied);
+      }
+      return Ok(copied);
+    }
+
+    // File
+    self.copy_file(ctx, &from_normalized, &to_normalized)?;
+    copied.push(to_normalized);
+    Ok(copied)
+  }
+
   /// Rename (move) a symlink from one path to another.
   ///
   /// This is a metadata-only operation — the symlink's target does NOT change,

@@ -2355,3 +2355,51 @@ fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
     _ => prefix.to_string(),
   }
 }
+
+// ---------------------------------------------------------------------------
+// POST /files/copy — copy one or more files/directories to a destination
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CopyRequest {
+  pub paths: Vec<String>,
+  pub destination: String,
+}
+
+pub async fn copy_files(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Json(payload): Json<CopyRequest>,
+) -> Response {
+  let dest_normalized = crate::engine::path_utils::normalize_path(&payload.destination);
+
+  if is_system_path(&dest_normalized) {
+    return ErrorResponse::new("Not found")
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let ops = DirectoryOps::new(&state.engine);
+  let mut copied = Vec::new();
+  let mut errors = Vec::new();
+
+  for path in &payload.paths {
+    let from_normalized = crate::engine::path_utils::normalize_path(path);
+    let name = crate::engine::path_utils::file_name(&from_normalized)
+      .unwrap_or("").to_string();
+    let to_path = format!("{}/{}", dest_normalized.trim_end_matches('/'), name);
+
+    match ops.copy_path(&ctx, &from_normalized, &to_path) {
+      Ok(paths) => copied.extend(paths),
+      Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
+    }
+  }
+
+  let mut response = serde_json::json!({ "copied": copied });
+  if !errors.is_empty() {
+    response["errors"] = serde_json::json!(errors);
+  }
+
+  (StatusCode::OK, Json(response)).into_response()
+}

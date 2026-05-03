@@ -249,6 +249,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/files/download", post(download_routes::download_zip))
     // Files: mkdir route (must be before /files/{*path} wildcard)
     .route("/files/mkdir", post(engine_routes::mkdir))
+    // Files: copy route (must be before /files/{*path} wildcard)
+    .route("/files/copy", post(engine_routes::copy_files))
     // Files: share routes (must be before /files/{*path} wildcard)
     .route("/files/share", post(share_routes::share))
     .route("/files/shares", get(share_routes::list_shares).delete(share_routes::unshare))
