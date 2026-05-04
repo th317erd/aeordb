@@ -704,3 +704,7 @@ path = "benches/gc_investigate.rs"
 name = "single_file_spec"
 path = "spec/engine/single_file_spec.rs"
 
+[[test]]
+name = "global_search_http_spec"
+path = "spec/http/global_search_http_spec.rs"
+

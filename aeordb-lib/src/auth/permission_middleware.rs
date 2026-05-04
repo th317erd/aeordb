@@ -45,6 +45,7 @@ pub async fn permission_middleware(
   // auth checks and must not be treated as file paths.
   let is_files_route = request_path.starts_with("/files/")
     && request_path != "/files/query"
+    && request_path != "/files/search"
     && request_path != "/files/download"
     && request_path != "/files/mkdir"
     && request_path != "/files/share"
