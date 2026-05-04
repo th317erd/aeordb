@@ -31,6 +31,12 @@ The `path` argument specifies which directory to reindex. The task worker will:
 3. Re-read each file and run it through the indexing pipeline
 4. Track progress and update checkpoints
 
+### Glob-Aware Reindexing
+
+When the index config includes a `glob` field, the reindex task uses recursive directory listing instead of direct children only. Files are filtered by the glob pattern before processing.
+
+For example, a config at `/sessions/` with `"glob": "*/session.json"` will recursively list all files under `/sessions/`, filter to those matching `*/session.json`, and reindex each one.
+
 ## Progress Tracking
 
 During an active reindex, query responses include a `meta.reindexing` field indicating that results may be incomplete:

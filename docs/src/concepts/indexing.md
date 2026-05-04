@@ -22,6 +22,33 @@ curl -X PUT http://localhost:6830/files/users/.config/indexes.json \
 
 When this file is created or updated, the engine automatically triggers a background reindex of all existing files in the directory.
 
+### Subdirectory Indexing with Glob
+
+By default, an index config only indexes direct children of its directory. To index files across subdirectories, add a `glob` field:
+
+```bash
+curl -X PUT http://localhost:6830/files/sessions/.config/indexes.json \
+  -H "Content-Type: application/json" \
+  -d '{
+    "glob": "*/session.json",
+    "indexes": [
+      {"name": "patient_name", "type": ["string", "trigram"]},
+      {"name": "notes", "type": "trigram", "source": ["comments", "", "text"]}
+    ]
+  }'
+```
+
+This config at `/sessions/` indexes all `session.json` files in immediate subdirectories (e.g., `/sessions/s1/session.json`, `/sessions/s2/session.json`).
+
+**Glob patterns:**
+- `*` — matches one directory level (`*/file.json` matches `subdir/file.json`)
+- `**` — matches any depth (`**/*.json` matches `a/b/c/file.json`)
+- `?` — matches a single character
+
+When a file is stored, the engine checks ancestor directories for glob configs. The nearest matching ancestor's config is used. Indexes are stored at the config owner's directory, so querying `/sessions/` finds results from all matching subdirectories.
+
+Reindexing with a glob config recursively scans all subdirectories and filters by the glob pattern.
+
 ## Index Types
 
 | Type | Order-Preserving | Description |
@@ -109,6 +136,51 @@ This extracts `metadata.author` from a JSON structure like:
 The `source` array supports:
 - String segments for object key lookup: `["metadata", "author"]`
 - Integer segments for array index access: `["items", 0, "name"]`
+
+### Array Fan-Out
+
+To index every element in an array, use an empty string `""` as a source segment. This "fans out" — creating one index entry per array element:
+
+```json
+{"name": "tag", "type": "trigram", "source": ["tags", ""]}
+```
+
+For `{"tags": ["rust", "database", "aeordb"]}`, this creates **three** index entries for the same file. A query for `tag = "rust"` will find this file.
+
+Fan-out works on objects too — `""` iterates all values:
+
+```json
+{"name": "value", "type": "string", "source": [""]}
+```
+
+For `{"color": "red", "size": "large"}`, this creates entries for both `"red"` and `"large"`.
+
+Fan-out can be chained for nested structures:
+
+```json
+{"name": "comment_text", "type": "trigram", "source": ["comments", "", "text"]}
+```
+
+For `{"comments": [{"text": "hello"}, {"text": "world"}]}`, this creates entries for `"hello"` and `"world"`.
+
+### Regex Filtering
+
+Use a regex segment `/pattern/flags` to filter which keys (on objects) or elements (on arrays) are included:
+
+```json
+{"name": "tag_value", "type": "string", "source": ["/^tag_/"]}
+```
+
+For `{"tag_color": "red", "tag_size": "large", "name": "foo"}`, this creates entries for `"red"` and `"large"` (keys matching `/^tag_/`), but not `"foo"`.
+
+Supported flags:
+- `i` — case-insensitive matching
+
+```json
+{"name": "name_field", "type": "string", "source": ["/^name$/i"]}
+```
+
+Matches keys `name`, `Name`, `NAME`, etc.
 
 ### Plugin Mapper
 

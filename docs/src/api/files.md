@@ -18,6 +18,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | GET | `/files/share-links?path=` | List active share links for a path | Yes (root) | 200, 403, 500 |
 | DELETE | `/files/share-links/{key_id}` | Revoke a share link | Yes (root) | 200, 403, 404, 500 |
 | GET | `/files/shared-with-me` | List paths shared with the current user | Yes | 200, 403, 500 |
+| POST | `/files/copy` | Copy files or directories | Yes | 200, 400, 404, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 > **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
@@ -844,3 +845,52 @@ Content-Type: application/pdf
 |--------|-----------|
 | 404 | Path does not exist |
 | 500 | Internal metadata lookup failure |
+
+---
+
+## POST /files/copy
+
+Copy files or directories to a new location. Uses content-addressed deduplication — no data is physically duplicated.
+
+### Request
+
+- **Headers:**
+  - `Authorization: Bearer <token>` (required)
+  - `Content-Type: application/json` (required)
+- **Body:**
+
+```json
+{
+  "paths": ["/src/file1.txt", "/src/file2.txt"],
+  "destination": "/dst/"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `paths` | array | Yes | Paths to copy (files or directories) |
+| `destination` | string | Yes | Destination directory |
+
+### Response
+
+**Status:** `200 OK`
+
+```json
+{
+  "copied": ["/dst/file1.txt", "/dst/file2.txt"]
+}
+```
+
+For directories in the `paths` list, all contents are recursively copied. If any individual copy fails, the error is reported in an `errors` array but other copies continue.
+
+### Example
+
+```bash
+curl -X POST http://localhost:6830/files/copy \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paths": ["/src/file1.txt", "/src/file2.txt"],
+    "destination": "/dst/"
+  }'
+```
