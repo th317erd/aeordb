@@ -7,6 +7,7 @@ The query engine supports indexed field queries with boolean combinators, pagina
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
 | POST | `/files/query` | Execute a query | Yes | 200, 400, 404, 500 |
+| POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 500 |
 
 ---
 
@@ -478,6 +479,80 @@ curl -X POST http://localhost:6830/files/query \
       ]
     }
   }'
+```
+
+---
+
+## Global Search
+
+Search across all indexed directories in the database.
+
+### POST /files/search
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | No | Broad search — searched against all trigram, phonetic, soundex, and dmetaphone indexed fields |
+| `where` | object | No | Structured query filter (same syntax as `/files/query`) |
+| `path` | string | No | Scope search to a subtree (default: `/` = everything) |
+| `limit` | integer | No | Max results (default: 50, max: 1000) |
+| `offset` | integer | No | Skip results |
+
+At least one of `query` or `where` is required.
+
+### Broad Search
+
+Discovers all directories with fuzzy-capable indexes (trigram, phonetic, soundex, dmetaphone) and searches the term against every matching field:
+
+```bash
+curl -X POST http://localhost:6830/files/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "alice", "limit": 20}'
+```
+
+### Structured Search
+
+Same `where` clause syntax as `/files/query`, but searches across all directories that have the requested field indexed:
+
+```bash
+curl -X POST http://localhost:6830/files/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"where": {"field": "@size", "op": "gt", "value": 1048576}}'
+```
+
+### Combined
+
+Broad search filtered by structured conditions:
+
+```bash
+curl -X POST http://localhost:6830/files/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "report", "where": {"field": "@extension", "op": "eq", "value": "pdf"}}'
+```
+
+### Response
+
+Same format as `/files/query`, plus a `source` field per result indicating which directory's index matched:
+
+```json
+{
+  "results": [
+    {
+      "path": "/users/alice.json",
+      "score": 0.95,
+      "matched_by": ["@filename"],
+      "source": "/",
+      "size": 256,
+      "content_type": "application/json",
+      "created_at": 1775968398000,
+      "updated_at": 1775968398000
+    }
+  ],
+  "has_more": false,
+  "total_count": 1
+}
 ```
 
 ---

@@ -259,6 +259,29 @@ When a file is stored and no parser is configured in the directory's index confi
 
 Parser and indexing failures never prevent file storage. The file is always stored regardless of parse/index errors. If logging is enabled in the index config (`"logging": true`), errors are written to `.logs/` under the directory.
 
+## Default Indexes
+
+AeorDB automatically indexes every file's metadata on first boot. A default configuration is written at `/.config/indexes.json` with `glob: "**/*"`:
+
+| Field | Index Types | Description |
+|-------|------------|-------------|
+| `@filename` | string, trigram, phonetic, dmetaphone | File name (last path segment). Supports exact match, fuzzy search, and phonetic matching. |
+| `@hash` | trigram | Content hash. Supports substring and similarity search. |
+| `@created_at` | timestamp | Creation time. Supports range queries. |
+| `@updated_at` | timestamp | Last update time. Supports range queries. |
+| `@size` | u64 | File size in bytes. Supports range queries. |
+| `@content_type` | string | MIME type. Supports exact match. |
+
+These indexes are stored at `/.indexes/` and cover every file in the database. They enable the global search endpoint (`POST /files/search`) to work out of the box.
+
+### @-Field Source Resolution
+
+When the indexing pipeline encounters a field name starting with `@`, it extracts the value from the file's metadata (FileRecord) instead of parsing the file content. This means even binary files (images, videos, PDFs) are indexed by filename, hash, timestamps, size, and content type without needing a parser.
+
+### Customization
+
+The default config at `/.config/indexes.json` is only written on first boot. You can modify it to add or remove default fields. Changes trigger an automatic reindex.
+
 ## Automatic Reindexing
 
 When you store or update a `.config/indexes.json` file, the engine automatically enqueues a background reindex task for that directory. The task:
