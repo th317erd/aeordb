@@ -72,8 +72,8 @@ class AeorUsers extends HTMLElement {
 
     if (this._forbidden) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;font-size:1rem;">You don't have permission to manage users.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message-lg">You don't have permission to manage users.</div>
         </div>
       `;
       return;
@@ -81,8 +81,8 @@ class AeorUsers extends HTMLElement {
 
     if (this._users.length === 0 && !this._error) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;">No users found.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message">No users found.</div>
         </div>
       `;
       return;
@@ -110,7 +110,7 @@ class AeorUsers extends HTMLElement {
                     ${(user.is_active) ? 'Active' : 'Inactive'}
                   </span>
                 </td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">
+                <td class="cell-mono">
                   ${(user.created_at) ? new Date(user.created_at).toLocaleDateString() : '\u2014'}
                 </td>
                 <td>
@@ -237,7 +237,7 @@ class AeorUsers extends HTMLElement {
                   <input type="checkbox" id="edit-active" ${isActive}>
                   <span class="toggle-track"></span>
                 </label>
-                <span class="form-label" style="margin-bottom:0;">Active</span>
+                <span class="form-label toggle-label">Active</span>
               </div>
             </div>
             <div class="modal-actions">

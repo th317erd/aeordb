@@ -485,6 +485,89 @@
     .flex-gap { display: flex; gap: 8px; }
     .text-muted { color: var(--text-muted); }
     .mb-4 { margin-bottom: 16px; }
+    .hidden { display: none !important; }
+
+    /* Empty states */
+    .empty-state { text-align: center; padding: 40px; }
+    .empty-state-message { color: #8b949e; }
+    .empty-state-message-lg { color: #8b949e; font-size: 1rem; }
+
+    /* Search bar wrapper */
+    .search-bar-wrap { margin-bottom: 16px; }
+
+    /* Section gap (tab bars, info boxes) */
+    .section-gap { margin-bottom: 20px; }
+
+    /* Modal body text */
+    .modal-body-text { color: var(--text-muted); margin-bottom: 18px; }
+
+    /* Monospace table cells */
+    .cell-mono { font-family: var(--font-mono); font-size: 0.85rem; }
+
+    /* Toggle label inline */
+    .toggle-label { margin-bottom: 0; }
+
+    /* Card section heading */
+    .card-heading { font-size: 1.1rem; font-weight: 700; margin-bottom: 18px; }
+
+    /* Form actions row */
+    .form-actions { display: flex; gap: 10px; margin-top: 18px; }
+
+    /* Monospace form input */
+    .form-input-mono { font-family: var(--font-mono); font-size: 0.85rem; }
+
+    /* Warning alert */
+    .alert-warning {
+      background: rgba(210, 153, 34, 0.12);
+      border: 1px solid rgba(210, 153, 34, 0.3);
+      color: var(--warning);
+      margin-bottom: 16px;
+    }
+
+    /* Key/detail metadata lines */
+    .detail-line { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; }
+    .detail-line-last { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+
+    /* Inline mono text */
+    .mono { font-family: var(--font-mono); }
+
+    /* Small uppercase field label */
+    .field-label-small {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    /* Muted badge */
+    .badge-muted { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+
+    /* Confirm-button theme variants */
+    .confirm-button-danger {
+      --lpb-fill: var(--danger, #f85149);
+      --lpb-text: var(--danger, #f85149);
+    }
+    .confirm-button-restore {
+      --lpb-bg: var(--accent, #f97316);
+      --lpb-text: #fff;
+      --lpb-fill: var(--success, #3fb950);
+      --lpb-border: var(--accent, #f97316);
+    }
+
+    /* Checkbox label (flex with gap) */
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    /* Form hint text */
+    .form-hint {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
 
     /* Mobile top bar */
     .mobile-top-bar {

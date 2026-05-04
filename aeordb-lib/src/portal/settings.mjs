@@ -35,12 +35,12 @@ class AeorSettings extends HTMLElement {
       </div>
       <div id="settings-error"></div>
       <div id="settings-feedback"></div>
-      <div class="tab-bar" style="margin-bottom:20px;">
+      <div class="tab-bar section-gap">
         <div class="tab active settings-tab" data-tab="email">Email</div>
         <div class="tab settings-tab" data-tab="gc">Garbage Collector</div>
       </div>
       <div id="settings-tab-email"></div>
-      <div id="settings-tab-gc" style="display:none;"></div>
+      <div id="settings-tab-gc" class="hidden"></div>
     `;
 
     this.querySelectorAll('.settings-tab').forEach((btn) => {
@@ -48,8 +48,8 @@ class AeorSettings extends HTMLElement {
         this.querySelectorAll('.settings-tab').forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
         this._activeTab = btn.dataset.tab;
-        this.querySelector('#settings-tab-email').style.display = this._activeTab === 'email' ? '' : 'none';
-        this.querySelector('#settings-tab-gc').style.display = this._activeTab === 'gc' ? '' : 'none';
+        this.querySelector('#settings-tab-email').classList.toggle('hidden', this._activeTab !== 'email');
+        this.querySelector('#settings-tab-gc').classList.toggle('hidden', this._activeTab !== 'gc');
       });
     });
   }
@@ -112,8 +112,8 @@ class AeorSettings extends HTMLElement {
 
     if (this._forbidden) {
       container.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;font-size:1rem;">You don't have permission to manage settings.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message-lg">You don't have permission to manage settings.</div>
         </div>
       `;
       return;
@@ -124,7 +124,7 @@ class AeorSettings extends HTMLElement {
 
     container.innerHTML = `
       <div class="card">
-        <h2 style="font-size:1.1rem;font-weight:700;margin-bottom:18px;">Email Configuration</h2>
+        <h2 class="card-heading">Email Configuration</h2>
         <form id="email-config-form">
           <div class="form-group">
             <label class="form-label" for="cfg-provider">Provider</label>
@@ -134,7 +134,7 @@ class AeorSettings extends HTMLElement {
             </select>
           </div>
 
-          <div id="smtp-fields" style="display:${provider === 'smtp' ? 'block' : 'none'};">
+          <div id="smtp-fields" class="${provider === 'smtp' ? '' : 'hidden'}">
             <div class="form-group">
               <label class="form-label" for="cfg-host">Host</label>
               <input class="form-input" id="cfg-host" type="text" value="${escapeHtml(cfg.host || '')}" placeholder="smtp.example.com">
@@ -169,7 +169,7 @@ class AeorSettings extends HTMLElement {
             </div>
           </div>
 
-          <div id="oauth-fields" style="display:${provider === 'oauth' ? 'block' : 'none'};">
+          <div id="oauth-fields" class="${provider === 'oauth' ? '' : 'hidden'}">
             <div class="form-group">
               <label class="form-label" for="cfg-oauth-service">OAuth Service</label>
               <select class="form-input" id="cfg-oauth-service">
@@ -200,7 +200,7 @@ class AeorSettings extends HTMLElement {
             </div>
           </div>
 
-          <div style="display:flex;gap:10px;margin-top:18px;">
+          <div class="form-actions">
             <button class="button button-primary" type="submit">Save</button>
             <button class="button" type="button" id="test-email-button">Send Test Email</button>
           </div>
@@ -212,8 +212,8 @@ class AeorSettings extends HTMLElement {
       this._provider = event.target.value;
       const smtpFields = this.querySelector('#smtp-fields');
       const oauthFields = this.querySelector('#oauth-fields');
-      if (smtpFields) smtpFields.style.display = (this._provider === 'smtp') ? 'block' : 'none';
-      if (oauthFields) oauthFields.style.display = (this._provider === 'oauth') ? 'block' : 'none';
+      if (smtpFields) smtpFields.classList.toggle('hidden', this._provider !== 'smtp');
+      if (oauthFields) oauthFields.classList.toggle('hidden', this._provider !== 'oauth');
     });
 
     this.querySelector('#email-config-form').addEventListener('submit', (event) => this.handleSave(event));
@@ -321,8 +321,8 @@ class AeorSettings extends HTMLElement {
 
     if (this._forbidden) {
       container.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;">You don't have permission to manage settings.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message">You don't have permission to manage settings.</div>
         </div>
       `;
       return;
@@ -333,7 +333,7 @@ class AeorSettings extends HTMLElement {
     const schedule = gc ? gc.schedule : '0 3 * * *';
 
     container.innerHTML = `
-      <aeor-info-box style="margin-bottom:20px;">
+      <aeor-info-box class="section-gap">
           The <strong>Garbage Collector</strong> reclaims disk space
           by removing unreachable data — orphaned file chunks from interrupted uploads,
           deleted files, and old versions that are no longer referenced. It runs safely
@@ -348,16 +348,16 @@ class AeorSettings extends HTMLElement {
       </aeor-info-box>
 
       <div class="card">
-        <h2 style="font-size:1.1rem;font-weight:700;margin-bottom:18px;">Schedule</h2>
+        <h2 class="card-heading">Schedule</h2>
 
         <div class="form-group">
-          <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <label class="form-label checkbox-label">
             <input type="checkbox" id="gc-enabled" ${isEnabled ? 'checked' : ''}>
             Run garbage collection on a schedule
           </label>
         </div>
 
-        <div id="gc-schedule-fields" style="display:${isEnabled ? 'block' : 'none'};">
+        <div id="gc-schedule-fields" class="${isEnabled ? '' : 'hidden'}">
           <div class="form-group">
             <label class="form-label">Run every</label>
             <select class="form-input" id="gc-frequency">
@@ -368,18 +368,18 @@ class AeorSettings extends HTMLElement {
             </select>
           </div>
 
-          <div id="gc-custom-cron" style="display:${!['0 3 * * *', '0 3 * * 0', '0 3 1 * *'].includes(schedule) ? 'block' : 'none'};">
+          <div id="gc-custom-cron" class="${!['0 3 * * *', '0 3 * * 0', '0 3 1 * *'].includes(schedule) ? '' : 'hidden'}">
             <div class="form-group">
               <label class="form-label" for="gc-cron-expr">Cron Expression</label>
               <input class="form-input" id="gc-cron-expr" type="text" value="${escapeHtml(schedule)}" placeholder="0 3 * * *">
-              <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px;">
+              <div class="form-hint">
                 Format: minute hour day-of-month month day-of-week
               </div>
             </div>
           </div>
         </div>
 
-        <div style="display:flex;gap:10px;margin-top:18px;">
+        <div class="form-actions">
           <button class="button button-primary" id="gc-save-button">Save</button>
           <button class="button" id="gc-run-now-button">Run Now</button>
         </div>
@@ -388,12 +388,12 @@ class AeorSettings extends HTMLElement {
 
     // Toggle schedule fields
     this.querySelector('#gc-enabled').addEventListener('change', (e) => {
-      this.querySelector('#gc-schedule-fields').style.display = e.target.checked ? 'block' : 'none';
+      this.querySelector('#gc-schedule-fields').classList.toggle('hidden', !e.target.checked);
     });
 
     // Toggle custom cron input
     this.querySelector('#gc-frequency').addEventListener('change', (e) => {
-      this.querySelector('#gc-custom-cron').style.display = e.target.value === 'custom' ? 'block' : 'none';
+      this.querySelector('#gc-custom-cron').classList.toggle('hidden', e.target.value !== 'custom');
     });
 
     // Save

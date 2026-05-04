@@ -98,8 +98,8 @@ class AeorGroups extends HTMLElement {
 
     if (this._forbidden) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;font-size:1rem;">You don't have permission to manage groups.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message-lg">You don't have permission to manage groups.</div>
         </div>
       `;
       return;
@@ -107,8 +107,8 @@ class AeorGroups extends HTMLElement {
 
     if (this._groups.length === 0 && !this._error) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;">No groups found. Create one to get started.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message">No groups found. Create one to get started.</div>
         </div>
       `;
       return;
@@ -131,10 +131,10 @@ class AeorGroups extends HTMLElement {
             ${this._groups.map((group) => `
               <tr>
                 <td><strong>${escapeHtml(group._displayName || group.name || '')}</strong></td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_field || '')}</td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_operator || '')}</td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(group.query_value || '')}</td>
-                <td style="font-family:var(--font-mono);font-size:0.85rem;">
+                <td class="cell-mono">${escapeHtml(group.query_field || '')}</td>
+                <td class="cell-mono">${escapeHtml(group.query_operator || '')}</td>
+                <td class="cell-mono">${escapeHtml(group.query_value || '')}</td>
+                <td class="cell-mono">
                   ${(group.created_at) ? new Date(group.created_at).toLocaleDateString() : '\u2014'}
                 </td>
                 <td>

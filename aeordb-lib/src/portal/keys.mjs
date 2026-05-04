@@ -46,7 +46,7 @@ class AeorKeys extends HTMLElement {
         <h1 class="page-title">Keys</h1>
         <button class="button button-primary" id="create-key-button">Create Key</button>
       </div>
-      <div style="margin-bottom:16px;">
+      <div class="search-bar-wrap">
         <input class="form-input" id="keys-search" type="text"
           placeholder="Showing your keys. Search here to show others.">
       </div>
@@ -168,8 +168,8 @@ class AeorKeys extends HTMLElement {
 
     if (displayKeys.length === 0 && !this._error) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;">No keys found.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message">No keys found.</div>
         </div>
       `;
       return;
@@ -277,7 +277,7 @@ class AeorKeys extends HTMLElement {
                 <div class="key-meta">Created ${created} \u00B7 Expires ${expires}</div>
               </div>
               <div class="key-user" title="${escapeHtml(String(key.user_id || ''))}">
-                <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">User</div>
+                <div class="field-label-small">User</div>
                 ${escapeHtml(key.username || this._truncateId(key.user_id))}
               </div>
               <div></div>
@@ -461,7 +461,7 @@ class AeorKeys extends HTMLElement {
         <div class="modal-overlay" id="modal-overlay">
           <div class="modal-content">
             <div class="modal-title">${escapeHtml(title)}</div>
-            <p style="color:var(--text-muted);margin-bottom:18px;">${escapeHtml(message)}</p>
+            <p class="modal-body-text">${escapeHtml(message)}</p>
             <div class="modal-actions">
               <button class="button" type="button" id="confirm-cancel">Cancel</button>
               <button class="button button-danger" type="button" id="confirm-ok">Revoke</button>
@@ -495,8 +495,8 @@ class AeorKeys extends HTMLElement {
       <div class="modal-overlay" id="modal-overlay">
         <div class="modal-content">
           <div class="modal-title">Revoke Key</div>
-          <p style="color:var(--text-muted);margin-bottom:18px;">
-            Are you sure you want to revoke key <code style="font-family:var(--font-mono);color:var(--text);">${escapeHtml(this._truncateId(keyId))}</code>?
+          <p class="modal-body-text">
+            Are you sure you want to revoke key <code class="mono">${escapeHtml(this._truncateId(keyId))}</code>?
             This action cannot be undone.
           </p>
           <div class="modal-actions">
@@ -662,21 +662,20 @@ class AeorKeys extends HTMLElement {
       <div class="modal-overlay" id="modal-overlay">
         <div class="modal-content">
           <div class="modal-title">Key Created</div>
-          <div class="alert" style="background:rgba(210,153,34,0.12);border:1px solid rgba(210,153,34,0.3);color:var(--warning);margin-bottom:16px;">
+          <div class="alert alert-warning">
             This key will not be shown again. Copy it now and store it securely.
           </div>
           <div class="form-group">
             <label class="form-label">API Key</label>
-            <div style="display:flex;gap:8px;">
-              <input class="form-input" id="created-key-value" type="text" readonly
-                value="${escapeHtml(data.key || '')}"
-                style="font-family:var(--font-mono);font-size:0.85rem;">
+            <div class="flex-gap">
+              <input class="form-input form-input-mono" id="created-key-value" type="text" readonly
+                value="${escapeHtml(data.key || '')}">
               <button class="button button-primary" type="button" id="copy-key-button">Copy</button>
             </div>
           </div>
-          ${data.label ? `<div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:8px;">Label: ${escapeHtml(data.label)}</div>` : ''}
-          <div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:8px;">Key ID: <code style="font-family:var(--font-mono);">${escapeHtml(String(data.key_id || ''))}</code></div>
-          <div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">Expires: ${data.expires_at ? new Date(data.expires_at).toLocaleDateString() : '\u2014'}</div>
+          ${data.label ? `<div class="detail-line">Label: ${escapeHtml(data.label)}</div>` : ''}
+          <div class="detail-line">Key ID: <code class="mono">${escapeHtml(String(data.key_id || ''))}</code></div>
+          <div class="detail-line-last">Expires: ${data.expires_at ? new Date(data.expires_at).toLocaleDateString() : '\u2014'}</div>
           <div class="modal-actions">
             <button class="button button-primary" type="button" id="close-result-button">Done</button>
           </div>

@@ -23,7 +23,7 @@ class AeorSnapshots extends HTMLElement {
       <div class="page-header">
         <h1 class="page-title">Snapshots</h1>
       </div>
-      <div style="margin-bottom:16px;">
+      <div class="search-bar-wrap">
         <input class="form-input" id="snapshots-search" type="text"
           placeholder="Search snapshots by name or ID...">
       </div>
@@ -102,8 +102,8 @@ class AeorSnapshots extends HTMLElement {
 
     if (displaySnapshots.length === 0 && !this._error) {
       contentContainer.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px;">
-          <div style="color:#8b949e;">No snapshots found.</div>
+        <div class="card empty-state">
+          <div class="empty-state-message">No snapshots found.</div>
         </div>
       `;
       return;
@@ -211,7 +211,7 @@ class AeorSnapshots extends HTMLElement {
               <div class="snap-info">
                 <div class="snap-name">
                   ${escapeHtml(snap.name || 'Unnamed')}
-                  ${isCurrent ? '<span class="badge badge-active">current</span>' : `<span class="badge" style="background:rgba(139,148,158,0.15);color:var(--text-muted);">${escapeHtml(age)}</span>`}
+                  ${isCurrent ? '<span class="badge badge-active">current</span>' : `<span class="badge badge-muted">${escapeHtml(age)}</span>`}
                 </div>
                 <div class="snap-id">
                   <span title="${escapeHtml(snap.id || '')}">${escapeHtml(this._truncateId(snap.id))}</span>
@@ -220,8 +220,8 @@ class AeorSnapshots extends HTMLElement {
                 <div class="snap-meta">Created ${escapeHtml(created)}</div>
               </div>
               <div class="snap-actions">
-                <aeor-confirm-button class="snap-delete-btn" label="Delete" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-confirm-button>
-                <aeor-confirm-button class="snap-restore-btn" label="Restore" confirmed-text="Restored!" duration="1000" style="--lpb-bg:var(--accent,#f97316);--lpb-text:#fff;--lpb-fill:var(--success,#3fb950);--lpb-border:var(--accent,#f97316);"></aeor-confirm-button>
+                <aeor-confirm-button class="snap-delete-btn confirm-button-danger" label="Delete" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>
+                <aeor-confirm-button class="snap-restore-btn confirm-button-restore" label="Restore" confirmed-text="Restored!" duration="1000"></aeor-confirm-button>
               </div>
             </div>
           `;
@@ -342,7 +342,7 @@ class AeorSnapshots extends HTMLElement {
     if (this._selectedIds.size > 0) {
       bar.innerHTML = `
         <span class="sel-count">${this._selectedIds.size} selected</span>
-        <aeor-confirm-button id="delete-selected-btn" label="Delete ${this._selectedIds.size} Snapshot${this._selectedIds.size > 1 ? 's' : ''}" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-confirm-button>
+        <aeor-confirm-button id="delete-selected-btn" class="confirm-button-danger" label="Delete ${this._selectedIds.size} Snapshot${this._selectedIds.size > 1 ? 's' : ''}" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>
         <button class="button button-small" id="clear-selection-btn">Clear Selection</button>
       `;
       bar.style.visibility = 'visible';
