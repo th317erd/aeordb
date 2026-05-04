@@ -10,6 +10,7 @@ import '/users.mjs';
 import '/groups.mjs';
 import '/files.mjs';
 import '/keys.mjs';
+import '/snapshots.mjs';
 import '/settings.mjs';
 
 // Auth state management
@@ -251,6 +252,7 @@ function navigate() {
     'users': 'aeor-users',
     'groups': 'aeor-groups',
     'keys': 'aeor-keys',
+    'snapshots': 'aeor-snapshots',
     'settings': 'aeor-settings',
   };
 

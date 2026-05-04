@@ -26,6 +26,7 @@ const PORTAL_SHARED_TOKENS_CSS: &str = include_str!("../portal/shared/styles/tok
 const PORTAL_SHARED_COMPONENTS_CSS: &str = include_str!("../portal/shared/styles/components.css");
 const PORTAL_FILES_MJS: &str = include_str!("../portal/files.mjs");
 const PORTAL_KEYS_MJS: &str = include_str!("../portal/keys.mjs");
+const PORTAL_SNAPSHOTS_MJS: &str = include_str!("../portal/snapshots.mjs");
 const PORTAL_SETTINGS_MJS: &str = include_str!("../portal/settings.mjs");
 const PORTAL_SHARED_FILE_BROWSER_JS: &str = include_str!("../portal/shared/components/aeor-file-browser.js");
 const PORTAL_SHARED_FILE_BROWSER_ADAPTER_JS: &str = include_str!("../portal/shared/components/aeor-file-browser-adapter.js");
@@ -58,6 +59,7 @@ pub async fn portal_asset(
         "groups.mjs" => (PORTAL_GROUPS_MJS, "application/javascript; charset=utf-8"),
         "files.mjs" => (PORTAL_FILES_MJS, "application/javascript; charset=utf-8"),
         "keys.mjs" => (PORTAL_KEYS_MJS, "application/javascript; charset=utf-8"),
+        "snapshots.mjs" => (PORTAL_SNAPSHOTS_MJS, "application/javascript; charset=utf-8"),
         "settings.mjs" => (PORTAL_SETTINGS_MJS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
