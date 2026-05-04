@@ -1362,8 +1362,18 @@ pub async fn snapshot_create(
 
   match version_manager.create_snapshot(&ctx, &payload.name, payload.metadata) {
     Ok(snapshot_info) => {
-      let response_body = SnapshotResponse::from(&snapshot_info);
-      (StatusCode::CREATED, Json(response_body)).into_response()
+      // If the returned snapshot has a different name than requested,
+      // it was deduplicated (HEAD unchanged since that snapshot).
+      let is_duplicate = snapshot_info.name != payload.name;
+      let status = if is_duplicate { StatusCode::OK } else { StatusCode::CREATED };
+      let mut response_body = serde_json::to_value(SnapshotResponse::from(&snapshot_info))
+        .unwrap_or_default();
+      if is_duplicate {
+        response_body["duplicate"] = serde_json::json!(true);
+        // Don't consume the rate limit slot for no-ops
+        state.engine.last_manual_snapshot.store(0, std::sync::atomic::Ordering::Relaxed);
+      }
+      (status, Json(response_body)).into_response()
     }
     Err(EngineError::AlreadyExists(message)) => {
       ErrorResponse::new(message)

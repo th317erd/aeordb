@@ -370,6 +370,16 @@ impl<'a> VersionManager<'a> {
 
     let root_hash = self.get_head_hash()?;
     let created_at = chrono::Utc::now().timestamp_millis();
+    let hash_length = self.engine.hash_algo().hash_length();
+
+    // Deduplicate: if an existing snapshot has the same root hash,
+    // HEAD hasn't changed — return the existing snapshot as-is.
+    let existing_snapshots = self.list_snapshots()?;
+    for existing in &existing_snapshots {
+      if existing.root_hash == root_hash {
+        return Ok(existing.clone());
+      }
+    }
 
     let snapshot_info = SnapshotInfo {
       name: name.to_string(),
@@ -378,7 +388,6 @@ impl<'a> VersionManager<'a> {
       metadata,
     };
 
-    let hash_length = self.engine.hash_algo().hash_length();
     let value = snapshot_info.serialize(hash_length)?;
 
     self.engine.store_entry_typed(
