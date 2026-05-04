@@ -773,6 +773,42 @@ impl<'a> IndexManager<'a> {
     Ok(index)
   }
 
+  /// Discover all directories that contain indexes under `base_path`.
+  ///
+  /// Scans `base_path` recursively for files whose path includes `/.indexes/`,
+  /// extracts the parent directory of each `.indexes` segment, and returns a
+  /// deduplicated, sorted list.
+  pub fn discover_indexed_directories(
+    &self,
+    base_path: &str,
+  ) -> EngineResult<Vec<String>> {
+    use std::collections::BTreeSet;
+    use crate::engine::directory_listing::list_directory_recursive;
+
+    let mut indexed_dirs = BTreeSet::new();
+
+    // Check base_path itself: if list_indexes returns any results, include it.
+    let base_indexes = self.list_indexes(base_path)?;
+    if !base_indexes.is_empty() {
+      let normalized = crate::engine::path_utils::normalize_path(base_path);
+      indexed_dirs.insert(normalized);
+    }
+
+    // Recursively list all files. Files inside .indexes directories have paths
+    // like `/some/dir/.indexes/field.trigram.idx`. We extract `/some/dir` from
+    // those paths.
+    let entries = list_directory_recursive(self.engine, base_path, -1, None, None)?;
+    for entry in &entries {
+      if let Some(idx_pos) = entry.path.find("/.indexes/") {
+        let parent = &entry.path[..idx_pos];
+        let dir = if parent.is_empty() { "/" } else { parent };
+        indexed_dirs.insert(dir.to_string());
+      }
+    }
+
+    Ok(indexed_dirs.into_iter().collect())
+  }
+
   /// Load all indexes for a field across all strategies.
   pub fn load_indexes_for_field(&self, path: &str, field_name: &str) -> EngineResult<Vec<FieldIndex>> {
     let indexes = self.list_indexes(path)?;

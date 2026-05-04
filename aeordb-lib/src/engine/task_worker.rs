@@ -211,6 +211,7 @@ fn execute_reindex(
 
         all_entries.into_iter()
             .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
+            .filter(|entry| !crate::engine::directory_ops::is_internal_path(&entry.path))
             .filter(|entry| {
                 let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
                 crate::engine::indexing_pipeline::glob_matches(glob_pattern, relative)
@@ -226,6 +227,7 @@ fn execute_reindex(
         entries.into_iter()
             .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
             .map(|entry| format!("{}/{}", prefix, entry.name))
+            .filter(|path| !crate::engine::directory_ops::is_internal_path(path))
             .collect()
     };
     file_paths.sort();

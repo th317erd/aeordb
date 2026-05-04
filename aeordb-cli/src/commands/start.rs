@@ -169,6 +169,41 @@ pub async fn run(
     }
   }
 
+  // Write default global index config if it doesn't exist.
+  {
+    let ops = aeordb::engine::DirectoryOps::new(&engine);
+    let ctx = aeordb::engine::RequestContext::system();
+    let config_path = "/.config/indexes.json";
+
+    match ops.read_file(config_path) {
+      Ok(_) => {
+        // Config exists — don't overwrite.
+      }
+      Err(_) => {
+        let default_config = serde_json::json!({
+          "glob": "**/*",
+          "indexes": [
+            {"name": "@filename", "type": ["string", "trigram", "phonetic", "dmetaphone"]},
+            {"name": "@hash", "type": "trigram"},
+            {"name": "@created_at", "type": "timestamp"},
+            {"name": "@updated_at", "type": "timestamp"},
+            {"name": "@size", "type": "u64"},
+            {"name": "@content_type", "type": "string"}
+          ]
+        });
+        let config_bytes = serde_json::to_vec_pretty(&default_config).unwrap();
+        if let Err(e) = ops.store_file(&ctx, config_path, &config_bytes, Some("application/json")) {
+          tracing::warn!("Failed to write default index config: {}", e);
+        } else {
+          tracing::info!("Created default global index config");
+          // Enqueue initial reindex.
+          let _ = task_queue.enqueue("reindex", serde_json::json!({"path": "/"}));
+          tracing::info!("Enqueued initial global reindex");
+        }
+      }
+    }
+  }
+
   // Start the cron scheduler (enqueues tasks based on cron config every 60s).
   let cron_handle = spawn_cron_scheduler(task_queue.clone(), engine.clone(), event_bus.clone(), cancel.clone());
 
