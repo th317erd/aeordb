@@ -243,6 +243,8 @@ pub fn create_app_with_all_and_task_queue(
       "/blobs/{hex_hash}",
       get(engine_routes::engine_get_by_hash),
     )
+    // Files: global search route (must be before /files/{*path} wildcard)
+    .route("/files/search", post(engine_routes::global_search_endpoint))
     // Files: query route (must be before /files/{*path} wildcard)
     .route("/files/query", post(engine_routes::query_endpoint))
     // Files: ZIP download route (must be before /files/{*path} wildcard)

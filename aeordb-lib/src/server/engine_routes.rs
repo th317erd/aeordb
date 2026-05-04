@@ -2413,3 +2413,92 @@ pub async fn copy_files(
 
   (StatusCode::OK, Json(response)).into_response()
 }
+
+// ---------------------------------------------------------------------------
+// POST /files/search — global cross-directory search
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalSearchRequest {
+  pub query: Option<String>,
+  #[serde(rename = "where")]
+  pub where_clause: Option<serde_json::Value>,
+  pub path: Option<String>,
+  pub limit: Option<usize>,
+  pub offset: Option<usize>,
+}
+
+pub async fn global_search_endpoint(
+  State(state): State<AppState>,
+  Extension(_claims): Extension<TokenClaims>,
+  Json(payload): Json<GlobalSearchRequest>,
+) -> Response {
+  if payload.query.is_none() && payload.where_clause.is_none() {
+    return ErrorResponse::new("At least one of 'query' or 'where' is required")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  }
+
+  // Parse the where clause into a FieldQuery, if provided.
+  let field_query = match payload.where_clause.as_ref() {
+    Some(value) => {
+      match parse_single_field_query(value) {
+        Ok(QueryNode::Field(fq)) => Some(fq),
+        Ok(_) => {
+          return ErrorResponse::new("'where' must be a single field query (field, op, value)")
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response();
+        }
+        Err(msg) => {
+          return ErrorResponse::new(msg)
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response();
+        }
+      }
+    }
+    None => None,
+  };
+
+  let base_path = payload.path.as_deref().unwrap_or("/");
+  let limit = payload.limit.map(|l| l.min(1000));
+  let offset = payload.offset;
+
+  match crate::engine::search::global_search(
+    &state.engine,
+    base_path,
+    payload.query.as_deref(),
+    field_query.as_ref(),
+    limit,
+    offset,
+  ) {
+    Ok(results) => {
+      let items: Vec<serde_json::Value> = results.results.iter().map(|r| {
+        serde_json::json!({
+          "path": r.path,
+          "score": r.score,
+          "matched_by": r.matched_by,
+          "source": r.source_dir,
+          "size": r.size,
+          "content_type": r.content_type,
+          "created_at": r.created_at,
+          "updated_at": r.updated_at,
+        })
+      }).collect();
+
+      let mut response = serde_json::json!({
+        "results": items,
+        "has_more": results.has_more,
+      });
+      if let Some(total) = results.total_count {
+        response["total_count"] = serde_json::json!(total);
+      }
+      (StatusCode::OK, Json(response)).into_response()
+    }
+    Err(error) => {
+      tracing::error!("Global search failed: {}", error);
+      ErrorResponse::new(format!("Search failed: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
