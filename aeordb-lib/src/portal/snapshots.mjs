@@ -1,7 +1,7 @@
 'use strict';
 
 import { escapeHtml } from '/shared/utils.js';
-import '/shared/components/aeor-long-press-button.js';
+import '/shared/components/aeor-confirm-button.js';
 
 class AeorSnapshots extends HTMLElement {
   constructor() {
@@ -220,8 +220,8 @@ class AeorSnapshots extends HTMLElement {
                 <div class="snap-meta">Created ${escapeHtml(created)}</div>
               </div>
               <div class="snap-actions">
-                <aeor-long-press-button class="snap-delete-btn" label="Delete" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-long-press-button>
-                <aeor-long-press-button class="snap-restore-btn" label="Restore" confirmed-text="Restored!" duration="1000" style="--lpb-bg:var(--accent,#f97316);--lpb-text:#fff;--lpb-fill:var(--success,#3fb950);--lpb-border:var(--accent,#f97316);"></aeor-long-press-button>
+                <aeor-confirm-button class="snap-delete-btn" label="Delete" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-confirm-button>
+                <aeor-confirm-button class="snap-restore-btn" label="Restore" confirmed-text="Restored!" duration="1000" style="--lpb-bg:var(--accent,#f97316);--lpb-text:#fff;--lpb-fill:var(--success,#3fb950);--lpb-border:var(--accent,#f97316);"></aeor-confirm-button>
               </div>
             </div>
           `;
@@ -237,7 +237,7 @@ class AeorSnapshots extends HTMLElement {
     // Row click — selection
     container.querySelectorAll('.snap-row').forEach((row) => {
       row.addEventListener('click', (event) => {
-        if (event.target.closest('aeor-long-press-button')) return;
+        if (event.target.closest('aeor-confirm-button')) return;
         if (event.target.closest('.copy-btn')) return;
 
         const snapName = row.dataset.snapName;
@@ -342,7 +342,7 @@ class AeorSnapshots extends HTMLElement {
     if (this._selectedIds.size > 0) {
       bar.innerHTML = `
         <span class="sel-count">${this._selectedIds.size} selected</span>
-        <aeor-long-press-button id="delete-selected-btn" label="Delete ${this._selectedIds.size} Snapshot${this._selectedIds.size > 1 ? 's' : ''}" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-long-press-button>
+        <aeor-confirm-button id="delete-selected-btn" label="Delete ${this._selectedIds.size} Snapshot${this._selectedIds.size > 1 ? 's' : ''}" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-confirm-button>
         <button class="button button-small" id="clear-selection-btn">Clear Selection</button>
       `;
       bar.style.visibility = 'visible';

@@ -18,7 +18,7 @@ const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
 const PORTAL_SHARED_UTILS_JS: &str = include_str!("../portal/shared/utils.js");
 const PORTAL_SHARED_API_JS: &str = include_str!("../portal/shared/api.js");
 const PORTAL_SHARED_CRUDLIFY_JS: &str = include_str!("../portal/shared/components/aeor-crudlify.js");
-const PORTAL_SHARED_TOASTS_JS: &str = include_str!("../portal/shared/components/aeor-toasts.js");
+const PORTAL_SHARED_TOASTS_JS: &str = include_str!("../portal/shared/components/aeor-toast.js");
 const PORTAL_SHARED_MODAL_JS: &str = include_str!("../portal/shared/components/aeor-modal.js");
 const PORTAL_SHARED_LOGIN_JS: &str = include_str!("../portal/shared/components/aeor-login.js");
 const PORTAL_SHARED_DASHBOARD_JS: &str = include_str!("../portal/shared/components/aeor-dashboard.js");
@@ -39,7 +39,7 @@ const PORTAL_SHARED_PREVIEW_DEFAULT_JS: &str = include_str!("../portal/shared/co
 const PORTAL_SHARED_PREVIEW_PDF_JS: &str = include_str!("../portal/shared/components/previews/aeor-preview-pdf.js");
 const PORTAL_SHARED_FILE_BROWSER_BASE_JS: &str = include_str!("../portal/shared/components/aeor-file-browser-base.js");
 const PORTAL_SHARED_FILE_BROWSER_PORTAL_JS: &str = include_str!("../portal/shared/components/aeor-file-browser-portal.js");
-const PORTAL_SHARED_LONG_PRESS_BUTTON_JS: &str = include_str!("../portal/shared/components/aeor-long-press-button.js");
+const PORTAL_SHARED_CONFIRM_BUTTON_JS: &str = include_str!("../portal/shared/components/aeor-confirm-button.js");
 const PORTAL_SHARED_INFO_BOX_JS: &str = include_str!("../portal/shared/components/aeor-info-box.js");
 
 /// Serve the main portal HTML page.
@@ -76,7 +76,7 @@ pub async fn portal_shared_asset(
         "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
         "api.js" => (PORTAL_SHARED_API_JS, "application/javascript; charset=utf-8"),
         "components/aeor-crudlify.js" => (PORTAL_SHARED_CRUDLIFY_JS, "application/javascript; charset=utf-8"),
-        "components/aeor-toasts.js" => (PORTAL_SHARED_TOASTS_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-toast.js" => (PORTAL_SHARED_TOASTS_JS, "application/javascript; charset=utf-8"),
         "components/aeor-modal.js" => (PORTAL_SHARED_MODAL_JS, "application/javascript; charset=utf-8"),
         "components/aeor-login.js" => (PORTAL_SHARED_LOGIN_JS, "application/javascript; charset=utf-8"),
         "components/aeor-dashboard.js" => (PORTAL_SHARED_DASHBOARD_JS, "application/javascript; charset=utf-8"),
@@ -84,7 +84,7 @@ pub async fn portal_shared_asset(
         "components/aeor-file-browser-adapter.js" => (PORTAL_SHARED_FILE_BROWSER_ADAPTER_JS, "application/javascript; charset=utf-8"),
         "components/aeor-file-browser-base.js" => (PORTAL_SHARED_FILE_BROWSER_BASE_JS, "application/javascript; charset=utf-8"),
         "components/aeor-file-browser-portal.js" => (PORTAL_SHARED_FILE_BROWSER_PORTAL_JS, "application/javascript; charset=utf-8"),
-        "components/aeor-long-press-button.js" => (PORTAL_SHARED_LONG_PRESS_BUTTON_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-confirm-button.js" => (PORTAL_SHARED_CONFIRM_BUTTON_JS, "application/javascript; charset=utf-8"),
         "components/aeor-info-box.js" => (PORTAL_SHARED_INFO_BOX_JS, "application/javascript; charset=utf-8"),
         "components/aeor-file-view-shared.js" => (PORTAL_SHARED_FILE_VIEW_SHARED_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-image.js" => (PORTAL_SHARED_PREVIEW_IMAGE_JS, "application/javascript; charset=utf-8"),
