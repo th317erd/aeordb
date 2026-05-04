@@ -96,7 +96,7 @@ pub enum SortDirection {
 /// A single sort field in an ORDER BY clause.
 #[derive(Debug, Clone)]
 pub struct SortField {
-    /// Field name to sort by. Prefix with `@` for built-in fields (`@score`, `@path`, `@size`, `@created_at`, `@updated_at`).
+    /// Field name to sort by. Prefix with `@` for built-in fields (`@score`, `@path`, `@hash`, `@size`, `@created_at`, `@updated_at`).
     pub field: String,
     /// Sort direction.
     pub direction: SortDirection,
@@ -458,6 +458,10 @@ fn encode_cursor(
                 "@size" => serde_json::json!(result.file_record.total_size),
                 "@created_at" => serde_json::json!(result.file_record.created_at),
                 "@updated_at" => serde_json::json!(result.file_record.updated_at),
+                "@hash" => {
+                    let h = if result.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&result.file_record.chunk_hashes[0]) };
+                    serde_json::json!(h)
+                }
                 _ => serde_json::Value::Null,
             };
             cursor.insert(sf.field.clone(), value);
@@ -881,6 +885,11 @@ impl<'a> QueryEngine<'a> {
           match sd.field.as_str() {
             "@score" => a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal),
             "@path" => a.file_record.path.cmp(&b.file_record.path),
+            "@hash" => {
+              let ha = if a.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&a.file_record.chunk_hashes[0]) };
+              let hb = if b.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&b.file_record.chunk_hashes[0]) };
+              ha.cmp(&hb)
+            }
             "@size" => a.file_record.total_size.cmp(&b.file_record.total_size),
             "@created_at" => a.file_record.created_at.cmp(&b.file_record.created_at),
             "@updated_at" => a.file_record.updated_at.cmp(&b.file_record.updated_at),
@@ -1059,7 +1068,7 @@ impl<'a> QueryEngine<'a> {
   /// Evaluate a virtual field query by scanning all files under the path.
   ///
   /// Virtual fields (`@path`, `@filename`, `@extension`, `@content_type`,
-  /// `@size`, `@created_at`, `@updated_at`) are derived from FileRecord
+  /// `@size`, `@created_at`, `@updated_at`, `@hash`) are derived from FileRecord
   /// metadata and do not require indexes. This is an O(n) scan over all
   /// files in the directory tree.
   fn evaluate_virtual_field_query(
@@ -1072,11 +1081,11 @@ impl<'a> QueryEngine<'a> {
     // Validate the virtual field name up front.
     match field_name {
       "@path" | "@filename" | "@extension" | "@content_type"
-      | "@size" | "@created_at" | "@updated_at" => {}
+      | "@size" | "@created_at" | "@updated_at" | "@hash" => {}
       unknown => {
         return Err(EngineError::InvalidInput(format!(
           "Unknown virtual field '{}'. Supported: @path, @filename, @extension, \
-           @content_type, @size, @created_at, @updated_at",
+           @content_type, @size, @created_at, @updated_at, @hash",
           unknown,
         )));
       }
@@ -1141,6 +1150,14 @@ impl<'a> QueryEngine<'a> {
       "@content_type" => {
         let content_type = file_record.content_type.as_deref().unwrap_or("");
         self.virtual_string_matches(content_type, operation)
+      }
+      "@hash" => {
+        let hash_hex = if file_record.chunk_hashes.is_empty() {
+          String::new()
+        } else {
+          hex::encode(&file_record.chunk_hashes[0])
+        };
+        self.virtual_string_matches(&hash_hex, operation)
       }
       "@size" => {
         self.virtual_u64_matches(file_record.total_size, operation)

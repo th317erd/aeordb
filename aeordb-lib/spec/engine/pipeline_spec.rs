@@ -817,3 +817,294 @@ fn test_pipeline_fanout_source_indexes_multiple_values() {
   assert!(index.is_some(), "Expected tag index with fan-out entries");
   assert_eq!(index.unwrap().len(), 3, "Fan-out should create one entry per resolved value");
 }
+
+// ============================================================
+// @-field (metadata) indexing tests
+// ============================================================
+
+#[test]
+fn test_at_filename_field_gets_indexed() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  // Config with @filename field using trigram index
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@filename".to_string(),
+        index_type: "trigram".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/files", &config);
+
+  // Store a file (creates the FileRecord in the engine)
+  let data = br#"{"irrelevant": true}"#;
+  ops.store_file_with_indexing(&ctx, "/files/report.json", &data[..], Some("application/json")).unwrap();
+
+  // Verify the @filename index was created
+  let index_manager = IndexManager::new(&engine);
+  let indexes = index_manager.list_indexes("/files").unwrap();
+  let has_filename_idx = indexes.iter().any(|name| name.contains("@filename"));
+  assert!(has_filename_idx, "Expected @filename index, got: {:?}", indexes);
+
+  // Load the index and verify it has an entry
+  let index = index_manager.load_index("/files", "@filename").unwrap();
+  assert!(index.is_some(), "Expected @filename index to be loadable");
+  let idx = index.unwrap();
+  assert!(idx.len() > 0, "Expected at least one entry in @filename index");
+}
+
+#[test]
+fn test_at_size_field_gets_indexed() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  // Config with @size field using u64 index
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@size".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
+        min: Some(0.0),
+        max: Some(1_000_000.0),
+      },
+    ],
+  };
+  store_index_config(&engine, "/sized", &config);
+
+  let data = br#"{"some": "content"}"#;
+  ops.store_file_with_indexing(&ctx, "/sized/doc.json", &data[..], Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/sized", "@size").unwrap();
+  assert!(index.is_some(), "Expected @size index to be created");
+  assert_eq!(index.unwrap().len(), 1, "Expected one entry in @size index");
+}
+
+#[test]
+fn test_at_content_type_field_gets_indexed() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@content_type".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/typed", &config);
+
+  let data = br#"{"val": 1}"#;
+  ops.store_file_with_indexing(&ctx, "/typed/item.json", &data[..], Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/typed", "@content_type").unwrap();
+  assert!(index.is_some(), "Expected @content_type index to be created");
+  assert_eq!(index.unwrap().len(), 1, "Expected one entry in @content_type index");
+}
+
+#[test]
+fn test_at_created_at_field_gets_indexed() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@created_at".to_string(),
+        index_type: "i64".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/timed", &config);
+
+  let data = br#"{"x": 1}"#;
+  ops.store_file_with_indexing(&ctx, "/timed/event.json", &data[..], Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/timed", "@created_at").unwrap();
+  assert!(index.is_some(), "Expected @created_at index to be created");
+  assert_eq!(index.unwrap().len(), 1);
+}
+
+#[test]
+fn test_at_field_unknown_name_silently_skipped() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  // Config with unknown @-field — should be silently skipped
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@nonexistent".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/unknown", &config);
+
+  let data = br#"{"val": 1}"#;
+  let result = ops.store_file_with_indexing(&ctx, "/unknown/file.json", &data[..], Some("application/json"));
+  assert!(result.is_ok(), "Unknown @-field should not cause an error");
+
+  let index_manager = IndexManager::new(&engine);
+  let indexes = index_manager.list_indexes("/unknown").unwrap();
+  assert!(indexes.is_empty(), "No index should exist for unknown @-field");
+}
+
+#[test]
+fn test_internal_path_skipped_by_pipeline() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  // Config at root that would match everything
+  let config = make_simple_config("name", "string");
+  store_index_config(&engine, "/", &config);
+
+  // Run pipeline directly with an internal path (.config)
+  let data = br#"{"name":"should not index"}"#;
+  let pipeline = IndexingPipeline::new(&engine);
+  let ctx = RequestContext::system();
+  let result = pipeline.run(&ctx, "/.aeordb-config/indexes.json", &data[..], Some("application/json"));
+  assert!(result.is_ok(), "Internal path should return Ok without indexing");
+
+  // Also try .aeordb-indexes
+  let result2 = pipeline.run(&ctx, "/data/.aeordb-indexes/something.idx", &data[..], Some("application/octet-stream"));
+  assert!(result2.is_ok(), "Internal .aeordb-indexes path should return Ok without indexing");
+
+  // Also try .logs
+  let result3 = pipeline.run(&ctx, "/data/.logs/system/parsing.log", &data[..], Some("text/plain"));
+  assert!(result3.is_ok(), "Internal .logs path should return Ok without indexing");
+}
+
+#[test]
+fn test_at_field_mixed_with_regular_fields() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  // Config with both a regular field and an @-field
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+      IndexFieldConfig {
+        name: "@filename".to_string(),
+        index_type: "trigram".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/mixed", &config);
+
+  let data = br#"{"name":"Alice"}"#;
+  ops.store_file_with_indexing(&ctx, "/mixed/alice.json", &data[..], Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+
+  // Regular field should be indexed
+  let name_idx = index_manager.load_index("/mixed", "name").unwrap();
+  assert!(name_idx.is_some(), "Expected name index");
+  assert_eq!(name_idx.unwrap().len(), 1);
+
+  // @-field should also be indexed
+  let filename_idx = index_manager.load_index("/mixed", "@filename").unwrap();
+  assert!(filename_idx.is_some(), "Expected @filename index");
+  assert!(filename_idx.unwrap().len() > 0, "Expected entries in @filename index");
+}
+
+#[test]
+fn test_at_field_overwrite_replaces_index_entry() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "@size".to_string(),
+        index_type: "u64".to_string(),
+        source: None,
+        min: Some(0.0),
+        max: Some(1_000_000.0),
+      },
+    ],
+  };
+  store_index_config(&engine, "/overwrite", &config);
+
+  // Store first version
+  let data1 = br#"{"short": true}"#;
+  ops.store_file_with_indexing(&ctx, "/overwrite/doc.json", &data1[..], Some("application/json")).unwrap();
+
+  // Overwrite with larger content
+  let data2 = br#"{"much_longer_content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+  ops.store_file_with_indexing(&ctx, "/overwrite/doc.json", &data2[..], Some("application/json")).unwrap();
+
+  // Should have exactly 1 entry (not 2)
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/overwrite", "@size").unwrap().unwrap();
+  assert_eq!(index.len(), 1, "Overwrite should replace, not duplicate @-field index entry");
+}

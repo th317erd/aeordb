@@ -26,7 +26,7 @@ pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>>
 
 /// Check if a path targets an internal directory that should not trigger indexing.
 /// Returns true for paths containing .logs/, .indexes/, or .config/ segments.
-fn is_internal_path(path: &str) -> bool {
+pub fn is_internal_path(path: &str) -> bool {
   let normalized = normalize_path(path);
   let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
   segments.iter().any(|s| *s == ".logs" || *s == ".aeordb-indexes" || *s == ".aeordb-config")

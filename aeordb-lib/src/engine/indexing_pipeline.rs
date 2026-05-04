@@ -1,5 +1,6 @@
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::file_record::FileRecord;
 use crate::engine::index_config::{PathIndexConfig, IndexFieldConfig, create_converter_from_config};
 use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{normalize_path, parent_path};
@@ -119,6 +120,11 @@ impl<'a> IndexingPipeline<'a> {
     data: &[u8],
     content_type: Option<&str>,
   ) -> EngineResult<()> {
+    // Skip internal paths (.logs, .aeordb-indexes, .aeordb-config) — never index engine internals.
+    if crate::engine::directory_ops::is_internal_path(path) {
+      return Ok(());
+    }
+
     let normalized = normalize_path(path);
 
     // Find config via ancestor discovery (checks parent first, then walks up
@@ -302,6 +308,11 @@ impl<'a> IndexingPipeline<'a> {
     parent: &str,
     index_manager: &IndexManager,
   ) -> EngineResult<()> {
+    // @-prefixed fields: extract values from FileRecord metadata instead of JSON content.
+    if field_config.name.starts_with('@') {
+      return self.index_meta_field(field_config, file_key, parent, index_manager);
+    }
+
     // Resolve field values based on source type (plural: fan-out supported)
     let field_values: Vec<Vec<u8>> = if let Some(source) = &field_config.source {
       if let Some(obj) = source.as_object() {
@@ -341,6 +352,68 @@ impl<'a> IndexingPipeline<'a> {
     };
 
     // Clear old entries for this file, then insert all resolved values
+    index.remove(file_key);
+    for value in &field_values {
+      index.insert_expanded(value, file_key.to_vec());
+    }
+    index_manager.save_index(parent, &index)?;
+
+    Ok(())
+  }
+
+  /// Index a @-prefixed field by extracting the value from the FileRecord metadata
+  /// rather than parsing the file's JSON content.
+  fn index_meta_field(
+    &self,
+    field_config: &IndexFieldConfig,
+    file_key: &[u8],
+    parent: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<()> {
+    // Load the FileRecord from the storage engine.
+    let entry = match self.engine.get_entry(file_key)? {
+      Some(entry) => entry,
+      None => return Ok(()), // file not yet stored — nothing to index
+    };
+    let (header, _key, value) = entry;
+    let hash_length = self.engine.hash_algo().hash_length();
+    let record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+
+    // Extract the value based on the @-field name.
+    let extracted: Vec<u8> = match field_config.name.as_str() {
+      "@filename" => {
+        crate::engine::path_utils::file_name(&record.path)
+          .unwrap_or_default()
+          .as_bytes()
+          .to_vec()
+      }
+      "@hash" => {
+        if let Some(first_hash) = record.chunk_hashes.first() {
+          hex::encode(first_hash).into_bytes()
+        } else {
+          Vec::new()
+        }
+      }
+      "@created_at" => record.created_at.to_be_bytes().to_vec(),
+      "@updated_at" => record.updated_at.to_be_bytes().to_vec(),
+      "@size" => record.total_size.to_be_bytes().to_vec(),
+      "@content_type" => {
+        record.content_type.as_deref().unwrap_or("").as_bytes().to_vec()
+      }
+      _ => return Ok(()), // unknown @-field — skip silently
+    };
+
+    let field_values = vec![extracted];
+
+    // Load or create index (same logic as the regular field path).
+    let converter = create_converter_from_config(field_config)?;
+    let strategy = converter.strategy().to_string();
+    let mut index = match index_manager.load_index_by_strategy(parent, &field_config.name, &strategy)? {
+      Some(idx) => idx,
+      None => index_manager.create_index(parent, &field_config.name, converter)?,
+    };
+
+    // Clear old entries for this file, then insert all resolved values.
     index.remove(file_key);
     for value in &field_values {
       index.insert_expanded(value, file_key.to_vec());
