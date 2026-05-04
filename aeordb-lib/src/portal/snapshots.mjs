@@ -42,7 +42,14 @@ class AeorSnapshots extends HTMLElement {
       const response = await window.api('/versions/snapshots');
       if (!response.ok) throw new Error(`Failed to fetch snapshots (${response.status})`);
       const data = await response.json();
-      this._snapshots = (data.items || []).sort((a, b) => b.created_at - a.created_at);
+      // Sort newest first, then deduplicate by root hash (id) — keep newest per hash
+      const sorted = (data.items || []).sort((a, b) => b.created_at - a.created_at);
+      const seen = new Set();
+      this._snapshots = sorted.filter((s) => {
+        if (seen.has(s.id)) return false;
+        seen.add(s.id);
+        return true;
+      });
       this._error = null;
       this.renderContent();
     } catch (error) {
@@ -102,7 +109,8 @@ class AeorSnapshots extends HTMLElement {
       return;
     }
 
-    const newestId = this._snapshots.length > 0 ? this._snapshots[0].id : null;
+    // "current" = newest by timestamp (first in sorted array), identified by name (unique)
+    const newestName = this._snapshots.length > 0 ? this._snapshots[0].name : null;
 
     contentContainer.innerHTML = `
       <style>
@@ -193,13 +201,13 @@ class AeorSnapshots extends HTMLElement {
       <div class="snap-selection-bar" id="snap-selection-bar">&nbsp;</div>
       <div class="snap-list">
         ${displaySnapshots.map((snap) => {
-          const isSelected = this._selectedIds.has(snap.id);
-          const isCurrent = snap.id === newestId;
+          const isSelected = this._selectedIds.has(snap.name);
+          const isCurrent = snap.name === newestName;
           const created = snap.created_at ? new Date(snap.created_at).toLocaleString() : '\u2014';
           const age = snap.created_at ? this._timeAgo(snap.created_at) : '';
 
           return `
-            <div class="snap-row ${isSelected ? 'selected' : ''}" data-snap-id="${escapeHtml(snap.id || '')}">
+            <div class="snap-row ${isSelected ? 'selected' : ''}" data-snap-name="${escapeHtml(snap.name || '')}" data-snap-id="${escapeHtml(snap.id || '')}">
               <div class="snap-info">
                 <div class="snap-name">
                   ${escapeHtml(snap.name || 'Unnamed')}
@@ -212,8 +220,8 @@ class AeorSnapshots extends HTMLElement {
                 <div class="snap-meta">Created ${escapeHtml(created)}</div>
               </div>
               <div class="snap-actions">
-                <aeor-long-press-button class="snap-restore-btn" label="Restore" confirmed-text="Restored!" duration="1000" style="--lpb-bg:var(--accent,#f97316);--lpb-text:#fff;--lpb-fill:var(--success,#3fb950);--lpb-border:var(--accent,#f97316);"></aeor-long-press-button>
                 <aeor-long-press-button class="snap-delete-btn" label="Delete" confirmed-text="Deleted!" duration="1000" style="--lpb-fill:var(--danger,#f85149);--lpb-text:var(--danger,#f85149);"></aeor-long-press-button>
+                <aeor-long-press-button class="snap-restore-btn" label="Restore" confirmed-text="Restored!" duration="1000" style="--lpb-bg:var(--accent,#f97316);--lpb-text:#fff;--lpb-fill:var(--success,#3fb950);--lpb-border:var(--accent,#f97316);"></aeor-long-press-button>
               </div>
             </div>
           `;
@@ -232,31 +240,31 @@ class AeorSnapshots extends HTMLElement {
         if (event.target.closest('aeor-long-press-button')) return;
         if (event.target.closest('.copy-btn')) return;
 
-        const snapId = row.dataset.snapId;
-        const index = displaySnapshots.findIndex((s) => s.id === snapId);
+        const snapName = row.dataset.snapName;
+        const index = displaySnapshots.findIndex((s) => s.name === snapName);
         const isMobile = window.innerWidth <= 768;
         const isCtrl = isMobile || event.ctrlKey || event.metaKey;
         const isShift = !isMobile && event.shiftKey;
 
         if (!isCtrl && !isShift) {
           this._selectedIds.clear();
-          this._selectedIds.add(snapId);
-          this._lastSelectedAnchor = snapId;
+          this._selectedIds.add(snapName);
+          this._lastSelectedAnchor = snapName;
         } else if (isCtrl) {
-          if (this._selectedIds.has(snapId))
-            this._selectedIds.delete(snapId);
+          if (this._selectedIds.has(snapName))
+            this._selectedIds.delete(snapName);
           else
-            this._selectedIds.add(snapId);
-          this._lastSelectedAnchor = snapId;
+            this._selectedIds.add(snapName);
+          this._lastSelectedAnchor = snapName;
         } else if (isShift) {
           const anchorIndex = this._lastSelectedAnchor
-            ? displaySnapshots.findIndex((s) => s.id === this._lastSelectedAnchor)
+            ? displaySnapshots.findIndex((s) => s.name === this._lastSelectedAnchor)
             : 0;
           const anchor = (anchorIndex >= 0) ? anchorIndex : 0;
           const start = Math.min(anchor, index);
           const end = Math.max(anchor, index);
           for (let i = start; i <= end; i++) {
-            if (displaySnapshots[i]) this._selectedIds.add(displaySnapshots[i].id);
+            if (displaySnapshots[i]) this._selectedIds.add(displaySnapshots[i].name);
           }
         }
 
@@ -269,7 +277,7 @@ class AeorSnapshots extends HTMLElement {
     container.querySelectorAll('.snap-restore-btn').forEach((btn) => {
       btn.addEventListener('confirm', () => {
         const row = btn.closest('.snap-row');
-        if (row) this._restoreSnapshot(row.dataset.snapId);
+        if (row) this._restoreSnapshot(row.dataset.snapName);
       });
     });
 
@@ -277,7 +285,7 @@ class AeorSnapshots extends HTMLElement {
     container.querySelectorAll('.snap-delete-btn').forEach((btn) => {
       btn.addEventListener('confirm', () => {
         const row = btn.closest('.snap-row');
-        if (row) this._deleteSnapshot(row.dataset.snapId);
+        if (row) this._deleteSnapshot(row.dataset.snapName);
       });
     });
 
@@ -301,9 +309,9 @@ class AeorSnapshots extends HTMLElement {
     const keydownHandler = (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === 'a') {
         event.preventDefault();
-        for (const s of displaySnapshots) this._selectedIds.add(s.id);
+        for (const s of displaySnapshots) this._selectedIds.add(s.name);
         if (displaySnapshots.length > 0)
-          this._lastSelectedAnchor = displaySnapshots[displaySnapshots.length - 1].id;
+          this._lastSelectedAnchor = displaySnapshots[displaySnapshots.length - 1].name;
         this._updateSelectionVisual(container);
         this._updateSelectionBar();
       } else if (event.key === 'Escape') {
@@ -320,7 +328,7 @@ class AeorSnapshots extends HTMLElement {
 
   _updateSelectionVisual(container) {
     container.querySelectorAll('.snap-row').forEach((row) => {
-      if (this._selectedIds.has(row.dataset.snapId))
+      if (this._selectedIds.has(row.dataset.snapName))
         row.classList.add('selected');
       else
         row.classList.remove('selected');
@@ -356,12 +364,12 @@ class AeorSnapshots extends HTMLElement {
     }
   }
 
-  async _restoreSnapshot(id) {
+  async _restoreSnapshot(name) {
     try {
       const response = await window.api('/versions/restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ name }),
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({ error: 'Restore failed' }));
@@ -374,17 +382,17 @@ class AeorSnapshots extends HTMLElement {
     }
   }
 
-  async _deleteSnapshot(id) {
+  async _deleteSnapshot(name) {
     try {
-      const response = await window.api(`/versions/snapshots/${encodeURIComponent(id)}`, {
+      const response = await window.api(`/versions/snapshots/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({ error: 'Delete failed' }));
         throw new Error(err.error || `HTTP ${response.status}`);
       }
-      this._snapshots = this._snapshots.filter((s) => s.id !== id);
-      this._selectedIds.delete(id);
+      this._snapshots = this._snapshots.filter((s) => s.name !== name);
+      this._selectedIds.delete(name);
       this.renderContent();
     } catch (error) {
       if (window.aeorToast) window.aeorToast('Delete failed: ' + error.message, 'error');
@@ -392,12 +400,12 @@ class AeorSnapshots extends HTMLElement {
   }
 
   async _deleteSelected() {
-    const ids = [...this._selectedIds];
-    for (const id of ids) {
+    const names = [...this._selectedIds];
+    for (const name of names) {
       try {
-        await window.api(`/versions/snapshots/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        this._snapshots = this._snapshots.filter((s) => s.id !== id);
-        this._selectedIds.delete(id);
+        await window.api(`/versions/snapshots/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        this._snapshots = this._snapshots.filter((s) => s.name !== name);
+        this._selectedIds.delete(name);
       } catch (error) {
         if (window.aeorToast) window.aeorToast('Delete failed: ' + error.message, 'error');
       }
