@@ -2,6 +2,7 @@
 
 import { escapeHtml, flashButton } from '/shared/utils.js';
 import '/shared/components/aeor-info-box.js';
+import '/shared/components/aeor-tab-view.js';
 
 class AeorSettings extends HTMLElement {
   constructor() {
@@ -35,23 +36,15 @@ class AeorSettings extends HTMLElement {
       </div>
       <div id="settings-error"></div>
       <div id="settings-feedback"></div>
-      <div class="tab-bar section-gap">
-        <div class="tab active settings-tab" data-tab="email">Email</div>
-        <div class="tab settings-tab" data-tab="gc">Garbage Collector</div>
-      </div>
-      <div id="settings-tab-email"></div>
-      <div id="settings-tab-gc" class="hidden"></div>
+      <aeor-tab-view active="email">
+        <aeor-tab label="Email" name="email">
+          <div id="settings-tab-email"></div>
+        </aeor-tab>
+        <aeor-tab label="Garbage Collector" name="gc">
+          <div id="settings-tab-gc"></div>
+        </aeor-tab>
+      </aeor-tab-view>
     `;
-
-    this.querySelectorAll('.settings-tab').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        this.querySelectorAll('.settings-tab').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        this._activeTab = btn.dataset.tab;
-        this.querySelector('#settings-tab-email').classList.toggle('hidden', this._activeTab !== 'email');
-        this.querySelector('#settings-tab-gc').classList.toggle('hidden', this._activeTab !== 'gc');
-      });
-    });
   }
 
   // ---------------------------------------------------------------------------
