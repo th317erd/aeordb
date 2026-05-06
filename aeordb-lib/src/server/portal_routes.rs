@@ -42,6 +42,7 @@ const PORTAL_SHARED_FILE_BROWSER_PORTAL_JS: &str = include_str!("../portal/share
 const PORTAL_SHARED_CONFIRM_BUTTON_JS: &str = include_str!("../portal/shared/components/aeor-confirm-button.js");
 const PORTAL_SHARED_INFO_BOX_JS: &str = include_str!("../portal/shared/components/aeor-info-box.js");
 const PORTAL_SHARED_TAB_VIEW_JS: &str = include_str!("../portal/shared/components/aeor-tab-view.js");
+const PORTAL_SHARED_SNAPSHOT_CARD_JS: &str = include_str!("../portal/shared/components/aeor-snapshot-card.js");
 
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
@@ -88,6 +89,7 @@ pub async fn portal_shared_asset(
         "components/aeor-confirm-button.js" => (PORTAL_SHARED_CONFIRM_BUTTON_JS, "application/javascript; charset=utf-8"),
         "components/aeor-info-box.js" => (PORTAL_SHARED_INFO_BOX_JS, "application/javascript; charset=utf-8"),
         "components/aeor-tab-view.js" => (PORTAL_SHARED_TAB_VIEW_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-snapshot-card.js" => (PORTAL_SHARED_SNAPSHOT_CARD_JS, "application/javascript; charset=utf-8"),
         "components/aeor-file-view-shared.js" => (PORTAL_SHARED_FILE_VIEW_SHARED_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-image.js" => (PORTAL_SHARED_PREVIEW_IMAGE_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-video.js" => (PORTAL_SHARED_PREVIEW_VIDEO_JS, "application/javascript; charset=utf-8"),

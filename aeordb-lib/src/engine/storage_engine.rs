@@ -972,26 +972,24 @@ impl StorageEngine {
   }
 
   /// Return all (key_hash, value) pairs for entries matching a KV type.
-  /// Reads each entry's value from disk. Includes deleted entries in the
-  /// result — callers should check `is_entry_deleted` if needed.
+  /// Uses the prebuilt type index for O(k) lookup where k is the number of
+  /// entries of the target type. Reads each entry's value from disk.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    let hashes: Vec<(Vec<u8>, u64)> = {
+    let entries: Vec<(Vec<u8>, u64)> = {
       let snapshot = self.kv_snapshot.load();
-      snapshot.iter_all()?
+      snapshot.iter_by_type(target_type)
         .into_iter()
-        .filter(|entry| entry.entry_type() == target_type)
         .map(|entry| (entry.hash, entry.offset))
         .collect()
     };
 
-    let mut results = Vec::with_capacity(hashes.len());
-    // Use a READ lock — read_entry_at_shared uses a cloned file handle.
+    let mut results = Vec::with_capacity(entries.len());
     let writer = self.writer.read()
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
 
-    for (hash, offset) in hashes {
+    for (hash, offset) in entries {
       let (_header, _key, value) = match writer.read_entry_at_shared(offset) {
         Ok(entry) => entry,
         Err(e) => {
@@ -1025,29 +1023,12 @@ impl StorageEngine {
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
 
-    // PERF(M4): This iter_all() + type counting is O(n) over all KV entries.
-    // For databases with millions of entries, consider maintaining atomic counters
-    // per entry type (updated on insert/delete) or caching this result with a
-    // short TTL (e.g., 1 second). Currently acceptable because the snapshot is
-    // fully in-memory and n is bounded by the number of stored objects.
-    let all_entries = snapshot.iter_all().unwrap_or_default();
-
-    let mut chunk_count = 0usize;
-    let mut file_count = 0usize;
-    let mut directory_count = 0usize;
-    let mut snapshot_count = 0usize;
-    let mut fork_count = 0usize;
-
-    for entry in &all_entries {
-      match entry.entry_type() {
-        KV_TYPE_CHUNK => chunk_count += 1,
-        KV_TYPE_FILE_RECORD => file_count += 1,
-        KV_TYPE_DIRECTORY => directory_count += 1,
-        KV_TYPE_SNAPSHOT => snapshot_count += 1,
-        KV_TYPE_FORK => fork_count += 1,
-        _ => {}
-      }
-    }
+    // Type counts from the prebuilt type index — O(1) per type.
+    let chunk_count = snapshot.iter_by_type(KV_TYPE_CHUNK).len();
+    let file_count = snapshot.iter_by_type(KV_TYPE_FILE_RECORD).len();
+    let directory_count = snapshot.iter_by_type(KV_TYPE_DIRECTORY).len();
+    let snapshot_count = snapshot.iter_by_type(KV_TYPE_SNAPSHOT).len();
+    let fork_count = snapshot.iter_by_type(KV_TYPE_FORK).len();
 
     // 3. Lock void_manager for void stats
     let (void_count, void_space_bytes) = match self.void_manager.read() {

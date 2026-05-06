@@ -2,6 +2,7 @@
 
 import { escapeHtml } from '/shared/utils.js';
 import '/shared/components/aeor-confirm-button.js';
+import '/shared/components/aeor-snapshot-card.js';
 
 class AeorSnapshots extends HTMLElement {
   constructor() {
@@ -67,13 +68,6 @@ class AeorSnapshots extends HTMLElement {
     });
   }
 
-  _truncateId(id) {
-    if (!id) return '\u2014';
-    const str = String(id);
-    if (str.length <= 16) return str;
-    return str.slice(0, 8) + '\u2026' + str.slice(-8);
-  }
-
   _timeAgo(timestamp) {
     const seconds = Math.floor((Date.now() - timestamp) / 1000);
     if (seconds < 60) return 'just now';
@@ -116,34 +110,16 @@ class AeorSnapshots extends HTMLElement {
       <style>
         .snap-list { display: flex; flex-direction: column; gap: 1px; }
 
-        .snap-row {
-          display: grid;
-          grid-template-columns: 1fr auto;
-          align-items: center;
-          gap: 12px;
-          padding: 12px 16px;
-          background: var(--card);
-          border: 1px solid var(--border);
-          border-radius: 6px;
-          margin-bottom: 4px;
-          cursor: pointer;
-          outline: none;
-          user-select: none;
-        }
-
-        .snap-row:hover { border-color: var(--accent); }
-        .snap-row.selected { background: rgba(249, 115, 22, 0.15); border-color: var(--accent); }
-
         .snap-selection-bar {
           display: flex;
           align-items: center;
-          gap: 12px;
-          padding: 8px 16px;
-          height: 44px;
+          gap: 0.75rem;
+          padding: 0.5rem 1rem;
+          height: 2.75rem;
           background: var(--card-hover, #21262d);
           border: 1px solid var(--border);
-          border-radius: 6px;
-          margin-bottom: 8px;
+          border-radius: 0.375rem;
+          margin-bottom: 0.5rem;
           font-size: 0.9rem;
           color: var(--text-muted);
           box-sizing: border-box;
@@ -151,80 +127,26 @@ class AeorSnapshots extends HTMLElement {
         }
 
         .snap-selection-bar .sel-count { font-weight: 600; color: var(--text); }
-
-        .snap-info { min-width: 0; }
-
-        .snap-name {
-          font-weight: 600;
-          color: var(--text);
-          margin-bottom: 2px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-
-        .snap-id {
-          font-family: var(--font-mono);
-          font-size: 0.78rem;
-          color: var(--text-muted);
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
-
-        .snap-id .copy-btn {
-          cursor: pointer;
-          opacity: 0.5;
-          font-size: 0.7rem;
-        }
-        .snap-id .copy-btn:hover { opacity: 1; }
-
-        .snap-meta {
-          font-size: 0.78rem;
-          color: var(--text-muted);
-          margin-top: 4px;
-        }
-
-        .snap-actions {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-          flex-shrink: 0;
-        }
-
-        @media (max-width: 768px) {
-          .snap-actions { flex-direction: column; gap: 4px; }
-        }
       </style>
 
       <div class="snap-selection-bar" id="snap-selection-bar">&nbsp;</div>
       <div class="snap-list">
         ${displaySnapshots.map((snap) => {
-          const isSelected = this._selectedIds.has(snap.name);
           const isCurrent = snap.name === newestName;
-          const created = snap.created_at ? new Date(snap.created_at).toLocaleString() : '\u2014';
+          const created = snap.created_at ? 'Created ' + new Date(snap.created_at).toLocaleString() : '\u2014';
           const age = snap.created_at ? this._timeAgo(snap.created_at) : '';
 
-          return `
-            <div class="snap-row ${isSelected ? 'selected' : ''}" data-snap-name="${escapeHtml(snap.name || '')}" data-snap-id="${escapeHtml(snap.id || '')}">
-              <div class="snap-info">
-                <div class="snap-name">
-                  ${escapeHtml(snap.name || 'Unnamed')}
-                  ${isCurrent ? '<span class="badge badge-active">current</span>' : `<span class="badge badge-muted">${escapeHtml(age)}</span>`}
-                </div>
-                <div class="snap-id">
-                  <span title="${escapeHtml(snap.id || '')}">${escapeHtml(this._truncateId(snap.id))}</span>
-                  <span class="copy-btn" data-copy-id="${escapeHtml(snap.id || '')}" title="Copy ID">&#128203;</span>
-                </div>
-                <div class="snap-meta">Created ${escapeHtml(created)}</div>
-              </div>
-              <div class="snap-actions">
-                <aeor-confirm-button class="snap-delete-btn confirm-button-danger" label="Delete" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>
-                <aeor-confirm-button class="snap-restore-btn confirm-button-restore" label="Restore" confirmed-text="Restored!" duration="1000"></aeor-confirm-button>
-              </div>
-            </div>
-          `;
+          return `<aeor-snapshot-card
+              name="${escapeHtml(snap.name || '')}"
+              snapshot-id="${escapeHtml(snap.id || '')}"
+              date="${escapeHtml(created)}"
+              ${isCurrent ? 'current' : ''}
+              ${!isCurrent ? `badge="${escapeHtml(age)}"` : ''}
+              ${this._selectedIds.has(snap.name) ? 'selected' : ''}
+              deletable
+              restorable
+              truncate-id
+            ></aeor-snapshot-card>`;
         }).join('')}
       </div>
     `;
@@ -234,13 +156,12 @@ class AeorSnapshots extends HTMLElement {
   }
 
   _bindRowEvents(container, displaySnapshots) {
-    // Row click — selection
-    container.querySelectorAll('.snap-row').forEach((row) => {
-      row.addEventListener('click', (event) => {
-        if (event.target.closest('aeor-confirm-button')) return;
-        if (event.target.closest('.copy-btn')) return;
+    // Card click — selection
+    container.querySelectorAll('aeor-snapshot-card').forEach((card) => {
+      card.addEventListener('click', (event) => {
+        if (event.target.closest('aeor-confirm-button') || event.target.closest('.snapshot-card-copy-btn')) return;
 
-        const snapName = row.dataset.snapName;
+        const snapName = card.getAttribute('name');
         const index = displaySnapshots.findIndex((s) => s.name === snapName);
         const isMobile = window.innerWidth <= 768;
         const isCtrl = isMobile || event.ctrlKey || event.metaKey;
@@ -271,35 +192,14 @@ class AeorSnapshots extends HTMLElement {
         this._updateSelectionVisual(container);
         this._updateSelectionBar();
       });
-    });
 
-    // Per-card Restore button
-    container.querySelectorAll('.snap-restore-btn').forEach((btn) => {
-      btn.addEventListener('confirm', () => {
-        const row = btn.closest('.snap-row');
-        if (row) this._restoreSnapshot(row.dataset.snapName);
+      // Restore / Delete via component events
+      card.addEventListener('snapshot-restore', () => {
+        this._restoreSnapshot(card.getAttribute('name'));
       });
-    });
 
-    // Per-card Delete button
-    container.querySelectorAll('.snap-delete-btn').forEach((btn) => {
-      btn.addEventListener('confirm', () => {
-        const row = btn.closest('.snap-row');
-        if (row) this._deleteSnapshot(row.dataset.snapName);
-      });
-    });
-
-    // Copy ID buttons
-    container.querySelectorAll('.copy-btn').forEach((btn) => {
-      btn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        const id = btn.dataset.copyId;
-        if (id) {
-          navigator.clipboard.writeText(id).then(() => {
-            btn.textContent = '\u2713';
-            setTimeout(() => { btn.textContent = '\uD83D\uDCCB'; }, 1500);
-          }).catch(() => {});
-        }
+      card.addEventListener('snapshot-delete', () => {
+        this._deleteSnapshot(card.getAttribute('name'));
       });
     });
 
@@ -327,11 +227,11 @@ class AeorSnapshots extends HTMLElement {
   }
 
   _updateSelectionVisual(container) {
-    container.querySelectorAll('.snap-row').forEach((row) => {
-      if (this._selectedIds.has(row.dataset.snapName))
-        row.classList.add('selected');
+    container.querySelectorAll('aeor-snapshot-card').forEach((card) => {
+      if (this._selectedIds.has(card.getAttribute('name')))
+        card.setAttribute('selected', '');
       else
-        row.classList.remove('selected');
+        card.removeAttribute('selected');
     });
   }
 

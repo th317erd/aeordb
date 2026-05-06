@@ -35,6 +35,12 @@ pub struct ReadSnapshot {
     /// Arc-wrapped for cheap sharing between snapshots (buffer-only publishes
     /// reuse existing pages via Arc::clone instead of re-reading from disk).
     pages: Arc<Vec<Vec<u8>>>,
+    /// Type index: maps entry_type (lower 4 bits of type_flags) to the set of
+    /// hash keys for that type. Built once from pages + buffer at snapshot
+    /// creation time; lookups are O(1) by type + O(k) by entries of that type.
+    /// Arc-wrapped so buffer-only publishes can share the base page index and
+    /// only apply buffer deltas.
+    type_index: Arc<HashMap<u8, HashMap<Vec<u8>, KVEntry>>>,
 }
 
 impl fmt::Debug for ReadSnapshot {
@@ -51,7 +57,8 @@ impl fmt::Debug for ReadSnapshot {
 
 impl ReadSnapshot {
     /// Create a new read snapshot from a frozen buffer, shared NVT, and an
-    /// in-memory copy of all KV pages.
+    /// in-memory copy of all KV pages. Builds a type index from pages + buffer
+    /// so that `iter_by_type()` is O(k) instead of O(n).
     pub fn new(
         buffer: HashMap<Vec<u8>, KVEntry>,
         nvt: Arc<NormalizedVectorTable>,
@@ -60,6 +67,7 @@ impl ReadSnapshot {
         entry_count: usize,
         pages: Arc<Vec<Vec<u8>>>,
     ) -> Self {
+        let type_index = Arc::new(Self::build_type_index(&pages, &buffer, hash_algo));
         ReadSnapshot {
             buffer,
             nvt,
@@ -67,7 +75,46 @@ impl ReadSnapshot {
             hash_algo,
             entry_count,
             pages,
+            type_index,
         }
+    }
+
+    /// Build the type index from pages + buffer. Entries are grouped by their
+    /// entry_type (lower 4 bits). Buffer entries override page entries for the
+    /// same hash. Deleted entries are excluded.
+    fn build_type_index(
+        pages: &[Vec<u8>],
+        buffer: &HashMap<Vec<u8>, KVEntry>,
+        hash_algo: HashAlgorithm,
+    ) -> HashMap<u8, HashMap<Vec<u8>, KVEntry>> {
+        let hash_length = hash_algo.hash_length();
+        // Collect all entries from pages, deduplicating by hash
+        let mut by_hash: HashMap<Vec<u8>, KVEntry> = HashMap::new();
+        for page_data in pages.iter() {
+            if let Ok(entries) = deserialize_page(page_data, hash_length) {
+                for entry in entries {
+                    by_hash.insert(entry.hash.clone(), entry);
+                }
+            }
+        }
+
+        // Buffer takes priority
+        for (hash, entry) in buffer {
+            by_hash.insert(hash.clone(), entry.clone());
+        }
+
+        // Group by type, excluding deleted
+        let mut index: HashMap<u8, HashMap<Vec<u8>, KVEntry>> = HashMap::new();
+        for (hash, entry) in by_hash {
+            if (entry.type_flags & KV_FLAG_DELETED) != 0 {
+                continue;
+            }
+            index.entry(entry.entry_type())
+                .or_default()
+                .insert(hash, entry);
+        }
+
+        index
     }
 
     /// Access the shared pages Arc (for cheap cloning in buffer-only publishes).
@@ -121,31 +168,24 @@ impl ReadSnapshot {
         }
     }
 
-    /// Iterate all entries: reads every page from in-memory cache, merges with buffer,
-    /// excludes deleted entries.
+    /// Iterate all entries of a specific type. O(k) where k is the number of
+    /// entries of that type, backed by the prebuilt type index.
+    pub fn iter_by_type(&self, target_type: u8) -> Vec<KVEntry> {
+        match self.type_index.get(&target_type) {
+            Some(entries) => entries.values().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Iterate all entries: uses the prebuilt type index to collect every
+    /// non-deleted entry across all types. Still O(n) but avoids re-scanning
+    /// pages and rebuilding the HashMap on every call.
     pub fn iter_all(&self) -> EngineResult<Vec<KVEntry>> {
-        let hash_length = self.hash_algo.hash_length();
-        let mut all: HashMap<Vec<u8>, KVEntry> = HashMap::new();
-
-        // Read all pages from in-memory cache
-        for page_data in self.pages.iter() {
-            if let Ok(entries) = deserialize_page(page_data, hash_length) {
-                for entry in entries {
-                    all.insert(entry.hash.clone(), entry);
-                }
-            }
+        let mut all = Vec::new();
+        for entries in self.type_index.values() {
+            all.extend(entries.values().cloned());
         }
-
-        // Merge buffer (buffer takes priority)
-        for (hash, entry) in &self.buffer {
-            all.insert(hash.clone(), entry.clone());
-        }
-
-        // Filter out deleted entries
-        Ok(all
-            .into_values()
-            .filter(|e| (e.type_flags & KV_FLAG_DELETED) == 0)
-            .collect())
+        Ok(all)
     }
 
     /// Check if an entry is marked as deleted in the buffer.
