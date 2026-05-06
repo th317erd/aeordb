@@ -176,7 +176,7 @@ impl TestHarness {
   async fn set_permissions(&self, path: &str, links: serde_json::Value) {
     let permissions_body = serde_json::json!({ "links": links });
     let permissions_path = if path == "/" || path.ends_with('/') {
-      format!("{}.permissions", path)
+      format!("{}.aeordb-permissions", path)
     } else {
       format!("{}/.aeordb-permissions", path)
     };

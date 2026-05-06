@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -9,8 +8,8 @@ use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::{
-    CrudlifyOp, DirectoryOps, GroupCache, PathPermissions, PermissionLink,
-    PermissionResolver, PermissionsCache, StorageEngine,
+    CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink,
+    PermissionResolver, StorageEngine, Cache, GroupLoader,
 };
 use aeordb::engine::system_store;
 use aeordb::engine::user::{ROOT_USER_ID, User};
@@ -37,7 +36,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     let ctx = RequestContext::system();
     let directory_ops = DirectoryOps::new(engine);
     let perm_path = if dir_path == "/" || dir_path.ends_with('/') {
-        format!("{}.permissions", dir_path)
+        format!("{}.aeordb-permissions", dir_path)
     } else {
         format!("{}/.aeordb-permissions", dir_path)
     };
@@ -142,9 +141,8 @@ fn path_pattern_scopes_to_specific_file() {
     };
     write_permissions(&engine, "/photos", &permissions);
 
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     // User CAN read the matched file
     assert!(
@@ -180,9 +178,8 @@ fn path_pattern_none_grants_directory_wide() {
     };
     write_permissions(&engine, "/docs", &permissions);
 
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     // User can read any file in /docs/
     assert!(
@@ -218,9 +215,8 @@ fn multiple_patterns_at_same_level() {
     };
     write_permissions(&engine, "/share", &permissions);
 
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     // alpha.txt: read only
     assert!(resolver.check_permission(&user_id, "/share/alpha.txt", CrudlifyOp::Read).unwrap());
@@ -253,9 +249,8 @@ fn pattern_link_plus_directory_wide_link_merge() {
     };
     write_permissions(&engine, "/project", &permissions);
 
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     // Both files are readable (directory-wide)
     assert!(
@@ -591,9 +586,8 @@ async fn per_file_share_does_not_grant_sibling_access() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify with PermissionResolver: user CAN access sunset.jpg, CANNOT access beach.jpg
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     assert!(
         resolver.check_permission(&target_user_id, "/photos/sunset.jpg", CrudlifyOp::Read).unwrap(),
@@ -708,9 +702,8 @@ fn path_pattern_does_not_affect_subdirectory() {
     };
     write_permissions(&engine, "/photos", &permissions);
 
-    let group_cache = GroupCache::new(Duration::from_secs(60));
-    let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-    let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+    let group_cache = Cache::new(GroupLoader);
+    let resolver = PermissionResolver::new(&engine, &group_cache);
 
     // Direct child matches
     assert!(resolver.check_permission(&user_id, "/photos/sunset.jpg", CrudlifyOp::Read).unwrap());

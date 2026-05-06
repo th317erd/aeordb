@@ -62,7 +62,7 @@ pub async fn permission_middleware(
   if !is_files_route {
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
-      if let Ok(Some(key_record)) = state.api_key_cache.get_key(key_id, &state.engine) {
+      if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {
         if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis() {
           if !key_record.rules.is_empty() {
             request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
@@ -125,7 +125,7 @@ pub async fn permission_middleware(
   // If the JWT was issued from a scoped API key, enforce the key's rules.
   // Denied by key rules = 404 (not 403) — the resource doesn't exist for this key.
   if let Some(ref key_id) = claims.key_id {
-    let key_record = match state.api_key_cache.get_key(key_id, &state.engine) {
+    let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
       Ok(Some(record)) => record,
       Ok(None) => {
         // Key not found in DB — token is stale
@@ -234,7 +234,7 @@ pub async fn permission_middleware(
   // Share keys with no rules must be denied — they have no user to fall back on.
   if is_share_key {
     if let Some(ref key_id) = claims.key_id {
-      let key_record = state.api_key_cache.get_key(key_id, &state.engine);
+      let key_record = state.api_key_cache.get(&key_id.to_string(), &state.engine);
       if let Ok(Some(record)) = key_record {
         if record.rules.is_empty() {
           return (
@@ -255,7 +255,6 @@ pub async fn permission_middleware(
   let resolver = PermissionResolver::new(
     &state.engine,
     &state.group_cache,
-    &state.permissions_cache,
   );
 
   match resolver.check_permission(&user_id.unwrap(), engine_path, operation) {

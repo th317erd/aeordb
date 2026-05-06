@@ -220,7 +220,7 @@ pub async fn share(
         }
 
         // Evict cache for this directory
-        state.permissions_cache.evict_path(&perm_dir);
+        state.engine.permissions_cache.evict(&perm_dir);
 
         shared_count += 1;
         shared_paths.push(normalized);
@@ -413,7 +413,7 @@ pub async fn unshare(
     }
 
     // Evict cache
-    state.permissions_cache.evict_path(&perm_dir);
+    state.engine.permissions_cache.evict(&perm_dir);
 
     Json(serde_json::json!({
         "revoked": true,
@@ -451,7 +451,7 @@ pub async fn shared_with_me(
     }
 
     // Get the user's group memberships
-    let user_groups = match state.group_cache.get_groups(&caller_id, &state.engine) {
+    let user_groups = match state.group_cache.get(&caller_id, &state.engine) {
         Ok(groups) => groups,
         Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
     };

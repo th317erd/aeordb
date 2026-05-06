@@ -7,6 +7,8 @@ use fs2::FileExt;
 use arc_swap::ArcSwap;
 
 use crate::engine::append_writer::AppendWriter;
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::engine_counters::EngineCounters;
@@ -137,6 +139,8 @@ pub struct StorageEngine {
   /// not protect across process boundaries).
   /// Separate rate-limit lanes for auto-snapshots. Each lane has its own
   /// throttle so delete/restore/manual operations don't block each other.
+  pub permissions_cache: Arc<Cache<PermissionsLoader>>,
+  pub index_config_cache: Arc<Cache<IndexConfigLoader>>,
   pub(crate) last_auto_snapshot_delete: std::sync::atomic::AtomicI64,
   pub(crate) last_auto_snapshot_restore: std::sync::atomic::AtomicI64,
   pub(crate) last_manual_snapshot: std::sync::atomic::AtomicI64,
@@ -229,6 +233,8 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
+      permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
+      index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
@@ -406,6 +412,8 @@ impl StorageEngine {
       void_manager: RwLock::new(void_manager),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
+      permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
+      index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),

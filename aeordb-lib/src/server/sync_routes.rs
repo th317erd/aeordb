@@ -146,7 +146,7 @@ fn determine_sync_caller(
 
         // Non-root: check API key scoping if key_id is present.
         let key_rules = if let Some(ref key_id) = claims.key_id {
-            match state.api_key_cache.get_key(key_id, &state.engine) {
+            match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
                 Ok(Some(key_record)) => {
                     if key_record.is_revoked {
                         return Err(ErrorResponse::new("API key has been revoked. Create a new key via POST /auth/api-keys")

@@ -111,7 +111,7 @@ pub async fn event_stream(
     let subscriber_rules: Vec<KeyRule> = if is_root {
         vec![] // Root gets everything
     } else if let Some(ref key_id) = claims.key_id {
-        match state.api_key_cache.get_key(key_id, &state.engine) {
+        match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
             Ok(Some(record)) if !record.is_revoked && !record.rules.is_empty() => {
                 record.rules.clone()
             }

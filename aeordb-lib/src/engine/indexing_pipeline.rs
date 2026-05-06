@@ -277,18 +277,7 @@ impl<'a> IndexingPipeline<'a> {
   }
 
   fn load_config(&self, parent: &str) -> EngineResult<Option<PathIndexConfig>> {
-    let config_path = if parent.ends_with('/') {
-      format!("{}.config/indexes.json", parent)
-    } else {
-      format!("{}/.aeordb-config/indexes.json", parent)
-    };
-
-    let ops = DirectoryOps::new(self.engine);
-    match ops.read_file(&config_path) {
-      Ok(config_data) => PathIndexConfig::deserialize(&config_data).map(Some),
-      Err(EngineError::NotFound(_)) => Ok(None),
-      Err(e) => Err(e),
-    }
+    self.engine.index_config_cache.get(&parent.to_string(), self.engine)
   }
 
   fn parse_json(&self, data: &[u8]) -> EngineResult<serde_json::Value> {

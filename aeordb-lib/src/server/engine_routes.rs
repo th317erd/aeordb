@@ -27,6 +27,36 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
+/// Evict cache entries when a system file is written, deleted, or renamed.
+fn evict_caches_for_path(state: &AppState, path: &str) {
+    let normalized = crate::engine::path_utils::normalize_path(path);
+
+    if normalized.ends_with("/.aeordb-permissions") || normalized == "/.aeordb-permissions" {
+        let parent = crate::engine::path_utils::parent_path(&normalized)
+            .unwrap_or_else(|| "/".to_string());
+        state.engine.permissions_cache.evict(&parent);
+    }
+
+    if normalized.ends_with("/.aeordb-config/indexes.json") {
+        if let Some(dir) = normalized.strip_suffix("/.aeordb-config/indexes.json") {
+            let key = if dir.is_empty() { "/".to_string() } else { dir.to_string() };
+            state.engine.index_config_cache.evict(&key);
+        }
+    }
+
+    if normalized.starts_with("/.aeordb-system/api-keys/") {
+        if let Some(key_id) = crate::engine::path_utils::file_name(&normalized) {
+            state.api_key_cache.evict(&key_id.to_string());
+        }
+    }
+
+    if normalized.starts_with("/.aeordb-system/groups/")
+        || normalized.starts_with("/.aeordb-system/users/")
+    {
+        state.group_cache.evict_all();
+    }
+}
+
 /// Query parameters for GET /files/*path (version access + directory listing).
 #[derive(Deserialize, Default)]
 pub struct EngineGetQuery {
@@ -333,6 +363,8 @@ pub async fn engine_store_file(
     response_body.hash = Some(hex::encode(&content_hash));
   }
 
+  evict_caches_for_path(&state, &path);
+
   (StatusCode::CREATED, Json(response_body)).into_response()
 }
 
@@ -467,14 +499,13 @@ fn attach_effective_permissions(
   listing: &mut [serde_json::Value],
   user_id: &Uuid,
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
-  group_cache: &std::sync::Arc<crate::engine::GroupCache>,
-  permissions_cache: &std::sync::Arc<crate::engine::PermissionsCache>,
+  group_cache: &std::sync::Arc<crate::engine::cache::Cache<crate::engine::cache_loaders::GroupLoader>>,
 ) {
   use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 
   if crate::engine::is_root(user_id) { return; }
 
-  let resolver = PermissionResolver::new(engine, group_cache, permissions_cache);
+  let resolver = PermissionResolver::new(engine, group_cache);
   let ops = [
     ('c', CrudlifyOp::Create), ('r', CrudlifyOp::Read), ('u', CrudlifyOp::Update),
     ('d', CrudlifyOp::Delete), ('l', CrudlifyOp::List), ('i', CrudlifyOp::Invoke),
@@ -746,7 +777,7 @@ fn handle_directory_listing(
           // Attach effective_permissions for non-root users
           if let Some(st) = state {
             if let Ok(uid) = uuid::Uuid::parse_str(user_id_str) {
-              attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache, &st.permissions_cache);
+              attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache);
             }
           }
           paginated_listing_response(listing, limit, offset, sort, order)
@@ -972,6 +1003,7 @@ pub async fn engine_delete_file(
 
   match directory_ops.delete_file_with_indexing(&ctx, &path) {
     Ok(()) => {
+      evict_caches_for_path(&state, &path);
       (
         StatusCode::OK,
         Json(serde_json::json!({ "deleted": true, "path": path })),
@@ -982,6 +1014,7 @@ pub async fn engine_delete_file(
       // File not found — try as an empty directory
       match directory_ops.delete_directory(&ctx, &path) {
         Ok(()) => {
+          evict_caches_for_path(&state, &path);
           (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "directory" })))
             .into_response()
         }
@@ -1452,6 +1485,10 @@ pub async fn snapshot_restore(
 
   match version_manager.restore_snapshot(&ctx, &snapshot.name) {
     Ok(()) => {
+      state.engine.permissions_cache.evict_all();
+      state.engine.index_config_cache.evict_all();
+      state.group_cache.evict_all();
+      state.api_key_cache.evict_all();
       (
         StatusCode::OK,
         Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name })),
@@ -2267,6 +2304,8 @@ pub async fn engine_rename(
   if ops.get_symlink(&path).ok().flatten().is_some() {
     return match ops.rename_symlink(&ctx, &path, destination) {
       Ok(_record) => {
+        evict_caches_for_path(&state, &path);
+        evict_caches_for_path(&state, destination);
         let from_normalized = crate::engine::path_utils::normalize_path(&path);
         let to_normalized = crate::engine::path_utils::normalize_path(destination);
         (StatusCode::OK, Json(serde_json::json!({
@@ -2288,6 +2327,8 @@ pub async fn engine_rename(
 
   match ops.rename_file(&ctx, &path, destination) {
     Ok(_record) => {
+      evict_caches_for_path(&state, &path);
+      evict_caches_for_path(&state, destination);
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
       let to_normalized = crate::engine::path_utils::normalize_path(destination);
       (StatusCode::OK, Json(serde_json::json!({

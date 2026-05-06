@@ -6,10 +6,9 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use crate::auth::provider::AuthProvider;
 use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
-use crate::engine::ApiKeyCache;
-use crate::engine::GroupCache;
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
 use crate::engine::PeerManager;
-use crate::engine::PermissionsCache;
 use crate::engine::StorageEngine;
 use crate::engine::EventBus;
 use crate::engine::TaskQueue;
@@ -25,9 +24,8 @@ pub struct AppState {
   pub prometheus_handle: PrometheusHandle,
   pub engine: Arc<StorageEngine>,
   pub event_bus: Arc<EventBus>,
-  pub group_cache: Arc<GroupCache>,
-  pub permissions_cache: Arc<PermissionsCache>,
-  pub api_key_cache: Arc<ApiKeyCache>,
+  pub group_cache: Arc<Cache<GroupLoader>>,
+  pub api_key_cache: Arc<Cache<ApiKeyLoader>>,
   pub task_queue: Option<Arc<TaskQueue>>,
   pub peer_manager: Arc<PeerManager>,
   pub startup_time: u64,

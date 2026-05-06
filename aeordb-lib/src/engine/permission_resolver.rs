@@ -1,9 +1,9 @@
 use uuid::Uuid;
 
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::GroupLoader;
 use crate::engine::errors::EngineResult;
-use crate::engine::group_cache::GroupCache;
 use crate::engine::permissions::{merge_flags, parse_crudlify_flags};
-use crate::engine::permissions_cache::PermissionsCache;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::is_root;
 
@@ -24,20 +24,17 @@ pub enum CrudlifyOp {
 /// hierarchy and evaluating .permissions files with group membership.
 pub struct PermissionResolver<'a> {
   engine: &'a StorageEngine,
-  group_cache: &'a GroupCache,
-  permissions_cache: &'a PermissionsCache,
+  group_cache: &'a Cache<GroupLoader>,
 }
 
 impl<'a> PermissionResolver<'a> {
   pub fn new(
     engine: &'a StorageEngine,
-    group_cache: &'a GroupCache,
-    permissions_cache: &'a PermissionsCache,
+    group_cache: &'a Cache<GroupLoader>,
   ) -> Self {
     PermissionResolver {
       engine,
       group_cache,
-      permissions_cache,
     }
   }
 
@@ -59,7 +56,7 @@ impl<'a> PermissionResolver<'a> {
     }
 
     // Get user's group memberships.
-    let user_groups = self.group_cache.get_groups(user_id, self.engine)?;
+    let user_groups = self.group_cache.get(user_id, self.engine)?;
 
     // Start with everything denied.
     let mut state = [false; 8];
@@ -68,7 +65,7 @@ impl<'a> PermissionResolver<'a> {
     let levels = path_levels(path);
 
     for level in &levels {
-      let permissions = self.permissions_cache.get_permissions(level, self.engine)?;
+      let permissions = self.engine.permissions_cache.get(level, self.engine)?;
 
       let permissions = match permissions {
         Some(permissions) => permissions,

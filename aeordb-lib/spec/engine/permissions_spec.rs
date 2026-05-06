@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use uuid::Uuid;
 
 use aeordb::engine::{
-  CrudlifyOp, DirectoryOps, GroupCache, PathPermissions, PermissionLink,
-  PermissionResolver, PermissionsCache, StorageEngine,
+  CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink,
+  PermissionResolver, StorageEngine,
   merge_flags, parse_crudlify_flags, path_levels,
+  Cache, GroupLoader, PermissionsLoader, ApiKeyLoader,
 };
 use aeordb::engine::system_store;
 use aeordb::engine::group::Group;
@@ -52,7 +52,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
   let ctx = RequestContext::system();
   let directory_ops = DirectoryOps::new(engine);
   let perm_path = if dir_path == "/" || dir_path.ends_with('/') {
-    format!("{}.permissions", dir_path)
+    format!("{}.aeordb-permissions", dir_path)
   } else {
     format!("{}/.aeordb-permissions", dir_path)
   };
@@ -312,9 +312,8 @@ fn test_resolve_deny_all_default() {
   let (engine, _temp_dir) = test_engine();
   let user_id = create_test_user(&engine, "alice");
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // No .permissions file anywhere -> deny all
   let allowed = resolver.check_permission(&user_id, "/myapp/data.json", CrudlifyOp::Read).unwrap();
@@ -324,9 +323,8 @@ fn test_resolve_deny_all_default() {
 #[test]
 fn test_resolve_root_bypasses_everything() {
   let (engine, _temp_dir) = test_engine();
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Root should bypass even with no .permissions files
   let allowed = resolver.check_permission(&ROOT_USER_ID, "/anything/at/all.txt", CrudlifyOp::Read).unwrap();
@@ -356,9 +354,8 @@ fn test_resolve_simple_allow() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   assert!(resolver.check_permission(&user_id, "/data.json", CrudlifyOp::Read).unwrap());
   assert!(resolver.check_permission(&user_id, "/data/", CrudlifyOp::List).unwrap());
@@ -384,9 +381,8 @@ fn test_resolve_deny_overrides_allow_same_level() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Allow wins for read
   assert!(resolver.check_permission(&user_id, "/file.json", CrudlifyOp::Read).unwrap());
@@ -418,9 +414,8 @@ fn test_resolve_deeper_allow_overrides_shallower_deny() {
   };
   write_permissions(&engine, "/myapp", &app_perms);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Root denied everything, but /myapp re-allows read and list
   assert!(resolver.check_permission(&user_id, "/myapp/data.json", CrudlifyOp::Read).unwrap());
@@ -445,9 +440,8 @@ fn test_resolve_others_flags() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Eve is not in admins, so others_allow applies: read+list only
   assert!(resolver.check_permission(&user_id, "/file.json", CrudlifyOp::Read).unwrap());
@@ -472,9 +466,8 @@ fn test_resolve_others_deny_flags() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Frank is not trusted, so others_deny applies
   assert!(!resolver.check_permission(&user_id, "/file.json", CrudlifyOp::Read).unwrap());
@@ -499,9 +492,8 @@ fn test_resolve_multiple_groups_union() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Union of both groups: read, list, create, update all allowed
   assert!(resolver.check_permission(&user_id, "/data.json", CrudlifyOp::Read).unwrap());
@@ -533,9 +525,8 @@ fn test_resolve_nested_path_inheritance() {
     links: vec![member_link(&user_group, "........", "crudlify")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // At /app level: read+list (root) + create+update (/app)
   assert!(resolver.check_permission(&user_id, "/app/data.json", CrudlifyOp::Read).unwrap());
@@ -558,9 +549,8 @@ fn test_resolve_no_permissions_file_passes_through() {
     links: vec![member_link(&user_group, ".r......", "........")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // No .permissions at /app means no change -- root's read grant still applies
   assert!(resolver.check_permission(&user_id, "/app/data.json", CrudlifyOp::Read).unwrap());
@@ -576,12 +566,12 @@ fn test_group_cache_hit() {
   let (engine, _temp_dir) = test_engine();
   let user_id = create_test_user(&engine, "julia");
 
-  let cache = GroupCache::new(Duration::from_secs(60));
+  let cache = Cache::new(GroupLoader);
 
   // First call loads from engine
-  let groups_first = cache.get_groups(&user_id, &engine).unwrap();
+  let groups_first = cache.get(&user_id, &engine).unwrap();
   // Second call should hit cache (same result)
-  let groups_second = cache.get_groups(&user_id, &engine).unwrap();
+  let groups_second = cache.get(&user_id, &engine).unwrap();
 
   assert_eq!(groups_first, groups_second);
   // User has auto-group "user:{user_id}"
@@ -597,8 +587,8 @@ fn test_group_cache_miss_loads() {
   // Create a group matching all active users
   create_test_group(&engine, "everyone", "is_active", "eq", "true");
 
-  let cache = GroupCache::new(Duration::from_secs(60));
-  let groups = cache.get_groups(&user_id, &engine).unwrap();
+  let cache = Cache::new(GroupLoader);
+  let groups = cache.get(&user_id, &engine).unwrap();
 
   let user_group = format!("user:{}", user_id);
   assert!(groups.contains(&user_group), "Should contain auto-group");
@@ -610,21 +600,21 @@ fn test_group_cache_evict_user() {
   let (engine, _temp_dir) = test_engine();
   let user_id = create_test_user(&engine, "lily");
 
-  let cache = GroupCache::new(Duration::from_secs(60));
+  let cache = Cache::new(GroupLoader);
 
   // Populate cache
-  let groups_before = cache.get_groups(&user_id, &engine).unwrap();
+  let groups_before = cache.get(&user_id, &engine).unwrap();
 
   // Add a new group that matches lily
   create_test_group(&engine, "new_group", "is_active", "eq", "true");
 
   // Without eviction, cache still returns old result
-  let groups_cached = cache.get_groups(&user_id, &engine).unwrap();
+  let groups_cached = cache.get(&user_id, &engine).unwrap();
   assert_eq!(groups_before, groups_cached, "Cache should return stale data");
 
   // Evict and reload
-  cache.evict_user(&user_id);
-  let groups_after = cache.get_groups(&user_id, &engine).unwrap();
+  cache.evict(&user_id);
+  let groups_after = cache.get(&user_id, &engine).unwrap();
   assert!(groups_after.contains(&"new_group".to_string()), "Should see new group after eviction");
 }
 
@@ -634,11 +624,11 @@ fn test_group_cache_evict_all() {
   let user_id_a = create_test_user(&engine, "mike");
   let user_id_b = create_test_user(&engine, "nancy");
 
-  let cache = GroupCache::new(Duration::from_secs(60));
+  let cache = Cache::new(GroupLoader);
 
   // Populate both
-  cache.get_groups(&user_id_a, &engine).unwrap();
-  cache.get_groups(&user_id_b, &engine).unwrap();
+  cache.get(&user_id_a, &engine).unwrap();
+  cache.get(&user_id_b, &engine).unwrap();
 
   // Add a new group
   create_test_group(&engine, "new_team", "is_active", "eq", "true");
@@ -647,8 +637,8 @@ fn test_group_cache_evict_all() {
   cache.evict_all();
 
   // Both should now see the new group
-  let groups_a = cache.get_groups(&user_id_a, &engine).unwrap();
-  let groups_b = cache.get_groups(&user_id_b, &engine).unwrap();
+  let groups_a = cache.get(&user_id_a, &engine).unwrap();
+  let groups_b = cache.get(&user_id_b, &engine).unwrap();
   assert!(groups_a.contains(&"new_team".to_string()));
   assert!(groups_b.contains(&"new_team".to_string()));
 }
@@ -658,31 +648,32 @@ fn test_group_cache_nonexistent_user_returns_empty() {
   let (engine, _temp_dir) = test_engine();
   let fake_user_id = Uuid::new_v4();
 
-  let cache = GroupCache::new(Duration::from_secs(60));
-  let groups = cache.get_groups(&fake_user_id, &engine).unwrap();
+  let cache = Cache::new(GroupLoader);
+  let groups = cache.get(&fake_user_id, &engine).unwrap();
   assert!(groups.is_empty(), "Nonexistent user should have no groups");
 }
 
 #[test]
-fn test_group_cache_ttl_expiry() {
+fn test_group_cache_evict_reloads() {
   let (engine, _temp_dir) = test_engine();
   let user_id = create_test_user(&engine, "oscar");
 
-  // Use a very short TTL
-  let cache = GroupCache::new(Duration::from_millis(1));
+  let cache = Cache::new(GroupLoader);
 
   // Populate
-  cache.get_groups(&user_id, &engine).unwrap();
-
-  // Wait for TTL to expire
-  std::thread::sleep(Duration::from_millis(5));
+  cache.get(&user_id, &engine).unwrap();
 
   // Add a new group
-  create_test_group(&engine, "ttl_test_group", "is_active", "eq", "true");
+  create_test_group(&engine, "evict_test_group", "is_active", "eq", "true");
 
-  // Should reload from engine (TTL expired)
-  let groups = cache.get_groups(&user_id, &engine).unwrap();
-  assert!(groups.contains(&"ttl_test_group".to_string()), "Should see new group after TTL expiry");
+  // Without eviction, still returns stale
+  let stale = cache.get(&user_id, &engine).unwrap();
+  assert!(!stale.contains(&"evict_test_group".to_string()));
+
+  // Evict and reload
+  cache.evict(&user_id);
+  let groups = cache.get(&user_id, &engine).unwrap();
+  assert!(groups.contains(&"evict_test_group".to_string()), "Should see new group after eviction");
 }
 
 // ---------------------------------------------------------------------------
@@ -698,15 +689,15 @@ fn test_permissions_cache_hit() {
   };
   write_permissions(&engine, "/", &permissions);
 
-  let cache = PermissionsCache::new(Duration::from_secs(60));
+  let cache = Cache::new(PermissionsLoader);
 
   // First call loads from engine
-  let result_first = cache.get_permissions("/", &engine).unwrap();
+  let result_first = cache.get(&"/".to_string(), &engine).unwrap();
   assert!(result_first.is_some());
   assert_eq!(result_first.as_ref().unwrap().links.len(), 1);
 
   // Second call should hit cache
-  let result_second = cache.get_permissions("/", &engine).unwrap();
+  let result_second = cache.get(&"/".to_string(), &engine).unwrap();
   assert!(result_second.is_some());
   assert_eq!(result_second.as_ref().unwrap().links[0].group, "team");
 }
@@ -714,14 +705,14 @@ fn test_permissions_cache_hit() {
 #[test]
 fn test_permissions_cache_miss_returns_none() {
   let (engine, _temp_dir) = test_engine();
-  let cache = PermissionsCache::new(Duration::from_secs(60));
+  let cache = Cache::new(PermissionsLoader);
 
   // No .permissions file at /nonexistent
-  let result = cache.get_permissions("/nonexistent", &engine).unwrap();
+  let result = cache.get(&"/nonexistent".to_string(), &engine).unwrap();
   assert!(result.is_none(), "Should return None for nonexistent path");
 
   // Verify it caches the None (second call should also return None without hitting engine)
-  let result_cached = cache.get_permissions("/nonexistent", &engine).unwrap();
+  let result_cached = cache.get(&"/nonexistent".to_string(), &engine).unwrap();
   assert!(result_cached.is_none());
 }
 
@@ -734,8 +725,8 @@ fn test_permissions_cache_evict() {
   };
   write_permissions(&engine, "/", &permissions_v1);
 
-  let cache = PermissionsCache::new(Duration::from_secs(60));
-  let result = cache.get_permissions("/", &engine).unwrap();
+  let cache = Cache::new(PermissionsLoader);
+  let result = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(result.unwrap().links[0].group, "team_v1");
 
   // Write updated permissions
@@ -745,12 +736,12 @@ fn test_permissions_cache_evict() {
   write_permissions(&engine, "/", &permissions_v2);
 
   // Without eviction, still returns stale
-  let stale = cache.get_permissions("/", &engine).unwrap();
+  let stale = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(stale.unwrap().links[0].group, "team_v1");
 
   // Evict and reload
-  cache.evict_path("/");
-  let fresh = cache.get_permissions("/", &engine).unwrap();
+  cache.evict(&"/".to_string());
+  let fresh = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(fresh.unwrap().links[0].group, "team_v2");
 }
 
@@ -765,39 +756,42 @@ fn test_permissions_cache_evict_all() {
     links: vec![member_link("app_team", ".r......", "........")],
   });
 
-  let cache = PermissionsCache::new(Duration::from_secs(60));
-  cache.get_permissions("/", &engine).unwrap();
-  cache.get_permissions("/app", &engine).unwrap();
+  let cache = Cache::new(PermissionsLoader);
+  cache.get(&"/".to_string(), &engine).unwrap();
+  cache.get(&"/app".to_string(), &engine).unwrap();
 
   cache.evict_all();
 
   // Both should reload on next access
-  let root = cache.get_permissions("/", &engine).unwrap();
-  let app = cache.get_permissions("/app", &engine).unwrap();
+  let root = cache.get(&"/".to_string(), &engine).unwrap();
+  let app = cache.get(&"/app".to_string(), &engine).unwrap();
   assert!(root.is_some());
   assert!(app.is_some());
 }
 
 #[test]
-fn test_permissions_cache_ttl_expiry() {
+fn test_permissions_cache_evict_reloads() {
   let (engine, _temp_dir) = test_engine();
 
   write_permissions(&engine, "/", &PathPermissions {
     links: vec![member_link("original", ".r......", "........")],
   });
 
-  let cache = PermissionsCache::new(Duration::from_millis(1));
-  cache.get_permissions("/", &engine).unwrap();
-
-  std::thread::sleep(Duration::from_millis(5));
+  let cache = Cache::new(PermissionsLoader);
+  cache.get(&"/".to_string(), &engine).unwrap();
 
   // Update permissions
   write_permissions(&engine, "/", &PathPermissions {
     links: vec![member_link("updated", "crudlify", "........")],
   });
 
-  // TTL expired, should reload
-  let result = cache.get_permissions("/", &engine).unwrap();
+  // Without eviction, returns stale
+  let stale = cache.get(&"/".to_string(), &engine).unwrap();
+  assert_eq!(stale.unwrap().links[0].group, "original");
+
+  // After eviction, should reload
+  cache.evict(&"/".to_string());
+  let result = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(result.unwrap().links[0].group, "updated");
 }
 
@@ -817,8 +811,7 @@ fn test_crudlify_op_from_http_method() {
   let prometheus_handle = aeordb::metrics::initialize_metrics();
   let plugin_manager = Arc::new(aeordb::plugins::PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(aeordb::auth::RateLimiter::default_config());
-  let group_cache = Arc::new(GroupCache::new(Duration::from_secs(60)));
-  let permissions_cache = Arc::new(PermissionsCache::new(Duration::from_secs(60)));
+  let group_cache = Arc::new(Cache::new(GroupLoader));
 
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(aeordb::auth::FileAuthProvider::new(engine.clone()));
   let state = AppState {
@@ -830,9 +823,8 @@ fn test_crudlify_op_from_http_method() {
     engine,
     event_bus: Arc::new(aeordb::engine::EventBus::new()),
     group_cache,
-    permissions_cache,
     task_queue: None,
-    api_key_cache: Arc::new(aeordb::engine::ApiKeyCache::new(Duration::from_secs(60))),
+    api_key_cache: Arc::new(Cache::new(ApiKeyLoader)),
     peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
     startup_instant: std::time::Instant::now(),
@@ -850,8 +842,8 @@ fn test_crudlify_op_from_http_method() {
   assert_eq!(http_to_crudlify(&Method::HEAD, "myapp/data.json", &state), CrudlifyOp::Read);
   // PUT to .permissions -> Configure
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-permissions", &state), CrudlifyOp::Configure);
-  // PUT to .config -> Configure
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.config", &state), CrudlifyOp::Configure);
+  // PUT to .aeordb-config -> Configure
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-config", &state), CrudlifyOp::Configure);
   // PUT to .functions -> Deploy
   assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-functions", &state), CrudlifyOp::Deploy);
   // PUT to new file -> Create (file doesn't exist)
@@ -1033,9 +1025,8 @@ fn test_resolve_user_not_in_any_group() {
     links: vec![member_link("exclusive", "crudlify", "........")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // orphan is not in the exclusive group, so no permissions
   // (their auto-group user:X exists but isn't linked in .permissions)
@@ -1050,9 +1041,8 @@ fn test_resolve_empty_permissions_file() {
   // Write an empty links array
   write_permissions(&engine, "/", &PathPermissions { links: vec![] });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // Empty permissions = no changes from default deny
   assert!(!resolver.check_permission(&user_id, "/data.json", CrudlifyOp::Read).unwrap());
@@ -1068,9 +1058,8 @@ fn test_resolve_all_eight_operations() {
     links: vec![member_link(&user_group, "crudlify", "........")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   let operations = [
     CrudlifyOp::Create,
@@ -1103,9 +1092,8 @@ fn test_resolve_deny_specific_operations() {
     links: vec![member_link(&user_group, "crudlify", "......fy")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   assert!(resolver.check_permission(&user_id, "/data.json", CrudlifyOp::Read).unwrap());
   assert!(resolver.check_permission(&user_id, "/data.json", CrudlifyOp::Create).unwrap());
@@ -1134,9 +1122,8 @@ fn test_resolve_multiple_levels_accumulate() {
     links: vec![member_link(&user_group, "..u.....", "........")],
   });
 
-  let group_cache = GroupCache::new(Duration::from_secs(60));
-  let permissions_cache = PermissionsCache::new(Duration::from_secs(60));
-  let resolver = PermissionResolver::new(&engine, &group_cache, &permissions_cache);
+  let group_cache = Cache::new(GroupLoader);
+  let resolver = PermissionResolver::new(&engine, &group_cache);
 
   // At /a/b/file.txt: read (root) + create (/a) + update (/a/b)
   assert!(resolver.check_permission(&user_id, "/a/b/file.txt", CrudlifyOp::Read).unwrap());

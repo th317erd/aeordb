@@ -416,7 +416,7 @@ pub async fn revoke_share_link(
     match state.auth_provider.revoke_api_key(parsed_key_id) {
         Ok(true) => {
             // 5. Invalidate cache.
-            state.api_key_cache.invalidate(&parsed_key_id.to_string());
+            state.api_key_cache.evict(&parsed_key_id.to_string());
 
             (
                 StatusCode::OK,

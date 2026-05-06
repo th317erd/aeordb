@@ -1,4 +1,3 @@
-pub mod api_key_cache;
 pub mod api_key_rules;
 pub mod append_writer;
 pub mod binary_utils;
@@ -37,7 +36,6 @@ pub mod hot_tail;
 pub mod group;
 pub mod health;
 pub mod phonetic;
-pub mod group_cache;
 pub mod hash_algorithm;
 pub mod index_config;
 pub mod index_store;
@@ -57,7 +55,6 @@ pub mod nvt_ops;
 pub mod path_utils;
 pub mod permission_resolver;
 pub mod permissions;
-pub mod permissions_cache;
 pub mod query_engine;
 pub mod rate_tracker;
 pub mod request_context;
@@ -88,7 +85,6 @@ pub mod webhook;
 pub use cache::{Cache, CacheLoader};
 pub use cache_loaders::{PermissionsLoader, GroupLoader, ApiKeyLoader, IndexConfigLoader};
 pub use engine_counters::{EngineCounters, CountersSnapshot};
-pub use api_key_cache::ApiKeyCache;
 pub use api_key_rules::{KeyRule, match_rules, check_operation_permitted, validate_rules, parse_rules_from_json, operation_to_flag_char};
 pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
 pub use append_writer::AppendWriter;
@@ -164,10 +160,8 @@ pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionSta
 pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
-pub use group_cache::GroupCache;
 pub use permission_resolver::{CrudlifyOp, PermissionResolver, path_levels};
 pub use permissions::{PathPermissions, PermissionLink, parse_crudlify_flags, merge_flags};
-pub use permissions_cache::PermissionsCache;
 pub use engine_event::{
     EngineEvent, EntryEventData, VersionEventData, UserEventData,
     PermissionChangeData, ImportEventData, IndexEventData, ErrorEventData,

@@ -22,7 +22,6 @@ pub mod sync_routes;
 pub mod version_file_routes;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
@@ -33,7 +32,9 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{ApiKeyCache, DirectoryOps, EventBus, GroupCache, PeerManager, PermissionsCache, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::{DirectoryOps, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -42,8 +43,6 @@ use state::AppState;
 
 pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_config, parse_cors_origins};
 
-/// Default cache TTL in seconds.
-const DEFAULT_CACHE_TTL_SECONDS: u64 = 60;
 
 // NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
@@ -207,10 +206,8 @@ pub fn create_app_with_all_and_task_queue(
   cors_state: CorsState,
   task_queue: Option<Arc<TaskQueue>>,
 ) -> Router {
-  let cache_ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
-  let group_cache = Arc::new(GroupCache::new(cache_ttl));
-  let permissions_cache = Arc::new(PermissionsCache::new(cache_ttl));
-  let api_key_cache = Arc::new(ApiKeyCache::new(cache_ttl));
+  let group_cache = Arc::new(Cache::new(GroupLoader));
+  let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
   let peer_manager = Arc::new(PeerManager::new());
   let app_state = AppState {
     jwt_manager,
@@ -221,7 +218,6 @@ pub fn create_app_with_all_and_task_queue(
     engine,
     event_bus,
     group_cache,
-    permissions_cache,
     api_key_cache,
     task_queue,
     peer_manager,
