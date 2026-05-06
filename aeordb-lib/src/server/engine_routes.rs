@@ -1001,9 +1001,11 @@ pub async fn engine_delete_file(
     };
   }
 
-  match directory_ops.delete_file_with_indexing(&ctx, &path) {
+  match directory_ops.delete_file(&ctx, &path) {
     Ok(()) => {
       evict_caches_for_path(&state, &path);
+      // Queue index cleanup in background (debounced, batched)
+      state.index_cleanup.queue(path.clone());
       (
         StatusCode::OK,
         Json(serde_json::json!({ "deleted": true, "path": path })),

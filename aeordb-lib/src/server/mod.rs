@@ -208,6 +208,7 @@ pub fn create_app_with_all_and_task_queue(
 ) -> Router {
   let group_cache = Arc::new(Cache::new(GroupLoader));
   let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
+  let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
   let app_state = AppState {
     jwt_manager,
@@ -219,6 +220,7 @@ pub fn create_app_with_all_and_task_queue(
     event_bus,
     group_cache,
     api_key_cache,
+    index_cleanup,
     task_queue,
     peer_manager,
     startup_time: chrono::Utc::now().timestamp_millis() as u64,

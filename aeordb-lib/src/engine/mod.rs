@@ -37,6 +37,7 @@ pub mod group;
 pub mod health;
 pub mod phonetic;
 pub mod hash_algorithm;
+pub mod index_cleanup;
 pub mod index_config;
 pub mod index_store;
 pub mod indexing_pipeline;
@@ -126,6 +127,7 @@ pub use scalar_converter::{
 pub use fuzzy::{extract_trigrams, extract_trigrams_no_pad, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
+pub use index_cleanup::{IndexCleanupSender, spawn_index_cleanup_worker};
 pub use index_store::{IndexEntry, FieldIndex, IndexManager};
 pub use json_parser::parse_json_fields;
 pub use search::{SearchResult, SearchResults, global_search};
