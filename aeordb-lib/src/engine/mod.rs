@@ -3,6 +3,8 @@ pub mod api_key_rules;
 pub mod append_writer;
 pub mod binary_utils;
 pub mod auto_heal;
+pub mod cache;
+pub mod cache_loaders;
 pub mod cluster_join;
 pub mod backup;
 pub mod batch_commit;
@@ -83,6 +85,8 @@ pub mod virtual_clock;
 pub mod void_manager;
 pub mod webhook;
 
+pub use cache::{Cache, CacheLoader};
+pub use cache_loaders::{PermissionsLoader, GroupLoader, ApiKeyLoader, IndexConfigLoader};
 pub use engine_counters::{EngineCounters, CountersSnapshot};
 pub use api_key_cache::ApiKeyCache;
 pub use api_key_rules::{KeyRule, match_rules, check_operation_permitted, validate_rules, parse_rules_from_json, operation_to_flag_char};
