@@ -27,6 +27,42 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
+/// Check if a file path is deleted and the user lacks delete permission.
+/// Deleted files are invisible/inaccessible to users without 'd' permission.
+fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) -> bool {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    use crate::engine::directory_ops::file_path_hash;
+
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+
+    // Root can see everything
+    if is_root(&user_id) {
+        return false;
+    }
+
+    // Check if the file is deleted in the KV store
+    let algo = state.engine.hash_algo();
+    let normalized = crate::engine::path_utils::normalize_path(path);
+    let file_key = match file_path_hash(&normalized, &algo) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+
+    let is_deleted = state.engine.is_entry_deleted(&file_key).unwrap_or(false);
+    if !is_deleted {
+        return false;
+    }
+
+    // File is deleted — check if user has 'd' permission
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let has_delete = resolver.check_permission(&user_id, &normalized, CrudlifyOp::Delete).unwrap_or(false);
+
+    !has_delete
+}
+
 /// Evict cache entries when a system file is written, deleted, or renamed.
 fn evict_caches_for_path(state: &AppState, path: &str) {
     let normalized = crate::engine::path_utils::normalize_path(path);
@@ -806,7 +842,7 @@ fn handle_directory_listing(
 /// GET /engine/*path -- read a file (streaming) or list a directory.
 pub async fn engine_get(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
@@ -814,6 +850,13 @@ pub async fn engine_get(
   // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
+  // Deleted files are invisible to users without 'd' permission
+  if is_deleted_and_forbidden(&state, &claims, &path) {
     return ErrorResponse::new(format!("Not found: {}", path))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
@@ -844,7 +887,7 @@ pub async fn engine_get(
     }
 
     return handle_symlink_resolution(
-      &state.engine, &path, &symlink_record.target, &_claims.sub, key_rules,
+      &state.engine, &path, &symlink_record.target, &claims.sub, key_rules,
       version_query.limit, version_query.offset,
     );
   }
@@ -868,12 +911,12 @@ pub async fn engine_get(
   // Try as directory -- recursive listing if depth/glob specified
   if version_query.depth.is_some() || version_query.glob.is_some() {
     return handle_recursive_listing(
-      &state.engine, &path, &version_query, key_rules, &_claims.sub,
+      &state.engine, &path, &version_query, key_rules, &claims.sub,
     );
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &_claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref(), Some(&state))
+  handle_directory_listing(&state.engine, &path, key_rules, &claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref(), Some(&state))
 }
 
 
@@ -1092,7 +1135,7 @@ pub async fn restore_deleted_file(
 /// GET /files/deleted?path=/some/dir/
 pub async fn list_deleted_files(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   AxumQuery(params): AxumQuery<std::collections::HashMap<String, String>>,
 ) -> Response {
   let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
@@ -1101,6 +1144,29 @@ pub async fn list_deleted_files(
     return ErrorResponse::new(format!("Not found: {}", dir_path))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
+  }
+
+  // Deleted files require 'd' permission — check on the directory
+  {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let user_id = match Uuid::parse_str(&claims.sub) {
+      Ok(id) => id,
+      Err(_) => {
+        return ErrorResponse::new("Invalid user ID")
+          .with_status(StatusCode::FORBIDDEN)
+          .into_response();
+      }
+    };
+    if !is_root(&user_id) {
+      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+      let has_delete = resolver.check_permission(&user_id, dir_path, CrudlifyOp::Delete).unwrap_or(false);
+      if !has_delete {
+        return (StatusCode::OK, Json(serde_json::json!({
+          "items": [],
+          "total": 0,
+        }))).into_response();
+      }
+    }
   }
 
   let ops = DirectoryOps::new(&state.engine);
@@ -1131,12 +1197,17 @@ pub async fn list_deleted_files(
 
 pub async fn engine_head(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
+  // Deleted files are invisible to users without 'd' permission
+  if is_deleted_and_forbidden(&state, &claims, &path) {
     return ErrorResponse::new(format!("Not found: {}", path))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
