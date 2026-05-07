@@ -19,6 +19,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | DELETE | `/files/share-links/{key_id}` | Revoke a share link | Yes (root) | 200, 403, 404, 500 |
 | GET | `/files/shared-with-me` | List paths shared with the current user | Yes | 200, 403, 500 |
 | POST | `/files/copy` | Copy files or directories | Yes | 200, 400, 404, 500 |
+| POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
 > **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
@@ -273,6 +274,17 @@ Delete a file or empty directory at the given path. Creates a `DeletionRecord` a
   "path": "/data/report.pdf"
 }
 ```
+
+### Deleted File Access
+
+Deleted files are invisible to users who lack the `d` (delete) permission on the containing directory:
+
+- `GET /files/deleted?path=/dir` returns an empty list
+- `GET /files/{path}` returns 404 for deleted files
+- `HEAD /files/{path}` returns 404 for deleted files
+- Reading a deleted file via `?version=` also returns 404
+
+Root users always have full access to deleted files.
 
 ### Side Effects
 
@@ -893,4 +905,55 @@ curl -X POST http://localhost:6830/files/copy \
     "paths": ["/src/file1.txt", "/src/file2.txt"],
     "destination": "/dst/"
   }'
+```
+
+---
+
+## Global Search
+
+### POST /files/search
+
+Search across all indexed directories in the database. Unlike `POST /files/query` which targets a single directory, global search fans out across every directory that has indexes.
+
+**Request body:**
+
+```json
+{
+  "query": "hero-banner",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+The `query` field performs a broad fuzzy search across all default-indexed fields (@filename, @hash, @size, etc.).
+
+For more targeted searches, use a structured `where` clause:
+
+```json
+{
+  "where": {
+    "field": "@filename",
+    "op": "similar",
+    "value": "hero",
+    "threshold": 0.3
+  },
+  "limit": 20
+}
+```
+
+**Response:**
+
+```json
+{
+  "results": [
+    {
+      "path": "/assets/hero-banner.png",
+      "score": 0.85,
+      "directory": "/assets",
+      "index_field": "@filename"
+    }
+  ],
+  "total": 1,
+  "directories_searched": 42
+}
 ```

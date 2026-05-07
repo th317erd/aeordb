@@ -125,6 +125,10 @@ GC should not be run concurrently with writes. The sweep phase re-verifies each 
 
 At scale, expect approximately 10K entries/sec sweep throughput. The mark phase is faster since it only walks reachable trees. The sweep phase writes are batched with a single sync at the end for performance.
 
+## Async Index Cleanup
+
+When files are deleted, their index entries are cleaned up asynchronously in the background. Deletions are debounced with a 50ms timeout and batched up to 100 paths per batch. This means index cleanup does not block the delete response, and rapid successive deletes are coalesced into efficient batch operations.
+
 ## See Also
 
 - [Task System & Cron](tasks.md) -- background task execution and scheduling

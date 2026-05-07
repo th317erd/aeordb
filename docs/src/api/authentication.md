@@ -425,7 +425,7 @@ The flags string is exactly 8 characters, one for each operation:
 | 0 | `c` | Create |
 | 1 | `r` | Read |
 | 2 | `u` | Update |
-| 3 | `d` | Delete |
+| 3 | `d` | Delete (also controls access to deleted files -- listing and reading) |
 | 4 | `l` | List |
 | 5 | `i` | Invoke |
 | 6 | `f` | Functions (deploy) |

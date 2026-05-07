@@ -160,6 +160,23 @@ Write /users/alice.json
 
 Each directory gets a new content hash because its contents changed. This is how the Merkle tree works -- a change at any leaf creates new hashes all the way to the root. The root hash (HEAD) uniquely identifies the complete state of the database.
 
+## Unified Cache
+
+AeorDB uses an eviction-based cache (no TTL) for frequently accessed metadata:
+
+| Cached Data | Evicted On |
+|-------------|------------|
+| Permissions | Write, delete, or rename of `.permissions` files |
+| Index configs | Write or delete of `.config/indexes.json` |
+| Groups | Group membership changes |
+| API keys | Key creation, revocation, or expiration |
+
+Cache entries live indefinitely until explicitly evicted by a write, delete, or rename that affects the underlying data. This avoids stale-read windows that TTL-based caches introduce -- the cache is always consistent with the storage layer.
+
+### KV Type Index
+
+The KV store maintains a type-based index that enables O(k) lookups by entry type (snapshots, files, directories, etc.) instead of O(n) full scans. For example, listing all snapshots requires scanning only snapshot entries rather than the entire KV store.
+
 ## Next Steps
 
 - [Storage Engine](./storage-engine.md) -- entry format, hashing, chunking, and dedup details

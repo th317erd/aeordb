@@ -261,7 +261,7 @@ Parser and indexing failures never prevent file storage. The file is always stor
 
 ## Default Indexes
 
-AeorDB automatically indexes every file's metadata on first boot. A default configuration is written at `/.config/indexes.json` with `glob: "**/*"`:
+On first server start, AeorDB bootstraps a default index configuration at `/.config/indexes.json` with `glob: "**/*"`. This automatically indexes every file's metadata across the entire database:
 
 | Field | Index Types | Description |
 |-------|------------|-------------|
@@ -272,7 +272,7 @@ AeorDB automatically indexes every file's metadata on first boot. A default conf
 | `@size` | u64 | File size in bytes. Supports range queries. |
 | `@content_type` | string | MIME type. Supports exact match. |
 
-These indexes are stored at `/.indexes/` and cover every file in the database. They enable the global search endpoint (`POST /files/search`) to work out of the box.
+These indexes are stored at `/.indexes/` and cover every file in the database. Because the bootstrap config uses `glob: "**/*"`, the global search endpoint ([`POST /files/search`](../api/files.md#global-search)) works out of the box with no additional configuration.
 
 ### @-Field Source Resolution
 

@@ -38,6 +38,8 @@ curl -X POST http://localhost:6830/versions/snapshots \
   -d '{"name": "v1.0"}'
 ```
 
+**Snapshot deduplication:** If an existing snapshot already has the same root hash as the current HEAD, `create_snapshot` returns the existing snapshot instead of creating a duplicate. This means taking frequent snapshots is essentially free when data hasn't changed -- no storage overhead, no redundant entries.
+
 ### List Snapshots
 
 ```bash
