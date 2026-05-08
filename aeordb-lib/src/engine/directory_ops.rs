@@ -14,7 +14,7 @@ use crate::engine::index_store::IndexManager;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
-use crate::engine::storage_engine::StorageEngine;
+use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
@@ -1631,35 +1631,44 @@ impl<'a> DirectoryOps<'a> {
 
     let mut current_child_path = child_path.to_string();
     let mut current_child_entry = child_entry;
+    let mut batch = WriteBatch::new();
 
     for _depth in 0..Self::MAX_DIRECTORY_DEPTH {
       let parent = match parent_path(&current_child_path) {
         Some(parent) => parent,
-        None => return Ok(()), // root has no parent
+        None => {
+          // root has no parent
+          if !batch.is_empty() { self.engine.flush_batch(batch)?; }
+          return Ok(());
+        }
       };
 
       // Don't propagate system paths (/.aeordb-*) to root — they're accessed
       // directly and listing root would filter them anyway. This prevents
       // system path operations from clobbering a recovered root directory.
       if parent == "/" && is_system_path(&current_child_path) {
+        if !batch.is_empty() { self.engine.flush_batch(batch)?; }
         return Ok(());
       }
 
       let dir_key = directory_path_hash(&parent, &algo)?;
 
-      // Read existing directory
-      let existing = self.engine.get_entry(&dir_key)?;
+      // Read existing directory via cache-aware, hard-link-following reader
+      let existing = self.read_directory_data(&dir_key)?;
 
       let (dir_value, content_key) = match existing {
-        Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+        Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
           // === B-TREE FORMAT ===
+          // B-tree nodes are stored synchronously by btree_insert_batched
           let (new_root_hash, new_root_data) = crate::engine::btree::btree_insert_batched(
             self.engine, &value, current_child_entry, hash_length, &algo
           )?;
 
+          // Cache the B-tree root data for subsequent reads in this propagation
+          self.engine.cache_dir_content(new_root_hash.clone(), new_root_data.clone());
           (new_root_data, new_root_hash)
         }
-        Some((header, _key, value)) => {
+        Some((header, value)) => {
           // === FLAT FORMAT ===
           let mut children = if value.is_empty() {
             Vec::new()
@@ -1677,18 +1686,20 @@ impl<'a> DirectoryOps<'a> {
 
           // Check if we should convert to B-tree
           if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
-            // Convert flat -> B-tree
+            // Convert flat -> B-tree (nodes stored synchronously)
             let root_hash = crate::engine::btree::btree_from_entries(
               self.engine, children, hash_length, &algo
             )?;
             let root_entry = self.engine.get_entry(&root_hash)?
               .ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
+            self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone());
             (root_entry.2, root_hash)
           } else {
-            // Stay flat
+            // Stay flat — batch the content write
             let dir_value = serialize_child_entries(&children, hash_length)?;
             let content_key = directory_content_hash(&dir_value, &algo)?;
-            self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+            batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+            self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
             (dir_value, content_key)
           }
         }
@@ -1698,17 +1709,18 @@ impl<'a> DirectoryOps<'a> {
           let children = vec![current_child_entry];
           let dir_value = serialize_child_entries(&children, hash_length)?;
           let content_key = directory_content_hash(&dir_value, &algo)?;
-          self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+          batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+          self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
           (dir_value, content_key)
         }
       };
 
-      // Store at path-based key
-      self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
+      // Hard link at path-based key: store content hash instead of full data
+      batch.add(EntryType::DirectoryIndex, dir_key, content_key.clone());
 
-      // If this is root "/", update HEAD to content hash and we're done
+      // If this is root "/", flush the entire batch and update HEAD atomically
       if parent == "/" {
-        self.engine.update_head(&content_key)?;
+        self.engine.flush_batch_and_update_head(batch, &content_key)?;
         return Ok(());
       }
 
