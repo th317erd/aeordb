@@ -389,7 +389,6 @@ pub fn create_app_with_all_and_task_queue(
     .route("/users.mjs", get(portal_routes::portal_asset))
     .route("/groups.mjs", get(portal_routes::portal_asset))
     .route("/files.mjs", get(portal_routes::portal_asset))
-    .route("/keys.mjs", get(portal_routes::portal_asset))
     .route("/snapshots.mjs", get(portal_routes::portal_asset))
     .route("/settings.mjs", get(portal_routes::portal_asset))
     .route("/shared/{*path}", get(portal_routes::portal_shared_asset))

@@ -25,7 +25,6 @@ const PORTAL_SHARED_DASHBOARD_JS: &str = include_str!("../portal/shared/componen
 const PORTAL_SHARED_TOKENS_CSS: &str = include_str!("../portal/shared/styles/tokens.css");
 const PORTAL_SHARED_COMPONENTS_CSS: &str = include_str!("../portal/shared/styles/components.css");
 const PORTAL_FILES_MJS: &str = include_str!("../portal/files.mjs");
-const PORTAL_KEYS_MJS: &str = include_str!("../portal/keys.mjs");
 const PORTAL_SNAPSHOTS_MJS: &str = include_str!("../portal/snapshots.mjs");
 const PORTAL_SETTINGS_MJS: &str = include_str!("../portal/settings.mjs");
 const PORTAL_SHARED_FILE_BROWSER_JS: &str = include_str!("../portal/shared/components/aeor-file-browser.js");
@@ -43,6 +42,8 @@ const PORTAL_SHARED_CONFIRM_BUTTON_JS: &str = include_str!("../portal/shared/com
 const PORTAL_SHARED_INFO_BOX_JS: &str = include_str!("../portal/shared/components/aeor-info-box.js");
 const PORTAL_SHARED_TAB_VIEW_JS: &str = include_str!("../portal/shared/components/aeor-tab-view.js");
 const PORTAL_SHARED_SNAPSHOT_CARD_JS: &str = include_str!("../portal/shared/components/aeor-snapshot-card.js");
+const PORTAL_SHARED_ADMIN_PAGE_JS: &str = include_str!("../portal/shared/components/aeor-admin-page.js");
+const PORTAL_SHARED_KEYS_PAGE_JS: &str = include_str!("../portal/shared/components/aeor-keys-page.js");
 
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
@@ -60,7 +61,6 @@ pub async fn portal_asset(
         "users.mjs" => (PORTAL_USERS_MJS, "application/javascript; charset=utf-8"),
         "groups.mjs" => (PORTAL_GROUPS_MJS, "application/javascript; charset=utf-8"),
         "files.mjs" => (PORTAL_FILES_MJS, "application/javascript; charset=utf-8"),
-        "keys.mjs" => (PORTAL_KEYS_MJS, "application/javascript; charset=utf-8"),
         "snapshots.mjs" => (PORTAL_SNAPSHOTS_MJS, "application/javascript; charset=utf-8"),
         "settings.mjs" => (PORTAL_SETTINGS_MJS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
@@ -90,6 +90,8 @@ pub async fn portal_shared_asset(
         "components/aeor-info-box.js" => (PORTAL_SHARED_INFO_BOX_JS, "application/javascript; charset=utf-8"),
         "components/aeor-tab-view.js" => (PORTAL_SHARED_TAB_VIEW_JS, "application/javascript; charset=utf-8"),
         "components/aeor-snapshot-card.js" => (PORTAL_SHARED_SNAPSHOT_CARD_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-admin-page.js" => (PORTAL_SHARED_ADMIN_PAGE_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-keys-page.js" => (PORTAL_SHARED_KEYS_PAGE_JS, "application/javascript; charset=utf-8"),
         "components/aeor-file-view-shared.js" => (PORTAL_SHARED_FILE_VIEW_SHARED_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-image.js" => (PORTAL_SHARED_PREVIEW_IMAGE_JS, "application/javascript; charset=utf-8"),
         "components/previews/aeor-preview-video.js" => (PORTAL_SHARED_PREVIEW_VIDEO_JS, "application/javascript; charset=utf-8"),

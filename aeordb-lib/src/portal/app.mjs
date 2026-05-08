@@ -9,7 +9,7 @@ import '/dashboard.mjs';
 import '/users.mjs';
 import '/groups.mjs';
 import '/files.mjs';
-import '/keys.mjs';
+import '/shared/components/aeor-keys-page.js';
 import '/snapshots.mjs';
 import '/settings.mjs';
 
