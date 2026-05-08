@@ -50,7 +50,7 @@ class AeorUsersPage extends AeorAdminPage {
   getActionButtons(selectedItems) {
     const count = selectedItems.length;
     const label = count === 1 ? 'Deactivate' : `Deactivate ${count}`;
-    return `<aeor-confirm-button class="confirm-button-danger small admin-deactivate-btn">${label}</aeor-confirm-button>`;
+    return `<aeor-confirm-button class="confirm-button-danger admin-deactivate-btn" label="${label}" confirmed-text="Deactivated!" duration="1000"></aeor-confirm-button>`;
   }
 
   _bindActionBarEvents(bar, selectedItems) {

@@ -78,7 +78,7 @@ class AeorGroupsPage extends AeorAdminPage {
   getActionButtons(selectedItems) {
     const count = selectedItems.length;
     const label = count === 1 ? 'Delete' : `Delete ${count} Groups`;
-    return `<aeor-confirm-button class="confirm-button-danger small admin-delete-btn">${label}</aeor-confirm-button>`;
+    return `<aeor-confirm-button class="confirm-button-danger admin-delete-btn" label="${label}" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>`;
   }
 
   _bindActionBarEvents(bar, selectedItems) {
