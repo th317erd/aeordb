@@ -840,6 +840,16 @@ fn handle_directory_listing(
 // ---------------------------------------------------------------------------
 
 /// GET /engine/*path -- read a file (streaming) or list a directory.
+/// GET /files or /files/ — root directory listing (no wildcard path param).
+pub async fn engine_get_root(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<ActiveKeyRules>>,
+  AxumQuery(version_query): AxumQuery<EngineGetQuery>,
+) -> Response {
+  engine_get(State(state), Extension(claims), active_key_rules, Path("/".to_string()), AxumQuery(version_query)).await
+}
+
 pub async fn engine_get(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,

@@ -261,6 +261,9 @@ pub fn create_app_with_all_and_task_queue(
     .route("/files/share-links/{key_id}", delete(share_link_routes::revoke_share_link))
     .route("/files/deleted", get(engine_routes::list_deleted_files))
     .route("/files/restore", post(engine_routes::restore_deleted_file))
+    // Root listing: /files/ doesn't match {*path} wildcard, so handle explicitly
+    .route("/files", get(engine_routes::engine_get_root))
+    .route("/files/", get(engine_routes::engine_get_root))
     // The wildcard MUST be last among /files/ routes
     .route(
       "/files/{*path}",
