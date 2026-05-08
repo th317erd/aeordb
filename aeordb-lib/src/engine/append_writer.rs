@@ -1,7 +1,31 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 use std::path::Path;
+
+/// Read exactly `buf.len()` bytes at `offset` without modifying the file's
+/// seek position. Equivalent to Unix `pread` / Windows `seek_read`. Loops
+/// until the buffer is filled to handle short reads on either platform.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+  let mut total = 0;
+  while total < buf.len() {
+    #[cfg(unix)]
+    let n = file.read_at(&mut buf[total..], offset + total as u64)?;
+    #[cfg(windows)]
+    let n = file.seek_read(&mut buf[total..], offset + total as u64)?;
+    if n == 0 {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "early EOF in read_exact_at",
+      ));
+    }
+    total += n;
+  }
+  Ok(())
+}
 
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
@@ -344,7 +368,7 @@ impl AppendWriter {
 
     // First, read the fixed header to learn hash algorithm and payload sizes.
     let mut fixed_buf = [0u8; EntryHeader::FIXED_HEADER_SIZE];
-    self.reader.read_at(&mut fixed_buf, offset)?;
+    read_exact_at(&self.reader, &mut fixed_buf, offset)?;
 
     // Parse hash algorithm from the fixed header to determine total header size.
     let hash_algo_raw = u16::from_le_bytes([fixed_buf[7], fixed_buf[8]]);
@@ -360,7 +384,7 @@ impl AppendWriter {
 
     // Read the entire entry (header + key + value) in a single pread call.
     let mut entry_buf = vec![0u8; total_length];
-    self.reader.read_at(&mut entry_buf, offset)?;
+    read_exact_at(&self.reader, &mut entry_buf, offset)?;
 
     // Deserialize the header from the buffer.
     let mut cursor = Cursor::new(&entry_buf[..full_header_size]);
