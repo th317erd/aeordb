@@ -95,6 +95,7 @@ pub fn expand_kv_block(
     // Update header
     header.kv_block_length = new_block_size;
     header.kv_block_stage = target_stage as u8;
+    header.resize_target_stage = 0; // Clear pending resize flag
     header.hot_tail_offset = new_hot_tail;
     let serialized = header.serialize();
     file.seek(SeekFrom::Start(0))?;

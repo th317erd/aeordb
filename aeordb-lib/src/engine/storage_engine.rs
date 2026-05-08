@@ -267,7 +267,7 @@ impl StorageEngine {
     let mut writer = AppendWriter::open(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
     let hash_length = hash_algo.hash_length();
-    let file_header = writer.file_header().clone();
+    let mut file_header = writer.file_header().clone();
 
     // Set writer offset to hot_tail_offset so new entries go before the hot tail
     if file_header.hot_tail_offset > 0 {
@@ -275,6 +275,37 @@ impl StorageEngine {
     }
 
     let mut void_manager = VoidManager::new(hash_algo);
+
+    // Check for pending KV block expansion (resize was blocked at runtime).
+    // expand_kv_block relocates WAL entries forward and zero-fills the KV block.
+    // After expansion, the engine opens normally and then rebuild_kv() is called
+    // to repopulate the KV index from a full WAL scan with correct new offsets.
+    let mut needs_kv_rebuild = false;
+    let resize_target = file_header.resize_target_stage as usize;
+    let current_stage = file_header.kv_block_stage as usize;
+    if resize_target > current_stage {
+      tracing::info!(
+        current_stage, resize_target,
+        "Pending KV block expansion detected — expanding before opening"
+      );
+      // Drop the writer to release the file handle during expansion
+      drop(writer);
+      match crate::engine::kv_expand::expand_kv_block(path, resize_target, hash_length) {
+        Ok((new_length, new_stage, delta)) => {
+          tracing::info!(new_length, new_stage, delta, "KV block expanded successfully — will rebuild KV index");
+          needs_kv_rebuild = true;
+        }
+        Err(e) => {
+          tracing::error!("KV block expansion failed: {}. Continuing with overflow buffer.", e);
+        }
+      }
+      // Re-open writer and re-read the (possibly updated) header
+      writer = AppendWriter::open(Path::new(path))?;
+      file_header = writer.file_header().clone();
+      if file_header.hot_tail_offset > 0 {
+        writer.set_offset(file_header.hot_tail_offset);
+      }
+    }
 
     let kv_block_offset = file_header.kv_block_offset;
     let kv_block_stage = file_header.kv_block_stage as usize;
@@ -428,6 +459,17 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
+
+    // After KV block expansion, rebuild the entire KV index from WAL.
+    // The expansion zeroed the KV pages, so only hot tail entries are loaded.
+    // A full rebuild repopulates all entries at their new offsets.
+    if needs_kv_rebuild {
+      tracing::info!("Rebuilding KV index after block expansion...");
+      engine.rebuild_kv()?;
+      // Re-initialize counters from the freshly rebuilt KV
+      let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine));
+      engine.counters.store(refreshed);
+    }
 
     Ok(engine)
   }

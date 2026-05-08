@@ -501,12 +501,29 @@ impl DiskKVStore {
         let new_pages_size = (new_bucket_count as u64) * (psize as u64);
         if new_pages_size > self.kv_block_length {
             // Can't resize in-place — the KV block is too small.
-            // Overflow entries will remain in the write buffer (still queryable
-            // via snapshot). StorageEngine must expand the block before resize.
+            // Mark the target stage in the file header so the next startup
+            // will expand the block before opening the KV store.
             tracing::warn!(
-                "KV resize blocked: stage {} needs {}B but block is {}B. Overflow entries stay in write buffer.",
+                "KV resize blocked: stage {} needs {}B but block is {}B. Will expand on next restart.",
                 new_stage, new_pages_size, self.kv_block_length,
             );
+
+            // Write resize_target_stage to the file header
+            {
+                let mut header_bytes = [0u8; crate::engine::file_header::FILE_HEADER_SIZE];
+                self.db_file.seek(std::io::SeekFrom::Start(0))?;
+                self.db_file.read_exact(&mut header_bytes)?;
+                if let Ok(mut header) = crate::engine::file_header::FileHeader::deserialize(&header_bytes) {
+                    if new_stage as u8 > header.resize_target_stage {
+                        header.resize_target_stage = new_stage as u8;
+                        let serialized = header.serialize();
+                        self.db_file.seek(std::io::SeekFrom::Start(0))?;
+                        self.db_file.write_all(&serialized)?;
+                        self.db_file.sync_data()?;
+                    }
+                }
+            }
+
             return Ok(());
         }
 
