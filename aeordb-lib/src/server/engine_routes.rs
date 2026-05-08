@@ -1629,6 +1629,70 @@ pub async fn snapshot_delete(
   }
 }
 
+/// PATCH /versions/snapshots/{name} -- rename a snapshot (requires root).
+pub async fn snapshot_rename(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Path(id_or_name): Path<String>,
+  Json(payload): Json<serde_json::Value>,
+) -> Response {
+  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can rename snapshots"
+    }))).into_response();
+  }
+
+  let new_name = match payload.get("name").and_then(|v| v.as_str()) {
+    Some(name) if !name.is_empty() => name,
+    _ => {
+      return ErrorResponse::new("Missing or empty 'name' field")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let version_manager = VersionManager::new(&state.engine);
+
+  let snapshot = match version_manager.resolve_snapshot(&id_or_name) {
+    Ok(s) => s,
+    Err(_) => {
+      return ErrorResponse::new(format!("Snapshot not found: '{}'", id_or_name))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+  };
+
+  match version_manager.rename_snapshot(&ctx, &snapshot.name, new_name) {
+    Ok(_) => {
+      (StatusCode::OK, Json(serde_json::json!({
+        "renamed": true,
+        "from": snapshot.name,
+        "to": new_name,
+      }))).into_response()
+    }
+    Err(EngineError::AlreadyExists(msg)) => {
+      ErrorResponse::new(msg)
+        .with_status(StatusCode::CONFLICT)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!("Failed to rename snapshot '{}': {}", snapshot.name, error);
+      ErrorResponse::new(format!("Failed to rename snapshot: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Fork routes
 // ---------------------------------------------------------------------------

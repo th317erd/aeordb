@@ -458,3 +458,84 @@ pub async fn delete_group(
   )
     .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// API key endpoints
+// ---------------------------------------------------------------------------
+
+/// PATCH /admin/api-keys/{key_id} -- update an API key's label.
+pub async fn update_api_key(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Path(key_id_string): Path<String>,
+  Json(payload): Json<serde_json::Value>,
+) -> Response {
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        "error": "Invalid user ID"
+      }))).into_response();
+    }
+  };
+  if !crate::engine::user::is_root(&user_id) {
+    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+      "error": "Only root user can update API keys"
+    }))).into_response();
+  }
+
+  let key_uuid = match Uuid::parse_str(&key_id_string) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid key ID format")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
+  let ops = crate::engine::DirectoryOps::new(&state.engine);
+  let path = format!("/.aeordb-system/api-keys/{}", key_uuid);
+  let data = match ops.read_file(&path) {
+    Ok(data) => data,
+    Err(crate::engine::EngineError::NotFound(_)) => {
+      return ErrorResponse::new(format!("API key not found: {}", key_id_string))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
+    Err(error) => {
+      return ErrorResponse::new(format!("Failed to read API key: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  let mut record: crate::auth::api_key::ApiKeyRecord = match serde_json::from_slice(&data) {
+    Ok(r) => r,
+    Err(e) => {
+      return ErrorResponse::new(format!("Corrupt API key record: {}", e))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  if let Some(label) = payload.get("label").and_then(|v| v.as_str()) {
+    record.label = Some(label.to_string());
+  }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  match system_store::store_api_key(&state.engine, &ctx, &record) {
+    Ok(()) => {
+      state.api_key_cache.evict(&key_id_string);
+      (StatusCode::OK, Json(serde_json::json!({
+        "updated": true,
+        "key_id": key_id_string,
+        "label": record.label,
+      }))).into_response()
+    }
+    Err(error) => {
+      ErrorResponse::new(format!("Failed to update API key: {}", error))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  }
+}

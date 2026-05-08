@@ -503,6 +503,43 @@ impl<'a> VersionManager<'a> {
     Ok(())
   }
 
+  /// Rename a snapshot. Creates a new snapshot entry with the new name
+  /// and the same root hash/metadata, then deletes the old one.
+  pub fn rename_snapshot(&self, ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
+    let old_key = self.snapshot_key(old_name)?;
+    let entry = self.engine.get_entry(&old_key)?;
+    let Some((header, _key, value)) = entry else {
+      return Err(EngineError::NotFound(format!("Snapshot not found: {}", old_name)));
+    };
+
+    let hash_length = self.engine.hash_algo().hash_length();
+    let old_snapshot = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
+
+    let new_key = self.snapshot_key(new_name)?;
+    if self.engine.has_entry(&new_key)? && !self.engine.is_entry_deleted(&new_key)? {
+      return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", new_name)));
+    }
+
+    let new_snapshot = SnapshotInfo {
+      name: new_name.to_string(),
+      root_hash: old_snapshot.root_hash,
+      created_at: old_snapshot.created_at,
+      metadata: old_snapshot.metadata,
+    };
+
+    let new_value = new_snapshot.serialize(hash_length)?;
+    self.engine.store_entry_typed(
+      crate::engine::entry_type::EntryType::Snapshot,
+      &new_key,
+      &new_value,
+      crate::engine::kv_store::KV_TYPE_SNAPSHOT,
+    )?;
+
+    self.engine.mark_entry_deleted(&old_key)?;
+
+    Ok(new_snapshot)
+  }
+
   /// Create a named fork for isolated writes.
   ///
   /// - If `base` is `None` or `Some("HEAD")`, forks from the current HEAD.

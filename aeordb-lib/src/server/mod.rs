@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
 
@@ -288,7 +288,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/auth/keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
     .route("/auth/keys/users", get(api_key_self_service_routes::list_key_assignable_users))
     .route("/auth/keys/admin", post(routes::create_api_key).get(routes::list_api_keys))
-    .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key))
+    .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key)
+                                       .patch(admin_routes::update_api_key))
     // System: metrics, stats
     .route("/system/metrics", get(routes::metrics_endpoint))
     .route("/system/stats", get(portal_routes::get_stats))
@@ -340,7 +341,8 @@ pub fn create_app_with_all_and_task_queue(
     .route("/versions/snapshots", post(engine_routes::snapshot_create)
                                  .get(engine_routes::snapshot_list))
     .route("/versions/restore", post(engine_routes::snapshot_restore))
-    .route("/versions/snapshots/{name}", delete(engine_routes::snapshot_delete))
+    .route("/versions/snapshots/{name}", delete(engine_routes::snapshot_delete)
+                                       .patch(engine_routes::snapshot_rename))
     // Versions: fork routes
     .route("/versions/forks", post(engine_routes::fork_create)
                              .get(engine_routes::fork_list))
