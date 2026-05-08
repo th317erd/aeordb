@@ -1595,7 +1595,6 @@ impl<'a> DirectoryOps<'a> {
       // Cache miss — read from WAL
       match self.engine.get_entry(content_key)? {
         Some((_h, _k, content_value)) => {
-          // Cache for future reads
           self.engine.cache_dir_content(content_key.to_vec(), content_value.clone());
           Ok(Some((header, content_value)))
         }
@@ -1605,7 +1604,6 @@ impl<'a> DirectoryOps<'a> {
         }
       }
     } else {
-      // Inline data (backward compatible or empty directory)
       Ok(Some((header, value)))
     }
   }
