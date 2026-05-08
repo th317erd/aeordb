@@ -1562,6 +1562,7 @@ pub async fn snapshot_restore(
       state.engine.index_config_cache.evict_all();
       state.group_cache.evict_all();
       state.api_key_cache.evict_all();
+      state.engine.clear_dir_content_cache();
       (
         StatusCode::OK,
         Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name })),

@@ -1567,6 +1567,49 @@ impl<'a> DirectoryOps<'a> {
     self.delete_file(ctx, path)
   }
 
+  /// Read directory data by path key, following hard links and checking the
+  /// content cache. Returns the entry header and directory value bytes.
+  ///
+  /// Hard link detection: if the value at dir_key is exactly hash_length bytes,
+  /// it's a hard link (content hash pointer). Follow it to get the actual data.
+  /// Backward compatible: values >hash_length are inline data (pre-optimization).
+  pub(crate) fn read_directory_data(&self, dir_key: &[u8]) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+
+    let entry = match self.engine.get_entry(dir_key)? {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let (header, _key, value) = entry;
+
+    // Check if this is a hard link (value == hash_length bytes)
+    if value.len() == hash_length {
+      let content_key = &value;
+
+      // Check cache first
+      if let Some(cached) = self.engine.get_cached_dir_content(content_key) {
+        return Ok(Some((header, cached)));
+      }
+
+      // Cache miss — read from WAL
+      match self.engine.get_entry(content_key)? {
+        Some((_h, _k, content_value)) => {
+          // Cache for future reads
+          self.engine.cache_dir_content(content_key.to_vec(), content_value.clone());
+          Ok(Some((header, content_value)))
+        }
+        None => {
+          tracing::warn!("Hard link target not found for directory entry");
+          Ok(None)
+        }
+      }
+    } else {
+      // Inline data (backward compatible or empty directory)
+      Ok(Some((header, value)))
+    }
+  }
+
   /// Maximum directory depth for update_parent_directories iteration.
   /// Prevents unbounded looping on pathologically deep paths.
   const MAX_DIRECTORY_DEPTH: usize = 1000;

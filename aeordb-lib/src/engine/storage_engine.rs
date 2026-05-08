@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -144,6 +145,10 @@ pub struct StorageEngine {
   pub(crate) last_auto_snapshot_delete: std::sync::atomic::AtomicI64,
   pub(crate) last_auto_snapshot_restore: std::sync::atomic::AtomicI64,
   pub(crate) last_manual_snapshot: std::sync::atomic::AtomicI64,
+  /// Cache of directory content keyed by content hash. Content-addressed data
+  /// is immutable, so this cache can never serve stale data for a given key.
+  /// Populated by update_parent_directories, read by directory lookups.
+  pub(crate) dir_content_cache: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -238,6 +243,7 @@ impl StorageEngine {
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
+      dir_content_cache: RwLock::new(HashMap::new()),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -417,6 +423,7 @@ impl StorageEngine {
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
+      dir_content_cache: RwLock::new(HashMap::new()),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -828,6 +835,74 @@ impl StorageEngine {
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     Ok(offsets)
+  }
+
+  /// Flush a write batch AND update HEAD atomically in a single lock hold.
+  /// This avoids separate lock acquisitions for the batch and the head update.
+  pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
+    if batch.is_empty() {
+      // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
+      return self.update_head(head_hash).map(|_| Vec::new());
+    }
+
+    let mut writer = self.writer.write()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|error| EngineError::IoError(
+        std::io::Error::other(error.to_string()),
+      ))?;
+
+    let mut offsets = Vec::with_capacity(batch.entries.len());
+
+    for entry in &batch.entries {
+      let offset = writer.append_entry(
+        entry.entry_type,
+        &entry.key,
+        &entry.value,
+        0, // flags
+      )?;
+      kv.set_hot_tail_offset(writer.current_offset());
+      offsets.push(offset);
+    }
+
+    for (i, entry) in batch.entries.iter().enumerate() {
+      let kv_entry = KVEntry {
+        type_flags: entry.kv_type,
+        hash: entry.key.clone(),
+        offset: offsets[i],
+      };
+      kv.insert(kv_entry)?;
+    }
+
+    // Update HEAD in the same lock hold
+    let mut header = writer.file_header().clone();
+    header.head_hash = head_hash.to_vec();
+    writer.update_file_header(&header)?;
+
+    self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
+
+    Ok(offsets)
+  }
+
+  /// Get directory content from cache by content hash.
+  pub(crate) fn get_cached_dir_content(&self, content_key: &[u8]) -> Option<Vec<u8>> {
+    self.dir_content_cache.read().ok()?.get(content_key).cloned()
+  }
+
+  /// Cache directory content by content hash.
+  pub(crate) fn cache_dir_content(&self, content_key: Vec<u8>, value: Vec<u8>) {
+    if let Ok(mut cache) = self.dir_content_cache.write() {
+      cache.insert(content_key, value);
+    }
+  }
+
+  /// Clear the directory content cache (called on snapshot restore).
+  pub fn clear_dir_content_cache(&self) {
+    if let Ok(mut cache) = self.dir_content_cache.write() {
+      cache.clear();
+    }
   }
 
   /// Check if a KV entry is marked as deleted.
