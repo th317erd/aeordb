@@ -310,7 +310,11 @@ pub async fn list_groups(
 
   match system_store::list_groups(&state.engine) {
     Ok(groups) => {
-      let responses: Vec<GroupResponse> = groups.iter().map(GroupResponse::from).collect();
+      // Filter out auto-generated per-user groups (user:{uuid}) — they're system-managed
+      let responses: Vec<GroupResponse> = groups.iter()
+        .filter(|g| !g.name.starts_with("user:"))
+        .map(GroupResponse::from)
+        .collect();
       (StatusCode::OK, Json(serde_json::json!({"items": responses}))).into_response()
     }
     Err(error) => {

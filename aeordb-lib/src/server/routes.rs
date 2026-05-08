@@ -337,6 +337,20 @@ pub async fn auth_token(
       .into_response();
   }
 
+  // Check user is active (skip for share keys which have no user_id).
+  if let Some(ref uid) = record.user_id {
+    if !crate::engine::user::is_root(uid) {
+      if let Ok(Some(user)) = crate::engine::system_store::get_user(&state.engine, uid) {
+        if !user.is_active {
+          metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "inactive").increment(1);
+          return ErrorResponse::new("Account deactivated. Contact your administrator.".to_string())
+            .with_status(StatusCode::UNAUTHORIZED)
+            .into_response();
+        }
+      }
+    }
+  }
+
   let now = chrono::Utc::now().timestamp();
   // Cap JWT expiry to the lesser of DEFAULT_EXPIRY_SECONDS and the key's remaining lifetime.
   let key_expires_seconds = (record.expires_at / 1000) - now;
