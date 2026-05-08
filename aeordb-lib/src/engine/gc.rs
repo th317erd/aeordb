@@ -123,6 +123,17 @@ fn walk_directory_tree(
 
   let (header, _key, value) = entry;
 
+  // Follow hard links: if value is exactly hash_length bytes, it's a content hash pointer
+  let value = if value.len() == hash_length {
+    live.insert(value.clone()); // Mark the content hash as live
+    match engine.get_entry_including_deleted(&value)? {
+      Some((_h, _k, v)) => v,
+      None => return Ok(()),
+    }
+  } else {
+    value
+  };
+
   match header.entry_type {
     EntryType::DirectoryIndex => {
       if value.is_empty() {

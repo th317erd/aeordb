@@ -866,8 +866,8 @@ impl<'a> DirectoryOps<'a> {
         );
       }
     }
-    match self.engine.get_entry(&dir_key) {
-      Ok(Some((header, _key, value))) => {
+    match self.read_directory_data(&dir_key) {
+      Ok(Some((header, value))) => {
         if normalized == "/" {
           tracing::debug!(
             value_len = value.len(),
@@ -1759,10 +1759,12 @@ impl<'a> DirectoryOps<'a> {
     let dir_key = directory_path_hash(&parent, &algo)?;
     let child_name = file_name(child_path).unwrap_or("").to_string();
 
-    let existing = self.engine.get_entry(&dir_key)?;
+    let existing = self.read_directory_data(&dir_key)?;
+
+    let mut batch = WriteBatch::new();
 
     let (dir_value, content_key) = match existing {
-      Some((_header, _key, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+      Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
         // B-tree format: delete from tree
         let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length)?;
         let root_hash = root_node.content_hash(hash_length, &algo)?;
@@ -1771,18 +1773,21 @@ impl<'a> DirectoryOps<'a> {
           Some(new_root_hash) => {
             let new_root_entry = self.engine.get_entry(&new_root_hash)?
               .ok_or_else(|| EngineError::NotFound("B-tree root not found after delete".to_string()))?;
+            // Cache the B-tree root data
+            self.engine.cache_dir_content(new_root_hash.clone(), new_root_entry.2.clone());
             (new_root_entry.2, new_root_hash)
           }
           None => {
             // Tree is empty -- store empty flat directory
             let dir_value = Vec::new();
             let content_key = directory_content_hash(&dir_value, &algo)?;
-            self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+            batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+            self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
             (dir_value, content_key)
           }
         }
       }
-      Some((header, _key, value)) => {
+      Some((header, value)) => {
         // Flat format
         let mut children = if value.is_empty() {
           Vec::new()
@@ -1794,25 +1799,30 @@ impl<'a> DirectoryOps<'a> {
 
         let dir_value = serialize_child_entries(&children, hash_length)?;
         let content_key = directory_content_hash(&dir_value, &algo)?;
-        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+        batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+        self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
         (dir_value, content_key)
       }
       None => {
         let dir_value = Vec::new();
         let content_key = directory_content_hash(&dir_value, &algo)?;
-        self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
+        batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+        self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
         (dir_value, content_key)
       }
     };
 
-    // Store at path-based key
-    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
+    // Hard link at path-based key: store content hash instead of full data
+    batch.add(EntryType::DirectoryIndex, dir_key, content_key.clone());
 
     // Propagate up
     if parent == "/" {
-      self.engine.update_head(&content_key)?;
+      self.engine.flush_batch_and_update_head(batch, &content_key)?;
       return Ok(());
     }
+
+    // Flush batch before calling update_parent_directories (it creates its own batch)
+    self.engine.flush_batch(batch)?;
 
     let del_now = chrono::Utc::now().timestamp_millis();
     let parent_child = ChildEntry {
