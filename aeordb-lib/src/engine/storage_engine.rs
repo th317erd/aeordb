@@ -1005,7 +1005,9 @@ impl StorageEngine {
     let old_kv_end = header.kv_block_offset + header.kv_block_length;
     let new_kv_end = header.kv_block_offset + new_pages_size;
     let growth_zone_size = new_kv_end - old_kv_end;
-    let hot_tail_offset = header.hot_tail_offset;
+    // Use the writer's current offset (end of WAL) as the actual hot tail position,
+    // NOT the header's hot_tail_offset which may be stale.
+    let hot_tail_offset = writer.current_offset();
 
     tracing::info!(
       growth_zone_size, old_kv_end, new_kv_end, hot_tail_offset,
