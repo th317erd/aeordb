@@ -887,6 +887,12 @@ impl StorageEngine {
       };
       kv.insert(kv_entry)?;
     }
+
+    // Flush hot tail to disk so all batch entries are durable.
+    // Without this, entries sit in the in-memory hot buffer and are
+    // lost on crash — causing dangling hard links and data loss.
+    kv.flush_hot_buffer()?;
+
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     let pending_expansion = kv.needs_expansion.take();
@@ -945,6 +951,9 @@ impl StorageEngine {
     let mut header = writer.file_header().clone();
     header.head_hash = head_hash.to_vec();
     writer.update_file_header(&header)?;
+
+    // Flush hot tail so all batch entries are durable on disk
+    kv.flush_hot_buffer()?;
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
