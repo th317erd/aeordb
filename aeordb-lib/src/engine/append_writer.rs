@@ -268,6 +268,44 @@ impl AppendWriter {
     Ok(())
   }
 
+  /// Copy a region of the file from one offset to another.
+  /// Used by KV block expansion to relocate WAL entries.
+  pub fn copy_region(&mut self, src: u64, dst: u64, size: u64) -> EngineResult<()> {
+    const CHUNK: usize = 64 * 1024 * 1024;
+    let mut remaining = size;
+    let mut read_pos = src;
+    let mut write_pos = dst;
+
+    while remaining > 0 {
+      let chunk_len = (CHUNK as u64).min(remaining) as usize;
+      let mut buf = vec![0u8; chunk_len];
+      self.file.seek(SeekFrom::Start(read_pos))?;
+      self.file.read_exact(&mut buf)?;
+      self.file.seek(SeekFrom::Start(write_pos))?;
+      self.file.write_all(&buf)?;
+      read_pos += chunk_len as u64;
+      write_pos += chunk_len as u64;
+      remaining -= chunk_len as u64;
+    }
+    Ok(())
+  }
+
+  /// Write hot tail entries at a specific offset using this writer's file handle.
+  pub fn write_hot_tail_at(&mut self, offset: u64, entries: &[crate::engine::kv_store::KVEntry], hash_length: usize) -> EngineResult<u64> {
+    let end = crate::engine::hot_tail::write_hot_tail(&mut self.file, offset, entries, hash_length)?;
+    Ok(end)
+  }
+
+  /// Read hot tail entries from this writer's reader handle.
+  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
+    let mut reader = match self.reader.try_clone() {
+      Ok(r) => r,
+      Err(_) => return Vec::new(),
+    };
+    crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length)
+      .unwrap_or_default()
+  }
+
   /// Write a void entry at a specific file offset (in-place overwrite).
   /// The void fills exactly `size` bytes starting at `offset`.
   pub fn write_void_at(&mut self, offset: u64, size: u32) -> EngineResult<()> {

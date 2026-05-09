@@ -615,6 +615,19 @@ impl StorageEngine {
     kv.insert(kv_entry)?;
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
+    // Check if KV block needs expansion (set during insert → flush → resize)
+    let pending_expansion = kv.needs_expansion.take();
+
+    // Drop locks before expansion (expansion acquires them itself)
+    drop(kv);
+    drop(writer);
+
+    if let Some(target_stage) = pending_expansion {
+      if let Err(e) = self.expand_kv_block_online(target_stage) {
+        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
+      }
+    }
+
     Ok(offset)
   }
 
@@ -876,6 +889,16 @@ impl StorageEngine {
     }
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
+    let pending_expansion = kv.needs_expansion.take();
+    drop(kv);
+    drop(writer);
+
+    if let Some(target_stage) = pending_expansion {
+      if let Err(e) = self.expand_kv_block_online(target_stage) {
+        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
+      }
+    }
+
     Ok(offsets)
   }
 
@@ -925,6 +948,16 @@ impl StorageEngine {
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
+    let pending_expansion = kv.needs_expansion.take();
+    drop(kv);
+    drop(writer);
+
+    if let Some(target_stage) = pending_expansion {
+      if let Err(e) = self.expand_kv_block_online(target_stage) {
+        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
+      }
+    }
+
     Ok(offsets)
   }
 
@@ -945,6 +978,87 @@ impl StorageEngine {
     if let Ok(mut cache) = self.dir_content_cache.write() {
       cache.clear();
     }
+  }
+
+  /// Perform online KV block expansion. Called after a KV flush detects
+  /// that the block needs to grow (kv.needs_expansion is Some).
+  ///
+  /// This method acquires BOTH locks and:
+  /// 1. Marks resize_in_progress in the file header
+  /// 2. Copies WAL entries from the growth zone to end of WAL via the writer
+  /// 3. Fsyncs (crash-safe: two copies exist)
+  /// 4. Tells the KV store to finalize: zero pages, rehash, update header
+  /// 5. Updates the writer's offset to reflect the new file layout
+  pub fn expand_kv_block_online(&self, target_stage: usize) -> EngineResult<()> {
+    let hash_length = self.hash_algo.hash_length();
+    let psize = crate::engine::kv_pages::page_size(hash_length);
+    let (_block_size, new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
+    let new_pages_size = (new_bucket_count as u64) * (psize as u64);
+
+    // Acquire both locks: writer first, then KV
+    let mut writer = self.writer.write()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    let mut kv = self.kv_writer.lock()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+
+    let header = writer.file_header().clone();
+    let old_kv_end = header.kv_block_offset + header.kv_block_length;
+    let new_kv_end = header.kv_block_offset + new_pages_size;
+    let growth_zone_size = new_kv_end - old_kv_end;
+    let hot_tail_offset = header.hot_tail_offset;
+
+    tracing::info!(
+      growth_zone_size, old_kv_end, new_kv_end, hot_tail_offset,
+      "Online KV expansion: relocating {} bytes of WAL data",
+      growth_zone_size,
+    );
+
+    // Step 1: Mark resize in progress
+    {
+      let mut h = header.clone();
+      h.resize_in_progress = true;
+      h.resize_target_stage = target_stage as u8;
+      writer.update_file_header(&h)?;
+    }
+
+    // Step 2: Read hot tail into memory, then copy growth zone data to
+    // where the hot tail was. The hot tail gets rewritten after.
+    let hot_entries = writer.read_hot_tail_entries(hot_tail_offset, hash_length);
+
+    // Copy growth zone [old_kv_end .. new_kv_end] to [hot_tail_offset ..]
+    let copy_dst = hot_tail_offset;
+    let new_hot_tail = hot_tail_offset + growth_zone_size;
+
+    writer.copy_region(old_kv_end, copy_dst, growth_zone_size)?;
+
+    // Rewrite hot tail at new position
+    writer.write_hot_tail_at(new_hot_tail, &hot_entries, hash_length)?;
+
+    // Step 3: Fsync — two copies exist, crash-safe
+    writer.sync()?;
+
+    // Update writer's offset to after the relocated data (before new hot tail)
+    writer.set_offset(new_hot_tail);
+
+    // Step 4-8: KV finalization (zero pages, rehash, update header, publish snapshot)
+    let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
+    kv.finalize_expansion(target_stage, old_kv_end, new_kv_end, offset_delta, new_hot_tail)?;
+
+    // Update writer's header to match what KV wrote
+    let mut final_header = writer.file_header().clone();
+    final_header.kv_block_length = new_pages_size;
+    final_header.kv_block_stage = target_stage as u8;
+    final_header.resize_in_progress = false;
+    final_header.resize_target_stage = 0;
+    final_header.hot_tail_offset = new_hot_tail;
+    writer.update_file_header(&final_header)?;
+
+    // Sync the writer's file handle to ensure it sees the KV's changes
+    writer.sync()?;
+
+    tracing::info!("Online KV block expansion complete");
+
+    Ok(())
   }
 
   /// Check if a KV entry is marked as deleted.
