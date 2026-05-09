@@ -19,9 +19,10 @@ use crate::engine::scalar_converter::HashConverter;
 const WRITE_BUFFER_THRESHOLD: usize = 512;
 
 /// Number of entries buffered before flushing to the hot tail.
-/// Low threshold ensures entries are durable quickly — crash with
-/// unflushed entries loses them until verify --repair rebuilds from WAL.
-const HOT_BUFFER_THRESHOLD: usize = 32;
+/// Safety net for burst writes between 250ms timer flushes.
+/// The timer is the primary durability mechanism — this threshold
+/// handles bursts that exceed what 250ms can cover.
+const HOT_BUFFER_THRESHOLD: usize = 512;
 
 /// A disk-resident KV store using NVT-indexed bucket pages inside the main
 /// database file. No sidecar files — the KV block lives at the head of the
