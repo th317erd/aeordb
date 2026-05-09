@@ -324,18 +324,24 @@ impl StorageEngine {
     );
 
     // Read hot tail entries from end of file
-    let hot_entries = if hot_tail_offset > 0 {
+    let (hot_entries, needs_dirty_startup) = if hot_tail_offset > 0 {
       let mut f = OpenOptions::new().read(true).open(path)?;
-      crate::engine::hot_tail::read_hot_tail(&mut f, hot_tail_offset, hash_length)
-        .unwrap_or_default()
+      match crate::engine::hot_tail::read_hot_tail(&mut f, hot_tail_offset, hash_length) {
+        Some(entries) => {
+          tracing::debug!(hot_entries_loaded = entries.len(), "open_internal: hot tail loaded");
+          (entries, false)
+        }
+        None => {
+          tracing::warn!(
+            hot_tail_offset,
+            "Corrupt or missing hot tail — will rebuild KV from WAL (dirty startup)"
+          );
+          (Vec::new(), true)
+        }
+      }
     } else {
-      Vec::new()
+      (Vec::new(), false)
     };
-
-    tracing::debug!(
-      hot_entries_loaded = hot_entries.len(),
-      "open_internal: hot tail read"
-    );
 
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
@@ -463,8 +469,13 @@ impl StorageEngine {
     // After KV block expansion, rebuild the entire KV index from WAL.
     // The expansion zeroed the KV pages, so only hot tail entries are loaded.
     // A full rebuild repopulates all entries at their new offsets.
-    if needs_kv_rebuild {
-      tracing::info!("Rebuilding KV index after block expansion...");
+    if needs_kv_rebuild || needs_dirty_startup {
+      if needs_kv_rebuild {
+        tracing::info!("Rebuilding KV index after block expansion...");
+      }
+      if needs_dirty_startup {
+        tracing::warn!("Dirty startup: rebuilding KV index from full WAL scan...");
+      }
       engine.rebuild_kv()?;
       // Re-initialize counters from the freshly rebuilt KV
       let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -888,11 +899,6 @@ impl StorageEngine {
       kv.insert(kv_entry)?;
     }
 
-    // Flush hot tail to disk so all batch entries are durable.
-    // Without this, entries sit in the in-memory hot buffer and are
-    // lost on crash — causing dangling hard links and data loss.
-    kv.flush_hot_buffer()?;
-
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
     let pending_expansion = kv.needs_expansion.take();
@@ -947,13 +953,13 @@ impl StorageEngine {
       kv.insert(kv_entry)?;
     }
 
-    // Update HEAD in the same lock hold
+    // Update HEAD and hot_tail_offset in the same lock hold.
+    // Including hot_tail_offset ensures the header always points to
+    // where the hot tail actually is — prevents stale pointer on crash.
     let mut header = writer.file_header().clone();
     header.head_hash = head_hash.to_vec();
+    header.hot_tail_offset = writer.current_offset();
     writer.update_file_header(&header)?;
-
-    // Flush hot tail so all batch entries are durable on disk
-    kv.flush_hot_buffer()?;
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
