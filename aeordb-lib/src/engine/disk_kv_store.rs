@@ -531,8 +531,20 @@ impl DiskKVStore {
 
             // Step 2: Bulk copy WAL entries from growth zone to end of WAL.
             // The growth zone is [old_kv_end .. new_kv_end].
-            // We copy this data to [hot_tail_offset .. hot_tail_offset + growth_zone_size],
+            // Layout: [Header][KV block][WAL entries...][Hot tail]
+            // We need to insert the growth zone data BEFORE the hot tail,
             // shifting the hot tail forward.
+            //
+            // First, read the hot tail into memory so we can rewrite it
+            // at its new position after the relocated data.
+            let hot_tail_data = {
+                let hash_length = self.hash_algo.hash_length();
+                let hot_entries = hot_tail::read_hot_tail(
+                    &mut self.db_file, self.hot_tail_offset, hash_length,
+                ).unwrap_or_default();
+                (hot_entries, hash_length)
+            };
+
             let copy_src = old_kv_end;
             let copy_dst = self.hot_tail_offset;
             let new_hot_tail = self.hot_tail_offset + growth_zone_size;
@@ -543,7 +555,7 @@ impl DiskKVStore {
                 growth_zone_size,
             );
 
-            // Read growth zone and append to end of file
+            // Copy growth zone data to end of WAL (where hot tail was)
             const CHUNK: usize = 64 * 1024 * 1024; // 64MB chunks
             let mut remaining = growth_zone_size;
             let mut read_offset = copy_src;
@@ -561,9 +573,13 @@ impl DiskKVStore {
                 remaining -= chunk_len as u64;
             }
 
+            // Rewrite hot tail at its new position
+            let (hot_entries, hl) = hot_tail_data;
+            hot_tail::write_hot_tail(&mut self.db_file, new_hot_tail, &hot_entries, hl)?;
+
             // Step 3: Verify + fsync — at this point we have two copies of the
             // growth zone data: original at [old_kv_end..new_kv_end] and copy
-            // at [copy_dst..copy_dst+growth_zone_size]. Crash-safe.
+            // at [copy_dst..copy_dst+growth_zone_size]. Hot tail preserved. Crash-safe.
             self.db_file.sync_all()?;
 
             // Step 4: Collect all current entries and adjust offsets for relocated ones.
