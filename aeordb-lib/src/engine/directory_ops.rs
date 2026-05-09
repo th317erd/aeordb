@@ -1193,16 +1193,23 @@ impl<'a> DirectoryOps<'a> {
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash("/", &algo)?;
 
-    // If the root directory exists and has children, leave it alone.
+    // If the root directory entry exists, leave it alone — even if it's
+    // unreadable (e.g., dangling hard link). Overwriting an existing root
+    // destroys all directory tree state. A KV rebuild (verify --repair)
+    // is the correct recovery path, not silent recreation.
     if self.engine.has_entry(&dir_key)? {
       match self.list_directory("/") {
         Ok(children) if !children.is_empty() => return Ok(()),
-        _ => {
-          // Root entry exists but is empty or unreadable — continue to
-          // create a fresh one. This self-heals after a repair where the
-          // root directory's children list was overwritten by a previous
-          // startup on a corrupt database.
-          tracing::warn!("Root directory exists but is empty, will recreate");
+        Ok(_) => {
+          // Root exists but lists as empty — might be a hard link with
+          // missing target. Log but DO NOT overwrite.
+          tracing::warn!("Root directory exists but appears empty. Run 'aeordb verify --repair' if data is missing.");
+          return Ok(());
+        }
+        Err(e) => {
+          // Root exists but is unreadable — DO NOT overwrite.
+          tracing::warn!("Root directory exists but is unreadable ({}). Run 'aeordb verify --repair' to recover.", e);
+          return Ok(());
         }
       }
     }
