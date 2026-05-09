@@ -1004,10 +1004,33 @@ impl StorageEngine {
     let header = writer.file_header().clone();
     let old_kv_end = header.kv_block_offset + header.kv_block_length;
     let new_kv_end = header.kv_block_offset + new_pages_size;
-    let growth_zone_size = new_kv_end - old_kv_end;
     // Use the writer's current offset (end of WAL) as the actual hot tail position,
     // NOT the header's hot_tail_offset which may be stale.
     let hot_tail_offset = writer.current_offset();
+
+    // The growth zone is [old_kv_end..new_kv_end], but entries may straddle
+    // the new_kv_end boundary. We must copy the straddling entry's tail too,
+    // otherwise the relocated copy is truncated. Scan forward from new_kv_end
+    // to find the first valid entry header — everything before it is the
+    // straddling tail that must be included in the copy.
+    let magic_bytes = crate::engine::entry_header::ENTRY_MAGIC.to_le_bytes();
+    let mut actual_copy_end = new_kv_end;
+    let scan_limit = new_kv_end + 1024 * 1024; // 1MB max scan for boundary
+    let mut scan_pos = new_kv_end;
+    while scan_pos < scan_limit && scan_pos < hot_tail_offset {
+      let mut buf = [0u8; 4];
+      if writer.read_bytes_at(scan_pos, &mut buf).is_err() { break; }
+      if buf == magic_bytes {
+        actual_copy_end = scan_pos;
+        break;
+      }
+      scan_pos += 1;
+    }
+    if actual_copy_end == new_kv_end {
+      // No straddling entry found, or couldn't scan — just use new_kv_end
+      actual_copy_end = new_kv_end;
+    }
+    let growth_zone_size = actual_copy_end - old_kv_end;
 
     tracing::info!(
       growth_zone_size, old_kv_end, new_kv_end, hot_tail_offset,
@@ -1039,12 +1062,26 @@ impl StorageEngine {
     // Step 3: Fsync — two copies exist, crash-safe
     writer.sync()?;
 
+    // The straddling tail region [new_kv_end..actual_copy_end] was relocated
+    // to the end of the WAL. Write a void entry over the dead original so
+    // the entry scanner doesn't trip over it on restart.
+    if actual_copy_end > new_kv_end {
+      let tail_size = (actual_copy_end - new_kv_end) as u32;
+      let min_void = (crate::engine::entry_header::EntryHeader::FIXED_HEADER_SIZE
+        + self.hash_algo.hash_length()) as u32;
+      if tail_size >= min_void {
+        writer.write_void_at(new_kv_end, tail_size)?;
+      }
+    }
+
     // Update writer's offset to after the relocated data (before new hot tail)
     writer.set_offset(new_hot_tail);
 
     // Step 4-8: KV finalization (zero pages, rehash, update header, publish snapshot)
     let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
-    kv.finalize_expansion(target_stage, old_kv_end, new_kv_end, offset_delta, new_hot_tail)?;
+    // Use actual_copy_end (not new_kv_end) for offset adjustment range —
+    // entries straddling the boundary were also relocated.
+    kv.finalize_expansion(target_stage, old_kv_end, actual_copy_end, offset_delta, new_hot_tail)?;
 
     // Update writer's header to match what KV wrote
     let mut final_header = writer.file_header().clone();

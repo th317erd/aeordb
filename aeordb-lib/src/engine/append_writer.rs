@@ -296,6 +296,19 @@ impl AppendWriter {
     Ok(end)
   }
 
+  /// Write bytes at a specific offset (no seek side effects on the main write position).
+  pub fn write_at(&mut self, offset: u64, data: &[u8]) -> EngineResult<()> {
+    self.file.seek(SeekFrom::Start(offset))?;
+    self.file.write_all(data)?;
+    Ok(())
+  }
+
+  /// Read bytes at a specific offset using the reader handle (no seek side effects).
+  pub fn read_bytes_at(&self, offset: u64, buf: &mut [u8]) -> EngineResult<()> {
+    read_exact_at(&self.reader, buf, offset)?;
+    Ok(())
+  }
+
   /// Read hot tail entries from this writer's reader handle.
   pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
     let mut reader = match self.reader.try_clone() {
