@@ -76,10 +76,10 @@ Expected response:
 
 ## 5. Add an Index
 
-To query fields, you need to tell AeorDB which fields to index. Store an index configuration at `.config/indexes.json` inside the directory:
+To query fields, you need to tell AeorDB which fields to index. Store an index configuration at `.aeordb-config/indexes.json` inside the directory:
 
 ```bash
-curl -X PUT http://localhost:6830/files/users/.config/indexes.json \
+curl -X PUT http://localhost:6830/files/users/.aeordb-config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "indexes": [

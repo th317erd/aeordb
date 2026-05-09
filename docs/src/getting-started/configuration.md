@@ -169,7 +169,7 @@ Per-path rules are checked first. If no rule matches the request path, the globa
 
 ## Index Configuration
 
-Indexes are configured per-directory by storing a `.config/indexes.json` file under the directory path. When this file changes, the engine automatically triggers a background reindex of all files in that directory.
+Indexes are configured per-directory by storing a `.aeordb-config/indexes.json` file under the directory path. When this file changes, the engine automatically triggers a background reindex of all files in that directory.
 
 ```json
 {

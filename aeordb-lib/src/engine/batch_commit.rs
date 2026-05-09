@@ -367,7 +367,17 @@ fn update_directory(
 ) -> EngineResult<(Vec<u8>, u64)> {
     let dir_key = directory_path_hash(dir_path, algo)?;
 
-    let existing = engine.get_entry(&dir_key)?;
+    // Follow hard links: dir_key may contain a 32-byte content hash pointer
+    let existing = {
+        let raw = engine.get_entry(&dir_key)?;
+        match raw {
+            Some((_header, _key, value)) if value.len() == hash_length => {
+                // Hard link — follow to actual content
+                engine.get_entry(&value)?
+            }
+            other => other,
+        }
+    };
 
     let (dir_value, content_key) = match existing {
         Some((_header, _key, value))

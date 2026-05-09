@@ -38,8 +38,12 @@ pub fn list_directory_recursive(
     let hash_length = algo.hash_length();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
-    let value = match engine.get_entry(&dir_key)? {
-        Some((_header, _key, value)) => value,
+
+    // Follow hard links and check the content cache (post-optimization,
+    // dir_key entries may contain a 32-byte content hash instead of inline data).
+    let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
+    let value = match ops.read_directory_data(&dir_key)? {
+        Some((_header, value)) => value,
         None => return Err(EngineError::NotFound(normalized)),
     };
 

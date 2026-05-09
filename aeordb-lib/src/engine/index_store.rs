@@ -796,13 +796,25 @@ impl<'a> IndexManager<'a> {
 
     // Recursively list all files. Files inside .indexes directories have paths
     // like `/some/dir/.indexes/field.trigram.idx`. We extract `/some/dir` from
-    // those paths.
-    let entries = list_directory_recursive(self.engine, base_path, -1, None, None)?;
-    for entry in &entries {
-      if let Some(idx_pos) = entry.path.find("/.indexes/") {
-        let parent = &entry.path[..idx_pos];
-        let dir = if parent.is_empty() { "/" } else { parent };
-        indexed_dirs.insert(dir.to_string());
+    // those paths. If the recursive walk fails (e.g., malformed directory entry
+    // after KV expansion), log the error and return whatever we found from the
+    // base path scan — partial results are better than a total failure.
+    match list_directory_recursive(self.engine, base_path, -1, None, None) {
+      Ok(entries) => {
+        for entry in &entries {
+          if let Some(idx_pos) = entry.path.find("/.indexes/") {
+            let parent = &entry.path[..idx_pos];
+            let dir = if parent.is_empty() { "/" } else { parent };
+            indexed_dirs.insert(dir.to_string());
+          }
+        }
+      }
+      Err(e) => {
+        tracing::warn!(
+          base_path,
+          "discover_indexed_directories: recursive scan failed ({}). Returning base-path results only.",
+          e,
+        );
       }
     }
 

@@ -815,9 +815,17 @@ impl<'a> DirectoryOps<'a> {
     // TOCTOU re-check: verify no children were added between our emptiness
     // check and the deletion. The directory entry is already marked deleted,
     // so use get_entry_including_deleted to read the raw data at that offset.
-    if let Ok(Some((_header, _key, value))) = self.engine.get_entry_including_deleted(&dir_key) {
+    if let Ok(Some((_header, _key, raw_value))) = self.engine.get_entry_including_deleted(&dir_key) {
+      // Follow hard link if present (value == hash_length bytes)
+      let hash_length = algo.hash_length();
+      let value = if raw_value.len() == hash_length {
+        self.engine.get_entry(&raw_value)?
+          .map(|(_h, _k, v)| v)
+          .unwrap_or_default()
+      } else {
+        raw_value
+      };
       if !value.is_empty() {
-        let hash_length = algo.hash_length();
         let recheck_children = if crate::engine::btree::is_btree_format(&value) {
           crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false)
             .unwrap_or_default()

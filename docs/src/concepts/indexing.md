@@ -4,10 +4,10 @@ AeorDB indexes are opt-in and configured per-directory. Nothing is indexed by de
 
 ## Index Configuration
 
-Create a `.config/indexes.json` file in any directory to define indexes for files in that directory:
+Create a `.aeordb-config/indexes.json` file in any directory to define indexes for files in that directory:
 
 ```bash
-curl -X PUT http://localhost:6830/files/users/.config/indexes.json \
+curl -X PUT http://localhost:6830/files/users/.aeordb-config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "indexes": [
@@ -27,7 +27,7 @@ When this file is created or updated, the engine automatically triggers a backgr
 By default, an index config only indexes direct children of its directory. To index files across subdirectories, add a `glob` field:
 
 ```bash
-curl -X PUT http://localhost:6830/files/sessions/.config/indexes.json \
+curl -X PUT http://localhost:6830/files/sessions/.aeordb-config/indexes.json \
   -H "Content-Type: application/json" \
   -d '{
     "glob": "*/session.json",
@@ -261,7 +261,7 @@ Parser and indexing failures never prevent file storage. The file is always stor
 
 ## Default Indexes
 
-On first server start, AeorDB bootstraps a default index configuration at `/.config/indexes.json` with `glob: "**/*"`. This automatically indexes every file's metadata across the entire database:
+On first server start, AeorDB bootstraps a default index configuration at `/.aeordb-config/indexes.json` with `glob: "**/*"`. This automatically indexes every file's metadata across the entire database:
 
 | Field | Index Types | Description |
 |-------|------------|-------------|
@@ -280,11 +280,11 @@ When the indexing pipeline encounters a field name starting with `@`, it extract
 
 ### Customization
 
-The default config at `/.config/indexes.json` is only written on first boot. You can modify it to add or remove default fields. Changes trigger an automatic reindex.
+The default config at `/.aeordb-config/indexes.json` is only written on first boot. You can modify it to add or remove default fields. Changes trigger an automatic reindex.
 
 ## Automatic Reindexing
 
-When you store or update a `.config/indexes.json` file, the engine automatically enqueues a background reindex task for that directory. The task:
+When you store or update a `.aeordb-config/indexes.json` file, the engine automatically enqueues a background reindex task for that directory. The task:
 
 1. Reads the current index config
 2. Lists all files in the directory

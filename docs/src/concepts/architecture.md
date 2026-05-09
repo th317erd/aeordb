@@ -167,7 +167,7 @@ AeorDB uses an eviction-based cache (no TTL) for frequently accessed metadata:
 | Cached Data | Evicted On |
 |-------------|------------|
 | Permissions | Write, delete, or rename of `.permissions` files |
-| Index configs | Write or delete of `.config/indexes.json` |
+| Index configs | Write or delete of `.aeordb-config/indexes.json` |
 | Groups | Group membership changes |
 | API keys | Key creation, revocation, or expiration |
 

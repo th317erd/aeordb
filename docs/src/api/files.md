@@ -55,7 +55,7 @@ Store a file at the given path. Parent directories are created automatically. If
 
 ### Side Effects
 
-- If the path matches `/.config/indexes.json` (or a nested variant like `/data/.config/indexes.json`), a reindex task is automatically enqueued for the parent directory. Any existing pending or running reindex for that path is cancelled first.
+- If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), a reindex task is automatically enqueued for the parent directory. Any existing pending or running reindex for that path is cancelled first.
 - Triggers `entries_created` events on the event bus.
 - Runs any deployed store-phase plugins.
 
