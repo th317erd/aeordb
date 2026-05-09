@@ -500,29 +500,135 @@ impl DiskKVStore {
         // Check that new pages fit within the KV block
         let new_pages_size = (new_bucket_count as u64) * (psize as u64);
         if new_pages_size > self.kv_block_length {
-            // Can't resize in-place — the KV block is too small.
-            // Mark the target stage in the file header so the next startup
-            // will expand the block before opening the KV store.
-            tracing::warn!(
-                "KV resize blocked: stage {} needs {}B but block is {}B. Will expand on next restart.",
+            // Can't resize in-place — the KV block needs to expand.
+            // Perform online expansion: relocate WAL entries from the growth
+            // zone to the end of the file, then claim the freed space for KV.
+            //
+            // During this process, the existing KV snapshot remains valid for
+            // reads. Writes go to the write buffer / hot tail as normal.
+            tracing::info!(
+                "KV block expansion: stage {} needs {}B, current block is {}B. Expanding online.",
                 new_stage, new_pages_size, self.kv_block_length,
             );
 
-            // Write resize_target_stage to the file header
+            // Step 1: Mark resize in progress in file header
+            let old_kv_end = self.kv_block_offset + self.kv_block_length;
+            let new_kv_end = self.kv_block_offset + new_pages_size;
+            let growth_zone_size = new_kv_end - old_kv_end;
+
             {
                 let mut header_bytes = [0u8; crate::engine::file_header::FILE_HEADER_SIZE];
-                self.db_file.seek(std::io::SeekFrom::Start(0))?;
+                self.db_file.seek(SeekFrom::Start(0))?;
                 self.db_file.read_exact(&mut header_bytes)?;
-                if let Ok(mut header) = crate::engine::file_header::FileHeader::deserialize(&header_bytes) {
-                    if new_stage as u8 > header.resize_target_stage {
-                        header.resize_target_stage = new_stage as u8;
-                        let serialized = header.serialize();
-                        self.db_file.seek(std::io::SeekFrom::Start(0))?;
-                        self.db_file.write_all(&serialized)?;
-                        self.db_file.sync_data()?;
-                    }
-                }
+                let mut header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+                header.resize_in_progress = true;
+                header.resize_target_stage = new_stage as u8;
+                let serialized = header.serialize();
+                self.db_file.seek(SeekFrom::Start(0))?;
+                self.db_file.write_all(&serialized)?;
+                self.db_file.sync_data()?;
             }
+
+            // Step 2: Bulk copy WAL entries from growth zone to end of WAL.
+            // The growth zone is [old_kv_end .. new_kv_end].
+            // We copy this data to [hot_tail_offset .. hot_tail_offset + growth_zone_size],
+            // shifting the hot tail forward.
+            let copy_src = old_kv_end;
+            let copy_dst = self.hot_tail_offset;
+            let new_hot_tail = self.hot_tail_offset + growth_zone_size;
+
+            tracing::info!(
+                growth_zone_size, copy_src, copy_dst, new_hot_tail,
+                "KV expansion: relocating {} bytes of WAL data",
+                growth_zone_size,
+            );
+
+            // Read growth zone and append to end of file
+            const CHUNK: usize = 64 * 1024 * 1024; // 64MB chunks
+            let mut remaining = growth_zone_size;
+            let mut read_offset = copy_src;
+            let mut write_offset = copy_dst;
+
+            while remaining > 0 {
+                let chunk_len = (CHUNK as u64).min(remaining) as usize;
+                let mut buf = vec![0u8; chunk_len];
+                self.db_file.seek(SeekFrom::Start(read_offset))?;
+                self.db_file.read_exact(&mut buf)?;
+                self.db_file.seek(SeekFrom::Start(write_offset))?;
+                self.db_file.write_all(&buf)?;
+                read_offset += chunk_len as u64;
+                write_offset += chunk_len as u64;
+                remaining -= chunk_len as u64;
+            }
+
+            // Step 3: Verify + fsync — at this point we have two copies of the
+            // growth zone data: original at [old_kv_end..new_kv_end] and copy
+            // at [copy_dst..copy_dst+growth_zone_size]. Crash-safe.
+            self.db_file.sync_all()?;
+
+            // Step 4: Collect all current entries and adjust offsets for relocated ones.
+            // Any entry whose WAL offset falls within the growth zone
+            // [old_kv_end .. new_kv_end] was copied to [copy_dst .. copy_dst + growth_zone_size].
+            let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
+
+            // Step 5: Zero-fill the expanded KV region (new bucket pages)
+            let empty_page = vec![0u8; psize];
+            for bucket in 0..new_bucket_count {
+                let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
+                self.db_file.seek(SeekFrom::Start(offset))?;
+                self.db_file.write_all(&empty_page)?;
+            }
+            self.db_file.sync_data()?;
+
+            // Step 6: Update internal state to new stage
+            self.kv_block_length = new_pages_size;
+            self.stage = new_stage;
+            self.bucket_count = new_bucket_count;
+            self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
+            self.hot_tail_offset = new_hot_tail;
+            self.entry_count = 0;
+
+            // Re-insert ALL entries into new bucket layout
+            let all_for_rehash: Vec<KVEntry> = {
+                let snap = self.snapshot.load();
+                snap.iter_all().unwrap_or_default()
+            };
+            // Apply offset adjustments from step 4
+            let rehash_entries: Vec<KVEntry> = all_for_rehash.into_iter().map(|mut e| {
+                if e.offset >= old_kv_end && e.offset < new_kv_end {
+                    e.offset = (e.offset as i64 + offset_delta) as u64;
+                }
+                e
+            }).collect();
+
+            self.bulk_insert(&rehash_entries);
+            self.flush_no_snapshot()?;
+            self.entry_count = rehash_entries.len();
+
+            // Step 7: Update file header — clear resize flags, update layout
+            {
+                let mut header_bytes = [0u8; crate::engine::file_header::FILE_HEADER_SIZE];
+                self.db_file.seek(SeekFrom::Start(0))?;
+                self.db_file.read_exact(&mut header_bytes)?;
+                let mut header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+                header.kv_block_length = new_pages_size;
+                header.kv_block_stage = new_stage as u8;
+                header.resize_in_progress = false;
+                header.resize_target_stage = 0;
+                header.hot_tail_offset = new_hot_tail;
+                let serialized = header.serialize();
+                self.db_file.seek(SeekFrom::Start(0))?;
+                self.db_file.write_all(&serialized)?;
+                self.db_file.sync_all()?;
+            }
+
+            // Step 8: Publish new snapshot with expanded layout
+            self.publish_full_snapshot_with_new_nvt();
+
+            tracing::info!(
+                new_stage, new_bucket_count, new_pages_size,
+                "KV block expansion complete"
+            );
 
             return Ok(());
         }
