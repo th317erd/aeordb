@@ -44,7 +44,10 @@ class AeorSnapshotsPage extends AeorAdminPage {
   }
 
   shouldShowEditButton(items) {
-    return items.length === 1;
+    // Renaming a snapshot is admin-only — non-root cannot edit.
+    const isRoot = window.AUTH && window.AUTH.currentUserId
+      && window.AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
+    return isRoot && items.length === 1;
   }
 
   // ── Card rendering ──────────────────────────────────────────────────
@@ -76,6 +79,11 @@ class AeorSnapshotsPage extends AeorAdminPage {
   // ── Action bar ──────────────────────────────────────────────────────
 
   getActionButtons(selectedItems) {
+    // Only root can restore/delete snapshots — these are db-wide operations.
+    const isRoot = window.AUTH && window.AUTH.currentUserId
+      && window.AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
+    if (!isRoot) return '';
+
     if (selectedItems.length === 1) {
       return `
         <button class="secondary small admin-restore-btn">Restore</button>

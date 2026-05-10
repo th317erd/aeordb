@@ -276,14 +276,22 @@ function navigate() {
   const mobileTopBar = document.querySelector('.mobile-top-bar');
   if (mobileTopBar) mobileTopBar.style.display = '';
 
-  // Hide admin sidebar items for non-root users
+  // Hide admin sidebar items for non-root users.
+  // Snapshots is admin-only — affects HEAD globally, only root can manage.
+  // Keys is self-service so all users see it.
   const isRoot = AUTH.currentUserId && AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
   document.querySelectorAll('.nav-link').forEach((link) => {
     const pg = link.dataset.page;
-    if (pg === 'users' || pg === 'groups' || pg === 'settings') {
+    if (pg === 'users' || pg === 'groups' || pg === 'settings' || pg === 'snapshots') {
       link.style.display = isRoot ? '' : 'none';
     }
   });
+
+  // If a non-root user lands on an admin-only page via URL, redirect to files.
+  if (!isRoot && (page === 'users' || page === 'groups' || page === 'settings' || page === 'snapshots')) {
+    setPageParam('files');
+    return;
+  }
 
   // Hide login if it exists
   const login = main.querySelector('aeor-login');
