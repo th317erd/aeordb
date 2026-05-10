@@ -301,6 +301,25 @@
 
     .form-input:focus { border-color: var(--accent); }
 
+    /* Native <select> chevron — browsers render the default arrow at
+       inconsistent positions. Suppress the default and draw our own
+       at a fixed offset for a consistent look across pages. */
+    select.form-input {
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5l5 5 5-5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.625rem center;
+      background-size: 0.75rem;
+      padding-right: 2rem;
+      cursor: pointer;
+    }
+    select.form-input[multiple] {
+      background-image: none;
+      padding-right: 0.75rem;
+    }
+
     /* Alert */
     .alert {
       padding: 0.625rem 1rem;
