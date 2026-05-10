@@ -8,7 +8,7 @@ pub mod provider;
 pub mod rate_limiter;
 pub mod refresh;
 
-pub use api_key::{ApiKeyRecord, generate_api_key, hash_api_key, parse_api_key, verify_api_key, DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS, NO_EXPIRY_SENTINEL};
+pub use api_key::{ApiKeyRecord, generate_api_key, hash_api_key, parse_api_key, verify_api_key, validate_root_key, DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS, NO_EXPIRY_SENTINEL};
 pub use auth_uri::{AuthMode, parse_auth_uri, resolve_auth_mode, expand_tilde};
 pub use jwt::{JwtManager, TokenClaims};
 pub use magic_link::{MagicLinkRecord, generate_magic_link_code, hash_magic_link_code};

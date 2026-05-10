@@ -402,8 +402,9 @@ fn execute_backup(
     let output_path = std::path::Path::new(backup_dir).join(&filename);
     let output_path_string = output_path.to_string_lossy().to_string();
 
-    // Run the export.
-    let result = backup::export_snapshot(engine, snapshot_name, &output_path_string)
+    // Run the export. Scheduled backups don't include system data —
+    // they're for user data history, not credential rotation.
+    let result = backup::export_snapshot(engine, snapshot_name, &output_path_string, false)
         .map_err(|error| format!("backup export failed: {}", error))?;
 
     // Enforce retention policy if configured.

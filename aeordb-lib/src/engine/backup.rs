@@ -15,10 +15,14 @@ use crate::engine::version_manager::VersionManager;
 /// The output database contains only live entries at the given version:
 /// no voids, no deletion records, no stale overwrites, no history.
 /// backup_type = 1 (full export), base_hash = target_hash = version_hash.
+///
+/// If `include_system` is true, all `/.aeordb-system/` entries (users,
+/// groups, API keys, etc.) are included. Otherwise they are filtered out.
 pub fn export_version(
     source: &StorageEngine,
     version_hash: &[u8],
     output_path: &str,
+    include_system: bool,
 ) -> EngineResult<ExportResult> {
     // Walk the source tree to collect all live entries
     let tree = walk_version_tree(source, version_hash)?;
@@ -29,7 +33,7 @@ pub fn export_version(
     // Set backup metadata: type=1 (full export), base=target=version_hash
     output.set_backup_info(1, version_hash, version_hash)?;
 
-    let stats = write_tree_to_engine(&tree, source, &output)?;
+    let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
 
     // Set HEAD to the version hash
     output.update_head(version_hash)?;
@@ -39,6 +43,7 @@ pub fn export_version(
         files_written: stats.1,
         directories_written: stats.2,
         version_hash: version_hash.to_vec(),
+        snapshots_written: 0,
     })
 }
 
@@ -47,6 +52,7 @@ pub fn export_snapshot(
     source: &StorageEngine,
     snapshot_name: Option<&str>,
     output_path: &str,
+    include_system: bool,
 ) -> EngineResult<ExportResult> {
     let version_hash = match snapshot_name {
         Some(name) => {
@@ -60,7 +66,85 @@ pub fn export_snapshot(
         None => source.head_hash()?,
     };
 
-    export_version(source, &version_hash, output_path)
+    export_version(source, &version_hash, output_path, include_system)
+}
+
+/// Export the FULL database: HEAD + every named snapshot + (optionally) system data.
+///
+/// This is the proper "full backup" mode. Each named snapshot's tree is walked
+/// and all reachable entries are written. Snapshot records themselves are
+/// included so the imported database has the same snapshot history.
+///
+/// `include_system` controls whether `/.aeordb-system/` entries (users, groups,
+/// API keys) are included. Callers should validate root key authority before
+/// passing `include_system = true`.
+pub fn export_full(
+    source: &StorageEngine,
+    output_path: &str,
+    include_system: bool,
+) -> EngineResult<ExportResult> {
+    // Create output database
+    let output = StorageEngine::create(output_path)?;
+
+    // Use HEAD as the primary version hash for backup metadata
+    let head_hash = source.head_hash()?;
+    output.set_backup_info(1, &head_hash, &head_hash)?;
+
+    let mut total_chunks = 0u64;
+    let mut total_files = 0u64;
+    let mut total_dirs = 0u64;
+
+    // Track which version hashes we've already walked to avoid duplicate work
+    let mut walked: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+    // 1. Walk and write HEAD
+    let head_tree = walk_version_tree(source, &head_hash)?;
+    let stats = write_tree_to_engine(&head_tree, source, &output, include_system)?;
+    total_chunks += stats.0;
+    total_files += stats.1;
+    total_dirs += stats.2;
+    walked.insert(head_hash.clone());
+
+    // 2. Walk and write each named snapshot
+    let vm = VersionManager::new(source);
+    let snapshots = vm.list_snapshots()?;
+    let snapshot_count = snapshots.len() as u64;
+    for snap in &snapshots {
+        if walked.contains(&snap.root_hash) {
+            continue;
+        }
+        let tree = walk_version_tree(source, &snap.root_hash)?;
+        let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+        total_chunks += stats.0;
+        total_files += stats.1;
+        total_dirs += stats.2;
+        walked.insert(snap.root_hash.clone());
+    }
+
+    // 3. Copy snapshot records themselves (Snapshot-type entries) so the
+    //    imported database has the snapshot history. These live under
+    //    /.aeordb-system/snapshots/ regardless of include_system, but the
+    //    Snapshot entry type is also stored at content-hash keys.
+    if include_system {
+        // Snapshot records are filed under /.aeordb-system/snapshots/<name>
+        // and were already copied via the system path tree walk above.
+        // No additional work needed when include_system = true.
+    } else {
+        // Without system data, snapshots can't be imported anyway (the
+        // version manager reads them from /.aeordb-system/snapshots/).
+        // Skip — this is a HEAD-only export.
+    }
+
+    // Set HEAD to the source's HEAD
+    output.update_head(&head_hash)?;
+
+    Ok(ExportResult {
+        chunks_written: total_chunks,
+        files_written: total_files,
+        directories_written: total_dirs,
+        version_hash: head_hash,
+        snapshots_written: if include_system { snapshot_count } else { 0 },
+    })
 }
 
 /// Write all entries from a VersionTree into an output engine.
@@ -73,25 +157,28 @@ fn write_tree_to_engine(
     tree: &VersionTree,
     source: &StorageEngine,
     output: &StorageEngine,
+    include_system: bool,
 ) -> EngineResult<(u64, u64, u64)> {
     let mut chunks_written = 0u64;
     let mut files_written = 0u64;
     let mut dirs_written = 0u64;
 
-    // Collect chunk hashes referenced by non-system files only, so we don't
-    // export chunks that belong exclusively to /.aeordb-system/ files.
-    let mut user_chunk_hashes = std::collections::HashSet::new();
+    // Collect chunk hashes. If include_system is false, exclude chunks
+    // that belong exclusively to /.aeordb-system/ files. If true, include all.
+    let mut chunk_hashes_to_write = std::collections::HashSet::new();
     for (path, (_file_hash, record)) in &tree.files {
-        if !is_system_path(path) {
+        if include_system || !is_system_path(path) {
             for chunk_hash in &record.chunk_hashes {
-                user_chunk_hashes.insert(chunk_hash.clone());
+                chunk_hashes_to_write.insert(chunk_hash.clone());
             }
         }
     }
 
-    // Write only chunks referenced by user (non-system) files
-    for chunk_hash in &user_chunk_hashes {
+    // Write the chunks
+    for chunk_hash in &chunk_hashes_to_write {
         if let Some((_header, key, value)) = source.get_entry_including_deleted(chunk_hash)? {
+            // Skip if already written (idempotent for repeat exports)
+            if output.has_entry(&key)? { continue; }
             output.store_entry(EntryType::Chunk, &key, &value)?;
             chunks_written += 1;
         }
@@ -100,39 +187,51 @@ fn write_tree_to_engine(
     // Write FileRecords at both content-hash and path-hash keys.
     // The tree walker stores content hashes as file_hash, but read_file
     // looks up by path hash, so both must be present in the exported database.
-    // SECURITY: Skip all files under /.aeordb-system/.
     let file_algo = output.hash_algo();
     for (path, (file_hash, _record)) in &tree.files {
-        if is_system_path(path) {
+        if !include_system && is_system_path(path) {
             continue;
         }
         if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-            // Write at content-hash key (for tree walking / snapshots)
-            output.store_entry(EntryType::FileRecord, &key, &value)?;
+            if !output.has_entry(&key)? {
+                if is_system_path(path) {
+                    // System entries need the FLAG_SYSTEM bit set
+                    output.store_entry_with_flags(
+                        EntryType::FileRecord, &key, &value,
+                        crate::engine::entry_header::FLAG_SYSTEM,
+                    )?;
+                } else {
+                    output.store_entry(EntryType::FileRecord, &key, &value)?;
+                }
+            }
             // Also write at path-hash key (for read_file lookups)
             let path_key = file_path_hash(path, &file_algo)?;
-            if path_key != key {
-                output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+            if path_key != key && !output.has_entry(&path_key)? {
+                if is_system_path(path) {
+                    output.store_entry_with_flags(
+                        EntryType::FileRecord, &path_key, &value,
+                        crate::engine::entry_header::FLAG_SYSTEM,
+                    )?;
+                } else {
+                    output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+                }
             }
             files_written += 1;
         }
     }
 
     // Write DirectoryIndexes at both content-hash and path-hash keys.
-    // The tree walker stores content hashes as dir_hash, but list_directory
-    // looks up by path hash, so both must be present in the exported database.
-    // SECURITY: Skip all directories under /.aeordb-system/.
     let algo = output.hash_algo();
     for (path, (dir_hash, _data)) in &tree.directories {
-        if is_system_path(path) {
+        if !include_system && is_system_path(path) {
             continue;
         }
         if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
-            // Write at content-hash key (for tree walking / snapshots)
-            output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
-            // Also write at path-hash key (for list_directory lookups)
+            if !output.has_entry(&key)? {
+                output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            }
             let path_key = directory_path_hash(path, &algo)?;
-            if path_key != key {
+            if path_key != key && !output.has_entry(&path_key)? {
                 output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
             }
             dirs_written += 1;
@@ -140,18 +239,17 @@ fn write_tree_to_engine(
     }
 
     // Write symlink entries at both content-hash and path-hash keys.
-    // SECURITY: Skip all symlinks under /.aeordb-system/.
     let symlink_algo = output.hash_algo();
     for (path, (symlink_hash, _record)) in &tree.symlinks {
-        if is_system_path(path) {
+        if !include_system && is_system_path(path) {
             continue;
         }
         if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
-            // Write at content-hash key (for tree walking / snapshots)
-            output.store_entry(EntryType::Symlink, &key, &value)?;
-            // Also write at path-hash key (for get_symlink lookups)
+            if !output.has_entry(&key)? {
+                output.store_entry(EntryType::Symlink, &key, &value)?;
+            }
             let path_key = symlink_path_hash(path, &symlink_algo)?;
-            if path_key != key {
+            if path_key != key && !output.has_entry(&path_key)? {
                 output.store_entry(EntryType::Symlink, &path_key, &value)?;
             }
         }
@@ -167,18 +265,31 @@ pub struct ExportResult {
     pub files_written: u64,
     pub directories_written: u64,
     pub version_hash: Vec<u8>,
+    pub snapshots_written: u64,
 }
 
 impl std::fmt::Display for ExportResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Export complete.\n  Files: {}\n  Chunks: {}\n  Directories: {}\n  Version: {}",
-            self.files_written,
-            self.chunks_written,
-            self.directories_written,
-            hex::encode(&self.version_hash),
-        )
+        if self.snapshots_written > 0 {
+            write!(
+                f,
+                "Export complete.\n  Files: {}\n  Chunks: {}\n  Directories: {}\n  Snapshots: {}\n  HEAD: {}",
+                self.files_written,
+                self.chunks_written,
+                self.directories_written,
+                self.snapshots_written,
+                hex::encode(&self.version_hash),
+            )
+        } else {
+            write!(
+                f,
+                "Export complete.\n  Files: {}\n  Chunks: {}\n  Directories: {}\n  Version: {}",
+                self.files_written,
+                self.chunks_written,
+                self.directories_written,
+                hex::encode(&self.version_hash),
+            )
+        }
     }
 }
 
@@ -384,18 +495,41 @@ impl std::fmt::Display for PatchResult {
     }
 }
 
+/// Detect whether a backup contains any system data (entries with FLAG_SYSTEM set).
+/// Used to determine whether root-key authority is required for import.
+pub fn backup_contains_system_data(backup: &StorageEngine) -> EngineResult<bool> {
+    use crate::engine::entry_header::FLAG_SYSTEM;
+    // Scan FileRecords — system data is stored as FileRecords with FLAG_SYSTEM
+    let snapshot = backup.kv_snapshot.load();
+    let entries = snapshot.iter_by_type(KV_TYPE_FILE_RECORD);
+    for entry in entries {
+        // Read the entry's flags from its header
+        if let Ok(Some((header, _key, _value))) = backup.get_entry_including_deleted(&entry.hash) {
+            if header.flags & FLAG_SYSTEM != 0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Import an export or patch .aeordb file into a target database.
 ///
 /// For full exports (backup_type=1): stores all entries into target.
 /// For patches (backup_type=2): verifies base version match, applies changes.
 ///
 /// Does NOT automatically promote HEAD unless `promote` is true.
+///
+/// `include_system`: when true, system entries (users, groups, keys) from the
+/// backup are imported. The CALLER must verify root-key authority before
+/// passing true. When false, system entries in the backup are silently skipped.
 pub fn import_backup(
     ctx: &RequestContext,
     target: &StorageEngine,
     backup_path: &str,
     force: bool,
     promote: bool,
+    include_system: bool,
 ) -> EngineResult<ImportResult> {
     // Open backup for import (allows patches)
     let backup = StorageEngine::open_for_import(backup_path)?;
@@ -420,37 +554,84 @@ pub fn import_backup(
     let mut dirs_imported = 0u64;
     let mut deletions_applied = 0u64;
 
-    // Import chunks
-    let chunk_entries = backup.entries_by_type(KV_TYPE_CHUNK)?;
-    for (hash, value) in &chunk_entries {
-        if !target.has_entry(hash)? {
-            target.store_entry(EntryType::Chunk, hash, value)?;
-            chunks_imported += 1;
+    use crate::engine::entry_header::FLAG_SYSTEM;
+
+    // Helper: read entry with header so we can inspect FLAG_SYSTEM
+    let read_entry = |hash: &[u8]| -> EngineResult<Option<(u8, Vec<u8>)>> {
+        match backup.get_entry_including_deleted(hash)? {
+            Some((header, _key, value)) => Ok(Some((header.flags, value))),
+            None => Ok(None),
+        }
+    };
+
+    // Import chunks (chunks themselves don't carry FLAG_SYSTEM — they're
+    // shared between user and system files. Filtering happens at the file/dir level.)
+    let chunk_kv_entries = {
+        let snapshot = backup.kv_snapshot.load();
+        snapshot.iter_by_type(KV_TYPE_CHUNK)
+    };
+    for entry in chunk_kv_entries {
+        if !target.has_entry(&entry.hash)? {
+            if let Some((_flags, value)) = read_entry(&entry.hash)? {
+                target.store_entry(EntryType::Chunk, &entry.hash, &value)?;
+                chunks_imported += 1;
+                entries_imported += 1;
+            }
+        }
+    }
+
+    // Import FileRecords (skip system entries when include_system = false)
+    let file_kv_entries = {
+        let snapshot = backup.kv_snapshot.load();
+        snapshot.iter_by_type(KV_TYPE_FILE_RECORD)
+    };
+    for entry in file_kv_entries {
+        if let Some((flags, value)) = read_entry(&entry.hash)? {
+            let is_system = flags & FLAG_SYSTEM != 0;
+            if is_system && !include_system {
+                continue;
+            }
+            if is_system {
+                target.store_entry_with_flags(EntryType::FileRecord, &entry.hash, &value, FLAG_SYSTEM)?;
+            } else {
+                target.store_entry(EntryType::FileRecord, &entry.hash, &value)?;
+            }
+            files_imported += 1;
             entries_imported += 1;
         }
     }
 
-    // Import FileRecords
-    let file_entries = backup.entries_by_type(KV_TYPE_FILE_RECORD)?;
-    for (hash, value) in &file_entries {
-        target.store_entry(EntryType::FileRecord, hash, value)?;
-        files_imported += 1;
-        entries_imported += 1;
+    // Import DirectoryIndexes (skip system dirs when include_system = false)
+    let dir_kv_entries = {
+        let snapshot = backup.kv_snapshot.load();
+        snapshot.iter_by_type(KV_TYPE_DIRECTORY)
+    };
+    for entry in dir_kv_entries {
+        if let Some((flags, value)) = read_entry(&entry.hash)? {
+            let is_system = flags & FLAG_SYSTEM != 0;
+            if is_system && !include_system {
+                continue;
+            }
+            target.store_entry(EntryType::DirectoryIndex, &entry.hash, &value)?;
+            dirs_imported += 1;
+            entries_imported += 1;
+        }
     }
 
-    // Import DirectoryIndexes
-    let dir_entries = backup.entries_by_type(KV_TYPE_DIRECTORY)?;
-    for (hash, value) in &dir_entries {
-        target.store_entry(EntryType::DirectoryIndex, hash, value)?;
-        dirs_imported += 1;
-        entries_imported += 1;
-    }
-
-    // Import Symlinks
-    let symlink_entries = backup.entries_by_type(KV_TYPE_SYMLINK)?;
-    for (hash, value) in &symlink_entries {
-        target.store_entry(EntryType::Symlink, hash, value)?;
-        entries_imported += 1;
+    // Import Symlinks (skip system symlinks when include_system = false)
+    let sym_kv_entries = {
+        let snapshot = backup.kv_snapshot.load();
+        snapshot.iter_by_type(KV_TYPE_SYMLINK)
+    };
+    for entry in sym_kv_entries {
+        if let Some((flags, value)) = read_entry(&entry.hash)? {
+            let is_system = flags & FLAG_SYSTEM != 0;
+            if is_system && !include_system {
+                continue;
+            }
+            target.store_entry(EntryType::Symlink, &entry.hash, &value)?;
+            entries_imported += 1;
+        }
     }
 
     // Apply DeletionRecords (for patches)

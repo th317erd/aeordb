@@ -90,3 +90,29 @@ pub fn verify_api_key(key: &str, hash: &str) -> Result<bool, argon2::password_ha
     Err(error) => Err(error),
   }
 }
+
+/// Validate that a key is the root API key for the given engine.
+/// Returns Ok(true) if the key matches the root key in the engine,
+/// Ok(false) if the key is valid but not root, or doesn't match any key.
+/// Used by CLI tools (export/import) to authorize system data access.
+pub fn validate_root_key(
+  engine: &crate::engine::StorageEngine,
+  key: &str,
+) -> Result<bool, String> {
+  let (key_id_prefix, full_key) = parse_api_key(key)?;
+
+  let record = crate::engine::system_store::get_api_key_by_prefix(engine, &key_id_prefix)
+    .map_err(|e| format!("failed to read api key record: {}", e))?
+    .ok_or_else(|| "no api key found matching the provided key".to_string())?;
+
+  // Root key has user_id == None (no user — bootstrap key)
+  if record.user_id.is_some() {
+    return Ok(false);
+  }
+
+  // Verify the hash
+  match verify_api_key(&full_key, &record.key_hash) {
+    Ok(matches) => Ok(matches),
+    Err(e) => Err(format!("hash verification failed: {}", e)),
+  }
+}

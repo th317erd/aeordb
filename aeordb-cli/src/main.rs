@@ -98,6 +98,10 @@ enum Commands {
     /// Version hash to export (alternative to snapshot name)
     #[arg(long)]
     hash: Option<String>,
+    /// Root API key for full backup mode (includes system data and all snapshots).
+    /// Can also be set via AEORDB_ROOT_KEY env var.
+    #[arg(long)]
+    root_key: Option<String>,
   },
   /// Create a patch .aeordb containing only the changeset between two versions
   Diff {
@@ -128,6 +132,10 @@ enum Commands {
     /// Promote imported version to HEAD after import
     #[arg(long)]
     promote: bool,
+    /// Root API key for the target database. Required when importing system
+    /// data (users, groups, keys). Can also be set via AEORDB_ROOT_KEY env var.
+    #[arg(long)]
+    root_key: Option<String>,
   },
   /// Promote a version hash to HEAD
   Promote {
@@ -268,14 +276,14 @@ async fn main() {
     Commands::EmergencyReset { database, force } => {
       commands::emergency_reset::run(&database, force);
     }
-    Commands::Export { database, output, snapshot, hash } => {
-      commands::export::run(&database, &output, snapshot.as_deref(), hash.as_deref());
+    Commands::Export { database, output, snapshot, hash, root_key } => {
+      commands::export::run(&database, &output, snapshot.as_deref(), hash.as_deref(), root_key.as_deref());
     }
     Commands::Diff { database, output, from, to } => {
       commands::diff::run(&database, &output, &from, to.as_deref());
     }
-    Commands::Import { database, file, force, promote } => {
-      commands::import_cmd::run(&database, &file, force, promote);
+    Commands::Import { database, file, force, promote, root_key } => {
+      commands::import_cmd::run(&database, &file, force, promote, root_key.as_deref());
     }
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);

@@ -53,12 +53,15 @@ pub async fn export_backup(
                     .into_response()
             }
         };
-        crate::engine::backup::export_version(&state.engine, &hash_bytes, &output_path)
+        // HTTP exports never include system data — security boundary.
+        // For full system backups, use the CLI with the root key.
+        crate::engine::backup::export_version(&state.engine, &hash_bytes, &output_path, false)
     } else {
         crate::engine::backup::export_snapshot(
             &state.engine,
             params.snapshot.as_deref(),
             &output_path,
+            false,
         )
     };
 
@@ -237,12 +240,15 @@ pub async fn import_backup(
     }
 
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+    // HTTP imports never accept system data — security boundary.
+    // System data import requires the CLI with root key.
     let result = crate::engine::backup::import_backup(
         &ctx,
         &state.engine,
         &temp_path,
         params.force.unwrap_or(false),
         params.promote.unwrap_or(false),
+        false,
     );
 
     let _ = std::fs::remove_file(&temp_path);
