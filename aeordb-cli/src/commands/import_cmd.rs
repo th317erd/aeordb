@@ -10,15 +10,7 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
         process::exit(1);
     }
 
-    let target = match aeordb::engine::StorageEngine::open(database) {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("Error opening target database: {}", e);
-            process::exit(1);
-        }
-    };
-
-    // Detect whether the backup file contains system data
+    // Open the backup first (for inspection AND root key validation)
     let backup_for_inspect = match aeordb::engine::StorageEngine::open_for_import(file) {
         Ok(engine) => engine,
         Err(e) => {
@@ -33,28 +25,30 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
             process::exit(1);
         }
     };
-    drop(backup_for_inspect);
 
     // Resolve root key from arg or env var
     let provided_key = root_key
         .map(|s| s.to_string())
         .or_else(|| std::env::var("AEORDB_ROOT_KEY").ok());
 
-    // Determine include_system: requires both a system-bearing backup AND a valid root key
+    // Determine include_system: requires both a system-bearing backup AND a
+    // valid root key from the BACKUP itself (proves ownership of the data
+    // being imported — same model as future encryption where the root key
+    // is the decryption key).
     let include_system = if backup_has_system {
-        match provided_key {
-            Some(key) => match aeordb::auth::validate_root_key(&target, &key) {
+        match &provided_key {
+            Some(key) => match aeordb::auth::validate_root_key(&backup_for_inspect, key) {
                 Ok(true) => {
-                    println!("Root key validated — system data will be imported.");
+                    println!("Root key validated against backup — system data will be imported.");
                     true
                 }
                 Ok(false) => {
-                    eprintln!("Error: backup contains system data, but provided key is not a valid root key for the target database.");
-                    eprintln!("       Either provide the correct root key for the target, or import into a fresh database.");
+                    eprintln!("Error: backup contains system data, but provided key is not the root key for the backup.");
+                    eprintln!("       Provide the root key from the SOURCE database (the backup's owner).");
                     process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("Error validating root key: {}", e);
+                    eprintln!("Error validating root key against backup: {}", e);
                     process::exit(1);
                 }
             },
@@ -69,6 +63,16 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
             println!("Note: root key provided but backup contains no system data — proceeding with user-data-only import.");
         }
         false
+    };
+    drop(backup_for_inspect);
+
+    // Now open the target
+    let target = match aeordb::engine::StorageEngine::open(database) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("Error opening target database: {}", e);
+            process::exit(1);
+        }
     };
 
     let ctx = aeordb::engine::RequestContext::system();

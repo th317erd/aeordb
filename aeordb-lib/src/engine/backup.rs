@@ -121,18 +121,15 @@ pub fn export_full(
         walked.insert(snap.root_hash.clone());
     }
 
-    // 3. Copy snapshot records themselves (Snapshot-type entries) so the
-    //    imported database has the snapshot history. These live under
-    //    /.aeordb-system/snapshots/ regardless of include_system, but the
-    //    Snapshot entry type is also stored at content-hash keys.
+    // 3. System data is stored under /.aeordb-system/ but is NOT propagated
+    //    to root (see directory_ops.rs:1662) — the tree walker can't reach
+    //    it from HEAD. Walk it as a separate subtree.
     if include_system {
-        // Snapshot records are filed under /.aeordb-system/snapshots/<name>
-        // and were already copied via the system path tree walk above.
-        // No additional work needed when include_system = true.
-    } else {
-        // Without system data, snapshots can't be imported anyway (the
-        // version manager reads them from /.aeordb-system/snapshots/).
-        // Skip — this is a HEAD-only export.
+        let system_stats = export_system_subtree(source, &output)?;
+        total_files += system_stats.0;
+        total_dirs += system_stats.1;
+        // Also copy all Snapshot-type entries (the version chain records)
+        copy_snapshot_entries(source, &output)?;
     }
 
     // Set HEAD to the source's HEAD
@@ -256,6 +253,156 @@ fn write_tree_to_engine(
     }
 
     Ok((chunks_written, files_written, dirs_written))
+}
+
+/// Walk the /.aeordb-system/ subtree(s) and copy all entries.
+///
+/// System paths are not propagated to root, so the regular HEAD walker
+/// can't reach them. Furthermore, individual system subdirectories
+/// (/.aeordb-system/users/, /groups/, etc.) may be orphaned from the
+/// /.aeordb-system/ children list itself — they exist as path-hash
+/// entries but aren't linked. We walk each known system subdirectory
+/// individually to ensure we capture everything.
+///
+/// Returns (file_records_copied, directories_copied).
+fn export_system_subtree(
+    source: &StorageEngine,
+    output: &StorageEngine,
+) -> EngineResult<(u64, u64)> {
+    let algo = source.hash_algo();
+    let hash_length = algo.hash_length();
+
+    // List of all known system subdirectories. Walking each separately
+    // ensures we capture all data even if some subdirectories aren't
+    // linked from /.aeordb-system/ itself.
+    let system_paths = [
+        "/.aeordb-system",
+        "/.aeordb-system/api-keys",
+        "/.aeordb-system/users",
+        "/.aeordb-system/groups",
+        "/.aeordb-system/snapshots",
+        "/.aeordb-system/config",
+        "/.aeordb-system/refresh-tokens",
+        "/.aeordb-system/magic-links",
+    ];
+
+    let mut sys_tree = crate::engine::tree_walker::VersionTree::new();
+
+    for sys_path in &system_paths {
+        let sys_dir_key = directory_path_hash(sys_path, &algo)?;
+        let raw_value = match source.get_entry_including_deleted(&sys_dir_key)? {
+            Some((_header, _key, value)) => value,
+            None => continue, // subdirectory doesn't exist in this source
+        };
+
+        // Resolve hard link if present
+        let sys_dir_hash = if raw_value.len() == hash_length {
+            raw_value
+        } else {
+            // Inline data — compute content hash to walk it
+            algo.compute_hash(&raw_value)?
+        };
+
+        // Also record the path-hash → content-hash mapping in the tree
+        sys_tree.directories.insert(
+            sys_path.to_string(),
+            (sys_dir_hash.clone(), Vec::new()),
+        );
+
+        if let Err(e) = crate::engine::tree_walker::walk_subtree(
+            source, sys_path, &sys_dir_hash, &mut sys_tree,
+        ) {
+            tracing::warn!("export: failed to walk {}: {}", sys_path, e);
+        }
+    }
+
+    // Write system tree entries with overwrite. Old snapshots may have
+    // included /.aeordb-system/ in their root listings (before the change
+    // that stops system path propagation to root), so a snapshot walk
+    // could have written stale system directory data. We need to overwrite
+    // those with the current state.
+    write_system_tree(&sys_tree, source, output)
+}
+
+/// Like write_tree_to_engine but unconditionally writes system entries
+/// (overwrites instead of skipping if existing). Used when copying the
+/// authoritative current system state.
+fn write_system_tree(
+    tree: &crate::engine::tree_walker::VersionTree,
+    source: &StorageEngine,
+    output: &StorageEngine,
+) -> EngineResult<(u64, u64)> {
+    use crate::engine::entry_header::FLAG_SYSTEM;
+    let mut files_written = 0u64;
+    let mut dirs_written = 0u64;
+
+    let algo = output.hash_algo();
+
+    // Chunks for system files (system files rarely have chunks, but include them)
+    let mut chunk_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for (_path, (_file_hash, record)) in &tree.files {
+        for ch in &record.chunk_hashes { chunk_hashes.insert(ch.clone()); }
+    }
+    for ch in &chunk_hashes {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(ch)? {
+            if !output.has_entry(&key)? {
+                output.store_entry(EntryType::Chunk, &key, &value)?;
+            }
+        }
+    }
+
+    // FileRecords (overwrite to ensure latest system state)
+    for (path, (file_hash, _record)) in &tree.files {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+            output.store_entry_with_flags(EntryType::FileRecord, &key, &value, FLAG_SYSTEM)?;
+            let path_key = file_path_hash(path, &algo)?;
+            if path_key != key {
+                output.store_entry_with_flags(EntryType::FileRecord, &path_key, &value, FLAG_SYSTEM)?;
+            }
+            files_written += 1;
+        }
+    }
+
+    // DirectoryIndex (overwrite — this is the critical fix for the api-keys bug)
+    for (path, (dir_hash, _data)) in &tree.directories {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
+            output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+            let path_key = directory_path_hash(path, &algo)?;
+            if path_key != key {
+                output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
+            }
+            dirs_written += 1;
+        }
+    }
+
+    // Symlinks
+    for (path, (sym_hash, _record)) in &tree.symlinks {
+        if let Some((_header, key, value)) = source.get_entry_including_deleted(sym_hash)? {
+            output.store_entry_with_flags(EntryType::Symlink, &key, &value, FLAG_SYSTEM)?;
+            let path_key = symlink_path_hash(path, &algo)?;
+            if path_key != key {
+                output.store_entry_with_flags(EntryType::Symlink, &path_key, &value, FLAG_SYSTEM)?;
+            }
+        }
+    }
+
+    Ok((files_written, dirs_written))
+}
+
+/// Copy all Snapshot-type entries from source to output. These represent
+/// the version history chain — without them, the imported database has
+/// no snapshot list even if the per-snapshot data is present.
+fn copy_snapshot_entries(source: &StorageEngine, output: &StorageEngine) -> EngineResult<u64> {
+    use crate::engine::kv_store::KV_TYPE_SNAPSHOT;
+    let mut copied = 0u64;
+    let snapshot_entries = source.entries_by_type(KV_TYPE_SNAPSHOT)?;
+    for (hash, value) in snapshot_entries {
+        if !output.has_entry(&hash)? {
+            output.store_entry(EntryType::Snapshot, &hash, &value)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 /// Result of an export operation.
@@ -631,6 +778,19 @@ pub fn import_backup(
             }
             target.store_entry(EntryType::Symlink, &entry.hash, &value)?;
             entries_imported += 1;
+        }
+    }
+
+    // Import Snapshot-type entries (only when system data is allowed —
+    // snapshots reference system snapshot files and aren't useful without them)
+    if include_system {
+        use crate::engine::kv_store::KV_TYPE_SNAPSHOT;
+        let snap_entries = backup.entries_by_type(KV_TYPE_SNAPSHOT)?;
+        for (hash, value) in &snap_entries {
+            if !target.has_entry(hash)? {
+                target.store_entry(EntryType::Snapshot, hash, value)?;
+                entries_imported += 1;
+            }
         }
     }
 

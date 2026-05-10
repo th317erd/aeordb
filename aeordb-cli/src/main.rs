@@ -171,6 +171,12 @@ enum Commands {
     #[arg(long)]
     dry_run: bool,
   },
+  /// Probe a database file: list /.aeordb-system/ contents (diagnostic).
+  #[command(hide = true)]
+  Probe {
+    #[arg(short = 'D', long)]
+    database: String,
+  },
 }
 
 #[tokio::main]
@@ -293,6 +299,9 @@ async fn main() {
     }
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);
+    }
+    Commands::Probe { database } => {
+      commands::probe::run(&database);
     }
   }
 }

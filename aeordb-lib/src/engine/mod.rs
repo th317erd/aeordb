@@ -153,7 +153,7 @@ pub use sync_api::{
     ChunkData, ConflictRecord, ConflictVersionInfo, FileHistoryEntry,
 };
 pub use sync_engine::{SyncEngine, SyncConfig, PeerSyncState, SyncCycleResult, spawn_sync_loop};
-pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
+pub use tree_walker::{walk_version_tree, walk_subtree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{export_version, export_snapshot, export_full, backup_contains_system_data, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};

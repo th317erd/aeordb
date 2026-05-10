@@ -48,6 +48,22 @@ pub fn walk_version_tree(
   Ok(tree)
 }
 
+/// Walk a subtree rooted at a given path. Used for collecting system data
+/// (/.aeordb-system/) which is not reachable from the user-visible HEAD tree
+/// because system paths are not propagated to root.
+///
+/// Adds entries into the provided tree.
+pub fn walk_subtree(
+  engine: &StorageEngine,
+  start_path: &str,
+  start_dir_hash: &[u8],
+  tree: &mut VersionTree,
+) -> EngineResult<()> {
+  let mut visited = HashSet::new();
+  let hash_length = engine.hash_algo().hash_length();
+  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut visited)
+}
+
 /// Recursively walk a directory and its children.
 ///
 /// The `visited` set tracks directory hashes already traversed to prevent
