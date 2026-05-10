@@ -514,11 +514,42 @@ pub async fn shared_with_me(
         // (e.g. share-file-A and share-file-B with different path_patterns).
         for link in &perms.links {
             if user_groups.contains(&link.group) {
-                shared_paths.push(serde_json::json!({
+                // For file-pattern shares, look up the file's metadata so the
+                // client can render a real preview/listing entry instead of a
+                // placeholder.
+                let metadata = if let Some(ref pattern) = link.path_pattern {
+                    let file_path = if dir_path == "/" {
+                        format!("/{}", pattern)
+                    } else {
+                        format!("{}/{}", dir_path, pattern)
+                    };
+                    ops.get_metadata(&file_path).ok().flatten().map(|fr| {
+                        serde_json::json!({
+                            "size": fr.total_size,
+                            "created_at": fr.created_at,
+                            "updated_at": fr.updated_at,
+                            "content_type": fr.content_type,
+                        })
+                    })
+                } else {
+                    None
+                };
+
+                let mut entry_value = serde_json::json!({
                     "path": dir_path,
                     "permissions": link.allow,
                     "path_pattern": link.path_pattern,
-                }));
+                });
+                if let Some(meta) = metadata {
+                    if let Some(obj) = entry_value.as_object_mut() {
+                        if let Some(meta_obj) = meta.as_object() {
+                            for (k, v) in meta_obj {
+                                obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                shared_paths.push(entry_value);
             }
         }
     }
