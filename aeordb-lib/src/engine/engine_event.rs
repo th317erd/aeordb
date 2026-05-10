@@ -2,12 +2,19 @@ use serde::Serialize;
 use uuid::Uuid;
 
 /// A single engine event with envelope metadata + typed payload.
+///
+/// `user_id` is the actor who triggered the event.
+/// `recipient_user_id` (when present) is the user the event is ADDRESSED TO —
+/// used by the per-user SSE channel for things like file share notifications.
+/// Events without a recipient are global (broadcast to all subscribers).
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineEvent {
     pub event_id: String,
     pub event_type: String,
     pub timestamp: i64,
     pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_user_id: Option<String>,
     pub payload: serde_json::Value,
 }
 
@@ -18,6 +25,20 @@ impl EngineEvent {
             event_type: event_type.to_string(),
             timestamp: chrono::Utc::now().timestamp_millis(),
             user_id: user_id.to_string(),
+            recipient_user_id: None,
+            payload,
+        }
+    }
+
+    /// Create an event addressed to a specific recipient user.
+    /// Delivered only via the per-user SSE channel for that user.
+    pub fn for_user(event_type: &str, actor_user_id: &str, recipient_user_id: &str, payload: serde_json::Value) -> Self {
+        EngineEvent {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            user_id: actor_user_id.to_string(),
+            recipient_user_id: Some(recipient_user_id.to_string()),
             payload,
         }
     }
@@ -146,6 +167,7 @@ pub const EVENT_API_KEYS_REVOKED: &str = "api_keys_revoked";
 pub const EVENT_PLUGINS_DEPLOYED: &str = "plugins_deployed";
 pub const EVENT_PLUGINS_REMOVED: &str = "plugins_removed";
 pub const EVENT_HEARTBEAT: &str = "heartbeat";
+pub const EVENT_FILES_SHARED: &str = "files_shared";
 pub const EVENT_METRICS: &str = "metrics";
 pub const EVENT_GC_STARTED: &str = "gc_started";
 pub const EVENT_GC_COMPLETED: &str = "gc_completed";

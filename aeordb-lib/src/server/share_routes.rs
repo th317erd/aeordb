@@ -226,11 +226,30 @@ pub async fn share(
         shared_paths.push(normalized);
     }
 
+    // Emit per-recipient SSE events for live notification.
+    // Each user receives one event per shared path (delivered via /events/me).
+    let direct_users: Vec<String> = body.users.clone().unwrap_or_default();
+    for recipient_uid in &direct_users {
+        for path in &shared_paths {
+            let event = crate::engine::engine_event::EngineEvent::for_user(
+                crate::engine::engine_event::EVENT_FILES_SHARED,
+                &claims.sub,
+                recipient_uid,
+                serde_json::json!({
+                    "path": path,
+                    "permissions": body.permissions,
+                    "from": sharer_name,
+                }),
+            );
+            state.event_bus.emit(event);
+        }
+    }
+
     // Spawn background email notification (best-effort)
     let engine_clone = state.engine.clone();
     let notify_paths = body.paths.clone();
     let notify_permissions = body.permissions.clone();
-    let notify_users: Vec<String> = body.users.clone().unwrap_or_default();
+    let notify_users: Vec<String> = direct_users;
     let sharer = sharer_name.clone();
     tokio::spawn(async move {
         send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions).await;

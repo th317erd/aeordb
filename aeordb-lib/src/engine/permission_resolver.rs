@@ -55,6 +55,16 @@ impl<'a> PermissionResolver<'a> {
       return Ok(true);
     }
 
+    // Normalize: callers may pass paths without a leading slash (e.g. the
+    // permission middleware strips "/files/" leaving "foo/bar/baz.txt").
+    // path_levels returns levels WITH a leading slash, so we must align.
+    let normalized = if path.starts_with('/') {
+      path.to_string()
+    } else {
+      format!("/{}", path)
+    };
+    let path = normalized.as_str();
+
     // Get user's group memberships.
     let user_groups = self.group_cache.get(user_id, self.engine)?;
 

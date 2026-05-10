@@ -336,6 +336,9 @@ pub fn create_app_with_all_and_task_queue(
     .route("/blobs/config", get(upload_routes::upload_config))
     // System: SSE event stream
     .route("/system/events", get(sse_routes::event_stream))
+    // Per-user SSE channel: only delivers events addressed to the JWT's user.
+    // Used for file share notifications and other personal events.
+    .route("/events/me", get(sse_routes::user_event_stream))
     // NOTE: /files/query, /files/download, /files/mkdir, /files/share,
     // /files/shares, /files/share-link, /files/share-links are registered
     // in large_upload_routes (same router as /files/{*path} wildcard) to
