@@ -500,24 +500,25 @@ pub async fn shared_with_me(
             Err(_) => continue,
         };
 
-        // Check if any link in this .permissions file matches the user's groups
+        // Extract the directory path once (strip /.aeordb-permissions suffix)
+        let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
+            entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
+        } else if entry.path == "/.aeordb-permissions" {
+            "/".to_string()
+        } else {
+            continue;
+        };
+
+        // Collect EVERY link in this .permissions file that matches the user's
+        // groups — one user may have multiple shares in the same directory
+        // (e.g. share-file-A and share-file-B with different path_patterns).
         for link in &perms.links {
             if user_groups.contains(&link.group) {
-                // Extract the directory path (strip /.aeordb-permissions suffix)
-                let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
-                    entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
-                } else if entry.path == "/.aeordb-permissions" {
-                    "/".to_string()
-                } else {
-                    continue;
-                };
-
                 shared_paths.push(serde_json::json!({
                     "path": dir_path,
                     "permissions": link.allow,
                     "path_pattern": link.path_pattern,
                 }));
-                break; // one match per .permissions file is enough
             }
         }
     }
