@@ -9,6 +9,29 @@ AeorDB supports exporting database versions as self-contained `.aeordb` files, c
 - **Import**: Applying an export or patch into a target database.
 - **Promote**: Setting a version hash as the current HEAD.
 
+## Privileged Backup (`--root-key`)
+
+By default, `aeordb export` includes only user data — the export omits everything under `/.aeordb-system/` (users, groups, snapshot records) and stops at the specified version (HEAD or one named snapshot).
+
+When you supply the source database's **root API key**, the CLI unlocks privileged backup mode:
+
+- **System data** is included: `/.aeordb-system/users/`, `/.aeordb-system/groups/`, `/.aeordb-system/snapshots/`, `/.aeordb-system/config/`.
+- **All named snapshots** are walked, not just HEAD. The exported `.aeordb` carries the full snapshot history.
+- **Credentials are NEVER exported**, regardless of the key: `/.aeordb-system/api-keys/`, `/.aeordb-system/refresh-tokens/`, and `/.aeordb-system/magic-links/` are always filtered out. Credentials are tied to the database identity that issued them; importing them would conflict with the target's own bootstrap key.
+
+Supply the key via flag or environment variable:
+
+```bash
+# Flag
+aeordb export -D source.aeordb -o backup.aeordb \
+  --root-key aeor_k_…
+
+# Environment variable
+AEORDB_ROOT_KEY=aeor_k_… aeordb export -D source.aeordb -o backup.aeordb
+```
+
+When importing a backup that contains system data, the target database's root key must be provided the same way. This proves ownership of the destination before user/group/snapshot records are merged.
+
 ## Full Export
 
 Export HEAD, a named snapshot, or a specific version hash as a self-contained backup.
@@ -44,6 +67,8 @@ curl -X POST http://localhost:6830/versions/export \
   -H "Content-Type: application/json" \
   -d '{"output": "backup.aeordb", "snapshot": "v1"}'
 ```
+
+> **Note:** HTTP exports never include system data or other snapshots — that's CLI-only with `--root-key`. The HTTP endpoint is for sharing a single version's user data.
 
 ### Output
 
@@ -119,11 +144,22 @@ aeordb import --database data.aeordb --file backup.aeordb --promote
 
 # Force import a patch even if base version doesn't match
 aeordb import --database data.aeordb --file patch.aeordb --force
+
+# Import a privileged backup that contains system data (users, groups,
+# snapshots). Required when the backup was made with --root-key.
+aeordb import --database data.aeordb --file backup.aeordb \
+  --root-key aeor_k_…
 ```
 
 **Flags:**
 - `--promote`: Automatically set HEAD to the imported version
 - `--force`: Skip base version verification for patches
+- `--root-key <key>` (or `AEORDB_ROOT_KEY` env var): Required when the
+  backup contains system data. The key must be the **target** database's
+  root key — proving you own where the data is going.
+
+When the backup contains system data and no root key is provided, the
+import succeeds but skips the system entries (a warning is printed).
 
 ### HTTP API
 
