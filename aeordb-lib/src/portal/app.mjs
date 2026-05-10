@@ -188,6 +188,48 @@ function setPageParam(page) {
   navigate();
 }
 
+// ---------------------------------------------------------------------------
+// Per-user SSE channel: receive notifications addressed to the current user.
+// JWT-gated; the server only delivers events whose recipient_user_id matches
+// the authenticated user.
+// ---------------------------------------------------------------------------
+
+let _userEventSource = null;
+
+function connectUserEventStream() {
+  if (_userEventSource) return;
+  if (!AUTH.token) return;
+
+  // EventSource doesn't support Authorization headers — pass token as query param.
+  const url = `/events/me?token=${encodeURIComponent(AUTH.token)}`;
+  try {
+    _userEventSource = new EventSource(url);
+
+    _userEventSource.addEventListener('files_shared', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const payload = data.payload || {};
+        const path = payload.path || 'a file';
+        const from = payload.from || 'someone';
+        if (window.aeorToast) {
+          window.aeorToast(`${from} shared ${path} with you`, 'info');
+        }
+      } catch (_) {}
+    });
+
+    _userEventSource.onerror = () => {
+      if (!AUTH.token) {
+        _userEventSource.close();
+        _userEventSource = null;
+      }
+    };
+  } catch (_) {
+    // SSE not supported — silently skip
+  }
+}
+
+window.connectUserEventStream = connectUserEventStream;
+
 // Router
 function navigate() {
   const page = getPageParam();
@@ -353,47 +395,3 @@ async function init() {
 }
 
 init();
-
-// ---------------------------------------------------------------------------
-// Per-user SSE channel: receive notifications addressed to the current user.
-// JWT-gated; the server only delivers events whose recipient_user_id matches
-// the authenticated user.
-// ---------------------------------------------------------------------------
-
-let _userEventSource = null;
-
-function connectUserEventStream() {
-  if (_userEventSource) return;
-  if (!AUTH.token) return;
-
-  // EventSource doesn't support Authorization headers — pass token as query param.
-  const url = `/events/me?token=${encodeURIComponent(AUTH.token)}`;
-  try {
-    _userEventSource = new EventSource(url);
-
-    _userEventSource.addEventListener('files_shared', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const payload = data.payload || {};
-        const path = payload.path || 'a file';
-        const from = payload.from || 'someone';
-        if (window.aeorToast) {
-          window.aeorToast(`${from} shared ${path} with you`, 'info');
-        }
-      } catch (_) {}
-    });
-
-    _userEventSource.onerror = () => {
-      // Auto-reconnect handled by EventSource — but reset on auth changes
-      if (!AUTH.token) {
-        _userEventSource.close();
-        _userEventSource = null;
-      }
-    };
-  } catch (_) {
-    // SSE not supported — silently skip
-  }
-}
-
-// Expose so the file browser etc. can also listen for new shares directly.
-window.connectUserEventStream = connectUserEventStream;

@@ -68,7 +68,10 @@ class AeorDashboard extends HTMLElement {
 
   connectSSE() {
     // Build SSE URL — subscribe to metrics events
-    let url = '/events/stream?events=metrics';
+    let url = '/system/events?events=metrics';
+    if (window.AUTH && window.AUTH.token) {
+      url += '&token=' + encodeURIComponent(window.AUTH.token);
+    }
 
     // EventSource doesn't support Authorization headers natively.
     // For --auth=false mode, no token is needed. For auth mode,
