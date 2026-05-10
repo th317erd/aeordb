@@ -1,5 +1,14 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_ops::{file_path_hash, directory_path_hash, is_system_path};
+
+/// Credential paths are always excluded from backups. Importing credentials
+/// would tie the target's auth state to the source's identity — confusing
+/// at best, security risk at worst. The target uses its own bootstrap key.
+fn is_credential_path(path: &str) -> bool {
+    path.starts_with("/.aeordb-system/api-keys")
+        || path.starts_with("/.aeordb-system/refresh-tokens")
+        || path.starts_with("/.aeordb-system/magic-links")
+}
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
@@ -161,9 +170,11 @@ fn write_tree_to_engine(
     let mut dirs_written = 0u64;
 
     // Collect chunk hashes. If include_system is false, exclude chunks
-    // that belong exclusively to /.aeordb-system/ files. If true, include all.
+    // that belong exclusively to /.aeordb-system/ files. If true, include all
+    // EXCEPT credentials (which are never backed up).
     let mut chunk_hashes_to_write = std::collections::HashSet::new();
     for (path, (_file_hash, record)) in &tree.files {
+        if is_credential_path(path) { continue; }
         if include_system || !is_system_path(path) {
             for chunk_hash in &record.chunk_hashes {
                 chunk_hashes_to_write.insert(chunk_hash.clone());
@@ -186,6 +197,7 @@ fn write_tree_to_engine(
     // looks up by path hash, so both must be present in the exported database.
     let file_algo = output.hash_algo();
     for (path, (file_hash, _record)) in &tree.files {
+        if is_credential_path(path) { continue; }
         if !include_system && is_system_path(path) {
             continue;
         }
@@ -220,6 +232,7 @@ fn write_tree_to_engine(
     // Write DirectoryIndexes at both content-hash and path-hash keys.
     let algo = output.hash_algo();
     for (path, (dir_hash, _data)) in &tree.directories {
+        if is_credential_path(path) { continue; }
         if !include_system && is_system_path(path) {
             continue;
         }
@@ -238,6 +251,7 @@ fn write_tree_to_engine(
     // Write symlink entries at both content-hash and path-hash keys.
     let symlink_algo = output.hash_algo();
     for (path, (symlink_hash, _record)) in &tree.symlinks {
+        if is_credential_path(path) { continue; }
         if !include_system && is_system_path(path) {
             continue;
         }
@@ -272,18 +286,24 @@ fn export_system_subtree(
     let algo = source.hash_algo();
     let hash_length = algo.hash_length();
 
-    // List of all known system subdirectories. Walking each separately
-    // ensures we capture all data even if some subdirectories aren't
-    // linked from /.aeordb-system/ itself.
+    // List of system subdirectories to include in the backup.
+    // CREDENTIALS (api-keys, refresh-tokens, magic-links) are always excluded —
+    // they're tied to the database identity that issued them. After a restore,
+    // the target's own bootstrap key is the new identity, and api keys are
+    // regenerated per user. Importing credentials would create confusion
+    // (which key is valid? which database authorized this token?) and
+    // doesn't match the encryption model where the root key is the
+    // master key for the database that owns it.
+    //
+    // We also exclude /.aeordb-system itself — the target's own writes
+    // will reconstruct that directory listing as users/groups/etc. land.
+    // Otherwise we'd inherit a listing that references credential subdirs
+    // we deliberately skipped.
     let system_paths = [
-        "/.aeordb-system",
-        "/.aeordb-system/api-keys",
         "/.aeordb-system/users",
         "/.aeordb-system/groups",
         "/.aeordb-system/snapshots",
         "/.aeordb-system/config",
-        "/.aeordb-system/refresh-tokens",
-        "/.aeordb-system/magic-links",
     ];
 
     let mut sys_tree = crate::engine::tree_walker::VersionTree::new();

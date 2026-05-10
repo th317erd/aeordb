@@ -10,7 +10,7 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
         process::exit(1);
     }
 
-    // Open the backup first (for inspection AND root key validation)
+    // Inspect the backup to detect if it contains system data
     let backup_for_inspect = match aeordb::engine::StorageEngine::open_for_import(file) {
         Ok(engine) => engine,
         Err(e) => {
@@ -25,6 +25,16 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
             process::exit(1);
         }
     };
+    drop(backup_for_inspect);
+
+    // Open the target
+    let target = match aeordb::engine::StorageEngine::open(database) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("Error opening target database: {}", e);
+            process::exit(1);
+        }
+    };
 
     // Resolve root key from arg or env var
     let provided_key = root_key
@@ -32,29 +42,30 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
         .or_else(|| std::env::var("AEORDB_ROOT_KEY").ok());
 
     // Determine include_system: requires both a system-bearing backup AND a
-    // valid root key from the BACKUP itself (proves ownership of the data
-    // being imported — same model as future encryption where the root key
-    // is the decryption key).
+    // valid root key for the TARGET database (proves you own where the
+    // data is going). Credentials are never in backups, so we can't
+    // validate against the backup itself — and we shouldn't, since the
+    // user authenticates as the target's owner going forward.
     let include_system = if backup_has_system {
         match &provided_key {
-            Some(key) => match aeordb::auth::validate_root_key(&backup_for_inspect, key) {
+            Some(key) => match aeordb::auth::validate_root_key(&target, key) {
                 Ok(true) => {
-                    println!("Root key validated against backup — system data will be imported.");
+                    println!("Root key validated against target — system data will be imported.");
                     true
                 }
                 Ok(false) => {
-                    eprintln!("Error: backup contains system data, but provided key is not the root key for the backup.");
-                    eprintln!("       Provide the root key from the SOURCE database (the backup's owner).");
+                    eprintln!("Error: backup contains system data, but provided key is not the root key for the target database.");
+                    eprintln!("       Use the TARGET database's bootstrap key (shown when the target was first created).");
                     process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("Error validating root key against backup: {}", e);
+                    eprintln!("Error validating root key against target: {}", e);
                     process::exit(1);
                 }
             },
             None => {
-                eprintln!("Note: backup contains system data (users, groups, keys), but no root key provided.");
-                eprintln!("      System data will be SKIPPED. Provide --root-key <key> or set AEORDB_ROOT_KEY to import system data.");
+                eprintln!("Note: backup contains system data (users, groups, snapshots), but no root key provided.");
+                eprintln!("      System data will be SKIPPED. Provide --root-key <target-key> or set AEORDB_ROOT_KEY to import.");
                 false
             }
         }
@@ -63,16 +74,6 @@ pub fn run(database: &str, file: &str, force: bool, promote: bool, root_key: Opt
             println!("Note: root key provided but backup contains no system data — proceeding with user-data-only import.");
         }
         false
-    };
-    drop(backup_for_inspect);
-
-    // Now open the target
-    let target = match aeordb::engine::StorageEngine::open(database) {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("Error opening target database: {}", e);
-            process::exit(1);
-        }
     };
 
     let ctx = aeordb::engine::RequestContext::system();
