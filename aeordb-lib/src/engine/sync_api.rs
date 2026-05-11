@@ -122,7 +122,16 @@ pub fn compute_sync_diff(
     let vm = VersionManager::new(engine);
     let head_hash = vm.get_head_hash()?;
 
-    let current_tree = walk_version_tree(engine, &head_hash)?;
+    let mut current_tree = walk_version_tree(engine, &head_hash)?;
+    if include_system {
+        // System paths aren't reachable from HEAD's user tree (by design).
+        // Walk them explicitly so they appear in the diff. The base tree
+        // intentionally is NOT augmented — system data isn't versioned with
+        // HEAD, so we can't reconstruct its past state. Diff treats every
+        // system file as "added"; the receiving peer dedupes by content
+        // hash.
+        crate::engine::tree_walker::augment_with_system_subtrees(engine, &mut current_tree);
+    }
 
     let (mut diff_result, chunk_hashes) = if let Some(since) = since_root_hash {
         let base_tree = walk_version_tree(engine, since)?;

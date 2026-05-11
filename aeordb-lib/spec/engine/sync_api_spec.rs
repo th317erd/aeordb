@@ -128,7 +128,11 @@ fn test_compute_diff_with_paths_filter() {
 fn test_compute_diff_excludes_system() {
     let (engine, _temp) = create_temp_engine_for_tests();
     store_file(&engine, "/user/doc.txt", b"user doc");
-    store_file(&engine, "/.aeordb-system/config.json", b"system config");
+    // Use a path under a known system subdirectory (config/) — these are
+    // the paths `augment_with_system_subtrees` walks. Bare files directly
+    // under /.aeordb-system/ (no subdirectory) are only walked for the
+    // explicit list (e.g. email-config.json).
+    store_file(&engine, "/.aeordb-system/config/test.json", b"system config");
 
     // With include_system=false
     let diff = compute_sync_diff(&engine, None, None, false).unwrap();
@@ -140,7 +144,7 @@ fn test_compute_diff_excludes_system() {
     );
     for path in &added_paths {
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "system path {} should be excluded",
             path
         );
@@ -154,8 +158,9 @@ fn test_compute_diff_excludes_system() {
         .map(|f| f.path.as_str())
         .collect();
     assert!(
-        all_paths.contains(&"/.aeordb-system/config.json"),
-        "system files should be present when include_system=true"
+        all_paths.contains(&"/.aeordb-system/config/test.json"),
+        "system files should be present when include_system=true, got: {:?}",
+        all_paths
     );
 }
 
@@ -364,7 +369,7 @@ fn test_full_library_sync_cycle() {
 
     for file_entry in &diff.files_added {
         // Skip system paths that might be in the diff
-        if file_entry.path.starts_with("/.system") {
+        if file_entry.path.starts_with("/.aeordb-system") {
             continue;
         }
 
@@ -410,7 +415,7 @@ fn test_compute_diff_empty_engine() {
             || diff
                 .files_added
                 .iter()
-                .all(|f| f.path.starts_with("/.system") || f.path.starts_with("/.conflicts")),
+                .all(|f| f.path.starts_with("/.aeordb-system") || f.path.starts_with("/.conflicts")),
         "empty engine should have no user files"
     );
 }

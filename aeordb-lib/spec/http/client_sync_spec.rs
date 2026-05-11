@@ -95,6 +95,24 @@ fn root_bearer_token(jwt_manager: &JwtManager) -> String {
     format!("Bearer {}", token)
 }
 
+/// Create a peer Bearer token (root sub + `scope: "sync"`). This is what
+/// SyncEngine::mint_sync_token produces for cluster replication; only this
+/// caller gets /.aeordb-system/ in /sync/diff responses.
+fn peer_bearer_token(jwt_manager: &JwtManager) -> String {
+    let now = Utc::now().timestamp();
+    let claims = TokenClaims {
+        sub: Uuid::nil().to_string(),
+        iss: "aeordb".to_string(),
+        iat: now,
+        exp: now + DEFAULT_EXPIRY_SECONDS,
+        scope: Some("sync".to_string()),
+        permissions: None,
+        key_id: None,
+    };
+    let token = jwt_manager.create_token(&claims).unwrap();
+    format!("Bearer {}", token)
+}
+
 /// Create a non-root user Bearer token (random UUID, no API key).
 fn non_root_bearer_token(jwt_manager: &JwtManager) -> String {
     let now = Utc::now().timestamp();
@@ -279,7 +297,7 @@ async fn test_client_sync_excludes_system() {
 
     // Store a user-space file and a system file.
     store_file(&engine, "public/file.txt", b"public data");
-    store_file(&engine, ".system/config/secret_key", b"secret");
+    store_file(&engine, ".aeordb-system/config/secret_key", b"secret");
 
     let token = non_root_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
@@ -308,15 +326,16 @@ async fn test_client_sync_excludes_system() {
     }
 }
 
-/// Root JWT sync includes /.aeordb-system/ paths.
+/// Peer (sync-scoped root) JWT sync includes /.aeordb-system/ paths.
+/// Admin root JWTs without sync scope do NOT — that's a separate test below.
 #[tokio::test]
 async fn test_root_sync_includes_system() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
 
     store_file(&engine, "public/file.txt", b"public data");
-    store_file(&engine, ".system/config/secret_key", b"secret");
+    store_file(&engine, ".aeordb-system/config/secret_key", b"secret");
 
-    let token = root_bearer_token(&jwt_manager);
+    let token = peer_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
 
     let (status, json) = sync_diff_request(
@@ -332,9 +351,8 @@ async fn test_root_sync_includes_system() {
         paths.contains(&"/public/file.txt".to_string()),
         "should include public file"
     );
-    // Root should see system paths (at least the one we stored).
     let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-    assert!(has_system, "root should see /.aeordb-system/ paths, got: {:?}", paths);
+    assert!(has_system, "peer should see /.aeordb-system/ paths, got: {:?}", paths);
 }
 
 /// Non-root JWT + paths filter only returns matching paths.
@@ -597,7 +615,7 @@ async fn test_non_bearer_auth_header_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// /sync/chunks also supports JWT auth (non-root).
+/// /sync/chunks also supports JWT auth (non-root, no key rules).
 #[tokio::test]
 async fn test_client_chunks_with_jwt() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -706,7 +724,7 @@ async fn test_non_root_empty_rules_sees_all_user_files() {
 
     store_file(&engine, "a/file.txt", b"a");
     store_file(&engine, "b/file.txt", b"b");
-    store_file(&engine, ".system/internal", b"sys");
+    store_file(&engine, ".aeordb-system/internal", b"sys");
 
     let user_id = Uuid::new_v4();
     let rules = vec![]; // empty rules = no path-level restrictions
@@ -781,27 +799,27 @@ async fn test_jwt_wrong_signing_key_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Root JWT sees /.aeordb-system/ paths; non-root JWT does not -- same data.
+/// Peer JWT sees /.aeordb-system/ paths; non-peer (client) JWT does not.
 #[tokio::test]
 async fn test_root_vs_client_system_visibility() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
 
     store_file(&engine, "public/file.txt", b"public");
-    store_file(&engine, ".system/config/key", b"system data");
+    store_file(&engine, ".aeordb-system/config/key", b"system data");
 
-    // Root sync
-    let root_token = root_bearer_token(&jwt_manager);
+    // Peer sync (sync-scoped JWT)
+    let peer_token = peer_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
-    let (status, root_json) = sync_diff_request(
+    let (status, peer_json) = sync_diff_request(
         app,
-        Some(("authorization", &root_token)),
+        Some(("authorization", &peer_token)),
         serde_json::json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let root_paths = extract_all_paths(&root_json["changes"]);
+    let root_paths = extract_all_paths(&peer_json["changes"]);
 
-    // Client sync
+    // Client sync (non-root user JWT)
     let token = non_root_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
     let (status, client_json) = sync_diff_request(
@@ -813,10 +831,10 @@ async fn test_root_vs_client_system_visibility() {
     assert_eq!(status, StatusCode::OK);
     let client_paths = extract_all_paths(&client_json["changes"]);
 
-    // Root should have more paths (system entries).
+    // Peer should have more paths (system entries).
     assert!(
         root_paths.len() > client_paths.len(),
-        "root should see more paths than client: root={:?}, client={:?}",
+        "peer should see more paths than client: peer={:?}, client={:?}",
         root_paths,
         client_paths
     );
@@ -825,7 +843,7 @@ async fn test_root_vs_client_system_visibility() {
     assert!(root_paths.contains(&"/public/file.txt".to_string()));
     assert!(client_paths.contains(&"/public/file.txt".to_string()));
 
-    // Only root should see system entries.
+    // Only peer should see system entries.
     let root_has_system = root_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
     let client_has_system = client_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
     assert!(root_has_system, "root should see /.aeordb-system/");
@@ -989,7 +1007,7 @@ async fn test_sync_chunks_root_jwt_works() {
     }
 }
 
-/// Root JWT sync with incremental diff works and includes system.
+/// Peer JWT sync with incremental diff works and includes system.
 #[tokio::test]
 async fn test_root_incremental_includes_system() {
     let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -997,10 +1015,10 @@ async fn test_root_incremental_includes_system() {
     store_file(&engine, "public/file.txt", b"public");
     let since_hash = get_head_hex(&engine);
 
-    store_file(&engine, ".system/new_config", b"new system data");
+    store_file(&engine, ".aeordb-system/new_config", b"new system data");
     store_file(&engine, "public/new_file.txt", b"new public");
 
-    let token = root_bearer_token(&jwt_manager);
+    let token = peer_bearer_token(&jwt_manager);
     let app = build_app(&jwt_manager, &engine);
 
     let (status, json) = sync_diff_request(
@@ -1017,7 +1035,7 @@ async fn test_root_incremental_includes_system() {
         "should include new public file"
     );
     let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-    assert!(has_system, "root incremental should include new system files");
+    assert!(has_system, "peer incremental should include new system files");
 }
 
 /// H4: Scoped key must NOT receive chunk hashes for files outside its scope.

@@ -433,6 +433,7 @@ fn test_store_and_get_refresh_token() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::days(30),
         is_revoked: false,
+      key_id: None,
     };
 
     system_store::store_refresh_token(&engine, &ctx, &record).unwrap();
@@ -462,6 +463,7 @@ fn test_revoke_refresh_token() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::days(30),
         is_revoked: false,
+      key_id: None,
     };
 
     system_store::store_refresh_token(&engine, &ctx, &record).unwrap();
@@ -621,7 +623,7 @@ fn test_system_data_in_directory_tree() {
 
     // Walk the version tree and check that /.aeordb-system/ entries are present.
     let ops = DirectoryOps::new(&engine);
-    let children = ops.list_directory("/.system").unwrap();
+    let children = ops.list_directory("/.aeordb-system").unwrap();
     let child_names: Vec<String> = children.iter().map(|c| c.name.clone()).collect();
 
     assert!(
@@ -637,19 +639,30 @@ fn test_system_data_in_directory_tree() {
 }
 
 #[test]
-fn test_system_data_appears_in_version_tree() {
+fn test_system_data_appears_in_subtree_walk() {
+    // System paths are NOT reachable via walk_version_tree(HEAD) by design
+    // (system data isn't in the user-visible directory tree). To check
+    // system data made it to disk, walk_subtree the /.aeordb-system/config
+    // subtree directly — that's the API peer sync (and backup) use.
     let (engine, _dir) = setup();
     let ctx = test_context();
 
     system_store::store_config(&engine, &ctx, "tree_check", b"hello").unwrap();
 
-    let head = engine.head_hash().unwrap();
-    let tree = walk_version_tree(&engine, &head).unwrap();
-    let all_paths: Vec<&String> = tree.files.keys().collect();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let dir_path = "/.aeordb-system/config";
+    let key = aeordb::engine::directory_ops::directory_path_hash(dir_path, &algo).unwrap();
+    let (_, _, raw) = engine.get_entry_including_deleted(&key).unwrap().unwrap();
+    let dir_hash = if raw.len() == hash_length { raw } else { algo.compute_hash(&raw).unwrap() };
 
+    let mut tree = aeordb::engine::tree_walker::VersionTree::new();
+    aeordb::engine::tree_walker::walk_subtree(&engine, dir_path, &dir_hash, &mut tree).unwrap();
+
+    let all_paths: Vec<&String> = tree.files.keys().collect();
     assert!(
-        all_paths.iter().any(|p| p.contains("/.aeordb-system/")),
-        "version tree should contain /.aeordb-system/ paths, got: {:?}",
+        all_paths.iter().any(|p: &&String| p.contains("tree_check")),
+        "subtree walk should contain the stored config, got: {:?}",
         all_paths
     );
 }
