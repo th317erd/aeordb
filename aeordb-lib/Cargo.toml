@@ -6,6 +6,15 @@ license-file.workspace = true
 repository.workspace = true
 autobenches = false
 
+[features]
+default = []
+# Cluster auto-healing module is a stub today (request_chunk_from_peer
+# always returns Err). The module is gated behind this opt-in flag so it
+# doesn't compile by default — preventing accidental wiring that would
+# create a false sense of corruption recovery. Remove the flag once the
+# HTTP transport is implemented.
+auto_heal_unimplemented = []
+
 [dependencies]
 crc32fast = "1"
 # File locking

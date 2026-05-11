@@ -713,9 +713,14 @@ fn test_live_counters_snapshot_delete() {
     let ctx = RequestContext::system();
     let directory = tempfile::tempdir().unwrap();
     let engine = create_engine(&directory);
+    let ops = aeordb::engine::DirectoryOps::new(&engine);
     let version_manager = VersionManager::new(&engine);
 
+    // Writes between snapshots prevent dedup (back-to-back snapshots at the
+    // same HEAD return the prior snapshot rather than creating a new one).
+    ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
     version_manager.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+    ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
     version_manager.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
 
     let snap = engine.counters().snapshot();

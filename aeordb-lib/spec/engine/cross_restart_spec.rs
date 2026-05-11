@@ -829,7 +829,8 @@ fn test_deleted_snapshot_stays_deleted_across_restart() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
 
-  // Session 1: create then delete a snapshot
+  // Session 1: create then delete a snapshot. Write between snapshots so
+  // they don't dedupe to the same HEAD.
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
@@ -837,6 +838,7 @@ fn test_deleted_snapshot_stays_deleted_across_restart() {
 
     let vm = VersionManager::new(&engine);
     vm.create_snapshot(&ctx, "doomed-snap", HashMap::new()).unwrap();
+    ops.store_file(&ctx, "/data2.txt", b"data2", None).unwrap();
     vm.create_snapshot(&ctx, "keeper-snap", HashMap::new()).unwrap();
     vm.delete_snapshot(&ctx, "doomed-snap").unwrap();
 

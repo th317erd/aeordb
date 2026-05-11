@@ -92,6 +92,31 @@ pub async fn permission_middleware(
     }
   };
 
+  // System paths (/.aeordb-system/, /.aeordb-config/) are invisible through
+  // the HTTP file APIs for ALL users including root — the system_store
+  // module is the only legitimate access point. Return 404 (not 403) so
+  // callers cannot enumerate which system paths exist.
+  //
+  // engine_path is the post-/files/ remainder, so a request to
+  // `/files/.aeordb-system/...` has engine_path = `.aeordb-system/...`
+  // (without the leading slash). Construct the canonical absolute form for
+  // the check.
+  let abs_check_path = if engine_path.starts_with('/') {
+    engine_path.to_string()
+  } else {
+    format!("/{}", engine_path)
+  };
+  if crate::engine::directory_ops::is_system_path(&abs_check_path) {
+    return (
+      StatusCode::NOT_FOUND,
+      Json(ErrorResponse {
+        error: format!("Not found: /{}", engine_path),
+        code: None,
+      }),
+    )
+      .into_response();
+  }
+
   // Parse user_id from claims.sub.
   // Share keys use "share:<id>" as sub — they skip the permission resolver.
   // Normal users must have UUID identities.

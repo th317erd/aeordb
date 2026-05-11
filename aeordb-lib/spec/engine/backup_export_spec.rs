@@ -35,7 +35,7 @@ fn test_export_head() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     assert_eq!(result.files_written, 3);
     assert!(result.chunks_written >= 3, "expected at least 3 chunks, got {}", result.chunks_written);
@@ -62,7 +62,7 @@ fn test_export_snapshot() {
     vm.create_snapshot(&ctx, "v1.0", HashMap::new()).unwrap();
 
     // Export the snapshot by name
-    let result = export_snapshot(&source, Some("v1.0"), &out).unwrap();
+    let result = export_snapshot(&source, Some("v1.0"), &out, false).unwrap();
 
     // The snapshot's root_hash should be used for backup metadata
     let vm2 = VersionManager::new(&source);
@@ -91,7 +91,7 @@ fn test_export_is_usable() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     // Should be openable as a normal database (backup_type=1 is allowed)
     let exported = StorageEngine::open(&out).unwrap();
@@ -115,7 +115,7 @@ fn test_export_has_correct_backup_type() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     let exported = StorageEngine::open(&out).unwrap();
     let (backup_type, _base, _target) = exported.backup_info().unwrap();
@@ -131,7 +131,7 @@ fn test_export_has_correct_hashes() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     let exported = StorageEngine::open(&out).unwrap();
     let (backup_type, base_hash, target_hash) = exported.backup_info().unwrap();
@@ -162,7 +162,7 @@ fn test_export_no_voids() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     // The exported database should have zero voids
     let exported = StorageEngine::open(&out).unwrap();
@@ -186,7 +186,7 @@ fn test_export_no_deletion_records() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     // Walk the exported tree -- no deletion records should appear
     let exported = StorageEngine::open(&out).unwrap();
@@ -209,7 +209,7 @@ fn test_export_preserves_file_content() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     let exported = StorageEngine::open(&out).unwrap();
     let ops = DirectoryOps::new(&exported);
@@ -227,7 +227,7 @@ fn test_export_nonexistent_snapshot() {
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
 
-    let result = export_snapshot(&source, Some("nonexistent_snapshot"), &out);
+    let result = export_snapshot(&source, Some("nonexistent_snapshot"), &out, false);
     assert!(result.is_err(), "should fail for nonexistent snapshot");
 
     let err_msg = format!("{}", result.unwrap_err());
@@ -253,7 +253,7 @@ fn test_export_empty_database() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     assert_eq!(result.files_written, 0);
     assert_eq!(result.chunks_written, 0);
@@ -284,7 +284,7 @@ fn test_export_nested_directories() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     assert_eq!(result.files_written, 3);
 
@@ -314,6 +314,7 @@ fn test_export_result_display() {
         files_written: 5,
         directories_written: 3,
         version_hash: vec![0xAB, 0xCD, 0xEF],
+        snapshots_written: 0,
     };
 
     let display = format!("{}", result);
@@ -333,7 +334,7 @@ fn test_export_head_via_export_snapshot_none() {
     let out = output_path(&output_temp);
 
     // export_snapshot with None should export HEAD
-    let result = export_snapshot(&source, None, &out).unwrap();
+    let result = export_snapshot(&source, None, &out, false).unwrap();
 
     let head = source.head_hash().unwrap();
     assert_eq!(result.version_hash, head, "should export HEAD when snapshot is None");
@@ -350,10 +351,10 @@ fn test_export_output_already_exists() {
 
     // First export succeeds
     let head = source.head_hash().unwrap();
-    export_version(&source, &head, &out).unwrap();
+    export_version(&source, &head, &out, false).unwrap();
 
     // Second export to same path should fail (StorageEngine::create uses create_new)
-    let result = export_version(&source, &head, &out);
+    let result = export_version(&source, &head, &out, false);
     assert!(result.is_err(), "should fail when output already exists");
 }
 
@@ -373,7 +374,7 @@ fn test_export_large_file_multiple_chunks() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     assert_eq!(result.files_written, 1);
     // A 300KB file with 256KB chunks should produce 2 chunks
@@ -403,7 +404,7 @@ fn test_export_overwritten_file_only_latest() {
     let out = output_path(&output_temp);
 
     let head = source.head_hash().unwrap();
-    let result = export_version(&source, &head, &out).unwrap();
+    let result = export_version(&source, &head, &out, false).unwrap();
 
     // Should only have 1 file (the latest version)
     assert_eq!(result.files_written, 1);
@@ -424,7 +425,7 @@ fn test_export_invalid_version_hash() {
 
     // Use a bogus hash that doesn't correspond to any version
     let bogus_hash = vec![0xFF; 32];
-    let result = export_version(&source, &bogus_hash, &out);
+    let result = export_version(&source, &bogus_hash, &out, false);
 
     // The walk should succeed but find nothing (empty tree from missing root)
     // or it may succeed with 0 entries - either way it should not panic

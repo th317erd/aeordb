@@ -63,11 +63,18 @@ fn run_scan_cycle(engine: &StorageEngine) {
   // Pick entries by stepping through with a stride
   let stride = (all_entries.len() / sample_size).max(1);
 
-  // Use a simple offset that changes each cycle so we cover different entries
-  let cycle_offset = (std::time::SystemTime::now()
+  // Use a simple offset that changes each cycle so we cover different
+  // entries. Jitter the wall-clock-derived offset with a process-local
+  // random seed so all replicas in a cluster don't check the same 1% slice
+  // in lockstep after a deploy (which would amplify the I/O cost across
+  // the cluster and miss other slices for the same wall-clock period).
+  static PROCESS_JITTER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+  let jitter = *PROCESS_JITTER.get_or_init(|| rand::random::<u64>());
+  let cycle_offset = ((std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default()
     .as_secs()
+    .wrapping_add(jitter))
     % stride as u64) as usize;
 
   let mut checked = 0u64;

@@ -129,10 +129,17 @@ fn test_expand_tilde_tilde_not_at_start() {
 
 // ===========================================================================
 // resolve_auth_mode tests
+//
+// These tests touch the process-wide `AEORDB_AUTH` env var. Rust runs tests
+// in parallel by default, so concurrent set/remove on the same env var is
+// racy. Serialize them through a static Mutex so each test sees a clean
+// env-var state.
 // ===========================================================================
+static AUTH_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn test_resolve_auth_mode_cli_flag_wins() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   // CLI flag should always win, even if env var is set.
   std::env::set_var("AEORDB_AUTH", "false");
   let result = resolve_auth_mode(Some("self"));
@@ -142,12 +149,14 @@ fn test_resolve_auth_mode_cli_flag_wins() {
 
 #[test]
 fn test_resolve_auth_mode_cli_false() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   let result = resolve_auth_mode(Some("false"));
   assert_eq!(result, AuthMode::Disabled);
 }
 
 #[test]
 fn test_resolve_auth_mode_env_var() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   std::env::set_var("AEORDB_AUTH", "false");
   let result = resolve_auth_mode(None);
   assert_eq!(result, AuthMode::Disabled);
@@ -156,6 +165,7 @@ fn test_resolve_auth_mode_env_var() {
 
 #[test]
 fn test_resolve_auth_mode_env_var_file() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   std::env::set_var("AEORDB_AUTH", "file:///tmp/test-identity");
   let result = resolve_auth_mode(None);
   assert_eq!(result, AuthMode::File("/tmp/test-identity".to_string()));
@@ -164,6 +174,7 @@ fn test_resolve_auth_mode_env_var_file() {
 
 #[test]
 fn test_resolve_auth_mode_default_self() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   // Remove env var, ensure no default identity file exists.
   std::env::remove_var("AEORDB_AUTH");
   let result = resolve_auth_mode(None);

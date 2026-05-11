@@ -145,9 +145,16 @@ fn test_child_entry_uses_content_hash() {
   // Create a subdirectory by storing a file inside it
   ops.store_file(&ctx, "/subdir/file.txt", b"in subdir", None).unwrap();
 
-  // Read the root directory to get ChildEntry for "subdir"
+  // Read the root directory to get ChildEntry for "subdir". The path-keyed
+  // entry may be a hard link (32-byte content hash) to the actual data;
+  // follow the link if so.
   let root_path_key = algo.compute_hash(b"dir:/").unwrap();
-  let (_header, _key, root_value) = engine.get_entry(&root_path_key).unwrap().unwrap();
+  let (_h, _k, raw) = engine.get_entry(&root_path_key).unwrap().unwrap();
+  let root_value = if raw.len() == hash_length {
+    engine.get_entry(&raw).unwrap().unwrap().2
+  } else {
+    raw
+  };
   let children = deserialize_child_entries(&root_value, hash_length, 0).unwrap();
 
   let subdir_child = children.iter().find(|c| c.name == "subdir").expect("must find subdir child");
@@ -421,9 +428,16 @@ fn test_path_and_content_entries_have_same_data() {
 
   ops.store_file(&ctx, "/test.txt", b"test data", None).unwrap();
 
-  // Get the path-based entry
+  // Get the path-based entry. May be a hard-link (content-hash bytes);
+  // follow it.
+  let hash_length = algo.hash_length();
   let path_key = algo.compute_hash(b"dir:/").unwrap();
-  let (_h1, _k1, path_value) = engine.get_entry(&path_key).unwrap().unwrap();
+  let (_h1, _k1, raw) = engine.get_entry(&path_key).unwrap().unwrap();
+  let path_value = if raw.len() == hash_length {
+    engine.get_entry(&raw).unwrap().unwrap().2
+  } else {
+    raw
+  };
 
   // Get the content-based entry (HEAD)
   let head = engine.head_hash().unwrap();

@@ -190,26 +190,28 @@ fn test_index_manager_save_load_string_strategy() {
 #[test]
 fn test_index_manager_backward_compat() {
   let ctx = RequestContext::system();
-  // Verify that old-format .idx files (without strategy) still load.
-  // We simulate the old format by directly storing a file at the legacy path.
+  // Verify that the legacy strategy-less format `{path}/.indexes/{field}.idx`
+  // still loads via IndexManager::load_index — that's the actual on-disk
+  // path the engine has used for per-directory indexes. (The previous
+  // version of this test stored at /data/.aeordb-indexes/... which is the
+  // wrong directory name — that path was never supported; the fallback
+  // doesn't exist for it.)
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  // Manually create an index and store it at the OLD path
   let converter = Box::new(U64Converter::with_range(0, 100));
   let index = FieldIndex::new("score".to_string(), converter);
   let hash_length = engine.hash_algo().hash_length();
   let data = index.serialize(hash_length);
 
-  // Store at legacy path: /data/.aeordb-indexes/score.idx
-  ops.store_file(&ctx, "/data/.aeordb-indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
+  // Per-directory legacy path: /data/.indexes/score.idx (no .strategy suffix).
+  ops.store_file(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
-  // load_index should find it via the old path
   let index_manager = IndexManager::new(&engine);
   let loaded = index_manager.load_index("/data", "score")
     .unwrap()
-    .expect("Legacy index should load via old path");
+    .expect("Legacy strategy-less index should still load");
   assert_eq!(loaded.field_name, "score");
 }
 

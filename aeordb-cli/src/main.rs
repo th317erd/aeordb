@@ -72,6 +72,27 @@ enum Commands {
     /// Write chunk size in bytes (default: 262144 = 256 KiB)
     #[arg(long)]
     chunk_size: Option<usize>,
+    /// Comma-separated list of peer URLs to register at startup
+    /// (e.g. "http://node2:6830,http://node3:6830").
+    /// Peers are persisted; this flag is idempotent.
+    #[arg(long)]
+    peers: Option<String>,
+    /// Join an existing cluster: URL of any existing cluster member.
+    /// Combined with --join-token, the new node fetches the cluster's
+    /// JWT signing key (so JWTs validate cluster-wide) and registers
+    /// the joined node as a peer.
+    #[arg(long)]
+    join: Option<String>,
+    /// Root API key (or bearer token) of an existing cluster member,
+    /// used to authorize the join request. Required with --join.
+    #[arg(long)]
+    join_token: Option<String>,
+    /// URL that other nodes should use to reach this node (e.g.
+    /// "https://node-b.internal:6841"). If omitted, --join falls back to
+    /// http://localhost:PORT, which is unreachable from any other host.
+    /// Required for multi-host clusters.
+    #[arg(long)]
+    advertise_url: Option<String>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -197,6 +218,10 @@ async fn main() {
       tls_key,
       jwt_expiry,
       chunk_size,
+      peers,
+      join,
+      join_token,
+      advertise_url,
     } => {
       // Load config file if specified; otherwise use all-None defaults.
       let file_config = match config {
@@ -259,6 +284,18 @@ async fn main() {
         .or(file_config.storage.chunk_size)
         .unwrap_or(262144);
 
+      // Parse --peers into a Vec<String>.
+      let peer_list: Vec<String> = peers
+        .as_deref()
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+      // Validate --join requires --join-token.
+      if join.is_some() && join_token.is_none() {
+        eprintln!("Error: --join requires --join-token (the existing cluster's root API key).");
+        std::process::exit(1);
+      }
+
       commands::start::run(
         merged_port,
         &merged_host,
@@ -271,6 +308,10 @@ async fn main() {
         merged_tls_key.as_deref(),
         merged_jwt_expiry,
         merged_chunk_size,
+        peer_list,
+        join.as_deref(),
+        join_token.as_deref(),
+        advertise_url.as_deref(),
       ).await;
     }
     Commands::Stress(arguments) => {

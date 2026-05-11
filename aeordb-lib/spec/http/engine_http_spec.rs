@@ -11,6 +11,10 @@ use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_test
 
 /// Create a fresh in-memory app with engine support.
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
+  // Tests create multiple snapshots back-to-back; bypass the 1-per-60s
+  // manual-snapshot throttle in production code.
+  // SAFETY: tests run single-threaded per binary; setting env var here is fine.
+  unsafe { std::env::set_var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT", "1"); }
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
@@ -750,7 +754,7 @@ async fn test_snapshot_list() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  // Create two snapshots
+  // Create snap1
   let request = Request::builder()
     .method("POST")
     .uri("/versions/snapshots")
@@ -760,6 +764,19 @@ async fn test_snapshot_list() {
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
+
+  // Write something so snap2 has a different HEAD — without this the
+  // dedup path returns the existing snap1 with 200 instead of creating
+  // a new snap2 with 201.
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/list-test.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("between snapshots"))
+    .unwrap();
+  let _ = app.oneshot(request).await.unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()

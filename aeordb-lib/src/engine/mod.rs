@@ -1,6 +1,7 @@
 pub mod api_key_rules;
 pub mod append_writer;
 pub mod binary_utils;
+#[cfg(feature = "auto_heal_unimplemented")]
 pub mod auto_heal;
 pub mod cache;
 pub mod cache_loaders;

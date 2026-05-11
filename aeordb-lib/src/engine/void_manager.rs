@@ -119,6 +119,8 @@ impl VoidManager {
   /// The minimum void size for the configured hash algorithm.
   /// This is the smallest possible entry: fixed_header + hash + 0 key + 0 value.
   pub fn minimum_void_size(&self) -> u32 {
+    // 0,0 lengths can never fail the bounds check, so unwrap is safe.
     EntryHeader::compute_total_length(self.hash_algo, 0, 0)
+      .expect("min void size with zero lengths cannot fail bounds")
   }
 }

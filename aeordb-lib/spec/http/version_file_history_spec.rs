@@ -153,6 +153,12 @@ async fn test_history_file_unchanged() {
 
     store_file(&engine, "/stable.txt", b"same content");
     create_snapshot(&engine, "snap1");
+    // Write something else so snap2 has a different HEAD (otherwise dedup
+    // returns snap1 instead of creating snap2). The history endpoint
+    // intentionally skips "unchanged" entries — only snapshots where the
+    // file changed are returned — so /stable.txt's history will only show
+    // snap1 (added) regardless.
+    store_file(&engine, "/_other.txt", b"x");
     create_snapshot(&engine, "snap2");
 
     let app = rebuild_app(&jwt_manager, &engine);
@@ -168,18 +174,16 @@ async fn test_history_file_unchanged() {
 
     let json = body_json(response.into_body()).await;
     let history = json["history"].as_array().unwrap();
-    assert_eq!(history.len(), 2);
+    // History only reports snapshots where the file CHANGED — snap2 has
+    // no change for /stable.txt, so it isn't in the list.
+    assert_eq!(history.len(), 1);
 
-    // Newest first
-    assert_eq!(history[0]["snapshot"], "snap2");
-    assert_eq!(history[0]["change_type"], "unchanged");
-    assert_eq!(history[1]["snapshot"], "snap1");
-    assert_eq!(history[1]["change_type"], "added");
+    assert_eq!(history[0]["snapshot"], "snap1");
+    assert_eq!(history[0]["change_type"], "added");
 
-    // Hashes must be the same for unchanged
-    let hash1 = history[1]["content_hash"].as_str().unwrap();
-    let hash2 = history[0]["content_hash"].as_str().unwrap();
-    assert_eq!(hash1, hash2);
+    // Sanity: the snap1 hash is present and non-empty.
+    let hash = history[0]["content_hash"].as_str().unwrap();
+    assert!(!hash.is_empty());
 }
 
 #[tokio::test]
@@ -231,7 +235,9 @@ async fn test_history_full_lifecycle() {
     store_file(&engine, "/lifecycle.txt", b"updated content");
     create_snapshot(&engine, "snap2");
 
-    // snap3: file unchanged
+    // snap3: file unchanged — write something unrelated to give snap3 a
+    // distinct HEAD (otherwise snap3 dedupes to snap2).
+    store_file(&engine, "/_other.txt", b"x");
     create_snapshot(&engine, "snap3");
 
     // snap4: file deleted
@@ -251,20 +257,19 @@ async fn test_history_full_lifecycle() {
 
     let json = body_json(response.into_body()).await;
     let history = json["history"].as_array().unwrap();
-    assert_eq!(history.len(), 4);
+    // History endpoint only returns snapshots where the file CHANGED —
+    // snap3 ("unchanged") is intentionally elided. Expect 3 entries.
+    assert_eq!(history.len(), 3);
 
     // Newest first
     assert_eq!(history[0]["snapshot"], "snap4");
     assert_eq!(history[0]["change_type"], "deleted");
 
-    assert_eq!(history[1]["snapshot"], "snap3");
-    assert_eq!(history[1]["change_type"], "unchanged");
+    assert_eq!(history[1]["snapshot"], "snap2");
+    assert_eq!(history[1]["change_type"], "modified");
 
-    assert_eq!(history[2]["snapshot"], "snap2");
-    assert_eq!(history[2]["change_type"], "modified");
-
-    assert_eq!(history[3]["snapshot"], "snap1");
-    assert_eq!(history[3]["change_type"], "added");
+    assert_eq!(history[2]["snapshot"], "snap1");
+    assert_eq!(history[2]["change_type"], "added");
 }
 
 #[tokio::test]

@@ -115,33 +115,45 @@ pub struct EngineGetQuery {
 fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
     entries.retain_mut(|entry| {
         let path = entry["path"].as_str().unwrap_or("").to_string();
-        // Check ancestor path first — items on the path to a scoped target
-        // must be visible for directory tree navigation, regardless of the
-        // deny-all fallback rule that would otherwise hide them.
-        if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
-            // Items on the ancestor path get read+list only for navigation.
-            // Items that directly match a rule get that rule's permissions.
-            let effective = match match_rules(rules, &path) {
-                Some(rule) if rule.glob != "**" => rule.permitted.clone(),
-                _ => "-r--l---".to_string(),
-            };
-            if let Some(obj) = entry.as_object_mut() {
-                obj.insert("effective_permissions".to_string(), serde_json::Value::String(effective));
-            }
-            return true;
-        }
+
+        // Order of precedence:
+        // 1. If the item matches an explicit rule (not the catch-all `**`),
+        //    that rule decides: drop unless the rule grants the operation.
+        //    This is the case that the old code got wrong — it would route
+        //    "denied" matches into the shared-path branch and keep them.
+        // 2. Otherwise, if the item is an ANCESTOR of any rule's target
+        //    (e.g. `/foo/` when the rule is on `/foo/bar/*`), allow it for
+        //    navigation only with `-r--l---` perms.
+        // 3. Otherwise, drop.
         match match_rules(rules, &path) {
-            Some(rule) => {
+            Some(rule) if rule.glob != "**" => {
                 if check_operation_permitted(&rule.permitted, operation) {
                     if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("effective_permissions".to_string(), serde_json::Value::String(rule.permitted.clone()));
+                        obj.insert(
+                            "effective_permissions".to_string(),
+                            serde_json::Value::String(rule.permitted.clone()),
+                        );
                     }
                     true
                 } else {
                     false
                 }
             }
-            None => false,
+            _ => {
+                // No explicit rule (or only the catch-all matched). Allow
+                // navigation if this is an ancestor of a scoped target.
+                if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "effective_permissions".to_string(),
+                            serde_json::Value::String("-r--l---".to_string()),
+                        );
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
         }
     });
 }
@@ -1289,13 +1301,18 @@ pub async fn engine_head(
 /// For Chunks: returns raw decompressed chunk data.
 /// For DirectoryIndex: returns the raw directory data.
 /// Other types: returns raw bytes.
+///
+/// Scoped-key enforcement: a key with rules (ActiveKeyRules extension) can
+/// only fetch FileRecords whose path is permitted with 'r' by the rules.
+/// Other entry types (raw chunks, directory indexes) are denied for scoped
+/// keys because there's no path to check — a chunk hash can be shared by
+/// many files. Root and unscoped keys retain full access.
 pub async fn engine_get_by_hash(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   Path(hex_hash): Path<String>,
 ) -> Response {
-  // Any authenticated user can fetch by hash. System-flagged entries
-  // return 404 (system hashes use a separate domain, can't be guessed).
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
@@ -1326,6 +1343,45 @@ pub async fn engine_get_by_hash(
     return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
+  }
+
+  // Scoped-key check. ActiveKeyRules is only inserted by the permission
+  // middleware when the key is scoped (rules non-empty). Root keys and
+  // unscoped keys skip this entirely.
+  if let Some(Extension(rules)) = active_key_rules.as_ref() {
+    use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
+    match header.entry_type {
+      EntryType::FileRecord => {
+        let algo = state.engine.hash_algo();
+        let hash_length = algo.hash_length();
+        let path = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
+          Ok(r) => r.path,
+          Err(_) => {
+            return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+              .with_status(StatusCode::NOT_FOUND)
+              .into_response();
+          }
+        };
+        let allowed = match match_rules(&rules.0, &path) {
+          Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
+          None => false,
+        };
+        if !allowed {
+          // Use 404 (not 403) so scoped keys cannot enumerate forbidden
+          // paths by probing hashes.
+          return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+        }
+      }
+      // For raw chunks and other non-path entries, we can't tie the hash
+      // back to a path the scoped key is permitted to access. Deny.
+      _ => {
+        return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+    }
   }
 
   match header.entry_type {
@@ -1454,8 +1510,10 @@ pub async fn snapshot_create(
   Json(payload): Json<CreateSnapshotRequest>,
 ) -> Response {
   // Manual snapshot throttle: 1 per 60 seconds (own lane, doesn't
-  // interfere with auto-snapshots from delete/restore operations)
-  {
+  // interfere with auto-snapshots from delete/restore operations).
+  // Bypass via env var for test environments where rapid back-to-back
+  // snapshot creation is the entire point of the test.
+  if std::env::var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT").is_err() {
     use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp_millis();
     let last = state.engine.last_manual_snapshot.load(Ordering::Relaxed);
@@ -1551,6 +1609,15 @@ pub async fn snapshot_restore(
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   let version_manager = VersionManager::new(&state.engine);
+
+  // Reject the request when neither id nor name was provided; both being
+  // absent is a client error (missing required field), not a missing
+  // snapshot (which would be a 404 after this point).
+  if payload.id.is_none() && payload.name.is_none() {
+    return ErrorResponse::new("Either 'id' or 'name' must be provided to identify the snapshot to restore.".to_string())
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  }
 
   // Resolve snapshot: id takes precedence over name
   let identifier = payload.id.as_deref()

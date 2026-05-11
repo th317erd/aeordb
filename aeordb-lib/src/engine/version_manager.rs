@@ -505,7 +505,7 @@ impl<'a> VersionManager<'a> {
 
   /// Rename a snapshot. Creates a new snapshot entry with the new name
   /// and the same root hash/metadata, then deletes the old one.
-  pub fn rename_snapshot(&self, ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
+  pub fn rename_snapshot(&self, _ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
     let old_key = self.snapshot_key(old_name)?;
     let entry = self.engine.get_entry(&old_key)?;
     let Some((header, _key, value)) = entry else {

@@ -65,7 +65,11 @@ impl TestHarness {
     }
 
     async fn create_user(&self, username: &str) -> String {
-        let body = format!(r#"{{"username":"{}"}}"#, username);
+        // POST /system/users requires both username and email (CreateUserRequest)
+        let body = format!(
+            r#"{{"username":"{}","email":"{}@test.local"}}"#,
+            username, username
+        );
         let request = Request::builder()
             .method("POST")
             .uri("/system/users")
@@ -136,8 +140,10 @@ impl TestHarness {
 
     async fn set_permissions(&self, path: &str, links: serde_json::Value) {
         let permissions_body = serde_json::json!({ "links": links });
+        // Engine reads `.aeordb-permissions` (per cache_loaders.rs); use that
+        // filename at every depth.
         let permissions_path = if path == "/" || path.ends_with('/') {
-            format!("{}.permissions", path)
+            format!("{}.aeordb-permissions", path)
         } else {
             format!("{}/.aeordb-permissions", path)
         };
@@ -232,12 +238,16 @@ async fn body_json(body: Body) -> serde_json::Value {
 #[tokio::test]
 async fn test_system_get_returns_404_for_root() {
     let harness = TestHarness::new();
-    // Seed .system/ data directly via engine (API blocks it now)
-    harness.store_file_via_engine("/.aeordb-system/config/jwt_signing_key", b"super-secret-key");
+    // Seed .system/ data directly via engine to verify the HTTP layer blocks
+    // it. NOTE: must NOT write to /.aeordb-system/config/jwt_signing_key
+    // because the auth provider validates that key on every construction —
+    // any non-Ed25519 bytes would crash the next FileAuthProvider::new (the
+    // app() helper builds a fresh provider). Pick a path that's just data.
+    harness.store_file_via_engine("/.aeordb-system/users/00000000-0000-0000-0000-000000000001", b"\"opaque\"");
 
     let request = Request::builder()
         .method("GET")
-        .uri("/files/.aeordb-system/config/jwt_signing_key")
+        .uri("/files/.aeordb-system/users/00000000-0000-0000-0000-000000000001")
         .header("authorization", &harness.root_jwt)
         .body(Body::empty())
         .unwrap();
@@ -362,7 +372,7 @@ async fn test_root_listing_hides_system_directory() {
     for entry in listing {
         let path = entry["path"].as_str().unwrap_or("");
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "Root listing should not contain /.system paths, found: {}",
             path
         );
@@ -657,7 +667,7 @@ async fn test_query_results_exclude_system_paths() {
     for item in items {
         let path = item["path"].as_str().unwrap_or("");
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "Query results should not contain /.system paths, found: {}",
             path
         );
@@ -693,7 +703,7 @@ async fn test_recursive_listing_excludes_system_for_root() {
     for entry in listing {
         let path = entry["path"].as_str().unwrap_or("");
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "Root recursive listing should not contain /.system paths, found: {}",
             path
         );
@@ -726,7 +736,7 @@ async fn test_recursive_listing_excludes_system_for_non_root() {
     for entry in listing {
         let path = entry["path"].as_str().unwrap_or("");
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "Non-root recursive listing should not contain /.system paths, found: {}",
             path
         );

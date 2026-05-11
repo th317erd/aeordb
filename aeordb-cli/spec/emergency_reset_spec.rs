@@ -14,7 +14,7 @@ fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: ROOT_USER_ID,
+    user_id: Some(ROOT_USER_ID),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: chrono::Utc::now().timestamp_millis() + (365 * 86400 * 1000),
@@ -41,7 +41,7 @@ fn test_emergency_reset_generates_new_key() {
   let keys_before = system_store::list_api_keys(&engine).unwrap();
   assert_eq!(keys_before.len(), 1);
   assert!(!keys_before[0].is_revoked);
-  assert_eq!(keys_before[0].user_id, ROOT_USER_ID);
+  assert_eq!(keys_before[0].user_id, Some(ROOT_USER_ID));
 
 
   drop(engine);
@@ -62,8 +62,8 @@ fn test_emergency_reset_generates_new_key() {
 
   assert_eq!(revoked_keys.len(), 1, "Should have exactly 1 revoked key");
   assert_eq!(active_keys.len(), 1, "Should have exactly 1 active key");
-  assert_eq!(active_keys[0].user_id, ROOT_USER_ID);
-  assert_eq!(revoked_keys[0].user_id, ROOT_USER_ID);
+  assert_eq!(active_keys[0].user_id, Some(ROOT_USER_ID));
+  assert_eq!(revoked_keys[0].user_id, Some(ROOT_USER_ID));
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn test_emergency_reset_revokes_old_key() {
   let _key2 = bootstrap_root_key(&engine);
 
   let keys_before = system_store::list_api_keys(&engine).unwrap();
-  let active_count_before = keys_before.iter().filter(|k| !k.is_revoked && k.user_id == ROOT_USER_ID).count();
+  let active_count_before = keys_before.iter().filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID)).count();
   assert_eq!(active_count_before, 2, "Should have 2 active root keys before reset");
 
 
@@ -94,11 +94,11 @@ fn test_emergency_reset_revokes_old_key() {
 
   let active_root_keys: Vec<_> = keys_after
     .iter()
-    .filter(|k| !k.is_revoked && k.user_id == ROOT_USER_ID)
+    .filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID))
     .collect();
   let revoked_root_keys: Vec<_> = keys_after
     .iter()
-    .filter(|k| k.is_revoked && k.user_id == ROOT_USER_ID)
+    .filter(|k| k.is_revoked && k.user_id == Some(ROOT_USER_ID))
     .collect();
 
   assert_eq!(active_root_keys.len(), 1, "Should have exactly 1 active root key after reset");
@@ -124,7 +124,7 @@ fn test_emergency_reset_on_empty_database() {
 
   let active_root_keys: Vec<_> = keys
     .iter()
-    .filter(|k| !k.is_revoked && k.user_id == ROOT_USER_ID)
+    .filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID))
     .collect();
   assert_eq!(active_root_keys.len(), 1, "Should have created a new root key");
 }

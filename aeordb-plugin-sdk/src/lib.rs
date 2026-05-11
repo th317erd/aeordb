@@ -22,13 +22,16 @@
 //!
 //! ## Query Plugin Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use aeordb_plugin_sdk::prelude::*;
 //! use aeordb_plugin_sdk::aeordb_query_plugin;
 //!
-//! aeordb_query_plugin!(handle);
+//! // NOTE: the user function name must differ from `handle` — the
+//! // `aeordb_query_plugin!` macro exports its own `handle` extern "C"
+//! // function as the WASM entry point.
+//! aeordb_query_plugin!(my_handler);
 //!
-//! fn handle(ctx: PluginContext, req: PluginRequest) -> Result<PluginResponse, PluginError> {
+//! fn my_handler(ctx: PluginContext, _req: PluginRequest) -> Result<PluginResponse, PluginError> {
 //!     let results = ctx.query("/users").field("name").contains("Alice").execute()?;
 //!     PluginResponse::json(200, &results).map_err(|e| PluginError::SerializationFailed(e.to_string()))
 //! }

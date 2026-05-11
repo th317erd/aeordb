@@ -24,12 +24,37 @@ pub struct DownloadRequest {
 pub async fn download_zip(
     State(state): State<AppState>,
     Extension(_claims): Extension<TokenClaims>,
+    active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
     Json(body): Json<DownloadRequest>,
 ) -> Response {
     if body.paths.is_empty() {
         return ErrorResponse::new("At least one path is required in the 'paths' array")
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
+    }
+
+    // Scoped-key check: every requested path must be readable by the key.
+    // We use 'r' for files and 'l' for directories (the matching crudlify
+    // flag). If the key's rules don't permit a path, return 404 so the
+    // caller cannot enumerate the tree by probing.
+    if let Some(Extension(rules)) = active_key_rules.as_ref() {
+        use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
+        for raw_path in &body.paths {
+            let normalized = normalize_path(raw_path);
+            // Probe the path: check 'r' (file) OR 'l' (directory listing).
+            let permitted = match match_rules(&rules.0, &normalized) {
+                Some(rule) => {
+                    check_operation_permitted(&rule.permitted, 'r')
+                        || check_operation_permitted(&rule.permitted, 'l')
+                }
+                None => false,
+            };
+            if !permitted {
+                return ErrorResponse::new(format!("Not found: {}", raw_path))
+                    .with_status(StatusCode::NOT_FOUND)
+                    .into_response();
+            }
+        }
     }
 
     const MAX_ZIP_SIZE: u64 = 2_147_483_648; // 2 GB

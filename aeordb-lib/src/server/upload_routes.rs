@@ -113,35 +113,44 @@ pub async fn upload_chunk(
     }))).into_response();
   }
 
-  // Dedup check
-  match state.engine.has_entry(&computed_bytes) {
-    Ok(true) => {
-      return (StatusCode::OK, Json(serde_json::json!({
-        "status": "exists",
-        "hash": hash_hex
-      }))).into_response();
+  // Move the I/O+fsync work to a blocking pool so we don't pin a tokio
+  // worker. The engine uses std::sync locks and per-write fsync; left in an
+  // async handler, multiple concurrent uploads can starve the runtime.
+  let engine = state.engine.clone();
+  let body_vec = body.to_vec();
+  let store_result = tokio::task::spawn_blocking(move || -> Result<&'static str, crate::engine::errors::EngineError> {
+    if engine.has_entry(&computed_bytes)? {
+      return Ok("exists");
     }
-    _ => {}
-  }
-
-  // Store with optional compression
-  let store_result = if should_compress(None, body.len()) {
-    match compress(&body, CompressionAlgorithm::Zstd) {
-      Ok(compressed) => state.engine.store_entry_compressed(
-        EntryType::Chunk, &computed_bytes, &compressed, CompressionAlgorithm::Zstd,
-      ),
-      Err(_) => state.engine.store_entry(EntryType::Chunk, &computed_bytes, &body),
+    if should_compress(None, body_vec.len()) {
+      match compress(&body_vec, CompressionAlgorithm::Zstd) {
+        Ok(compressed) => {
+          engine.store_entry_compressed(
+            EntryType::Chunk, &computed_bytes, &compressed, CompressionAlgorithm::Zstd,
+          )?;
+        }
+        Err(_) => {
+          engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
+        }
+      }
+    } else {
+      engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
     }
-  } else {
-    state.engine.store_entry(EntryType::Chunk, &computed_bytes, &body)
-  };
+    Ok("created")
+  }).await;
 
   match store_result {
-    Ok(_) => (StatusCode::CREATED, Json(serde_json::json!({
+    Ok(Ok("exists")) => (StatusCode::OK, Json(serde_json::json!({
+      "status": "exists", "hash": hash_hex
+    }))).into_response(),
+    Ok(Ok(_)) => (StatusCode::CREATED, Json(serde_json::json!({
       "status": "created", "hash": hash_hex
     }))).into_response(),
-    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+    Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
       "error": format!("Failed to store chunk: {}", e)
+    }))).into_response(),
+    Err(join_err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+      "error": format!("Chunk upload task panicked: {}", join_err)
     }))).into_response(),
   }
 }

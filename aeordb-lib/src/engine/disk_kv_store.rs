@@ -19,9 +19,9 @@ use crate::engine::scalar_converter::HashConverter;
 const WRITE_BUFFER_THRESHOLD: usize = 512;
 
 /// Number of entries buffered before flushing to the hot tail.
-/// Safety net for burst writes between 250ms timer flushes.
+/// Safety net for burst writes between 100ms timer flushes.
 /// The timer is the primary durability mechanism — this threshold
-/// handles bursts that exceed what 250ms can cover.
+/// handles bursts that exceed what 100ms can cover.
 const HOT_BUFFER_THRESHOLD: usize = 512;
 
 /// A disk-resident KV store using NVT-indexed bucket pages inside the main
@@ -479,7 +479,14 @@ impl DiskKVStore {
         self.flush_hot_buffer()?;
         if self.transaction_depth == 0 && self.hot_tail_enabled {
             let hash_length = self.hash_algo.hash_length();
-            let _ = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &[], hash_length);
+            // Propagate write errors. If this fails (EIO / disk full), the
+            // on-disk hot tail still has the OLD entries while hot_buffer
+            // has been cleared — recovery would later load stale entries
+            // pointing at WAL offsets that have since been overwritten.
+            hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &[], hash_length)
+                .map_err(|e| EngineError::IoError(std::io::Error::other(format!(
+                    "Failed to write empty hot tail after page flush: {}", e
+                ))))?;
         }
 
         self.publish_snapshot_incremental(&modified_buckets);

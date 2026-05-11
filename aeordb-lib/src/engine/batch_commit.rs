@@ -9,6 +9,7 @@ use crate::engine::directory_entry::{
 };
 use crate::engine::directory_ops::{
     directory_content_hash, directory_path_hash, file_content_hash, file_identity_hash, file_path_hash,
+    is_system_path,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_type::EntryType;
@@ -58,6 +59,20 @@ pub fn commit_files(
         return Err(EngineError::InvalidInput(
             "No files provided for commit".to_string(),
         ));
+    }
+
+    // Reject any path under /.aeordb-system/ or /.aeordb-config/. System data
+    // is written exclusively through dedicated APIs (system_store, directory_ops
+    // with FLAG_SYSTEM) — never through user-facing batch commit. Without this
+    // check, an authenticated user could overwrite /.aeordb-system/api-keys/<uuid>
+    // and mint themselves a root key.
+    for file in &files {
+        if is_system_path(&file.path) {
+            return Err(EngineError::InvalidInput(format!(
+                "Path '{}' is reserved for internal system data and cannot be written through this endpoint",
+                file.path
+            )));
+        }
     }
 
     let algo = engine.hash_algo();

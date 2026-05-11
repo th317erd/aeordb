@@ -1,4 +1,5 @@
 use crate::engine::deletion_record::DeletionRecord;
+use crate::engine::file_record::FileRecord;
 use crate::engine::directory_ops::{file_path_hash, directory_path_hash, is_system_path};
 
 /// Credential paths are always excluded from backups. Importing credentials
@@ -304,6 +305,19 @@ fn export_system_subtree(
         "/.aeordb-system/groups",
         "/.aeordb-system/snapshots",
         "/.aeordb-system/config",
+        // /.aeordb-config holds cron schedules, webhook configs, parser
+        // registry, per-directory indexes.json, and other non-credential
+        // operational state. Restore must include these — otherwise a
+        // restored cluster has no scheduled jobs, no webhooks, no parsers.
+        "/.aeordb-config",
+    ];
+
+    // Single files under /.aeordb-system/ (not in a subdirectory). These
+    // are individually enumerated because walk_subtree only visits children
+    // of a directory; bare files under /.aeordb-system would otherwise be
+    // skipped.
+    let system_single_files: &[&str] = &[
+        "/.aeordb-system/email-config.json",
     ];
 
     let mut sys_tree = crate::engine::tree_walker::VersionTree::new();
@@ -334,6 +348,31 @@ fn export_system_subtree(
         ) {
             tracing::warn!("export: failed to walk {}: {}", sys_path, e);
         }
+    }
+
+    // Single files under /.aeordb-system/. Each is keyed by path-hash;
+    // resolve to a FileRecord and add it to the tree. The content hash for
+    // the tree key is recomputed from the serialized FileRecord — that's
+    // what the chunk-domain entries use elsewhere in the engine.
+    for file_path in system_single_files {
+        let key = crate::engine::directory_ops::file_path_hash(file_path, &algo)?;
+        let (record, content_hash) = match source.get_entry_including_deleted(&key)? {
+            Some((header, _key, raw)) => {
+                match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
+                    Ok(record) => {
+                        let serialized = record.serialize(hash_length)?;
+                        let h = algo.compute_hash(&serialized)?;
+                        (record, h)
+                    }
+                    Err(e) => {
+                        tracing::warn!("export: failed to deserialize {} as FileRecord: {}", file_path, e);
+                        continue;
+                    }
+                }
+            }
+            None => continue, // file doesn't exist in source — fine
+        };
+        sys_tree.files.insert(file_path.to_string(), (content_hash, record));
     }
 
     // Write system tree entries with overwrite. Old snapshots may have

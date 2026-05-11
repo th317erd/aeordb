@@ -20,6 +20,22 @@ pub fn run(
         process::exit(1);
     }
 
+    // Write to a `.part` sibling and rename at the end. A killed export
+    // would otherwise leave a partial file at the final path with a valid
+    // magic + backup_info header — indistinguishable from a successful
+    // export, and `import_backup` would happily iterate the partial entries.
+    let part_path = format!("{}.part", output);
+    if std::path::Path::new(&part_path).exists() {
+        // Clean up a stale `.part` from a previous crashed export.
+        if let Err(e) = std::fs::remove_file(&part_path) {
+            eprintln!(
+                "Error: failed to remove stale '{}': {}. Remove it manually and retry.",
+                part_path, e
+            );
+            process::exit(1);
+        }
+    }
+
     // Open source database
     let source = match aeordb::engine::StorageEngine::open(database) {
         Ok(engine) => engine,
@@ -58,7 +74,7 @@ pub fn run(
         }
     };
 
-    // Determine export mode
+    // Determine export mode — write into the .part path.
     let result = if let Some(h) = hash {
         // Specific version hash — single-version export
         let hash_bytes = match hex::decode(h) {
@@ -69,29 +85,41 @@ pub fn run(
             }
         };
         println!("Exporting hash: {}", h);
-        aeordb::engine::backup::export_version(&source, &hash_bytes, output, include_system)
+        aeordb::engine::backup::export_version(&source, &hash_bytes, &part_path, include_system)
     } else if let Some(name) = snapshot {
         // Specific snapshot — single-version export
         println!("Exporting snapshot: {}", name);
-        aeordb::engine::backup::export_snapshot(&source, Some(name), output, include_system)
+        aeordb::engine::backup::export_snapshot(&source, Some(name), &part_path, include_system)
     } else if include_system {
         // Full backup mode — HEAD + all snapshots + system data
         println!("Exporting full database (HEAD + all snapshots + system data)");
-        aeordb::engine::backup::export_full(&source, output, true)
+        aeordb::engine::backup::export_full(&source, &part_path, true)
     } else {
         // Default: HEAD only, user data only
         println!("Exporting HEAD (user data only)");
-        aeordb::engine::backup::export_snapshot(&source, None, output, false)
+        aeordb::engine::backup::export_snapshot(&source, None, &part_path, false)
     };
 
     match result {
         Ok(result) => {
+            // Atomic rename: only after the export wrote successfully do we
+            // expose the file at its final path. A killed export leaves
+            // `.part` on disk — easy for an operator to identify and clean
+            // up, and `import_backup` won't accidentally read it.
+            if let Err(e) = std::fs::rename(&part_path, output) {
+                eprintln!(
+                    "Export wrote successfully but final rename failed: {}\n\
+                     Partial output is at: {}",
+                    e, part_path
+                );
+                process::exit(1);
+            }
             println!("\n{}", result);
         }
         Err(e) => {
             eprintln!("Export failed: {}", e);
-            // Clean up partial output
-            let _ = std::fs::remove_file(output);
+            // Clean up the partial .part file — it has no use.
+            let _ = std::fs::remove_file(&part_path);
             process::exit(1);
         }
     }

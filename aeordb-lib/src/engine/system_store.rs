@@ -127,6 +127,23 @@ pub fn get_api_key_by_prefix(
     Ok(None)
 }
 
+/// Get an API key record by its UUID. Returns `Ok(None)` if no such key.
+pub fn get_api_key(
+    engine: &StorageEngine,
+    key_id: Uuid,
+) -> EngineResult<Option<ApiKeyRecord>> {
+    let ops = DirectoryOps::new(engine);
+    let path = format!("/.aeordb-system/api-keys/{}", key_id);
+    match ops.read_file(&path) {
+        Ok(data) => match serde_json::from_slice::<ApiKeyRecord>(&data) {
+            Ok(record) => Ok(Some(record)),
+            Err(_) => Ok(None),
+        },
+        Err(EngineError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// List all API key records.
 pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> {
     let ops = DirectoryOps::new(engine);

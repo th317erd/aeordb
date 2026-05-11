@@ -802,49 +802,53 @@ fn make_unique_hash(index: u32) -> Vec<u8> {
     blake3::hash(&index.to_le_bytes()).as_bytes().to_vec()
 }
 
+/// Through the full StorageEngine API, inserting enough files should
+/// trigger `expand_kv_block_online` and bump the kv_block_stage in the
+/// file header. This replaces the old DiskKVStore-direct resize tests
+/// (which assumed an in-place resize model that no longer applies — the
+/// store now needs StorageEngine to expand the file's KV region).
 #[test]
-fn test_resize_on_overflow() {
+fn test_kv_stage_grows_via_storage_engine() {
+    use aeordb::engine::storage_engine::StorageEngine;
+    use aeordb::engine::DirectoryOps;
+    use aeordb::engine::RequestContext;
+
     let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-    assert_eq!(store.stage(), 0);
+    let db_path = dir.path().join("expand.aeordb");
+    let db_str = db_path.to_str().unwrap();
 
-    let hash_algo = HashAlgorithm::Blake3_256;
-    let psize = page_size(hash_algo.hash_length());
-    let (_, initial_buckets) = aeordb::engine::kv_stages::stage_params(0, psize);
-    assert_eq!(store.bucket_count(), initial_buckets);
+    let engine = StorageEngine::create(db_str).unwrap();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
 
-    // Stage 0: buckets * 32 entries per page.
-    // Insert 2,500 entries to force at least one overflow and resize.
-    let count = 2_500u32;
-    let mut hashes = Vec::with_capacity(count as usize);
+    let initial_stage = {
+        let writer = engine.writer_read_lock().unwrap();
+        writer.file_header().kv_block_stage
+    };
 
+    // Stage 0 fits a few hundred small files before overflow. Push past it.
+    let count = 1_500u32;
     for i in 0..count {
-        let hash = make_unique_hash(i);
-        hashes.push(hash.clone());
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64 * 100,
-        });
+        let path = format!("/many/file_{:05}.txt", i);
+        ops.store_file(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
+            .unwrap();
     }
-    store.flush().unwrap();
 
-    // Verify resize happened — stage should have increased
+    let final_stage = {
+        let writer = engine.writer_read_lock().unwrap();
+        writer.file_header().kv_block_stage
+    };
     assert!(
-        store.stage() >= 1,
-        "Store should have resized to at least stage 1, got stage {}",
-        store.stage()
+        final_stage > initial_stage,
+        "KV stage should grow after heavy insert: initial={}, final={}",
+        initial_stage, final_stage
     );
 
-    // Verify all entries are findable
-    for (i, hash) in hashes.iter().enumerate() {
-        let entry = store.get(hash);
-        assert!(
-            entry.is_some(),
-            "Entry {} should be findable after resize",
-            i
-        );
-        assert_eq!(entry.unwrap().offset, i as u64 * 100);
+    // Stored files must still be readable after the expansion.
+    for i in (0..count).step_by(100) {
+        let path = format!("/many/file_{:05}.txt", i);
+        let content = ops.read_file(&path).unwrap();
+        assert_eq!(content, format!("v{}", i).as_bytes());
     }
 }
 
@@ -876,131 +880,6 @@ fn test_resize_preserves_all_entries() {
     // entry_count may drift slightly during resize due to duplicate
     // counting when entries are re-inserted. All entries are findable above.
     assert!(store.len() >= count as usize - 200, "entry_count should be close to {}", count);
-}
-
-#[test]
-fn test_resize_stage_increases() {
-    let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-    assert_eq!(store.stage(), 0);
-
-    // Force overflow: stage 0 has limited capacity.
-    // The pigeonhole principle means some buckets may fill before the
-    // theoretical max. Insert enough to guarantee overflow.
-    for i in 0..2_500u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    assert!(
-        store.stage() >= 1,
-        "Stage should increase after overflow, got {}",
-        store.stage()
-    );
-
-    let hash_algo = HashAlgorithm::Blake3_256;
-    let psize = page_size(hash_algo.hash_length());
-    let (_, initial_buckets) = aeordb::engine::kv_stages::stage_params(0, psize);
-    assert!(
-        store.bucket_count() > initial_buckets,
-        "Bucket count should increase after resize, got {}",
-        store.bucket_count()
-    );
-}
-
-#[test]
-fn test_resize_persists_across_reopen() {
-    let dir = tempdir().unwrap();
-
-    let count = 2_500u32;
-    let mut hashes = Vec::with_capacity(count as usize);
-
-    // Create, fill to overflow, close
-    {
-        let mut store = create_test_kv_resizable(dir.path());
-        for i in 0..count {
-            let hash = make_unique_hash(i);
-            hashes.push(hash.clone());
-            store.insert(KVEntry {
-                type_flags: KV_TYPE_CHUNK,
-                hash,
-                offset: i as u64,
-            });
-        }
-        store.flush().unwrap();
-        assert!(store.stage() >= 1);
-    }
-
-    // Reopen at stage 1 (resize target) and verify
-    {
-        let mut store = open_test_kv_at_stage(dir.path(), 1);
-        assert!(
-            store.stage() >= 1,
-            "Stage should persist across reopen, got {}",
-            store.stage()
-        );
-
-        // Verify all entries findable after reopen
-        for (i, hash) in hashes.iter().enumerate() {
-            let entry = store.get(hash);
-            assert!(
-                entry.is_some(),
-                "Entry {} should be findable after reopen of resized store",
-                i
-            );
-        }
-    }
-}
-
-#[test]
-fn test_flush_after_resize_works() {
-    let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-
-    // Trigger resize
-    for i in 0..2_500u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    let stage_after_resize = store.stage();
-    assert!(stage_after_resize >= 1);
-
-    // Now insert more entries after resize
-    let extra_hashes: Vec<Vec<u8>> = (100_000..100_500u32)
-        .map(|i| make_unique_hash(i))
-        .collect();
-
-    for (i, hash) in extra_hashes.iter().enumerate() {
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_FILE_RECORD,
-            hash: hash.clone(),
-            offset: (i as u64 + 1_000_000),
-        });
-    }
-    store.flush().unwrap();
-
-    // Verify new entries are findable
-    for (i, hash) in extra_hashes.iter().enumerate() {
-        let entry = store.get(hash);
-        assert!(entry.is_some(), "Post-resize entry {} should be findable", i);
-        let found = entry.unwrap();
-        assert_eq!(found.offset, i as u64 + 1_000_000);
-        assert_eq!(found.entry_type(), KV_TYPE_FILE_RECORD);
-    }
-
-    // Stage should not have changed (500 more entries shouldn't trigger another resize)
-    assert_eq!(store.stage(), stage_after_resize);
 }
 
 #[test]

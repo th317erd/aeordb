@@ -130,6 +130,7 @@ async fn test_refresh_returns_new_jwt() {
     created_at: chrono::Utc::now(),
     expires_at: expires_at,
     is_revoked: false,
+    key_id: None,
   }).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -165,6 +166,7 @@ async fn test_refresh_rotates_refresh_token() {
     created_at: chrono::Utc::now(),
     expires_at: expires_at,
     is_revoked: false,
+    key_id: None,
   }).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -201,6 +203,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
     created_at: chrono::Utc::now(),
     expires_at: expires_at,
     is_revoked: false,
+    key_id: None,
   }).unwrap();
 
   // First refresh succeeds and rotates.
@@ -246,6 +249,7 @@ async fn test_expired_refresh_token_rejected() {
     created_at: chrono::Utc::now(),
     expires_at: expires_at,
     is_revoked: false,
+    key_id: None,
   }).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -352,6 +356,7 @@ async fn test_revoked_refresh_token_rejected() {
     created_at: chrono::Utc::now(),
     expires_at: expires_at,
     is_revoked: false,
+    key_id: None,
   }).unwrap();
 
   system_store::revoke_refresh_token(&engine, &ctx, &token_hash).unwrap();

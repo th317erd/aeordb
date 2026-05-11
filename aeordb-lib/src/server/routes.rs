@@ -287,6 +287,24 @@ pub async fn auth_token(
     }
   };
 
+  // Rate-limit token-exchange attempts per key-id prefix. The prefix is the
+  // public part of the key (intentionally not the secret), so any attacker
+  // who knows a key's prefix gets capped attempts at brute-forcing its
+  // secret. Argon2 is expensive on the server but a flood of attempts is
+  // still a DoS vector without this gate.
+  //
+  // Key namespace: `token:` prefix so this counter doesn't share a window
+  // with the magic-link limiter (which uses raw email addresses). The
+  // limit here is the shared default (5/60s) — increase via
+  // RateLimiter::new(max, window_secs) if your legitimate users see 429s.
+  let rl_key = format!("token:{}", key_id_prefix);
+  if let Err(_) = state.rate_limiter.check_rate_limit(&rl_key) {
+    metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "rate_limited").increment(1);
+    return ErrorResponse::new("Too many authentication attempts for this key. Wait a moment and retry.".to_string())
+      .with_status(StatusCode::TOO_MANY_REQUESTS)
+      .into_response();
+  }
+
   let record = match state.auth_provider.get_api_key_by_prefix(&key_id_prefix) {
     Ok(Some(record)) => record,
     Ok(None) => {
@@ -394,6 +412,7 @@ pub async fn auth_token(
     created_at: chrono::Utc::now(),
     expires_at: refresh_expires_at,
     is_revoked: false,
+    key_id: Some(record.key_id.to_string()),
   };
   if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &refresh_record) {
     tracing::error!("Failed to store refresh token: {}", error);
@@ -651,12 +670,24 @@ pub async fn request_magic_link(
     // Still return 200 to prevent enumeration.
   }
 
-  // Log the magic link URL at debug level only — the code is a secret.
-  tracing::debug!(
-    email = %payload.email,
-    magic_link_url = %format!("/auth/magic-link/verify?code={}", code),
-    "Magic link generated (dev mode — not emailed)"
-  );
+  // Log the magic link URL at debug level only, AND gate on an explicit
+  // env var so production debug logging never leaks secrets. Operators
+  // running with `RUST_LOG=debug` in production would otherwise have full
+  // magic-link URLs (sufficient to log in as the user) in their log
+  // pipeline.
+  if std::env::var("AEORDB_LOG_MAGIC_LINKS").is_ok() {
+    tracing::debug!(
+      email = %payload.email,
+      magic_link_url = %format!("/auth/magic-link/verify?code={}", code),
+      "Magic link generated (AEORDB_LOG_MAGIC_LINKS enabled — dev only)"
+    );
+  } else {
+    // Log a redacted line so operators see SOMETHING in dev without the secret.
+    tracing::debug!(
+      email = %payload.email,
+      "Magic link generated (URL not logged; set AEORDB_LOG_MAGIC_LINKS=1 to log)"
+    );
+  }
 
   (
     StatusCode::OK,
@@ -805,6 +836,50 @@ pub async fn refresh_token(
       .into_response();
   }
 
+  // Check that the issuing API key is still active. Without this, revoking a
+  // leaked key wouldn't actually stop outstanding refresh tokens from minting
+  // new JWTs — that was a P0 in the 2026-05-10 audit. Older refresh records
+  // (pre-2026-05) have `key_id: None`; we let those continue working so the
+  // upgrade doesn't terminate every existing session, but new refresh tokens
+  // (issued by this version) carry their key_id and get strict validation.
+  if let Some(ref key_id_str) = record.key_id {
+    match uuid::Uuid::parse_str(key_id_str) {
+      Ok(kid) => {
+        match system_store::get_api_key(&state.engine, kid) {
+          Ok(Some(api_key)) => {
+            if api_key.is_revoked {
+              return ErrorResponse::new("API key has been revoked. Re-authenticate via POST /auth/token".to_string())
+                .with_status(StatusCode::UNAUTHORIZED)
+                .into_response();
+            }
+            if api_key.expires_at < chrono::Utc::now().timestamp_millis() {
+              return ErrorResponse::new("API key has expired. Re-authenticate via POST /auth/token".to_string())
+                .with_status(StatusCode::UNAUTHORIZED)
+                .into_response();
+            }
+          }
+          Ok(None) => {
+            return ErrorResponse::new("Issuing API key no longer exists. Re-authenticate via POST /auth/token".to_string())
+              .with_status(StatusCode::UNAUTHORIZED)
+              .into_response();
+          }
+          Err(error) => {
+            tracing::error!("Failed to look up API key for refresh: {}", error);
+            return ErrorResponse::new("Failed to validate API key during refresh".to_string())
+              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+              .into_response();
+          }
+        }
+      }
+      Err(_) => {
+        tracing::warn!("Refresh token has malformed key_id '{}'", key_id_str);
+        return ErrorResponse::new("Refresh token is malformed. Re-authenticate via POST /auth/token".to_string())
+          .with_status(StatusCode::UNAUTHORIZED)
+          .into_response();
+      }
+    }
+  }
+
   // Revoke the old refresh token (rotation).
   let ctx = RequestContext::with_bus(state.event_bus.clone());
   if let Err(error) = system_store::revoke_refresh_token(&state.engine, &ctx, &old_token_hash) {
@@ -848,6 +923,7 @@ pub async fn refresh_token(
     created_at: chrono::Utc::now(),
     expires_at: refresh_expires_at,
     is_revoked: false,
+    key_id: record.key_id,
   };
   if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &new_refresh_record) {
     tracing::error!("Failed to store new refresh token: {}", error);

@@ -90,9 +90,12 @@ async fn test_gc_root_user_succeeds() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(status, StatusCode::OK, "body: {}", body_str);
 
-    let json = body_json(response.into_body()).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
     assert!(json.get("versions_scanned").is_some());
     assert!(json.get("live_entries").is_some());
     assert!(json.get("garbage_entries").is_some());

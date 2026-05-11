@@ -129,10 +129,21 @@ pub fn system_file_identity_hash(
     algo.compute_hash(&input)
 }
 
-/// Check if a path is under the /.aeordb-system/ directory.
+/// Check if a path is under one of the protected system roots:
+///   - `/.aeordb-system/...` (user/group records, api keys, refresh tokens,
+///     snapshots, internal config like jwt_signing_key)
+///   - `/.aeordb-config/...` (cron schedules, webhook configs, parser
+///     registry, per-directory indexes)
+///
+/// Per-directory dotfiles like `.aeordb-permissions` (at any depth) and
+/// `.aeordb-indexes/` (inside a user directory) are user-visible config
+/// and NOT system paths. Only the absolute roots are system.
 pub fn is_system_path(path: &str) -> bool {
     let normalized = crate::engine::path_utils::normalize_path(path);
-    normalized.starts_with("/.aeordb-") || normalized == "/.aeordb-system"
+    normalized == "/.aeordb-system"
+        || normalized.starts_with("/.aeordb-system/")
+        || normalized == "/.aeordb-config"
+        || normalized.starts_with("/.aeordb-config/")
 }
 
 /// Compute the domain-prefixed hash for a deletion record.
@@ -714,17 +725,14 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
 
-    // Auto-snapshot before delete (at most once per minute)
-    if !is_system_path(&normalized) {
-      self.auto_snapshot_before_delete(ctx);
-    }
-
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
-    // Verify the file exists and capture metadata for event
+    // Verify the file exists FIRST — before auto-snapshot or any side-effect.
+    // A delete of a nonexistent file must produce zero observable side-effects:
+    // no auto-snapshot, no event, no counter changes.
     let file_key = file_path_hash(&normalized, &algo)?;
     let file_record_opt = match self.engine.get_entry(&file_key)? {
       Some((header, _key, value)) => {
@@ -734,6 +742,12 @@ impl<'a> DirectoryOps<'a> {
         return Err(EngineError::NotFound(normalized));
       }
     };
+
+    // File confirmed to exist. Now take an auto-snapshot before mutating
+    // (at most once per minute).
+    if !is_system_path(&normalized) {
+      self.auto_snapshot_before_delete(ctx);
+    }
 
     // Store a DeletionRecord
     let deletion = DeletionRecord::new(normalized.clone(), None);
@@ -1087,7 +1101,14 @@ impl<'a> DirectoryOps<'a> {
       dt.timestamp_subsec_millis(),
     );
 
-    match vm.create_snapshot(ctx, &name, std::collections::HashMap::new()) {
+    // Use a system context so the auto-snapshot does NOT emit a public
+    // `versions_created` event — auto-snapshots are an implementation
+    // detail of the calling operation (delete/restore), not a user-visible
+    // version mutation. The caller's own event (entries_deleted etc.)
+    // remains the observable signal.
+    let sys_ctx = crate::engine::request_context::RequestContext::system();
+    let _ = ctx; // Keep ctx parameter for future use (currently unused after the suppression above)
+    match vm.create_snapshot(&sys_ctx, &name, std::collections::HashMap::new()) {
       Ok(_) => {
         tracing::info!(snapshot = %name, "Auto-snapshot ({})", prefix);
       }
@@ -1238,7 +1259,7 @@ impl<'a> DirectoryOps<'a> {
   /// re-propagating their parent directories up to root. Used by `verify --repair`
   /// when the root directory is empty but files exist (e.g., after a KV rebuild
   /// where the root directory entry was overwritten by a prior corrupt session).
-  pub fn rebuild_directory_tree(&self, ctx: &RequestContext) -> EngineResult<usize> {
+  pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
     let hash_length = self.engine.hash_algo().hash_length();
     let snapshot = self.engine.kv_snapshot.load();
     let all_entries = snapshot.iter_all()?;

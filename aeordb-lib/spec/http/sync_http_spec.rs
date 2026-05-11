@@ -107,7 +107,7 @@ async fn test_sync_diff_full() {
     // All files as "added"
     let added = json["changes"]["files_added"].as_array().unwrap();
     let user_added: Vec<_> = added.iter()
-        .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system"))
+        .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.aeordb-system"))
         .collect();
     assert_eq!(user_added.len(), 2);
     // Sorted by path
@@ -320,7 +320,7 @@ async fn test_sync_diff_empty_database() {
 
     // Filter out /.aeordb-system/ entries
     let added: Vec<_> = json["changes"]["files_added"].as_array().unwrap()
-        .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system")).collect();
+        .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.aeordb-system")).collect();
     assert!(added.is_empty(), "No user files should be added on empty db");
     assert!(json["changes"]["files_modified"].as_array().unwrap().is_empty());
     assert!(json["changes"]["files_deleted"].as_array().unwrap().is_empty());

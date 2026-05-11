@@ -17,6 +17,14 @@ pub struct RefreshTokenRecord {
   pub created_at: DateTime<Utc>,
   pub expires_at: DateTime<Utc>,
   pub is_revoked: bool,
+  /// The API key that issued this refresh token, when known. Refresh
+  /// requests verify the key is still active and unrevoked — otherwise
+  /// a revoked key's outstanding refresh tokens would still mint fresh
+  /// JWTs. Older refresh records (pre-2026-05) have `None`; for those we
+  /// fall back to "trust unless explicitly revoked," matching legacy
+  /// behavior so existing sessions don't break on upgrade.
+  #[serde(default)]
+  pub key_id: Option<String>,
 }
 
 /// Generate a cryptographically random refresh token with the `aeor_r_` prefix.

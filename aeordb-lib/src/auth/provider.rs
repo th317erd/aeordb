@@ -196,10 +196,34 @@ impl AuthProvider for FileAuthProvider {
 }
 
 /// Load an existing signing key from config, or generate a new one and persist it.
+///
+/// Failure semantics — important for cluster correctness:
+///   * If the key file IS NOT PRESENT (`Ok(None)`): generate a new one and
+///     persist it. This is the normal first-run bootstrap.
+///   * If the key file IS PRESENT but corrupt (e.g. wrong byte length): RETURN
+///     AN ERROR so the operator can investigate. The previous behavior here
+///     silently fell through to "generate new" — which invalidated every
+///     outstanding JWT and refresh token on the cluster and could mask a
+///     deeper corruption issue. Refusing to start surfaces the problem.
 fn load_or_create_jwt_manager(engine: &StorageEngine) -> std::result::Result<JwtManager, String> {
-  if let Ok(Some(key_bytes)) = system_store::get_config(engine, SIGNING_KEY_CONFIG) {
-    if let Ok(manager) = JwtManager::from_bytes(&key_bytes) {
-      return Ok(manager);
+  match system_store::get_config(engine, SIGNING_KEY_CONFIG) {
+    Ok(Some(key_bytes)) => {
+      // Key bytes ARE present. They MUST parse. Don't fall through.
+      return JwtManager::from_bytes(&key_bytes).map_err(|e| format!(
+        "JWT signing key is present at /.aeordb-system/config/{} but failed to parse: {:?}. \
+         This indicates corruption. Refusing to regenerate the key automatically — \
+         doing so would invalidate every outstanding JWT and refresh token in the cluster. \
+         If you intend to reset the signing key, run emergency-reset (which also wipes \
+         /.aeordb-system/refresh-tokens) or remove the corrupt config entry manually \
+         before restart.",
+        SIGNING_KEY_CONFIG, e
+      ));
+    }
+    Ok(None) => {
+      // First-run bootstrap path — fall through to generate-and-persist.
+    }
+    Err(e) => {
+      return Err(format!("Failed to read JWT signing key config: {}", e));
     }
   }
 

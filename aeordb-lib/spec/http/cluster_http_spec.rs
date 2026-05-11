@@ -435,11 +435,11 @@ async fn test_remove_peer_requires_root() {
 }
 
 // ===========================================================================
-// POST /admin/cluster/sync -- trigger sync (placeholder)
+// POST /sync/trigger -- trigger immediate sync with all peers
 // ===========================================================================
 
 #[tokio::test]
-async fn test_trigger_sync_returns_not_implemented() {
+async fn test_trigger_sync_with_no_peers_returns_empty_results() {
     let (app, jwt_manager, _engine, _temp_dir) = test_app();
     let token = root_bearer_token(&jwt_manager);
 
@@ -453,7 +453,14 @@ async fn test_trigger_sync_returns_not_implemented() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+    assert_eq!(json["peers_synced"].as_u64(), Some(0));
+    assert_eq!(json["peers_failed"].as_u64(), Some(0));
+    assert!(json["results"].is_array());
+    assert_eq!(json["results"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -578,4 +585,140 @@ async fn test_list_peers_includes_sync_status() {
     assert_eq!(sync_status["consecutive_failures"], 0);
     assert_eq!(sync_status["total_syncs"], 0);
     assert_eq!(sync_status["total_failures"], 0);
+}
+
+// ===========================================================================
+// POST /sync/join — cluster signing-key handoff
+// ===========================================================================
+
+#[tokio::test]
+async fn test_sync_join_requires_root() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let token = non_root_bearer_token(&jwt_manager);
+
+    let response = app
+        .oneshot(
+            Request::post("/sync/join")
+                .header("authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"node_url":"http://other-node:6830"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_sync_join_rejects_missing_node_url() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let token = root_bearer_token(&jwt_manager);
+
+    let response = app
+        .oneshot(
+            Request::post("/sync/join")
+                .header("authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_sync_join_returns_signing_key_and_ids() {
+    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+    let token = root_bearer_token(&jwt_manager);
+
+    let response = app
+        .oneshot(
+            Request::post("/sync/join")
+                .header("authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"node_url":"http://other-node:6830","label":"east-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response.into_body()).await;
+
+    // Response must include base64 signing key and two distinct node_ids.
+    let signing_key = json["signing_key"].as_str()
+        .expect("response must include signing_key");
+    assert!(!signing_key.is_empty(), "signing_key should be non-empty");
+
+    let responding_id = json["responding_node_id"].as_u64()
+        .expect("responding_node_id must be present and numeric");
+    let new_peer_id = json["new_peer_node_id"].as_u64()
+        .expect("new_peer_node_id must be present and numeric");
+
+    // The two IDs must differ; otherwise a peer record collides with the
+    // local node's id.
+    assert_ne!(responding_id, new_peer_id,
+        "responding_node_id and new_peer_node_id must differ");
+    assert_ne!(responding_id, 0, "node_id must not be the reserved 0 value");
+    assert_ne!(new_peer_id, 0, "node_id must not be the reserved 0 value");
+}
+
+#[tokio::test]
+async fn test_sync_join_persists_node_id_at_startup() {
+    // After server startup (which is implicit via test_app()), the local
+    // node_id must already be persisted — /sync/join should read it, not
+    // generate it lazily.
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+
+    // Read node_id directly via system_store; it should be Some(_).
+    let id_before = aeordb::engine::system_store::get_node_id(&engine)
+        .expect("get_node_id should not error")
+        .expect("startup should have persisted a node_id");
+    assert_ne!(id_before, 0);
+
+    let token = root_bearer_token(&jwt_manager);
+    let response = app
+        .oneshot(
+            Request::post("/sync/join")
+                .header("authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"node_url":"http://other:6830"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response.into_body()).await;
+    let responding_id = json["responding_node_id"].as_u64().unwrap();
+
+    // The returned id must match what's already in the store.
+    assert_eq!(responding_id, id_before);
+}
+
+#[tokio::test]
+async fn test_sync_join_registers_peer() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let token = root_bearer_token(&jwt_manager);
+
+    let response = app
+        .oneshot(
+            Request::post("/sync/join")
+                .header("authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"node_url":"http://east-1:6830","label":"east-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The joining node should now appear in the peer list.
+    let peers = aeordb::engine::system_store::get_peer_configs(&engine).unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].address, "http://east-1:6830");
+    assert_eq!(peers[0].label.as_deref(), Some("east-1"));
 }

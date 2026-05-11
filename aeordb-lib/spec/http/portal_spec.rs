@@ -75,7 +75,7 @@ async fn test_portal_index_returns_html() {
 
   let request = Request::builder()
     .method("GET")
-    .uri(""/")
+    .uri("/")
     .body(Body::empty())
     .unwrap();
 
@@ -216,7 +216,7 @@ async fn test_portal_assets_require_no_auth() {
   // Deliberately omit Authorization header.
   let request = Request::builder()
     .method("GET")
-    .uri(""/")
+    .uri("/")
     .body(Body::empty())
     .unwrap();
 

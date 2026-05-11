@@ -142,7 +142,7 @@ impl AppendWriter {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -169,7 +169,7 @@ impl AppendWriter {
     self.file.write_all(key)?;
     self.file.write_all(value)?;
 
-    // No per-entry fsync — the hot tail (flushed every 250ms) provides crash
+    // No per-entry fsync — the hot tail (flushed every 100ms) provides crash
     // recovery. WAL data reaches disk via the periodic timer sync in
     // try_flush_hot_buffer(). This eliminates ~4,000 fsync calls per 1GB upload.
 
@@ -229,7 +229,7 @@ impl AppendWriter {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -487,6 +487,16 @@ impl AppendWriter {
   pub fn scan_entries_reporting(&self) -> EngineResult<EntryScanner> {
     let file = File::open(&self.file_path)?;
     EntryScanner::new_reporting(file)
+  }
+
+  /// Scan the WAL for dirty-startup recovery: ignore the stale
+  /// `header.hot_tail_offset` and walk to EOF. **MUST** be used by
+  /// `rebuild_kv` when the hot tail was detected as corrupt/missing —
+  /// otherwise entries written between the last 100ms timer flush and the
+  /// crash are silently dropped.
+  pub fn scan_entries_dirty_recovery(&self) -> EngineResult<EntryScanner> {
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new_dirty_recovery(file)
   }
 
   pub fn file_header(&self) -> &FileHeader {

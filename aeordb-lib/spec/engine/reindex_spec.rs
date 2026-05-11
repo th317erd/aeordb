@@ -99,6 +99,7 @@ fn test_reindex_indexes_all_files() {
     );
 }
 
+
 #[test]
 fn test_reindex_checkpoint_resume() {
     let (engine, _temp) = create_temp_engine_for_tests();
@@ -110,14 +111,17 @@ fn test_reindex_checkpoint_resume() {
     store_json_files(&engine, "/data", 100);
 
     // Enqueue reindex and manually set a checkpoint at the 50th file.
+    // The reindex executor compares each file_path > checkpoint
+    // lexicographically using the FULL path (see task_worker::execute_reindex
+    // line ~237), so the checkpoint must be a full path, not a bare name.
     let task = queue
         .enqueue("reindex", serde_json::json!({"path": "/data"}))
         .unwrap();
 
-    // Files are named item-000.json through item-099.json.
-    // Checkpoint at "item-049.json" means skip everything <= that name.
+    // Files are stored at /data/item-000.json … /data/item-099.json.
+    // Checkpoint at "/data/item-049.json" means skip everything <= that path.
     queue
-        .update_checkpoint(&task.id, "item-049.json")
+        .update_checkpoint(&task.id, "/data/item-049.json")
         .unwrap();
 
     // Process the task.

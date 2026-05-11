@@ -74,6 +74,7 @@ async fn test_store_file_overwrite_emits_entries_created() {
 
 // ─── Entry events: delete_file ──────────────────────────────────────────
 
+
 #[tokio::test]
 async fn test_delete_file_emits_entries_deleted() {
     let (engine, bus, ctx, _temp) = setup_with_events();
@@ -96,6 +97,7 @@ async fn test_delete_file_emits_entries_deleted() {
     assert!(entries[0]["size"].as_u64().unwrap() > 0);
 }
 
+
 #[tokio::test]
 async fn test_delete_file_not_found_no_event() {
     let (engine, bus, ctx, _temp) = setup_with_events();
@@ -112,6 +114,7 @@ async fn test_delete_file_not_found_no_event() {
     ).await;
     assert!(result.is_err(), "should timeout — no events for failed operation");
 }
+
 
 #[tokio::test]
 async fn test_delete_file_with_indexing_emits_entries_deleted() {
@@ -362,7 +365,7 @@ async fn test_import_backup_emits_imports_completed() {
     let export_temp = tempfile::tempdir().unwrap();
     let export_path = export_temp.path().join("export.aeordb").to_str().unwrap().to_string();
     let head = source.head_hash().unwrap();
-    aeordb::engine::export_version(&source, &head, &export_path).unwrap();
+    aeordb::engine::export_version(&source, &head, &export_path, false).unwrap();
 
     // Import with events
     let (target, _target_temp) = create_temp_engine_for_tests();
@@ -370,7 +373,7 @@ async fn test_import_backup_emits_imports_completed() {
     let ctx = RequestContext::from_claims("importer", bus.clone());
     let mut rx = bus.subscribe();
 
-    aeordb::engine::import_backup(&ctx, &target, &export_path, false, true).unwrap();
+    aeordb::engine::import_backup(&ctx, &target, &export_path, false, true, false).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.event_type, "imports_completed");
@@ -393,14 +396,14 @@ async fn test_import_backup_no_event_with_system_ctx() {
     let export_temp = tempfile::tempdir().unwrap();
     let export_path = export_temp.path().join("export.aeordb").to_str().unwrap().to_string();
     let head = source.head_hash().unwrap();
-    aeordb::engine::export_version(&source, &head, &export_path).unwrap();
+    aeordb::engine::export_version(&source, &head, &export_path, false).unwrap();
 
     let bus = Arc::new(EventBus::new());
     let mut rx = bus.subscribe();
     let (target, _target_temp) = create_temp_engine_for_tests();
 
     // Import with system context (no bus)
-    aeordb::engine::import_backup(&sys_ctx, &target, &export_path, false, true).unwrap();
+    aeordb::engine::import_backup(&sys_ctx, &target, &export_path, false, true, false).unwrap();
 
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
@@ -610,6 +613,7 @@ async fn test_create_snapshot_with_metadata_emits_event() {
 }
 
 // ─── Mixed operations event ordering ────────────────────────────────────
+
 
 #[tokio::test]
 async fn test_mixed_operations_event_ordering() {

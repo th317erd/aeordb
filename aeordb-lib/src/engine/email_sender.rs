@@ -32,6 +32,17 @@ fn validate_email(email: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// An inline image (or other file) to attach to the email. `content_id`
+/// is the value used in HTML via `<img src="cid:...">`. Multiple
+/// attachments are allowed; each needs a unique `content_id`.
+#[derive(Debug, Clone)]
+pub struct InlineAttachment {
+    pub content_id: String,
+    pub mime_type:  String,
+    pub filename:   String,
+    pub bytes:      Vec<u8>,
+}
+
 /// Send an email using the configured provider.
 /// Returns Ok(()) on success, Err(error_message) on failure.
 pub async fn send_email(
@@ -41,9 +52,32 @@ pub async fn send_email(
     html_body: &str,
     text_body: &str,
 ) -> Result<(), String> {
+    send_email_with_attachments(config, to, subject, html_body, text_body, &[]).await
+}
+
+/// Send an email with optional inline attachments. Currently only the
+/// SMTP path honors `attachments`; OAuth providers (Gmail/Outlook) fall
+/// through to a no-attachment send and log a one-line warning. Add
+/// per-provider attachment support there if it ever matters.
+pub async fn send_email_with_attachments(
+    config: &EmailConfig,
+    to: &str,
+    subject: &str,
+    html_body: &str,
+    text_body: &str,
+    attachments: &[InlineAttachment],
+) -> Result<(), String> {
     match config {
-        EmailConfig::Smtp(smtp) => send_smtp(smtp, to, subject, html_body, text_body).await,
-        EmailConfig::OAuth(oauth) => send_oauth(oauth, to, subject, html_body, text_body).await,
+        EmailConfig::Smtp(smtp) => send_smtp(smtp, to, subject, html_body, text_body, attachments).await,
+        EmailConfig::OAuth(oauth) => {
+            if !attachments.is_empty() {
+                tracing::warn!(
+                    "[email] OAuth providers don't support inline attachments yet — sending {} byte(s) of attachment(s) inline as HTML only is not implemented; the HTML body's cid: references will appear broken in the recipient's client",
+                    attachments.iter().map(|a| a.bytes.len()).sum::<usize>(),
+                );
+            }
+            send_oauth(oauth, to, subject, html_body, text_body).await
+        }
     }
 }
 
@@ -53,10 +87,11 @@ async fn send_smtp(
     subject: &str,
     html_body: &str,
     text_body: &str,
+    attachments: &[InlineAttachment],
 ) -> Result<(), String> {
     use lettre::{
         AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
-        message::{header::ContentType, Mailbox, MultiPart, SinglePart},
+        message::{header::{ContentType, ContentDisposition, ContentId}, Mailbox, MultiPart, SinglePart},
         transport::smtp::authentication::Credentials,
         Message,
     };
@@ -70,23 +105,48 @@ async fn send_smtp(
     let to_mailbox: Mailbox = to.parse()
         .map_err(|e| format!("Invalid to address: {}", e))?;
 
+    // Build the body. Two cases:
+    //   • no attachments → simple multipart/alternative (text + html).
+    //   • attachments    → multipart/alternative with html branch wrapped
+    //                      in multipart/related so the HTML can reference
+    //                      images via `cid:...` and have them resolve to
+    //                      the embedded image parts.
+    let plain_part = SinglePart::builder()
+        .header(ContentType::TEXT_PLAIN)
+        .body(text_body.to_string());
+
+    let html_part = SinglePart::builder()
+        .header(ContentType::TEXT_HTML)
+        .body(html_body.to_string());
+
+    let multipart = if attachments.is_empty() {
+        MultiPart::alternative()
+            .singlepart(plain_part)
+            .singlepart(html_part)
+    } else {
+        let mut related = MultiPart::related().singlepart(html_part);
+        for att in attachments {
+            let mime: ContentType = att.mime_type
+                .parse()
+                .map_err(|e| format!("Invalid attachment mime type {:?}: {}", att.mime_type, e))?;
+            related = related.singlepart(
+                SinglePart::builder()
+                    .header(mime)
+                    .header(ContentDisposition::inline_with_name(&att.filename))
+                    .header(ContentId::from(format!("<{}>", att.content_id)))
+                    .body(att.bytes.clone()),
+            );
+        }
+        MultiPart::alternative()
+            .singlepart(plain_part)
+            .multipart(related)
+    };
+
     let email = Message::builder()
         .from(from)
         .to(to_mailbox)
         .subject(subject)
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_PLAIN)
-                        .body(text_body.to_string()),
-                )
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_HTML)
-                        .body(html_body.to_string()),
-                ),
-        )
+        .multipart(multipart)
         .map_err(|e| format!("Failed to build email: {}", e))?;
 
     let creds = Credentials::new(config.username.clone(), config.password.clone());

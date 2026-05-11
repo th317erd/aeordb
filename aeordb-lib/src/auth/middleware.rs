@@ -101,6 +101,33 @@ pub async fn auth_middleware(
     }
   };
 
+  // Scope enforcement: tokens minted with scope="sync" are for peer-to-peer
+  // sync ONLY. They're root JWTs (cluster signing key is shared), so leaking
+  // one without scope would give full takeover. Reject them on any non-/sync/*
+  // path so a leaked sync token can do no harm elsewhere.
+  if claims.scope.as_deref() == Some("sync") {
+    let path = request.uri().path();
+    if !path.starts_with("/sync/") {
+      tracing::warn!(
+        user_id = %claims.sub,
+        path = %path,
+        "Rejected sync-scoped JWT used outside /sync/ paths"
+      );
+      metrics::counter!(
+        crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
+        "result" => "scope_violation"
+      ).increment(1);
+      return (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+          error: "Token scope 'sync' cannot access this endpoint".to_string(),
+          code: None,
+        }),
+      )
+        .into_response();
+    }
+  }
+
   tracing::debug!(user_id = %claims.sub, "JWT validation succeeded");
   metrics::counter!(
     crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,

@@ -121,10 +121,17 @@ fn test_list_snapshots() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
+  // Snapshot dedup: back-to-back snapshots with no writes between them
+  // get deduplicated to the prior snapshot. Write something between each
+  // to force HEAD changes.
+  ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
   vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
   vm.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
+  ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
   vm.create_snapshot(&ctx, "v3", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();
@@ -138,11 +145,15 @@ fn test_list_snapshots_ordered_by_time() {
   let engine = create_engine(&dir);
   let vm = VersionManager::new(&engine);
 
+  let ops = DirectoryOps::new(&engine);
+  // Writes between snapshots prevent dedup; small sleeps keep timestamps distinct.
+  ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
   vm.create_snapshot(&ctx, "alpha", HashMap::new()).unwrap();
-  // Small delay to ensure distinct timestamps
   std::thread::sleep(std::time::Duration::from_millis(2));
+  ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
   vm.create_snapshot(&ctx, "beta", HashMap::new()).unwrap();
   std::thread::sleep(std::time::Duration::from_millis(2));
+  ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
   vm.create_snapshot(&ctx, "gamma", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();

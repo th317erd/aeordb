@@ -41,13 +41,36 @@ impl EntryHeader {
     self.flags & FLAG_SYSTEM != 0
   }
 
+  /// Maximum bytes allowed for a single key+value pair. Cap at 1 GiB each so
+  /// `compute_total_length`'s u32 arithmetic can never overflow, even when
+  /// `header_size` is at its maximum. An overflow would silently truncate
+  /// `total_length`, advance the write cursor by the truncated value, and
+  /// let the next append overwrite the tail of this entry → silent data
+  /// corruption.
+  pub const MAX_KEY_OR_VALUE_BYTES: u32 = 1 << 30;
+
   pub fn compute_total_length(
     hash_algo: HashAlgorithm,
-    key_length: u32,
-    value_length: u32,
-  ) -> u32 {
+    key_length: usize,
+    value_length: usize,
+  ) -> EngineResult<u32> {
+    let max = Self::MAX_KEY_OR_VALUE_BYTES as usize;
+    if key_length > max {
+      return Err(EngineError::InvalidInput(format!(
+        "key length {} exceeds maximum {} bytes",
+        key_length, max
+      )));
+    }
+    if value_length > max {
+      return Err(EngineError::InvalidInput(format!(
+        "value length {} exceeds maximum {} bytes",
+        value_length, max
+      )));
+    }
     let header_size = Self::FIXED_HEADER_SIZE + hash_algo.hash_length();
-    (header_size as u32) + key_length + value_length
+    // header_size + key_length + value_length cannot overflow u32 because
+    // header_size is small (<256) and key+value are each capped at 2^30.
+    Ok((header_size as u32) + (key_length as u32) + (value_length as u32))
   }
 
   pub fn compute_hash(

@@ -143,7 +143,7 @@ async fn test_restore_creates_auto_snapshot() {
 
     let json = body_json(response.into_body()).await;
     let auto_snap_name = json["auto_snapshot"].as_str().unwrap();
-    assert!(auto_snap_name.starts_with("pre-restore-"), "auto snapshot name should start with 'pre-restore-', got: {}", auto_snap_name);
+    assert!(auto_snap_name.starts_with("auto-pre-restore"), "auto snapshot name should start with 'pre-restore-', got: {}", auto_snap_name);
 
     // Verify the auto snapshot exists in list
     let vm = VersionManager::new(&engine);
@@ -343,7 +343,7 @@ async fn test_restore_response_shape() {
     assert_eq!(json["restored"], true);
     assert_eq!(json["path"], "shape.txt");
     assert!(json["auto_snapshot"].is_string(), "auto_snapshot should be a string");
-    assert!(json["auto_snapshot"].as_str().unwrap().starts_with("pre-restore-"));
+    assert!(json["auto_snapshot"].as_str().unwrap().starts_with("auto-pre-restore"));
     assert_eq!(json["size"], 11); // "hello world" is 11 bytes
     assert_eq!(json["from_snapshot"], "snap1");
 

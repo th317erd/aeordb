@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
 
@@ -68,6 +68,19 @@ pub fn create_app_with_auth_mode(
   hot_dir: Option<&std::path::Path>,
   cors_flag: Option<&str>,
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
+  create_app_with_auth_mode_and_cancel(engine_path, auth_mode, hot_dir, cors_flag, None)
+}
+
+/// As `create_app_with_auth_mode`, but accepts a `CancellationToken` so the
+/// caller's shutdown signal reaches the sync loop (and any other background
+/// workers wired through the cancel argument). Use from CLI; tests can ignore.
+pub fn create_app_with_auth_mode_and_cancel(
+  engine_path: &str,
+  auth_mode: &AuthMode,
+  hot_dir: Option<&std::path::Path>,
+  cors_flag: Option<&str>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
   let engine = create_engine_with_hot_dir(engine_path, hot_dir);
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
@@ -95,7 +108,18 @@ pub fn create_app_with_auth_mode(
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let task_queue = Arc::new(TaskQueue::new(engine.clone()));
   let cors_state = build_cors_state(cors_flag, &engine);
-  let router = create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine.clone(), event_bus.clone(), cors_state, Some(task_queue.clone()));
+  let router = match cancel {
+    Some(token) => create_app_with_all_and_task_queue_with_cancel(
+      auth_provider, jwt_manager, plugin_manager, rate_limiter,
+      prometheus_handle, engine.clone(), event_bus.clone(), cors_state,
+      Some(task_queue.clone()), token,
+    ),
+    None => create_app_with_all_and_task_queue(
+      auth_provider, jwt_manager, plugin_manager, rate_limiter,
+      prometheus_handle, engine.clone(), event_bus.clone(), cors_state,
+      Some(task_queue.clone()),
+    ),
+  };
   (router, bootstrap_key, engine, event_bus, task_queue)
 }
 
@@ -206,10 +230,118 @@ pub fn create_app_with_all_and_task_queue(
   cors_state: CorsState,
   task_queue: Option<Arc<TaskQueue>>,
 ) -> Router {
+  create_app_with_all_and_task_queue_inner(
+    auth_provider, jwt_manager, plugin_manager, rate_limiter,
+    prometheus_handle, engine, event_bus, cors_state, task_queue,
+    None,
+  )
+}
+
+/// Same as `create_app_with_all_and_task_queue`, but accepts an explicit
+/// `CancellationToken` so the caller's shutdown signal can propagate to
+/// background workers (sync loop, etc.). The CLI uses this; tests use the
+/// non-`_with_cancel` form and let the loop run until the runtime drops.
+pub fn create_app_with_all_and_task_queue_with_cancel(
+  auth_provider: Arc<dyn AuthProvider>,
+  jwt_manager: Arc<JwtManager>,
+  plugin_manager: Arc<PluginManager>,
+  rate_limiter: Arc<RateLimiter>,
+  prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
+  event_bus: Arc<EventBus>,
+  cors_state: CorsState,
+  task_queue: Option<Arc<TaskQueue>>,
+  cancel: tokio_util::sync::CancellationToken,
+) -> Router {
+  create_app_with_all_and_task_queue_inner(
+    auth_provider, jwt_manager, plugin_manager, rate_limiter,
+    prometheus_handle, engine, event_bus, cors_state, task_queue,
+    Some(cancel),
+  )
+}
+
+fn create_app_with_all_and_task_queue_inner(
+  auth_provider: Arc<dyn AuthProvider>,
+  jwt_manager: Arc<JwtManager>,
+  plugin_manager: Arc<PluginManager>,
+  rate_limiter: Arc<RateLimiter>,
+  prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
+  event_bus: Arc<EventBus>,
+  cors_state: CorsState,
+  task_queue: Option<Arc<TaskQueue>>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Router {
   let group_cache = Arc::new(Cache::new(GroupLoader));
   let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
+
+  // Ensure this node has a stable node_id BEFORE any sync handler can run.
+  // The previous lazy-generation-inside-/sync/join was racy: two concurrent
+  // joins against a fresh node could both observe `Ok(None)`, both call
+  // `rand::random()`, and the second `store_node_id` would overwrite the
+  // first — the first joining node had already received the stale ID.
+  match crate::engine::system_store::get_node_id(&engine) {
+    Ok(Some(id)) => {
+      tracing::debug!(node_id = id, "Loaded existing node_id");
+    }
+    Ok(None) => {
+      let new_id: u64 = rand::random();
+      let ctx = crate::engine::RequestContext::system();
+      if let Err(e) = crate::engine::system_store::store_node_id(&engine, &ctx, new_id) {
+        tracing::error!("Failed to persist node_id at startup: {}", e);
+      } else {
+        tracing::info!(node_id = new_id, "Generated and persisted new node_id");
+      }
+    }
+    Err(e) => {
+      tracing::error!("Failed to read node_id at startup: {}", e);
+    }
+  }
+
+  // Load any persisted peer configs (added via /sync/peers, --peers, or
+  // --join) into the runtime PeerManager so the sync loop sees them.
+  if let Ok(persisted) = crate::engine::system_store::get_peer_configs(&engine) {
+    for cfg in &persisted {
+      peer_manager.add_peer(cfg);
+    }
+    if !persisted.is_empty() {
+      tracing::info!("Loaded {} peer(s) from system store", persisted.len());
+    }
+  }
+
+  // Construct the sync engine so /sync/trigger and the periodic loop have
+  // something to drive. The clock tracker rejects heartbeats with offsets
+  // larger than 30 seconds — anything wider than that is almost certainly
+  // a configuration error rather than legitimate drift.
+  let clock_tracker = Arc::new(crate::engine::PeerClockTracker::new(30_000));
+  let sync_engine = Arc::new(
+    crate::engine::SyncEngine::new(
+      Arc::clone(&engine),
+      Arc::clone(&peer_manager),
+      Arc::clone(&clock_tracker),
+      crate::engine::SyncConfig { periodic_interval_secs: 30 },
+    )
+    .with_jwt_manager(Arc::clone(&jwt_manager)),
+  );
+
+  // Spawn the periodic sync loop. The loop only does work when peers are
+  // in Active state (set after the honeymoon clock-sync handshake), so
+  // running it unconditionally costs almost nothing on a standalone node.
+  //
+  // If a CancellationToken was passed in (CLI path), use it so the loop
+  // exits cleanly on shutdown. Tests construct the router without a token
+  // and rely on runtime drop to stop the loop.
+  let sync_loop_cancel = cancel.clone()
+    .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+  let _sync_loop_handle = crate::engine::spawn_sync_loop(
+    Arc::clone(&sync_engine),
+    30,
+    Some(Arc::clone(&event_bus)),
+    sync_loop_cancel,
+  );
+
   let app_state = AppState {
     jwt_manager,
     auth_provider,
@@ -223,6 +355,7 @@ pub fn create_app_with_all_and_task_queue(
     index_cleanup,
     task_queue,
     peer_manager,
+    sync_engine: Some(sync_engine),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
     startup_instant: std::time::Instant::now(),
     db_path: String::new(),
@@ -367,6 +500,7 @@ pub fn create_app_with_all_and_task_queue(
     .route("/sync/peers", post(cluster_routes::add_peer).get(cluster_routes::list_peers))
     .route("/sync/peers/{node_id}", delete(cluster_routes::remove_peer))
     .route("/sync/trigger", post(cluster_routes::trigger_sync))
+    .route("/sync/join", post(cluster_routes::join_cluster))
     // Links: symlink routes
     .route("/links/{*path}", put(symlink_routes::create_symlink)
                             .get(symlink_routes::get_symlink)

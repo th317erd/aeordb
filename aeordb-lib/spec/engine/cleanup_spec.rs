@@ -29,6 +29,7 @@ fn store_test_refresh_token(
         created_at: Utc::now() - Duration::hours(2),
         expires_at,
         is_revoked: revoked,
+      key_id: None,
     };
 
     system_store::store_refresh_token(engine, ctx, &record).unwrap();

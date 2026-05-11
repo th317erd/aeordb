@@ -142,7 +142,7 @@ fn walk_directory_tree(
       let children = if is_btree_format(&value) {
         collect_btree_children(engine, &value, hash_length, live)?
       } else {
-        deserialize_child_entries(&value, hash_length, 0)?
+        deserialize_child_entries(&value, hash_length, header.entry_version)?
       };
 
       for child in &children {
@@ -276,16 +276,26 @@ fn mark_system_entries(
   for prefix in &system_prefixes {
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
     // System dirs may be deleted at HEAD but snapshot-referenced.
-    if let Some((_header, _key, value)) = engine.get_entry_including_deleted(&dir_hash)? {
+    if let Some((header, _key, value)) = engine.get_entry_including_deleted(&dir_hash)? {
       live.insert(dir_hash);
-      if !value.is_empty() {
-        if is_btree_format(&value) {
-          let children = collect_btree_children(engine, &value, hash_length, live)?;
+      // Follow hard link if value is a content-hash pointer.
+      let dir_value = if value.len() == hash_length {
+        live.insert(value.clone());
+        match engine.get_entry_including_deleted(&value)? {
+          Some((_h, _k, v)) => v,
+          None => continue,
+        }
+      } else {
+        value
+      };
+      if !dir_value.is_empty() {
+        if is_btree_format(&dir_value) {
+          let children = collect_btree_children(engine, &dir_value, hash_length, live)?;
           for child in &children {
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
         } else {
-          let children = deserialize_child_entries(&value, hash_length, 0)?;
+          let children = deserialize_child_entries(&dir_value, hash_length, header.entry_version)?;
           for child in &children {
             mark_entry_recursive(engine, &child.hash, hash_length, live)?;
           }
@@ -377,12 +387,14 @@ fn min_deletion_size(engine: &StorageEngine) -> u32 {
   // value = u16(2) + "gc"(2) + i64(8) + u16(2) + "gc"(2) = 16 bytes
   // key = hash_length bytes (computed hash)
   let hash_length = engine.hash_algo().hash_length();
-  EntryHeader::compute_total_length(engine.hash_algo(), hash_length as u32, 16)
+  EntryHeader::compute_total_length(engine.hash_algo(), hash_length, 16)
+    .expect("small fixed sizes cannot exceed length bounds")
 }
 
 /// Minimum void entry size.
 fn min_void_size(engine: &StorageEngine) -> u32 {
   EntryHeader::compute_total_length(engine.hash_algo(), 0, 0)
+    .expect("zero lengths cannot exceed bounds")
 }
 
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.

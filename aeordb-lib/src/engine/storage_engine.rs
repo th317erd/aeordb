@@ -1373,9 +1373,16 @@ impl StorageEngine {
       tracing::debug!(
         writer_offset = writer.current_offset(),
         file_path = %writer.file_path().display(),
-        "rebuild_kv: scanning WAL"
+        "rebuild_kv: scanning WAL to EOF (dirty recovery)"
       );
-      let scanner = writer.scan_entries()?;
+      // Use the dirty-recovery scanner: ignore the stale
+      // `header.hot_tail_offset` and walk to EOF. Without this, every entry
+      // written between the last 100ms timer flush and a crash is silently
+      // dropped — `scan_entries()` would stop at the stale offset and the
+      // entries past it (but before EOF) would be invisible to the rebuilt
+      // KV. The dirty-recovery scanner uses `scan_for_next_magic` to step
+      // over any torn-write garbage at the tail.
+      let scanner = writer.scan_entries_dirty_recovery()?;
       let mut collected = Vec::new();
       for result in scanner {
         match result {
@@ -1553,7 +1560,7 @@ impl StorageEngine {
   }
 
   /// Try to flush the hot buffer if the KV lock is available.
-  /// Used by the 250ms timer task — non-blocking, skips if writer is busy.
+  /// Used by the 100ms timer task — non-blocking, skips if writer is busy.
   pub fn try_flush_hot_buffer(&self) {
     // Sync WAL data to disk first — entries written since last sync are in the
     // OS page cache. This must happen BEFORE writing the hot tail, so that any
