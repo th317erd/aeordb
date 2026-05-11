@@ -139,6 +139,81 @@ The hash is always computed on the raw uncompressed data. This preserves dedupli
 
 Each entry carries its own `compression_algo` byte, so compressed and uncompressed entries coexist in the same file. Currently, zstd is the only supported compression algorithm.
 
+## On-Disk Layout: Single File
+
+A complete AeorDB lives in one `.aeordb` file:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  File Header (256 bytes)                                     │
+├──────────────────────────────────────────────────────────────┤
+│  KV Block — bucket pages, pinned at head                     │
+│  (stages: 64 KB → 512 KB → 4 MB → 32 MB → 128 MB → …)        │
+├──────────────────────────────────────────────────────────────┤
+│  WAL — entries appended forward (chunks, file records,       │
+│  directory indexes, snapshots, …)                            │
+├──────────────────────────────────────────────────────────────┤
+│  Hot Tail — magic + count + CRC + recent KV entries          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+No sidecar files. No journal directory. The single file is the entire database.
+
+The **KV block** at the head is a flat bucket array — `hash → entry offset` mappings indexed by a normalized vector table (NVT). Lookups are O(1): hash the key, find the bucket, read the page.
+
+The **WAL** grows forward from the end of the KV block. New entries are appended.
+
+The **hot tail** at EOF is a short journal of KV entries that haven't been flushed into the bucket pages yet. On startup we read the hot tail first, populating the in-memory write buffer with the most recent unflushed entries.
+
+## Online KV Expansion
+
+When the KV bucket pages fill, AeorDB grows the KV block to the next stage **while the database is running** — no restart, no downtime, no rebuild.
+
+The expansion holds both writer and KV locks for the duration of the relocation, then releases them. Reads and writes that complete before or after the expansion proceed normally; writes during the expansion queue on the lock.
+
+Stage progression (BLAKE3, page size 1,314 bytes):
+
+| Stage | Block size | Buckets | Capacity (~) |
+|-------|-----------|---------|-------------|
+| 0 | 64 KB | 49 | 1,500 entries |
+| 1 | 512 KB | 399 | 12,000 |
+| 2 | 4 MB | 3,192 | 96,000 |
+| 3 | 32 MB | 25,532 | 768,000 |
+| 4 | 128 MB | 102,130 | 3,000,000 |
+
+Growth is geometric early (8× per stage) then linear (4×, 2×) to keep relocation costs bounded.
+
+### How it works (atomically)
+
+1. Set `resize_in_progress = true` and `resize_target_stage` in the file header.
+2. Scan forward from the new KV-block boundary to find the first WAL entry that starts AFTER it. This is the actual end of the growth zone — entries straddling the boundary must be included so the relocated copy is complete.
+3. Bulk-copy the growth zone `[old_kv_end .. actual_copy_end]` to the end of the WAL (right before the hot tail). This temporarily produces two copies — the original (still readable) and the relocated copy. Crash-safe window.
+4. fsync.
+5. Tell the KV store to finalize: zero the new bucket pages, rehash all entries (entries that lived in the growth zone now point to their relocated offsets), update the in-memory state, write the file header with the new stage.
+6. Write a Void entry over the dead tail at the old growth-zone boundary so the entry scanner stays clean on restart.
+
+If the process crashes between steps 2 and 5, the original WAL data is intact and the next startup detects `resize_in_progress = true` in the header. The expansion resumes from the relocated copy.
+
+## Hot Tail
+
+The hot tail is a small journal at the end of the file. It stores any KV entries that exist in memory but haven't been flushed to the bucket pages yet.
+
+```
+[Hot Tail Header — 13 bytes]
+  magic:        [u8; 5] = AE 01 7D B1 0C
+  entry_count:  u32     (number of entries below)
+  count_crc32:  u32     (CRC32 of the entry_count bytes)
+
+[Entries — 41 bytes each, for BLAKE3]
+  hash:         [u8; 32]
+  type_flags:   u8
+  offset:       u64       (WAL position of the actual entry)
+```
+
+The hot tail is the durability boundary for the KV. Periodic flushes write the hot tail; on the next startup, those entries reload into the in-memory write buffer before any reads happen.
+
+If the hot tail's CRC fails or the magic doesn't match, the engine logs a warning and triggers a **dirty startup**: a full WAL scan rebuilds the KV from scratch. Same behavior if the hot tail offset in the header points past the actual file boundary. No data is lost — the WAL is the source of truth, the hot tail is just a fast-path index.
+
 ## fsync Strategy
 
 Not all entries are equally important for durability:
