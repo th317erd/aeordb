@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -149,6 +149,11 @@ pub struct StorageEngine {
   /// is immutable, so this cache can never serve stale data for a given key.
   /// Populated by update_parent_directories, read by directory lookups.
   pub(crate) dir_content_cache: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+  /// GC recheck queue. While GC mark+sweep runs, every successful write hash
+  /// is added here so the sweep phase can avoid clobbering entries that were
+  /// written after the mark snapshot was captured. `None` means GC is not
+  /// active and writes don't bother recording. See bot-docs/plan/gc-mark-sweep.md.
+  pub(crate) gc_recheck: Mutex<Option<HashSet<Vec<u8>>>>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -244,6 +249,7 @@ impl StorageEngine {
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -461,6 +467,7 @@ impl StorageEngine {
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -639,7 +646,59 @@ impl StorageEngine {
       }
     }
 
+    // If GC is running, record the hash so the sweep phase can spare it.
+    self.record_gc_recheck(key);
+
     Ok(offset)
+  }
+
+  /// Record a write into the GC recheck set if GC mark+sweep is active.
+  /// No-op otherwise. Cheap: one Mutex acquisition + an Option check.
+  fn record_gc_recheck(&self, hash: &[u8]) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_mut() {
+        set.insert(hash.to_vec());
+      }
+    }
+  }
+
+  /// Begin GC recheck tracking. Subsequent writes have their hashes recorded
+  /// into the recheck set. The caller (GC) reads + clears the set via
+  /// `take_gc_recheck` between mark and sweep, and again after sweep.
+  pub fn begin_gc_recheck(&self) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      *guard = Some(HashSet::new());
+    }
+  }
+
+  /// Drain the GC recheck set. Returns the hashes accumulated since the last
+  /// call (or since `begin_gc_recheck`). Leaves an empty set in place so
+  /// recording continues.
+  pub fn take_gc_recheck(&self) -> HashSet<Vec<u8>> {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_mut() {
+        return std::mem::take(set);
+      }
+    }
+    HashSet::new()
+  }
+
+  /// Peek at the GC recheck set without draining. Used during sweep to spare
+  /// in-flight writes (writers can still add while we read).
+  pub fn gc_recheck_contains(&self, hash: &[u8]) -> bool {
+    if let Ok(guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_ref() {
+        return set.contains(hash);
+      }
+    }
+    false
+  }
+
+  /// End GC recheck tracking. Writes will no longer record.
+  pub fn end_gc_recheck(&self) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      *guard = None;
+    }
   }
 
   /// Retrieve an entry by its hash key via a lock-free snapshot read.

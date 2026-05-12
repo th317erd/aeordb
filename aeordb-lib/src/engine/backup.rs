@@ -60,6 +60,15 @@ fn export_atomic<F>(output_path: &str, work: F) -> EngineResult<ExportResult>
 where
     F: FnOnce(&str) -> EngineResult<ExportResult>,
 {
+    // Refuse to overwrite an existing destination — callers should remove first.
+    // This preserves the pre-atomicity contract (StorageEngine::create rejected
+    // existing files) so accidental clobbers are still caught.
+    if std::path::Path::new(output_path).exists() {
+        return Err(EngineError::AlreadyExists(format!(
+            "export destination '{}' already exists",
+            output_path
+        )));
+    }
     let part_path = format!("{}.part", output_path);
     let _ = std::fs::remove_file(&part_path);
 

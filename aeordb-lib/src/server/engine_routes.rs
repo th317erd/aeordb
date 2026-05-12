@@ -24,7 +24,7 @@ use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::compression::{CompressionAlgorithm, decompress};
 use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
-use crate::engine::errors::EngineError;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
@@ -250,19 +250,28 @@ pub async fn mkdir(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
 
-  match ops.create_directory(&ctx, &normalized) {
-    Ok(()) => {
-      (StatusCode::CREATED, Json(serde_json::json!({
-        "path": normalized,
-        "entry_type": 3,
-        "created": true,
-      }))).into_response()
-    }
-    Err(error) => {
+  let engine = state.engine.clone();
+  let normalized_for_blocking = normalized.clone();
+  let result = tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine);
+    ops.create_directory(&ctx, &normalized_for_blocking)
+  })
+  .await;
+
+  match result {
+    Ok(Ok(())) => (StatusCode::CREATED, Json(serde_json::json!({
+      "path": normalized,
+      "entry_type": 3,
+      "created": true,
+    }))).into_response(),
+    Ok(Err(error)) => {
       tracing::error!("Failed to create directory '{}': {}", normalized, error);
-      ErrorResponse::new(format!("Failed to create directory: {}", error))
+      engine_error_response("Failed to create directory", &error)
+    }
+    Err(join_error) => {
+      tracing::error!("create_directory task panicked: {}", join_error);
+      ErrorResponse::new("Failed to create directory: internal task error")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -356,17 +365,41 @@ pub async fn engine_store_file(
 
   let content_type = headers
     .get("content-type")
-    .and_then(|value| value.to_str().ok());
+    .and_then(|value| value.to_str().ok())
+    .map(|s| s.to_string());
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
-  let file_record = match directory_ops.finalize_file(
-    &ctx, &path, chunk_hashes, total_size, content_type, &first_bytes,
-  ) {
-    Ok(record) => record,
-    Err(error) => {
+  // Move the fsync-heavy finalize off the async runtime so we don't block other
+  // requests sharing this worker thread while we wait for disk.
+  let engine_for_blocking = state.engine.clone();
+  let path_for_blocking = path.clone();
+  let ctx_for_blocking = ctx.clone();
+  let first_bytes_owned = first_bytes;
+  let chunk_hashes_owned = chunk_hashes;
+  let file_record = match tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine_for_blocking);
+    ops.finalize_file(
+      &ctx_for_blocking,
+      &path_for_blocking,
+      chunk_hashes_owned,
+      total_size,
+      content_type.as_deref(),
+      &first_bytes_owned,
+    )
+  })
+  .await
+  {
+    Ok(Ok(record)) => record,
+    Ok(Err(error)) => {
       tracing::error!("Engine: failed to store file at '{}': {}", path, error);
       return engine_error_response("Failed to store file", &error);
+    }
+    Err(join_error) => {
+      tracing::error!("Engine: finalize_file task panicked: {}", join_error);
+      return ErrorResponse::new("Failed to store file: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
     }
   };
 
@@ -1047,64 +1080,53 @@ pub async fn engine_delete_file(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let directory_ops = DirectoryOps::new(&state.engine);
+  let engine = state.engine.clone();
+  let path_for_blocking = path.clone();
 
-  // Check if it's a symlink first
-  if directory_ops.get_symlink(&path).ok().flatten().is_some() {
-    return match directory_ops.delete_symlink(&ctx, &path) {
-      Ok(()) => {
-        (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "symlink" })))
-          .into_response()
+  // Dispatch + delete all happen on a blocking thread. The kind ("symlink" /
+  // "file" / "directory") flows back to the response. Cache eviction stays on
+  // the async side since it touches Arc'd state.
+  let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
+    let ops = DirectoryOps::new(&engine);
+    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+      ops.delete_symlink(&ctx, &path_for_blocking)?;
+      return Ok("symlink");
+    }
+    match ops.delete_file(&ctx, &path_for_blocking) {
+      Ok(()) => Ok("file"),
+      Err(EngineError::NotFound(_)) => {
+        ops.delete_directory(&ctx, &path_for_blocking)?;
+        Ok("directory")
       }
-      Err(error) => {
-        tracing::error!("Engine: failed to delete symlink '{}': {}", path, error);
-        ErrorResponse::new(format!("Failed to delete symlink '{}'. If this persists, check GET /system/health for system status", path))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-      }
-    };
-  }
+      Err(other) => Err(other),
+    }
+  })
+  .await;
 
-  match directory_ops.delete_file(&ctx, &path) {
-    Ok(()) => {
+  match result {
+    Ok(Ok(kind)) => {
       evict_caches_for_path(&state, &path);
-      // Queue index cleanup in background (debounced, batched)
-      state.index_cleanup.queue(path.clone());
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "deleted": true, "path": path })),
-      )
+      if kind == "file" {
+        state.index_cleanup.queue(path.clone());
+      }
+      let mut body = serde_json::json!({ "deleted": true, "path": path });
+      if kind != "file" {
+        body["entry_type"] = serde_json::json!(kind);
+      }
+      (StatusCode::OK, Json(body)).into_response()
+    }
+    Ok(Err(EngineError::NotFound(_))) => {
+      ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
-    Err(EngineError::NotFound(_)) => {
-      // File not found — try as an empty directory
-      match directory_ops.delete_directory(&ctx, &path) {
-        Ok(()) => {
-          evict_caches_for_path(&state, &path);
-          (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "directory" })))
-            .into_response()
-        }
-        Err(EngineError::NotFound(_)) => {
-          ErrorResponse::new(format!("Not found: {}", path))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response()
-        }
-        Err(EngineError::InvalidInput(msg)) => {
-          ErrorResponse::new(msg)
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response()
-        }
-        Err(error) => {
-          tracing::error!("Engine: failed to delete directory '{}': {}", path, error);
-          ErrorResponse::new(format!("Failed to delete: {}", error))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response()
-        }
-      }
+    Ok(Err(error)) => {
+      tracing::error!("Engine: failed to delete '{}': {}", path, error);
+      engine_error_response("Failed to delete", &error)
     }
-    Err(error) => {
-      tracing::error!("Engine: failed to delete file '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to delete file '{}'. If this persists, check GET /system/health for system status", path))
+    Err(join_error) => {
+      tracing::error!("delete task panicked: {}", join_error);
+      ErrorResponse::new("Failed to delete: internal task error")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -2512,31 +2534,24 @@ pub async fn engine_rename(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
+  let engine = state.engine.clone();
+  let path_for_blocking = path.clone();
+  let destination_owned = destination.to_string();
 
-  // Try symlink first, then file
-  if ops.get_symlink(&path).ok().flatten().is_some() {
-    return match ops.rename_symlink(&ctx, &path, destination) {
-      Ok(_record) => {
-        evict_caches_for_path(&state, &path);
-        evict_caches_for_path(&state, destination);
-        let from_normalized = crate::engine::path_utils::normalize_path(&path);
-        let to_normalized = crate::engine::path_utils::normalize_path(destination);
-        (StatusCode::OK, Json(serde_json::json!({
-          "from": from_normalized,
-          "to": to_normalized,
-          "entry_type": "symlink",
-        }))).into_response()
-      }
-      Err(ref error) => {
-        tracing::error!("Engine: failed to rename symlink '{}': {}", path, error);
-        engine_error_response("Rename failed", error)
-      }
-    };
-  }
+  let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
+    let ops = DirectoryOps::new(&engine);
+    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+      ops.rename_symlink(&ctx, &path_for_blocking, &destination_owned)?;
+      Ok("symlink")
+    } else {
+      ops.rename_file(&ctx, &path_for_blocking, &destination_owned)?;
+      Ok("file")
+    }
+  })
+  .await;
 
-  match ops.rename_file(&ctx, &path, destination) {
-    Ok(_record) => {
+  match result {
+    Ok(Ok(kind)) => {
       evict_caches_for_path(&state, &path);
       evict_caches_for_path(&state, destination);
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
@@ -2544,12 +2559,19 @@ pub async fn engine_rename(
       (StatusCode::OK, Json(serde_json::json!({
         "from": from_normalized,
         "to": to_normalized,
-        "entry_type": "file",
-      }))).into_response()
+        "entry_type": kind,
+      })))
+        .into_response()
     }
-    Err(ref error) => {
-      tracing::error!("Engine: failed to rename file '{}': {}", path, error);
-      engine_error_response("Rename failed", error)
+    Ok(Err(error)) => {
+      tracing::error!("Engine: failed to rename '{}': {}", path, error);
+      engine_error_response("Rename failed", &error)
+    }
+    Err(join_error) => {
+      tracing::error!("rename task panicked: {}", join_error);
+      ErrorResponse::new("Rename failed: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
     }
   }
 }
@@ -2619,21 +2641,38 @@ pub async fn copy_files(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
-  let mut copied = Vec::new();
-  let mut errors = Vec::new();
+  let engine = state.engine.clone();
+  let paths = payload.paths.clone();
+  let dest_for_blocking = dest_normalized.clone();
 
-  for path in &payload.paths {
-    let from_normalized = crate::engine::path_utils::normalize_path(path);
-    let name = crate::engine::path_utils::file_name(&from_normalized)
-      .unwrap_or("").to_string();
-    let to_path = format!("{}/{}", dest_normalized.trim_end_matches('/'), name);
-
-    match ops.copy_path(&ctx, &from_normalized, &to_path) {
-      Ok(paths) => copied.extend(paths),
-      Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
+  // All copies run sequentially on a blocking thread; errors are collected
+  // per-source rather than aborting on the first failure (matches prior behavior).
+  let (copied, errors) = match tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine);
+    let mut copied = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for path in &paths {
+      let from_normalized = crate::engine::path_utils::normalize_path(path);
+      let name = crate::engine::path_utils::file_name(&from_normalized)
+        .unwrap_or("").to_string();
+      let to_path = format!("{}/{}", dest_for_blocking.trim_end_matches('/'), name);
+      match ops.copy_path(&ctx, &from_normalized, &to_path) {
+        Ok(paths) => copied.extend(paths),
+        Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
+      }
     }
-  }
+    (copied, errors)
+  })
+  .await
+  {
+    Ok(pair) => pair,
+    Err(join_error) => {
+      tracing::error!("copy task panicked: {}", join_error);
+      return ErrorResponse::new("Copy failed: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
 
   let mut response = serde_json::json!({ "copied": copied });
   if !errors.is_empty() {

@@ -1,0 +1,35 @@
+name: Stress Tests
+
+# Stress tests run on-demand only — they take many minutes per case.
+# Trigger from the Actions tab or by pushing a `stress/*` branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['stress/*']
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  stress:
+    name: stress test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-stress-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run stress tests
+        run: cargo test --release --workspace test_stress -- --nocapture

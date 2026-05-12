@@ -437,6 +437,12 @@ pub fn gc_sweep(
     if live.contains(&entry.hash) {
       continue;
     }
+    // Spare entries that landed during mark/sweep — they're in the recheck
+    // set the engine maintains while GC is active. Without this, concurrent
+    // writes would be eligible for sweep just because they're not in `live`.
+    if !dry_run && engine.gc_recheck_contains(&entry.hash) {
+      continue;
+    }
 
     let header = engine.read_entry_header_at(entry.offset)?;
     let entry_size = header.total_length;
@@ -522,6 +528,20 @@ pub fn run_gc(
     "dry_run": dry_run,
   }));
 
+  // Begin GC recheck tracking before any version-forest reads. From this
+  // point on, every successful write hash is recorded so the sweep phase can
+  // spare entries that arrived after the mark snapshot was captured. See
+  // bot-docs/plan/gc-mark-sweep.md. The RAII guard ensures we always call
+  // end_gc_recheck on exit, even on `?`-propagated errors.
+  struct RecheckGuard<'a>(&'a StorageEngine, bool);
+  impl<'a> Drop for RecheckGuard<'a> {
+    fn drop(&mut self) { if self.1 { self.0.end_gc_recheck(); } }
+  }
+  if !dry_run {
+    engine.begin_gc_recheck();
+  }
+  let _recheck_guard = RecheckGuard(engine, !dry_run);
+
   let vm = VersionManager::new(engine);
 
   // Auto-snapshot before GC — safety net in case sweep removes something needed
@@ -559,9 +579,28 @@ pub fn run_gc(
   let fork_count = vm.list_forks()?.len();
   let versions_scanned = 1 + snapshot_count + fork_count;
 
-  let live = gc_mark(engine)?;
+  let mut live = gc_mark(engine)?;
+
+  // Re-check drain: any entry that was written during the mark phase is now in
+  // the recheck set. Walk each one and union into `live` so the sweep doesn't
+  // clobber freshly-written data. Loop until the queue is empty for one pass.
+  if !dry_run {
+    loop {
+      let pending = engine.take_gc_recheck();
+      if pending.is_empty() {
+        break;
+      }
+      let hash_length = engine.hash_algo().hash_length();
+      for hash in pending {
+        mark_entry_recursive(engine, &hash, hash_length, &mut live)?;
+      }
+    }
+  }
+
   let live_entries = live.len();
 
+  // The RAII guard above calls end_gc_recheck on scope exit so failure paths
+  // don't leave recheck recording on indefinitely.
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
 
   // Reconcile counters from authoritative KV state after sweep

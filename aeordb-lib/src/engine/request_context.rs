@@ -7,6 +7,7 @@ use crate::engine::engine_event::EngineEvent;
 ///
 /// Created at the HTTP handler or CLI command level, passed to every
 /// engine method as `ctx: &RequestContext`.
+#[derive(Clone)]
 pub struct RequestContext {
     pub user_id: String,
     event_bus: Option<Arc<EventBus>>,

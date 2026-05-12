@@ -4,6 +4,14 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 pub const FILE_HEADER_SIZE: usize = 256;
 pub const FILE_MAGIC: &[u8; 4] = b"AEOR";
 
+/// Header format version this build understands. Bumping this is a
+/// commitment: every future change to the on-disk header layout must increment
+/// and provide a clear error to readers of an unknown version.
+///
+/// Current revision: v1 (single 256-byte slot; A/B double-buffer with sequence
+/// + CRC is planned for v2, see bot-docs/plan/disk-resident-kvs.md).
+pub const SUPPORTED_HEADER_VERSION: u8 = 1;
+
 #[derive(Debug, Clone)]
 pub struct FileHeader {
   pub header_version: u8,
@@ -168,9 +176,13 @@ impl FileHeader {
     }
     offset += 4;
 
-    // header_version: 1 byte
+    // header_version: 1 byte. Reject unknown versions with a clear message so
+    // future format changes have a clean error story instead of silent corruption.
     let header_version = bytes[offset];
     offset += 1;
+    if header_version != SUPPORTED_HEADER_VERSION {
+      return Err(EngineError::InvalidEntryVersion(header_version));
+    }
 
     // hash_algo: 2 bytes
     let hash_algo_raw = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);

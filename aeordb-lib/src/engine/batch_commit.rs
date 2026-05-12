@@ -61,6 +61,12 @@ pub fn commit_files(
         ));
     }
 
+    // Wrap the entire commit in a transaction so the hot-tail flush is deferred
+    // to the end. Without this, a crash mid-batch can leave files visible via
+    // path-based lookup but invisible in the directory tree (the directory
+    // entries haven't propagated and HEAD hasn't been updated).
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
+
     // Reject any path under /.aeordb-system/ or /.aeordb-config/. System data
     // is written exclusively through dedicated APIs (system_store, directory_ops
     // with FLAG_SYSTEM) — never through user-facing batch commit. Without this
