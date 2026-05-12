@@ -1,6 +1,6 @@
-/// Native image metadata parser.
-///
-/// Ported from `aeordb-plugin-parser-image`.
+//! Native image metadata parser.
+//!
+//! Ported from `aeordb-plugin-parser-image`.
 
 use serde_json::json;
 use super::exif;

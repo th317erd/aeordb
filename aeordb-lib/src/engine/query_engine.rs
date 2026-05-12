@@ -18,6 +18,53 @@ use crate::engine::scalar_converter::{
 };
 use crate::engine::storage_engine::StorageEngine;
 
+// ---------------------------------------------------------------------------
+// Type aliases for the query + aggregation pipelines
+// ---------------------------------------------------------------------------
+//
+// Most of the query engine works in terms of three things: file hashes, raw
+// field-value bytes, and scalar type tags. The natural Rust spellings
+// (`HashMap<Vec<u8>, Vec<u8>>`, `(HashMap<...>, u8)`, etc.) are mechanical to
+// read once but very noisy when nested. These aliases name the things the
+// engine actually traffics in.
+
+/// One file's stored field value, expressed as raw bytes. The accompanying
+/// type tag tells callers how to interpret them (see `bytes_to_f64`,
+/// `bytes_to_json_value`).
+type FieldValueBytes = HashMap<Vec<u8>, Vec<u8>>;
+
+/// A loaded field index: the per-file value bytes plus the converter type
+/// tag (u8) so callers know how to interpret them.
+type FieldIndexData = (FieldValueBytes, u8);
+
+/// Aggregate field indexes keyed by field name. Used during SUM/AVG/MIN/MAX
+/// to look up each file's value for each requested aggregate field.
+type FieldIndexMap = HashMap<String, FieldIndexData>;
+
+/// GROUP BY field data: positional `Vec` of `(field_name, values, type_tag)`
+/// preserving the order declared in the query.
+type GroupFieldEntries = Vec<(String, FieldValueBytes, u8)>;
+
+/// One bucket of a GROUP BY result: the group-key field values plus the
+/// file hashes assigned to that group.
+type GroupBucket = (HashMap<String, serde_json::Value>, Vec<Vec<u8>>);
+
+/// All GROUP BY buckets keyed by composite group key string.
+type GroupBuckets = HashMap<String, GroupBucket>;
+
+/// Candidate set returned by fuzzy/trigram indexes: the set of matching file
+/// hashes plus their raw stored values (used during the recheck phase to
+/// filter false positives before returning to the caller).
+type FuzzyCandidates = (HashSet<Vec<u8>>, FieldValueBytes);
+
+/// Output of `compute_aggregates`: per-aggregate-field result maps.
+struct ComputedAggregates {
+  sum: HashMap<String, f64>,
+  avg: HashMap<String, f64>,
+  min: HashMap<String, serde_json::Value>,
+  max: HashMap<String, serde_json::Value>,
+}
+
 /// A query operation on a single indexed field.
 ///
 /// Scalar operations (`Eq`, `Gt`, `Lt`, `Between`, `In`) compare against
@@ -1440,8 +1487,8 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
-  ) -> EngineResult<(HashSet<Vec<u8>>, HashMap<Vec<u8>, Vec<u8>>)> {
-    let mut all_values: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+  ) -> EngineResult<FuzzyCandidates> {
+    let mut all_values: FieldValueBytes = HashMap::new();
 
     match &field_query.operation {
       QueryOp::Contains(query_str) | QueryOp::Similar(query_str, _) | QueryOp::Fuzzy(query_str, _) => {
@@ -1865,7 +1912,7 @@ impl<'a> QueryEngine<'a> {
     for f in &agg.max { agg_fields.insert(f); }
 
     // Load indexes for aggregate fields
-    let mut field_indexes: HashMap<String, (HashMap<Vec<u8>, Vec<u8>>, u8)> = HashMap::new();
+    let mut field_indexes: FieldIndexMap = HashMap::new();
     for field_name in &agg_fields {
         let indexes = index_manager.load_indexes_for_field(&query.path, field_name)?;
         let index = indexes.into_iter().next().ok_or_else(|| {
@@ -1897,7 +1944,7 @@ impl<'a> QueryEngine<'a> {
 
     // If no GROUP BY, compute flat aggregates
     if agg.group_by.is_empty() {
-        let (sum, avg, min, max) = compute_aggregates(
+        let ComputedAggregates { sum, avg, min, max } = compute_aggregates(
             &result_hash_set, agg, &field_indexes,
         );
 
@@ -1914,7 +1961,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     // GROUP BY: load group field indexes
-    let mut group_field_data: Vec<(String, HashMap<Vec<u8>, Vec<u8>>, u8)> = Vec::new();
+    let mut group_field_data: GroupFieldEntries = Vec::new();
     for gf in &agg.group_by {
         let indexes = index_manager.load_indexes_for_field(&query.path, gf)?;
         let index = indexes.into_iter().next().ok_or_else(|| {
@@ -1925,7 +1972,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Bucket results by group key
-    let mut groups: HashMap<String, (HashMap<String, serde_json::Value>, Vec<Vec<u8>>)> = HashMap::new();
+    let mut groups: GroupBuckets = HashMap::new();
 
     for file_hash in &result_hash_set {
         // Build group key from all group_by fields
@@ -1951,7 +1998,8 @@ impl<'a> QueryEngine<'a> {
 
     for (key_map, group_hashes) in groups.values() {
         let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
-        let (sum, avg, min, max) = compute_aggregates(&group_hash_set, agg, &field_indexes);
+        let ComputedAggregates { sum, avg, min, max } =
+            compute_aggregates(&group_hash_set, agg, &field_indexes);
 
         group_results.push(GroupResult {
             key: key_map.clone(),
@@ -2076,8 +2124,8 @@ pub fn is_numeric_type(type_tag: u8) -> bool {
 fn compute_aggregates(
     hash_set: &HashSet<Vec<u8>>,
     agg: &AggregateQuery,
-    field_indexes: &HashMap<String, (HashMap<Vec<u8>, Vec<u8>>, u8)>,
-) -> (HashMap<String, f64>, HashMap<String, f64>, HashMap<String, serde_json::Value>, HashMap<String, serde_json::Value>) {
+    field_indexes: &FieldIndexMap,
+) -> ComputedAggregates {
     let mut sum_map: HashMap<String, f64> = HashMap::new();
     let mut avg_counts: HashMap<String, (f64, u64)> = HashMap::new();
     let mut min_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
@@ -2151,7 +2199,12 @@ fn compute_aggregates(
         .map(|(k, (v, _))| (k, v))
         .collect();
 
-    (sum_map, avg_map, min_display, max_display)
+    ComputedAggregates {
+        sum: sum_map,
+        avg: avg_map,
+        min: min_display,
+        max: max_display,
+    }
 }
 
 /// Chainable query builder.

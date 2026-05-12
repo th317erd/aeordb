@@ -1,6 +1,6 @@
-/// Native ODF (ODT/ODS) parser.
-///
-/// Ported from `aeordb-plugin-parser-odf`.
+//! Native ODF (ODT/ODS) parser.
+//!
+//! Ported from `aeordb-plugin-parser-odf`.
 
 use std::io::{Cursor, Read};
 

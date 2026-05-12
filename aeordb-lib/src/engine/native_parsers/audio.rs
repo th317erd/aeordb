@@ -1,6 +1,6 @@
-/// Native audio metadata parser.
-///
-/// Ported from `aeordb-plugin-parser-audio`.
+//! Native audio metadata parser.
+//!
+//! Ported from `aeordb-plugin-parser-audio`.
 
 use serde_json::json;
 

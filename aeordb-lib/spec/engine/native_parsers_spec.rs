@@ -1,10 +1,10 @@
-/// Tests for the native parser dispatch module.
-///
-/// Verifies:
-/// 1. Each parser is dispatched correctly by content type
-/// 2. Extension fallback works for application/octet-stream
-/// 3. Unknown content types return None (falls through to WASM)
-/// 4. Basic parsing works for each format
+//! Tests for the native parser dispatch module.
+//!
+//! Verifies:
+//! 1. Each parser is dispatched correctly by content type
+//! 2. Extension fallback works for application/octet-stream
+//! 3. Unknown content types return None (falls through to WASM)
+//! 4. Basic parsing works for each format
 
 use aeordb::engine::native_parsers::parse_native;
 

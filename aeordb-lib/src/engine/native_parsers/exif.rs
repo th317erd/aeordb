@@ -1,8 +1,8 @@
-/// Shared EXIF/IFD parser for JPEG and TIFF images.
-///
-/// Extracts structured metadata from TIFF-format IFD entries:
-/// camera info, dates, GPS coordinates, and textual fields
-/// (description, artist, copyright, software, user comment).
+//! Shared EXIF/IFD parser for JPEG and TIFF images.
+//!
+//! Extracts structured metadata from TIFF-format IFD entries:
+//! camera info, dates, GPS coordinates, and textual fields
+//! (description, artist, copyright, software, user comment).
 
 use serde_json::json;
 

@@ -1,6 +1,6 @@
-/// Native MS Office (DOCX/XLSX) parser.
-///
-/// Ported from `aeordb-plugin-parser-msoffice`.
+//! Native MS Office (DOCX/XLSX) parser.
+//!
+//! Ported from `aeordb-plugin-parser-msoffice`.
 
 use std::io::{Cursor, Read};
 

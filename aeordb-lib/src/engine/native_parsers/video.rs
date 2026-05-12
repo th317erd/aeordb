@@ -1,6 +1,6 @@
-/// Native video metadata parser.
-///
-/// Ported from `aeordb-plugin-parser-video`.
+//! Native video metadata parser.
+//!
+//! Ported from `aeordb-plugin-parser-video`.
 
 
 

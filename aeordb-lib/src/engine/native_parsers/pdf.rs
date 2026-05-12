@@ -1,10 +1,10 @@
-/// Native PDF parser.
-///
-/// Ported from `aeordb-plugin-parser-pdf`.
+//! Native PDF parser.
+//!
+//! Ported from `aeordb-plugin-parser-pdf`.
 
 
 
-/// PDF magic bytes that must appear at the start of every valid PDF.
+//! PDF magic bytes that must appear at the start of every valid PDF.
 const PDF_MAGIC: &[u8] = b"%PDF-";
 
 /// Parse a PDF file, extracting text (best-effort) and metadata from the

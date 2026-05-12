@@ -1,8 +1,8 @@
-/// Native parser dispatch module.
-///
-/// Provides built-in parsers for common file formats so they work
-/// out of the box without deploying WASM plugins. Unknown content
-/// types return `None`, falling through to the WASM plugin system.
+//! Native parser dispatch module.
+//!
+//! Provides built-in parsers for common file formats so they work
+//! out of the box without deploying WASM plugins. Unknown content
+//! types return `None`, falling through to the WASM plugin system.
 
 mod text;
 pub mod exif;

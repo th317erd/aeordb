@@ -1,6 +1,6 @@
-/// Native HTML/XML parser.
-///
-/// Ported from `aeordb-plugin-parser-html`.
+//! Native HTML/XML parser.
+//!
+//! Ported from `aeordb-plugin-parser-html`.
 
 pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Result<serde_json::Value, String> {
     let text = std::str::from_utf8(data).map_err(|e| format!("invalid UTF-8: {}", e))?;
