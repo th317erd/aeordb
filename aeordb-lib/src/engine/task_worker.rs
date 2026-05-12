@@ -55,14 +55,16 @@ pub fn spawn_task_worker(
             let engine_clone = engine.clone();
             let plugin_manager_clone = plugin_manager.clone();
             let event_bus_clone = event_bus.clone();
+            let cancel_clone = cancel.clone();
 
             // Use spawn_blocking since engine work is CPU-bound.
             let result = tokio::task::spawn_blocking(move || {
-                process_next_task_internal(
+                process_next_task_internal_with_cancel(
                     &queue_clone,
                     &engine_clone,
                     &plugin_manager_clone,
                     &event_bus_clone,
+                    &cancel_clone,
                 )
             })
             .await;
@@ -103,14 +105,18 @@ pub fn process_next_task(
     plugin_manager: &PluginManager,
     event_bus: &EventBus,
 ) -> EngineResult<bool> {
-    process_next_task_internal(queue, engine, plugin_manager, event_bus)
+    // Tests + sync callers without a cancel token get a dummy "never-cancelled"
+    // token. Production goes through process_next_task_internal_with_cancel.
+    let dummy_cancel = tokio_util::sync::CancellationToken::new();
+    process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel)
 }
 
-fn process_next_task_internal(
+fn process_next_task_internal_with_cancel(
     queue: &TaskQueue,
     engine: &StorageEngine,
     plugin_manager: &PluginManager,
     event_bus: &EventBus,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<bool> {
     // H18: dequeue_next atomically finds the oldest pending task and marks
     // it Running under a lock, preventing double-dequeue.
@@ -133,7 +139,7 @@ fn process_next_task_internal(
 
     // Execute based on task type.
     let result = match task.task_type.as_str() {
-        "reindex" => execute_reindex(queue, &task, engine, plugin_manager),
+        "reindex" => execute_reindex(queue, &task, engine, plugin_manager, cancel),
         "gc" => execute_gc(queue, &task, engine),
         "backup" => execute_backup(&task, engine),
         "cleanup" => execute_cleanup(&task, engine, event_bus),
@@ -182,6 +188,7 @@ fn execute_reindex(
     task: &TaskRecord,
     engine: &StorageEngine,
     plugin_manager: &PluginManager,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<String, String> {
     let path = task
         .args
@@ -328,8 +335,10 @@ fn execute_reindex(
             },
         );
 
-        // Check for cancellation after each batch.
-        if queue.is_cancelled(&task.id) {
+        // Check for per-task or shutdown cancellation after each batch. The
+        // outer cancel covers graceful shutdown — without polling it here the
+        // worker can't exit during a long reindex.
+        if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
             return Err("cancelled".to_string());
         }
     }

@@ -2012,6 +2012,8 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -2069,6 +2071,8 @@ impl<'a> DirectoryOps<'a> {
     old_path: &str,
     new_path: &str,
   ) -> EngineResult<FileRecord> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let old_normalized = normalize_path(old_path);
     let new_normalized = normalize_path(new_path);
 
@@ -2218,6 +2222,8 @@ impl<'a> DirectoryOps<'a> {
     from_path: &str,
     to_path: &str,
   ) -> EngineResult<FileRecord> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
 
@@ -2259,6 +2265,8 @@ impl<'a> DirectoryOps<'a> {
     from_path: &str,
     to_path: &str,
   ) -> EngineResult<Vec<String>> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
     let mut copied = Vec::new();
