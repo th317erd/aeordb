@@ -9,6 +9,10 @@ repository.workspace = true
 name = "aeordb"
 path = "src/main.rs"
 
+[[bin]]
+name = "crash-soak-worker"
+path = "src/bin/crash-soak-worker.rs"
+
 [dependencies]
 aeordb = { path = "../aeordb-lib" }
 axum = "0.8"
@@ -31,10 +35,15 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
+libc = "0.2"
 
 [[test]]
 name = "stress_spec"
 path = "spec/stress_spec.rs"
+
+[[test]]
+name = "crash_inject_spec"
+path = "spec/crash_inject_spec.rs"
 
 [[test]]
 name = "emergency_reset_spec"

@@ -190,7 +190,12 @@ impl DiskKVStore {
         let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
         let shared_nvt = Arc::new(nvt.clone());
 
-        // Read all pages for initial snapshot
+        // Read all pages for initial snapshot, validating the page CRC on
+        // every non-empty bucket. A CRC failure means the page got corrupted
+        // (torn write, disk error, bit flip). Flag `needs_rebuild` so the
+        // outer open path will trigger dirty startup and reconstruct the KV
+        // from a full WAL scan — the WAL is the source of truth.
+        let mut detected_page_corruption = false;
         let pages = {
             let mut pages = Vec::with_capacity(bucket_count);
             for bucket in 0..bucket_count {
@@ -198,6 +203,19 @@ impl DiskKVStore {
                 let mut page_data = vec![0u8; psize];
                 db_file.seek(SeekFrom::Start(offset))?;
                 db_file.read_exact(&mut page_data)?;
+                // Validate CRC for non-empty pages. deserialize_page accepts
+                // an all-zero "empty page" sentinel; any other state failing
+                // CRC means the page is corrupt.
+                if let Err(error) =
+                    crate::engine::kv_pages::deserialize_page(&page_data, hash_length)
+                {
+                    tracing::warn!(
+                        bucket,
+                        ?error,
+                        "KV bucket page failed CRC on open — triggering dirty startup"
+                    );
+                    detected_page_corruption = true;
+                }
                 pages.push(page_data);
             }
             Arc::new(pages)
@@ -235,7 +253,7 @@ impl DiskKVStore {
             hot_buffer: Vec::new(),
             snapshot,
             shared_nvt,
-            needs_rebuild: false,
+            needs_rebuild: detected_page_corruption,
             needs_expansion: None,
             transaction_depth: 0,
         })

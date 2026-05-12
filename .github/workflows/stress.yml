@@ -33,3 +33,9 @@ jobs:
 
       - name: Run stress tests
         run: cargo test --release --workspace test_stress -- --nocapture
+
+      - name: Build crash-soak-worker
+        run: cargo build --release --bin crash-soak-worker
+
+      - name: Run crash-injection tests
+        run: cargo test --release --test crash_inject_spec -- --ignored --nocapture

@@ -349,6 +349,7 @@ impl StorageEngine {
       (Vec::new(), false)
     };
 
+    let mut detected_kv_corruption = false;
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -356,6 +357,12 @@ impl StorageEngine {
         kv_file, hash_algo, kv_block_offset, hot_tail_offset,
         kv_block_stage, hot_entries,
       )?;
+      // If any bucket page failed CRC on open, the KV index is unreliable
+      // for the buckets involved — trigger dirty startup below so the WAL
+      // scan is the source of truth.
+      if kv.needs_rebuild {
+        detected_kv_corruption = true;
+      }
 
       // Scan for void entries (in-memory, not in KV)
       let scanner = writer.scan_entries()?;
@@ -476,7 +483,7 @@ impl StorageEngine {
     // After KV block expansion, rebuild the entire KV index from WAL.
     // The expansion zeroed the KV pages, so only hot tail entries are loaded.
     // A full rebuild repopulates all entries at their new offsets.
-    if needs_kv_rebuild || needs_dirty_startup {
+    if needs_kv_rebuild || needs_dirty_startup || detected_kv_corruption {
       if needs_kv_rebuild {
         tracing::info!("Rebuilding KV index after block expansion...");
       }
