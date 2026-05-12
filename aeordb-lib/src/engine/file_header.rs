@@ -1,11 +1,24 @@
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
+/// Size of a single header slot. The on-disk layout has TWO of these (slot A
+/// at byte 0, slot B at byte FILE_HEADER_SIZE). Most callsites that need
+/// "size of a header buffer" want this constant; sites that need "where the
+/// data region starts" want [`HEADER_REGION_SIZE`].
 pub const FILE_HEADER_SIZE: usize = 256;
+
+/// Total size of the header region — both slots combined. Data (KV block,
+/// WAL) starts at this offset.
+pub const HEADER_REGION_SIZE: usize = FILE_HEADER_SIZE * 2;
+
 pub const FILE_MAGIC: &[u8; 4] = b"AEOR";
 
-/// CRC32 size in bytes, at the tail of the header. Bytes [FILE_HEADER_SIZE-4
-/// .. FILE_HEADER_SIZE] hold the CRC32 computed over the first 252 bytes.
+/// CRC32 size in bytes, at the tail of each slot. Bytes [FILE_HEADER_SIZE-4
+/// .. FILE_HEADER_SIZE] hold the CRC32 computed over the first 252 bytes of
+/// the slot.
 const HEADER_CRC_SIZE: usize = 4;
 
 /// Header format version this build understands. Bumping this is a
@@ -15,18 +28,21 @@ const HEADER_CRC_SIZE: usize = 4;
 /// v1 (legacy): single 256-byte header, no CRC. No DBs in the wild.
 /// v2: single 256-byte header with CRC32 in the last 4 bytes. Catches torn
 ///     writes that pass magic+version but leave later bytes garbled.
-///
-/// A future v3 will add A/B double-buffering (slot A at 0, slot B at 256,
-/// data at 512, plus a u64 sequence number per slot) so a torn write to one
-/// slot leaves the other intact. The CRC field added in v2 is the prerequisite
-/// for picking the live slot — readers will compare sequence numbers and pick
-/// the highest one with a valid CRC.
-pub const SUPPORTED_HEADER_VERSION: u8 = 2;
+/// v3: two 256-byte slots at bytes 0 and 256, data starts at byte 512. Each
+///     slot carries a u64 sequence number + CRC32. Writes alternate slots —
+///     a torn write to one slot leaves the other intact. Readers pick the
+///     highest sequence with a valid CRC. The CRC field added in v2 is the
+///     prerequisite for picking the live slot.
+pub const SUPPORTED_HEADER_VERSION: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
   pub header_version: u8,
   pub hash_algo: HashAlgorithm,
+  /// Monotonically-increasing sequence number for A/B slot selection.
+  /// Every `update_header` increments this by 1. On read the slot with the
+  /// higher valid sequence wins.
+  pub sequence: u64,
   pub created_at: i64,
   pub updated_at: i64,
   pub kv_block_offset: u64,
@@ -57,6 +73,7 @@ impl FileHeader {
     FileHeader {
       header_version: SUPPORTED_HEADER_VERSION,
       hash_algo,
+      sequence: 0,
       created_at: now,
       updated_at: now,
       kv_block_offset: 0,
@@ -94,6 +111,10 @@ impl FileHeader {
     // hash_algo: 2 bytes
     buffer[offset..offset + 2].copy_from_slice(&self.hash_algo.to_u16().to_le_bytes());
     offset += 2;
+
+    // sequence: 8 bytes — v3 A/B slot selector
+    buffer[offset..offset + 8].copy_from_slice(&self.sequence.to_le_bytes());
+    offset += 8;
 
     // created_at: 8 bytes
     buffer[offset..offset + 8].copy_from_slice(&self.created_at.to_le_bytes());
@@ -224,6 +245,10 @@ impl FileHeader {
       .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
     offset += 2;
 
+    // sequence: 8 bytes — v3 A/B slot selector
+    let sequence = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    offset += 8;
+
     // created_at: 8 bytes
     let created_at = i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
     offset += 8;
@@ -304,6 +329,7 @@ impl FileHeader {
     Ok(FileHeader {
       header_version,
       hash_algo,
+      sequence,
       created_at,
       updated_at,
       kv_block_offset,
@@ -325,4 +351,95 @@ impl FileHeader {
       target_hash,
     })
   }
+}
+
+// ---------------------------------------------------------------------------
+// A/B slot read / write
+// ---------------------------------------------------------------------------
+
+/// Read both header slots and return the one with the higher valid sequence.
+///
+/// On a freshly-created database, slot A has sequence 0 and slot B is all
+/// zeros (CRC fails). The function therefore accepts a single valid slot as
+/// authoritative. If BOTH slots are valid (the steady state after the first
+/// few writes), the higher-sequence one wins.
+///
+/// Returns the active header along with the slot index (0 or 1) it came from
+/// so the caller can write the NEXT update to the OTHER slot.
+pub fn read_active_header(file: &mut File) -> EngineResult<(FileHeader, usize)> {
+  let mut slot_a = [0u8; FILE_HEADER_SIZE];
+  let mut slot_b = [0u8; FILE_HEADER_SIZE];
+
+  file.seek(SeekFrom::Start(0))?;
+  file.read_exact(&mut slot_a)?;
+  file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64))?;
+  file.read_exact(&mut slot_b)?;
+
+  let parsed_a = FileHeader::deserialize(&slot_a);
+  let parsed_b = FileHeader::deserialize(&slot_b);
+
+  match (parsed_a, parsed_b) {
+    (Ok(a), Ok(b)) => {
+      // Both valid — pick higher sequence
+      if a.sequence >= b.sequence {
+        Ok((a, 0))
+      } else {
+        Ok((b, 1))
+      }
+    }
+    (Ok(a), Err(_)) => Ok((a, 0)),
+    (Err(_), Ok(b)) => Ok((b, 1)),
+    (Err(error), Err(_)) => Err(error),
+  }
+}
+
+/// Write `header` to the slot OPPOSITE the `active_slot` (the slot the most
+/// recent read came from). Increments the sequence number first so the new
+/// slot wins on the next read.
+///
+/// CRITICAL ordering for crash safety:
+///   1. fsync the file so any prior writes are durable
+///   2. write the new header bytes to the inactive slot
+///   3. fsync again so the new header is durable
+///
+/// If we crash between steps 2 and 3, the OLD active slot still wins on the
+/// next read (we wrote the new slot to the INACTIVE one), so the database
+/// rolls back cleanly to the previous consistent state.
+pub fn write_header_to_inactive_slot(
+  file: &mut File,
+  header: &mut FileHeader,
+  active_slot: usize,
+) -> EngineResult<()> {
+  // Increment sequence — the new slot must win on next read.
+  header.sequence = header.sequence.wrapping_add(1);
+
+  let bytes = header.serialize();
+  let target_slot = 1 - active_slot;
+  let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
+
+  // Barrier: durable-ize prior writes first.
+  file.sync_data()?;
+
+  file.seek(SeekFrom::Start(slot_offset))?;
+  file.write_all(&bytes)?;
+  file.sync_data()?;
+
+  Ok(())
+}
+
+/// Write the initial header to slot A only (slot B left zeroed). Used by
+/// `create` since there's no "previous" state to preserve.
+pub fn write_initial_header(file: &mut File, header: &mut FileHeader) -> EngineResult<()> {
+  // Zero slot B explicitly so a torn write doesn't accidentally produce a
+  // valid-looking slot B at a higher sequence.
+  let zero = [0u8; FILE_HEADER_SIZE];
+  file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64))?;
+  file.write_all(&zero)?;
+
+  header.sequence = 1; // start at 1 so any "all zeros" slot reads as older
+  let bytes = header.serialize();
+  file.seek(SeekFrom::Start(0))?;
+  file.write_all(&bytes)?;
+  file.sync_data()?;
+  Ok(())
 }

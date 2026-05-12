@@ -204,7 +204,9 @@ impl StorageEngine {
 
     // Open a second file handle for the KV store (same .aeordb file)
     let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-    let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+    // v3 layout: data starts after BOTH header slots (HEADER_REGION_SIZE), not
+    // just the first one. The two slots make up the A/B double-buffer.
+    let kv_block_offset = crate::engine::file_header::HEADER_REGION_SIZE as u64;
     let hash_length = hash_algo.hash_length();
     let kv_block_length = crate::engine::kv_stages::initial_block_size();
     // hot_tail_offset = after header + KV block
@@ -382,7 +384,7 @@ impl StorageEngine {
       kv
     } else {
       // No valid KV block — create from full WAL scan (dirty startup)
-      let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+      let kv_block_offset = crate::engine::file_header::HEADER_REGION_SIZE as u64;
       let kv_block_length = crate::engine::kv_stages::initial_block_size();
       let hot_tail_offset = kv_block_offset + kv_block_length;
 

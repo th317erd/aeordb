@@ -1,7 +1,7 @@
 //! Low-level header repair for databases that won't open cleanly.
 //!
 //! The normal [`StorageEngine::open`] path fails fast on:
-//!   - unknown header version (we expect v2; v1 files refused)
+//!   - unknown header version (we expect v3; v1 and v2 files refused)
 //!   - header CRC mismatch (torn write)
 //!   - hot_tail_offset past EOF (the fsync-ordering corruption that hit
 //!     xenocept on 2026-05-11)
@@ -10,14 +10,19 @@
 //! every header field. This module reads the raw header bytes, identifies
 //! recoverable conditions, applies the minimal fixes needed to let
 //! `StorageEngine::open` proceed (which then triggers dirty startup), and
-//! writes a new v2 header back to disk.
+//! writes a new v3 header back to disk.
+//!
+//! For v1 and v2 files, the data region also needs to shift forward 256 bytes
+//! to make room for slot B. `repair_header_in_place` handles that shift
+//! transparently.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_header::{
-    FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION,
+    write_initial_header, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC,
+    SUPPORTED_HEADER_VERSION,
 };
 use crate::engine::hash_algorithm::HashAlgorithm;
 
@@ -77,7 +82,7 @@ pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
     }
 
     // For v2+ check CRC; for v1 there's no CRC to check.
-    if header_version == 2 {
+    if header_version >= 2 {
         let stored = u32::from_le_bytes(
             bytes[FILE_HEADER_SIZE - 4..].try_into().unwrap(),
         );
@@ -87,9 +92,12 @@ pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
         }
     }
 
-    // Parse hot_tail_offset directly: it lives 114..122 in both v1 and v2
-    // (the layout up to that point is identical).
-    let hot_tail_offset = u64::from_le_bytes(bytes[114..122].try_into().unwrap());
+    // Parse hot_tail_offset directly. v1/v2 has it at bytes 114..122. v3
+    // inserts a u64 sequence at byte 7, shifting hot_tail_offset to 122..130.
+    let hot_tail_pos = if header_version >= 3 { 122 } else { 114 };
+    let hot_tail_offset = u64::from_le_bytes(
+        bytes[hot_tail_pos..hot_tail_pos + 8].try_into().unwrap(),
+    );
     if hot_tail_offset > file_size {
         report.hot_tail_past_eof = Some(HotTailMismatch {
             recorded_offset: hot_tail_offset,
@@ -130,71 +138,81 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut bytes)?;
 
-    // Parse the fields we trust into a fresh FileHeader. Layout for v1 and v2
-    // is identical up to byte 252; v2 just adds CRC at 252..256. So we can
-    // read v1 bytes into a header that we then re-serialize as v2 (the writer
-    // adds the CRC).
+    // Parse the fields we trust into a fresh FileHeader. v1 and v2 share the
+    // same field layout from byte 7 onwards (v2 adds a tail CRC). v3 inserts
+    // a u64 sequence at byte 7, shifting every subsequent field by 8.
+    let source_version = bytes[4];
+    let needs_data_shift = source_version <= 2;
+    let sequence_size: usize = if source_version >= 3 { 8 } else { 0 };
+
     let hash_algo_raw = u16::from_le_bytes([bytes[5], bytes[6]]);
     let hash_algo = HashAlgorithm::from_u16(hash_algo_raw)
         .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
     let hash_length = hash_algo.hash_length();
 
-    let created_at = i64::from_le_bytes(bytes[7..15].try_into().unwrap());
-    let updated_at = i64::from_le_bytes(bytes[15..23].try_into().unwrap());
-    let kv_block_offset = u64::from_le_bytes(bytes[23..31].try_into().unwrap());
-    let kv_block_length = u64::from_le_bytes(bytes[31..39].try_into().unwrap());
-    let kv_block_version = bytes[39];
-    let nvt_offset = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
-    let nvt_length = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
-    let nvt_version = bytes[56];
+    let mut pos = 7 + sequence_size; // skip sequence in v3
+    let created_at = i64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let updated_at = i64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let kv_block_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let kv_block_length = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let kv_block_version = bytes[pos]; pos += 1;
+    let nvt_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let nvt_length = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let nvt_version = bytes[pos]; pos += 1;
 
-    let head_hash_start = 57;
-    let head_hash_end = head_hash_start + hash_length;
-    let head_hash = bytes[head_hash_start..head_hash_end].to_vec();
+    let head_hash = bytes[pos..pos + hash_length].to_vec();
+    pos += hash_length;
 
-    let entry_count = u64::from_le_bytes(
-        bytes[head_hash_end..head_hash_end + 8].try_into().unwrap(),
-    );
-    let resize_in_progress = bytes[head_hash_end + 8] != 0;
-    let buffer_kvs_offset = u64::from_le_bytes(
-        bytes[head_hash_end + 9..head_hash_end + 17].try_into().unwrap(),
-    );
-    let buffer_nvt_offset = u64::from_le_bytes(
-        bytes[head_hash_end + 17..head_hash_end + 25].try_into().unwrap(),
-    );
-    let mut hot_tail_offset = u64::from_le_bytes(
-        bytes[head_hash_end + 25..head_hash_end + 33].try_into().unwrap(),
-    );
-    let kv_block_stage = bytes[head_hash_end + 33];
-    let resize_target_stage = bytes[head_hash_end + 34];
-    let backup_type = bytes[head_hash_end + 35];
+    let entry_count = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let resize_in_progress = bytes[pos] != 0; pos += 1;
+    let buffer_kvs_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let buffer_nvt_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let mut hot_tail_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()); pos += 8;
+    let kv_block_stage = bytes[pos]; pos += 1;
+    let resize_target_stage = bytes[pos]; pos += 1;
+    let backup_type = bytes[pos]; pos += 1;
 
-    let base_hash_start = head_hash_end + 36;
-    let base_hash_end = base_hash_start + hash_length;
-    let base_hash = bytes[base_hash_start..base_hash_end].to_vec();
-    let target_hash_end = base_hash_end + hash_length;
-    let target_hash = bytes[base_hash_end..target_hash_end].to_vec();
+    let base_hash = bytes[pos..pos + hash_length].to_vec(); pos += hash_length;
+    let target_hash = bytes[pos..pos + hash_length].to_vec();
+
+    // For v1 and v2 → v3 migration, the data region needs to shift forward
+    // 256 bytes (one slot's worth) to make room for slot B. Bump every
+    // header-stored offset that refers to a location inside the data region.
+    let mut kv_block_offset = kv_block_offset;
+    let mut nvt_offset = nvt_offset;
+    let mut buffer_kvs_offset = buffer_kvs_offset;
+    let mut buffer_nvt_offset = buffer_nvt_offset;
+    if needs_data_shift {
+        kv_block_offset = if kv_block_offset > 0 { kv_block_offset + FILE_HEADER_SIZE as u64 } else { 0 };
+        if hot_tail_offset > 0 { hot_tail_offset += FILE_HEADER_SIZE as u64; }
+        if nvt_offset > 0 { nvt_offset += FILE_HEADER_SIZE as u64; }
+        if buffer_kvs_offset > 0 { buffer_kvs_offset += FILE_HEADER_SIZE as u64; }
+        if buffer_nvt_offset > 0 { buffer_nvt_offset += FILE_HEADER_SIZE as u64; }
+    }
 
     // Apply the fix: if hot_tail_offset points past EOF, reset it to the
-    // current file size. read_hot_tail at file size will fail to find a
-    // valid hot-tail header (EOF before the 13-byte header is read), so
-    // open's dirty-startup branch fires and rebuild_kv reconstructs the KV
-    // from a full WAL scan. We keep the offset > kv_block_offset so the
-    // kv_block_valid check still passes — that lets the KV pages on disk
-    // be reused while only the missing tail entries are recovered.
+    // current file size. The reset uses the POST-shift file size when we're
+    // also migrating versions, since the shift adds 256 bytes to the file.
     if let Some(ref mismatch) = report.hot_tail_past_eof {
+        let target_size = if needs_data_shift {
+            mismatch.actual_file_size + FILE_HEADER_SIZE as u64
+        } else {
+            mismatch.actual_file_size
+        };
         tracing::warn!(
             recorded = mismatch.recorded_offset,
             file_size = mismatch.actual_file_size,
             past_eof = mismatch.bytes_past_eof,
-            "hot_tail_offset is past EOF — resetting to file size to trigger dirty startup"
+            "hot_tail_offset is past EOF — resetting to {} to trigger dirty startup",
+            target_size,
         );
-        hot_tail_offset = mismatch.actual_file_size;
+        hot_tail_offset = target_size;
     }
 
-    let new_header = FileHeader {
+    let mut new_header = FileHeader {
         header_version: SUPPORTED_HEADER_VERSION,
         hash_algo,
+        sequence: 0, // write_initial_header sets to 1
         created_at,
         updated_at,
         kv_block_offset,
@@ -216,16 +234,55 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
         target_hash,
     };
 
-    let new_bytes = new_header.serialize();
+    // If we're migrating v1/v2 → v3, shift the data region forward by
+    // FILE_HEADER_SIZE bytes (the size of one slot). Copy from the end
+    // backwards to avoid overwriting source data before we've read it.
+    if needs_data_shift {
+        tracing::info!(
+            file_size,
+            source_version,
+            "Migrating v{} → v3: shifting data region forward {} bytes",
+            source_version, FILE_HEADER_SIZE,
+        );
+        shift_data_region_forward(&mut file, file_size, FILE_HEADER_SIZE as u64)?;
+    }
 
-    // Safe ordering: fsync before AND after writing the header.
-    file.sync_all()?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&new_bytes)?;
-    file.sync_all()?;
-
-    let _ = file_size; // silence unused warning if no logging refs it
+    // Write the new v3 header to slot A and zero slot B. The barrier inside
+    // write_initial_header fsyncs both writes.
+    write_initial_header(&mut file, &mut new_header)?;
 
     report.repaired = true;
     Ok(report)
+}
+
+/// Shift `[FILE_HEADER_SIZE..file_size]` forward by `shift` bytes. The file
+/// grows by `shift`. Copy chunks back-to-front to avoid corrupting bytes we
+/// haven't read yet. fsyncs at the end.
+fn shift_data_region_forward(
+    file: &mut std::fs::File,
+    file_size: u64,
+    shift: u64,
+) -> EngineResult<()> {
+    if file_size <= FILE_HEADER_SIZE as u64 {
+        return Ok(()); // nothing to shift
+    }
+    let data_start = FILE_HEADER_SIZE as u64;
+    let data_size = file_size - data_start;
+
+    const CHUNK: u64 = 64 * 1024 * 1024;
+    let mut buf = vec![0u8; CHUNK.min(data_size) as usize];
+
+    let mut remaining = data_size;
+    while remaining > 0 {
+        let chunk_len = CHUNK.min(remaining) as usize;
+        let src = data_start + remaining - chunk_len as u64;
+        let dst = src + shift;
+        file.seek(SeekFrom::Start(src))?;
+        file.read_exact(&mut buf[..chunk_len])?;
+        file.seek(SeekFrom::Start(dst))?;
+        file.write_all(&buf[..chunk_len])?;
+        remaining -= chunk_len as u64;
+    }
+    file.sync_all()?;
+    Ok(())
 }

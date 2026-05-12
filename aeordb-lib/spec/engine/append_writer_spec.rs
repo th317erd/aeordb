@@ -3,7 +3,7 @@ use std::io::{Seek, SeekFrom, Write};
 use aeordb::engine::append_writer::AppendWriter;
 use aeordb::engine::entry_header::CURRENT_ENTRY_VERSION;
 use aeordb::engine::entry_type::EntryType;
-use aeordb::engine::file_header::FILE_HEADER_SIZE;
+use aeordb::engine::file_header::{FILE_HEADER_SIZE, HEADER_REGION_SIZE};
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 
 fn create_temp_path() -> tempfile::TempDir {
@@ -19,14 +19,16 @@ fn test_create_new_file_writes_header() {
     .expect("Failed to create file");
 
   let header = writer.file_header();
-  assert_eq!(header.header_version, 2);
+  assert_eq!(header.header_version, 3);
   assert_eq!(header.hash_algo, HashAlgorithm::Blake3_256);
   assert_eq!(header.entry_count, 0);
   assert!(!header.resize_in_progress);
 
-  // File should exist and be at least 256 bytes
+  // File should exist and be the size of the header region (both slots)
   let metadata = std::fs::metadata(&file_path).expect("Failed to read metadata");
-  assert_eq!(metadata.len(), FILE_HEADER_SIZE as u64);
+  assert_eq!(metadata.len(), HEADER_REGION_SIZE as u64);
+  // FILE_HEADER_SIZE is the slot size; verify it's half the region.
+  assert_eq!(FILE_HEADER_SIZE * 2, HEADER_REGION_SIZE);
 }
 
 #[test]
@@ -43,7 +45,7 @@ fn test_open_existing_file_reads_header() {
     .expect("Failed to open file");
 
   let header = writer.file_header();
-  assert_eq!(header.header_version, 2);
+  assert_eq!(header.header_version, 3);
   assert_eq!(header.hash_algo, HashAlgorithm::Blake3_256);
 }
 
@@ -58,8 +60,8 @@ fn test_append_entry_returns_offset() {
     .append_entry(EntryType::Chunk, b"key1", b"value1", 0)
     .expect("Failed to append entry");
 
-  // First entry should start right after the file header
-  assert_eq!(offset, FILE_HEADER_SIZE as u64);
+  // First entry should start right after the header region (both A/B slots)
+  assert_eq!(offset, HEADER_REGION_SIZE as u64);
 }
 
 #[test]

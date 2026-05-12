@@ -13,7 +13,9 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::errors::EngineResult;
-use crate::engine::file_header::FILE_HEADER_SIZE;
+use crate::engine::file_header::{
+  read_active_header, write_header_to_inactive_slot,
+};
 use crate::engine::kv_pages::page_size;
 use crate::engine::kv_stages::stage_params;
 
@@ -32,11 +34,9 @@ pub fn expand_kv_block(
     let psize = page_size(hash_length);
     let (new_block_size, _new_bucket_count) = stage_params(target_stage, psize);
 
-    // Read current header
+    // Read the active header slot (v3 A/B layout).
     let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
-    let mut header_bytes = [0u8; FILE_HEADER_SIZE];
-    file.read_exact(&mut header_bytes)?;
-    let mut header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+    let (mut header, active_slot) = read_active_header(&mut file)?;
 
     let old_kv_offset = header.kv_block_offset;
     let old_kv_length = header.kv_block_length;
@@ -107,16 +107,13 @@ pub fn expand_kv_block(
     // see stale old-KV bytes in the "new" block.
     file.sync_all()?;
 
-    // Update header
+    // Update header — write to the inactive slot. The old slot remains the
+    // rollback point if the write crashes mid-flight.
     header.kv_block_length = new_block_size;
     header.kv_block_stage = target_stage as u8;
     header.resize_target_stage = 0; // Clear pending resize flag
     header.hot_tail_offset = new_hot_tail;
-    let serialized = header.serialize();
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&serialized)?;
-
-    // Final fsync makes the new layout durable.
+    write_header_to_inactive_slot(&mut file, &mut header, active_slot)?;
     file.sync_all()?;
 
     tracing::info!(

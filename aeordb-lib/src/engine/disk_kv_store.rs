@@ -849,24 +849,22 @@ impl DiskKVStore {
         self.flush_no_snapshot()?;
         self.entry_count = adjusted.len();
 
-        // Update file header. Pre-fsync to guarantee the new bucket pages
-        // (zero-filled + populated above) are durable before the header
-        // advertises the new layout. Matches the pattern in
-        // append_writer::update_header.
+        // Update file header. The bucket pages were already zero-filled and
+        // populated + fsync'd above; we now write a new header advertising
+        // the new layout to the INACTIVE slot. v3 A/B double-buffer leaves
+        // the old slot as a rollback point if the write crashes.
         {
             self.db_file.sync_all()?;
-            let mut header_bytes = [0u8; crate::engine::file_header::FILE_HEADER_SIZE];
-            self.db_file.seek(SeekFrom::Start(0))?;
-            self.db_file.read_exact(&mut header_bytes)?;
-            let mut header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+            let (mut header, active_slot) =
+                crate::engine::file_header::read_active_header(&mut self.db_file)?;
             header.kv_block_length = new_pages_size;
             header.kv_block_stage = target_stage as u8;
             header.resize_in_progress = false;
             header.resize_target_stage = 0;
             header.hot_tail_offset = new_hot_tail;
-            let serialized = header.serialize();
-            self.db_file.seek(SeekFrom::Start(0))?;
-            self.db_file.write_all(&serialized)?;
+            crate::engine::file_header::write_header_to_inactive_slot(
+                &mut self.db_file, &mut header, active_slot,
+            )?;
             self.db_file.sync_all()?;
         }
 

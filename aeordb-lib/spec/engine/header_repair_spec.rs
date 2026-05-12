@@ -20,11 +20,17 @@ fn poison_hot_tail_offset_past_eof(path: &str) {
     let file_size = std::fs::metadata(path).unwrap().len();
     let phantom_offset = file_size + 57_064; // arbitrary, just must exceed EOF
     let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
-    // hot_tail_offset lives at bytes 114..122 in both v1 and v2
-    file.seek(SeekFrom::Start(114)).unwrap();
+    // hot_tail_offset position depends on header version. v3 inserts a u64
+    // sequence field at byte 7, shifting hot_tail_offset from 114 → 122.
+    let mut version_byte = [0u8; 1];
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.read_exact(&mut version_byte).unwrap();
+    let hot_tail_pos: u64 = if version_byte[0] >= 3 { 122 } else { 114 };
+
+    file.seek(SeekFrom::Start(hot_tail_pos)).unwrap();
     file.write_all(&phantom_offset.to_le_bytes()).unwrap();
-    // Recompute CRC for v2 so the corruption looks like a real fsync-ordering
-    // bug, not a CRC failure
+    // Recompute CRC so the corruption looks like a real fsync-ordering
+    // bug, not a CRC failure.
     let mut bytes = [0u8; aeordb::engine::FILE_HEADER_SIZE];
     file.seek(SeekFrom::Start(0)).unwrap();
     file.read_exact(&mut bytes).unwrap();
@@ -88,11 +94,11 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
 }
 
 #[test]
-fn header_crc_catches_single_byte_corruption() {
-    // A torn write within the header — one byte flipped — must fail the CRC
-    // check on next open. Without v2's CRC, this byte flip would silently
-    // alter (say) hot_tail_offset and the engine would happily build state
-    // around a corrupted value.
+fn header_crc_catches_single_byte_corruption_in_one_slot() {
+    // A/B double-buffer: corrupting ONE slot is recoverable — the engine
+    // reads the other slot. inspect_header (which reads slot A only) reports
+    // the CRC fail; open succeeds via slot B (which holds the most recent
+    // header after any update).
     let (_dir, path) = make_temp_db();
     {
         let engine = StorageEngine::create(&path).unwrap();
@@ -103,7 +109,7 @@ fn header_crc_catches_single_byte_corruption() {
         engine.shutdown().unwrap();
     }
 
-    // Flip a byte at offset 50 (within the CRC-covered region 0..252).
+    // Flip a byte in slot A only (offset 50). Slot B is at 256-511 and untouched.
     {
         let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
         file.seek(SeekFrom::Start(50)).unwrap();
@@ -116,10 +122,47 @@ fn header_crc_catches_single_byte_corruption() {
     }
 
     let report = inspect_header(&path).unwrap();
-    assert!(report.crc_failed, "byte flip in header should fail CRC");
+    assert!(report.crc_failed, "byte flip in slot A should fail its CRC");
+
+    // Open should SUCCEED because slot B is still valid — that's the entire
+    // point of A/B double-buffering.
+    let result = StorageEngine::open(&path);
+    assert!(result.is_ok(), "open should fall back to slot B");
+    let engine = result.unwrap();
+    let ops = DirectoryOps::new(&engine);
+    assert_eq!(ops.read_file("/test.txt").unwrap(), b"hello");
+}
+
+#[test]
+fn corrupting_both_slots_refuses_open() {
+    // The A/B fallback only protects against single-slot torn writes.
+    // Corrupting BOTH slots leaves the engine with no valid header to read.
+    let (_dir, path) = make_temp_db();
+    {
+        let engine = StorageEngine::create(&path).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let ctx = RequestContext::system();
+        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain"))
+            .unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    // Flip a byte in slot A AND in slot B.
+    {
+        let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        for offset in [50u64, 256 + 50] {
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            byte[0] ^= 0xFF;
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            file.write_all(&byte).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
 
     let result = StorageEngine::open(&path);
-    assert!(result.is_err(), "open should refuse a CRC-failed header");
+    assert!(result.is_err(), "open should refuse when both slots fail CRC");
 }
 
 #[test]

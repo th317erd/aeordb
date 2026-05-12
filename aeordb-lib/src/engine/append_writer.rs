@@ -32,7 +32,10 @@ use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{FileHeader, FILE_HEADER_SIZE};
+use crate::engine::file_header::{
+  read_active_header, write_header_to_inactive_slot, write_initial_header,
+  FileHeader, HEADER_REGION_SIZE,
+};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
@@ -41,6 +44,9 @@ pub struct AppendWriter {
   file_path: std::path::PathBuf,
   file_header: FileHeader,
   current_offset: u64,
+  /// Which slot (0 or 1) the most recent header read came from. The next
+  /// update writes to the opposite slot. See file_header::read_active_header.
+  active_slot: usize,
 }
 
 impl AppendWriter {
@@ -51,13 +57,13 @@ impl AppendWriter {
       .create_new(true)
       .open(path)?;
 
-    let file_header = FileHeader::new(HashAlgorithm::Blake3_256);
-    let header_bytes = file_header.serialize();
-    file.write_all(&header_bytes)?;
-    file.sync_all()?;
+    let mut file_header = FileHeader::new(HashAlgorithm::Blake3_256);
+    // v3: write slot A only (slot B left zeroed), data region starts after
+    // both slots.
+    write_initial_header(&mut file, &mut file_header)?;
 
     let reader = File::open(path)?;
-    let current_offset = FILE_HEADER_SIZE as u64;
+    let current_offset = HEADER_REGION_SIZE as u64;
 
     Ok(AppendWriter {
       file,
@@ -65,6 +71,7 @@ impl AppendWriter {
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
+      active_slot: 0,
     })
   }
 
@@ -74,9 +81,7 @@ impl AppendWriter {
       .write(true)
       .open(path)?;
 
-    let mut header_bytes = [0u8; FILE_HEADER_SIZE];
-    file.read_exact(&mut header_bytes)?;
-    let file_header = FileHeader::deserialize(&header_bytes)?;
+    let (file_header, active_slot) = read_active_header(&mut file)?;
 
     let reader = File::open(path)?;
     let current_offset = file.seek(SeekFrom::End(0))?;
@@ -87,6 +92,7 @@ impl AppendWriter {
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
+      active_slot,
     })
   }
 
@@ -105,23 +111,32 @@ impl AppendWriter {
     self.current_offset
   }
 
-  /// Update the file header in place (seek to 0, write 256 bytes, sync).
+  /// Update the file header by writing to the INACTIVE slot (A/B double-buffer).
   ///
-  /// CRITICAL: fsync the file BEFORE writing the new header so any data the
-  /// header references (notably hot_tail_offset) is durable first. Without
-  /// this barrier, the OS may persist the new header (low-offset page) before
-  /// the appended WAL entries (high-offset pages) hit disk. On crash, the
-  /// header then points past EOF — exactly the corruption pattern seen at
-  /// xenocept (header hot_tail_offset 57 KB past actual file size).
+  /// The new header carries an incremented sequence number, so on next open
+  /// `read_active_header` picks the slot we just wrote. The previously-active
+  /// slot is left untouched and remains a valid rollback point if the write
+  /// crashes mid-flight.
+  ///
+  /// Crash safety order (handled by `write_header_to_inactive_slot`):
+  ///   1. fsync (durable-ize all prior writes — protects against the
+  ///      hot_tail_offset-past-EOF corruption that hit xenocept)
+  ///   2. write new header bytes to the inactive slot
+  ///   3. fsync (durable-ize the new header)
+  ///
+  /// A crash between steps 2 and 3 leaves the inactive slot with a
+  /// partially-flushed header; on next read its CRC fails or its sequence is
+  /// behind the active slot, so the OLD slot wins. State rolls back cleanly.
   pub fn update_header(&mut self, header: &FileHeader) -> EngineResult<()> {
-    // Barrier: durable-ize all prior writes before updating the header.
-    self.file.sync_data()?;
+    let mut new_header = header.clone();
+    // Carry the current sequence forward — write_header_to_inactive_slot
+    // increments it for us.
+    new_header.sequence = self.file_header.sequence;
 
-    self.file_header = header.clone();
-    let bytes = header.serialize();
-    self.file.seek(SeekFrom::Start(0))?;
-    self.file.write_all(&bytes)?;
-    self.file.sync_data()?;
+    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
+
+    self.file_header = new_header;
+    self.active_slot = 1 - self.active_slot;
     Ok(())
   }
 
@@ -517,21 +532,19 @@ impl AppendWriter {
     self.current_offset
   }
 
-  /// As `update_header`, but uses sync_all (metadata + data) for full durability.
-  ///
-  /// CRITICAL: fsync BEFORE writing the new header so any data it references
-  /// (notably hot_tail_offset) is durable first. See `update_header` for the
-  /// full rationale — without this barrier, the OS can persist the header
-  /// before the appended WAL entries, leaving the header pointing past EOF.
+  /// As `update_header`. In the A/B world the distinction between
+  /// `sync_data` and `sync_all` is no longer load-bearing — both
+  /// `write_header_to_inactive_slot` calls `sync_data` and the file extent
+  /// metadata is already established. Kept as a separate method for callers
+  /// who semantically want "fully durable header update".
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
-    // Barrier: durable-ize all prior writes before updating the header.
+    let mut new_header = header.clone();
+    new_header.sequence = self.file_header.sequence;
+    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
+    // sync_all for the full-durability semantics the old API promised.
     self.file.sync_all()?;
-
-    self.file_header = header.clone();
-    let header_bytes = self.file_header.serialize();
-    self.file.seek(SeekFrom::Start(0))?;
-    self.file.write_all(&header_bytes)?;
-    self.file.sync_all()?;
+    self.file_header = new_header;
+    self.active_slot = 1 - self.active_slot;
     Ok(())
   }
 }
