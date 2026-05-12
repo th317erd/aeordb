@@ -831,8 +831,12 @@ impl DiskKVStore {
         self.flush_no_snapshot()?;
         self.entry_count = adjusted.len();
 
-        // Update file header
+        // Update file header. Pre-fsync to guarantee the new bucket pages
+        // (zero-filled + populated above) are durable before the header
+        // advertises the new layout. Matches the pattern in
+        // append_writer::update_header.
         {
+            self.db_file.sync_all()?;
             let mut header_bytes = [0u8; crate::engine::file_header::FILE_HEADER_SIZE];
             self.db_file.seek(SeekFrom::Start(0))?;
             self.db_file.read_exact(&mut header_bytes)?;

@@ -175,17 +175,21 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
     let target_hash_end = base_hash_end + hash_length;
     let target_hash = bytes[base_hash_end..target_hash_end].to_vec();
 
-    // Apply the fix: if hot_tail_offset points past EOF, reset to 0 so
-    // StorageEngine::open's dirty-startup path runs a full WAL scan and
-    // rebuilds the KV index from authoritative entry bytes.
+    // Apply the fix: if hot_tail_offset points past EOF, reset it to the
+    // current file size. read_hot_tail at file size will fail to find a
+    // valid hot-tail header (EOF before the 13-byte header is read), so
+    // open's dirty-startup branch fires and rebuild_kv reconstructs the KV
+    // from a full WAL scan. We keep the offset > kv_block_offset so the
+    // kv_block_valid check still passes — that lets the KV pages on disk
+    // be reused while only the missing tail entries are recovered.
     if let Some(ref mismatch) = report.hot_tail_past_eof {
         tracing::warn!(
             recorded = mismatch.recorded_offset,
             file_size = mismatch.actual_file_size,
             past_eof = mismatch.bytes_past_eof,
-            "hot_tail_offset is past EOF — resetting to 0 to force dirty startup"
+            "hot_tail_offset is past EOF — resetting to file size to trigger dirty startup"
         );
-        hot_tail_offset = 0;
+        hot_tail_offset = mismatch.actual_file_size;
     }
 
     let new_header = FileHeader {

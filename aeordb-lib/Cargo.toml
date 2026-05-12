@@ -721,3 +721,7 @@ path = "spec/http/global_search_http_spec.rs"
 name = "cache_and_hardlinks_spec"
 path = "spec/engine/cache_and_hardlinks_spec.rs"
 
+[[test]]
+name = "header_repair_spec"
+path = "spec/engine/header_repair_spec.rs"
+
