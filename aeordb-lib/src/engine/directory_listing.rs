@@ -61,32 +61,41 @@ pub fn list_directory_recursive(
     let recursive_mode = depth != 0;
 
     let mut results = Vec::new();
-    walk_listing(
+    let ctx = WalkContext {
         engine,
-        &children,
-        &normalized,
-        depth,
         recursive_mode,
         glob_pattern,
         hash_length,
         max_results,
-        &mut results,
-    )?;
+    };
+    walk_listing(&ctx, &children, &normalized, depth, &mut results)?;
 
     Ok(results)
 }
 
+/// Walk-invariant arguments shared across every recursive `walk_listing`
+/// call. Carrying these in a context struct lets the per-level args
+/// (children, current_path, remaining_depth) stay short and obvious.
+struct WalkContext<'a> {
+    engine: &'a StorageEngine,
+    recursive_mode: bool,
+    glob_pattern: Option<&'a str>,
+    hash_length: usize,
+    max_results: Option<usize>,
+}
+
 fn walk_listing(
-    engine: &StorageEngine,
+    ctx: &WalkContext<'_>,
     children: &[crate::engine::directory_entry::ChildEntry],
     current_path: &str,
     remaining_depth: i32,
-    recursive_mode: bool,
-    glob_pattern: Option<&str>,
-    hash_length: usize,
-    max_results: Option<usize>,
     results: &mut Vec<ListingEntry>,
 ) -> EngineResult<()> {
+    let engine = ctx.engine;
+    let recursive_mode = ctx.recursive_mode;
+    let glob_pattern = ctx.glob_pattern;
+    let hash_length = ctx.hash_length;
+    let max_results = ctx.max_results;
     for child in children {
         // Early-exit when the result cap has been reached
         if let Some(cap) = max_results {
@@ -162,17 +171,7 @@ fn walk_listing(
                                 remaining_depth - 1
                             };
 
-                            walk_listing(
-                                engine,
-                                &sub_children,
-                                &child_path,
-                                next_depth,
-                                recursive_mode,
-                                glob_pattern,
-                                hash_length,
-                                max_results,
-                                results,
-                            )?;
+                            walk_listing(ctx, &sub_children, &child_path, next_depth, results)?;
                         }
                     }
                 }

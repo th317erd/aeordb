@@ -206,6 +206,13 @@ fn create_app_with_provider_and_metrics(
 
 /// Build the application router with all dependencies injected (useful for tests
 /// that need to control the rate limiter).
+///
+/// Each dependency is an Arc'd singleton the caller owns. A future cleanup
+/// could collapse these into an `AppDependencies` struct, but the existing
+/// 8-arg shape is heavily used across the test suite (~30 callsites) and the
+/// dependencies are not all related (auth/storage/network/plugin) — bundling
+/// them adds little real clarity. Keeping the explicit signature.
+#[allow(clippy::too_many_arguments)]
 pub fn create_app_with_all(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
@@ -220,6 +227,9 @@ pub fn create_app_with_all(
 }
 
 /// Build the application router with all dependencies injected, including an optional TaskQueue.
+///
+/// See `create_app_with_all` for the rationale on the wide signature.
+#[allow(clippy::too_many_arguments)]
 pub fn create_app_with_all_and_task_queue(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
@@ -242,6 +252,7 @@ pub fn create_app_with_all_and_task_queue(
 /// `CancellationToken` so the caller's shutdown signal can propagate to
 /// background workers (sync loop, etc.). The CLI uses this; tests use the
 /// non-`_with_cancel` form and let the loop run until the runtime drops.
+#[allow(clippy::too_many_arguments)]
 pub fn create_app_with_all_and_task_queue_with_cancel(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
@@ -261,6 +272,7 @@ pub fn create_app_with_all_and_task_queue_with_cancel(
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_app_with_all_and_task_queue_inner(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,

@@ -296,23 +296,23 @@ async fn main() {
         std::process::exit(1);
       }
 
-      commands::start::run(
-        merged_port,
-        &merged_host,
-        &merged_database,
-        &merged_log_format,
-        merged_auth.as_deref(),
-        merged_hot_dir.as_deref(),
-        merged_cors.as_deref(),
-        merged_tls_cert.as_deref(),
-        merged_tls_key.as_deref(),
-        merged_jwt_expiry,
-        merged_chunk_size,
-        peer_list,
-        join.as_deref(),
-        join_token.as_deref(),
-        advertise_url.as_deref(),
-      ).await;
+      commands::start::run(commands::start::StartConfig {
+        port: merged_port,
+        host: &merged_host,
+        database: &merged_database,
+        log_format: &merged_log_format,
+        auth_flag: merged_auth.as_deref(),
+        hot_dir_arg: merged_hot_dir.as_deref(),
+        cors_flag: merged_cors.as_deref(),
+        tls_cert: merged_tls_cert.as_deref(),
+        tls_key: merged_tls_key.as_deref(),
+        jwt_expiry: merged_jwt_expiry,
+        chunk_size: merged_chunk_size,
+        peers: peer_list,
+        join_url: join.as_deref(),
+        join_token: join_token.as_deref(),
+        advertise_url: advertise_url.as_deref(),
+      }).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

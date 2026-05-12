@@ -104,7 +104,9 @@ pub async fn download_zip(
                 }
                 Err(crate::engine::errors::EngineError::NotFound(_)) => {
                     // Not a file — try as directory
-                    if add_directory_to_zip(&ops, &normalized, &common_prefix, &mut zip_writer, options, &mut skipped, &mut cumulative_size, MAX_ZIP_SIZE).is_err() {
+                    let walk = ZipWalk { ops: &ops, common_prefix: &common_prefix, options, max_size: MAX_ZIP_SIZE };
+                    let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
+                    if add_directory_to_zip(&walk, &normalized, &mut state).is_err() {
                         if cumulative_size > MAX_ZIP_SIZE {
                             return ErrorResponse::new(
                                 "Download exceeds the 2 GB size limit. Select fewer files or download individually."
@@ -148,17 +150,28 @@ pub async fn download_zip(
         })
 }
 
-fn add_directory_to_zip(
-    ops: &DirectoryOps,
-    dir_path: &str,
-    common_prefix: &str,
-    zip_writer: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
+/// Walk-invariant arguments for the recursive ZIP builder.
+struct ZipWalk<'a> {
+    ops: &'a DirectoryOps<'a>,
+    common_prefix: &'a str,
     options: zip::write::SimpleFileOptions,
-    skipped: &mut Vec<String>,
-    cumulative_size: &mut u64,
     max_size: u64,
+}
+
+/// Mutable state threaded through the recursive ZIP builder. Bundled so the
+/// recursion signature stays short.
+struct ZipState<'a, 'b> {
+    writer: &'a mut zip::ZipWriter<std::io::Cursor<&'b mut Vec<u8>>>,
+    skipped: &'a mut Vec<String>,
+    cumulative_size: &'a mut u64,
+}
+
+fn add_directory_to_zip(
+    walk: &ZipWalk<'_>,
+    dir_path: &str,
+    state: &mut ZipState<'_, '_>,
 ) -> Result<(), ()> {
-    let entries = ops.list_directory(dir_path).map_err(|_| ())?;
+    let entries = walk.ops.list_directory(dir_path).map_err(|_| ())?;
 
     for entry in entries {
         let child_path = if dir_path == "/" {
@@ -170,21 +183,21 @@ fn add_directory_to_zip(
         let normalized = normalize_path(&child_path);
 
         if is_system_path(&normalized) {
-            skipped.push(child_path);
+            state.skipped.push(child_path);
             continue;
         }
 
         if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
-            let _ = add_directory_to_zip(ops, &normalized, common_prefix, zip_writer, options, skipped, cumulative_size, max_size);
+            let _ = add_directory_to_zip(walk, &normalized, state);
         } else if entry.entry_type == EntryType::FileRecord.to_u8() {
-            if let Ok(data) = ops.read_file(&normalized) {
-                *cumulative_size += data.len() as u64;
-                if *cumulative_size > max_size {
+            if let Ok(data) = walk.ops.read_file(&normalized) {
+                *state.cumulative_size += data.len() as u64;
+                if *state.cumulative_size > walk.max_size {
                     return Err(());
                 }
-                let zip_entry_name = strip_prefix(&normalized, common_prefix);
-                if zip_writer.start_file(&zip_entry_name, options).is_ok() {
-                    let _ = zip_writer.write_all(&data);
+                let zip_entry_name = strip_prefix(&normalized, walk.common_prefix);
+                if state.writer.start_file(&zip_entry_name, walk.options).is_ok() {
+                    let _ = state.writer.write_all(&data);
                 }
             }
         }

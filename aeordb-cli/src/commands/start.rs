@@ -12,23 +12,45 @@ use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use aeordb::server::create_app_with_auth_mode_and_cancel;
 
-pub async fn run(
-  port: u16,
-  host: &str,
-  database: &str,
-  log_format: &str,
-  auth_flag: Option<&str>,
-  hot_dir_arg: Option<&str>,
-  cors_flag: Option<&str>,
-  tls_cert: Option<&str>,
-  tls_key: Option<&str>,
-  _jwt_expiry: i64,
-  _chunk_size: usize,
-  peers: Vec<String>,
-  join_url: Option<&str>,
-  join_token: Option<&str>,
-  advertise_url: Option<&str>,
-) {
+/// All settings the `start` command needs. Built in `main.rs` by merging the
+/// clap-parsed CLI flags with the optional config file, then passed to
+/// `run` as a single arg. Replaces the previous 15-arg signature.
+pub struct StartConfig<'a> {
+  pub port: u16,
+  pub host: &'a str,
+  pub database: &'a str,
+  pub log_format: &'a str,
+  pub auth_flag: Option<&'a str>,
+  pub hot_dir_arg: Option<&'a str>,
+  pub cors_flag: Option<&'a str>,
+  pub tls_cert: Option<&'a str>,
+  pub tls_key: Option<&'a str>,
+  pub jwt_expiry: i64,
+  pub chunk_size: usize,
+  pub peers: Vec<String>,
+  pub join_url: Option<&'a str>,
+  pub join_token: Option<&'a str>,
+  pub advertise_url: Option<&'a str>,
+}
+
+pub async fn run(config: StartConfig<'_>) {
+  let StartConfig {
+    port,
+    host,
+    database,
+    log_format,
+    auth_flag,
+    hot_dir_arg,
+    cors_flag,
+    tls_cert,
+    tls_key,
+    jwt_expiry: _jwt_expiry,
+    chunk_size: _chunk_size,
+    peers,
+    join_url,
+    join_token,
+    advertise_url,
+  } = config;
   let log_config = LogConfig {
     format: match log_format {
       "json" => LogFormat::Json,

@@ -831,18 +831,25 @@ fn handle_recursive_listing(
   }
 }
 
+/// Pagination + sort options for a directory listing. Bundled to keep the
+/// downstream signatures short — these always travel together.
+struct ListingPagination<'a> {
+  limit: Option<usize>,
+  offset: Option<usize>,
+  sort: Option<&'a str>,
+  order: Option<&'a str>,
+}
+
 /// Handle default (flat) directory listing without depth/glob parameters.
 fn handle_directory_listing(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   path: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   user_id_str: &str,
-  limit: Option<usize>,
-  offset: Option<usize>,
-  sort: Option<&str>,
-  order: Option<&str>,
+  pagination: ListingPagination<'_>,
   state: Option<&AppState>,
 ) -> Response {
+  let ListingPagination { limit, offset, sort, order } = pagination;
   let directory_ops = DirectoryOps::new(engine);
 
   match directory_ops.list_directory(path) {
@@ -966,7 +973,19 @@ pub async fn engine_get(
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref(), Some(&state))
+  handle_directory_listing(
+    &state.engine,
+    &path,
+    key_rules,
+    &claims.sub,
+    ListingPagination {
+      limit: version_query.limit,
+      offset: version_query.offset,
+      sort: version_query.sort.as_deref(),
+      order: version_query.order.as_deref(),
+    },
+    Some(&state),
+  )
 }
 
 
