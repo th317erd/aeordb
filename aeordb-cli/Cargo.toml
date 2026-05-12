@@ -52,3 +52,6 @@ path = "spec/emergency_reset_spec.rs"
 [[test]]
 name = "config_spec"
 path = "spec/config_spec.rs"
+
+[lints]
+workspace = true

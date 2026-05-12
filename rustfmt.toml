@@ -1,0 +1,10 @@
+tab_spaces = 2
+max_width = 140
+reorder_imports = false
+chain_width = 140
+fn_call_width = 140
+single_line_if_else_max_width = 140
+attr_fn_like_width = 140
+struct_lit_width = 140
+struct_variant_width = 140
+array_width = 140

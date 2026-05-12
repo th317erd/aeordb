@@ -725,3 +725,6 @@ path = "spec/engine/cache_and_hardlinks_spec.rs"
 name = "header_repair_spec"
 path = "spec/engine/header_repair_spec.rs"
 
+
+[lints]
+workspace = true
