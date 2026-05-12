@@ -106,7 +106,17 @@ impl AppendWriter {
   }
 
   /// Update the file header in place (seek to 0, write 256 bytes, sync).
+  ///
+  /// CRITICAL: fsync the file BEFORE writing the new header so any data the
+  /// header references (notably hot_tail_offset) is durable first. Without
+  /// this barrier, the OS may persist the new header (low-offset page) before
+  /// the appended WAL entries (high-offset pages) hit disk. On crash, the
+  /// header then points past EOF — exactly the corruption pattern seen at
+  /// xenocept (header hot_tail_offset 57 KB past actual file size).
   pub fn update_header(&mut self, header: &FileHeader) -> EngineResult<()> {
+    // Barrier: durable-ize all prior writes before updating the header.
+    self.file.sync_data()?;
+
     self.file_header = header.clone();
     let bytes = header.serialize();
     self.file.seek(SeekFrom::Start(0))?;
@@ -507,7 +517,16 @@ impl AppendWriter {
     self.current_offset
   }
 
+  /// As `update_header`, but uses sync_all (metadata + data) for full durability.
+  ///
+  /// CRITICAL: fsync BEFORE writing the new header so any data it references
+  /// (notably hot_tail_offset) is durable first. See `update_header` for the
+  /// full rationale — without this barrier, the OS can persist the header
+  /// before the appended WAL entries, leaving the header pointing past EOF.
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
+    // Barrier: durable-ize all prior writes before updating the header.
+    self.file.sync_all()?;
+
     self.file_header = header.clone();
     let header_bytes = self.file_header.serialize();
     self.file.seek(SeekFrom::Start(0))?;
