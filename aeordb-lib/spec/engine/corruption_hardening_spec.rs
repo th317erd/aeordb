@@ -377,9 +377,11 @@ fn scanner_handles_corruption_at_start_of_data_region() {
 
     drop(engine);
 
-    // Corrupt near the beginning but after file header (offset 128 to avoid
-    // destroying the file header which is needed to open)
-    inject_corruption(db_str, 128, 64);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
+    // Corrupt near the beginning but after the file header. The header is
+    // 256 bytes and now carries a CRC, so corrupting within it correctly
+    // refuses to open. Use offset 300 to land in the KV region instead, where
+    // dirty startup can recover.
+    inject_corruption(db_str, 300, 64);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
 
     // Should still open (scanner skips corrupt entries)
     let result = StorageEngine::open(db_str);

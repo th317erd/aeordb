@@ -4,13 +4,24 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 pub const FILE_HEADER_SIZE: usize = 256;
 pub const FILE_MAGIC: &[u8; 4] = b"AEOR";
 
+/// CRC32 size in bytes, at the tail of the header. Bytes [FILE_HEADER_SIZE-4
+/// .. FILE_HEADER_SIZE] hold the CRC32 computed over the first 252 bytes.
+const HEADER_CRC_SIZE: usize = 4;
+
 /// Header format version this build understands. Bumping this is a
 /// commitment: every future change to the on-disk header layout must increment
 /// and provide a clear error to readers of an unknown version.
 ///
-/// Current revision: v1 (single 256-byte slot; A/B double-buffer with sequence
-/// + CRC is planned for v2, see bot-docs/plan/disk-resident-kvs.md).
-pub const SUPPORTED_HEADER_VERSION: u8 = 1;
+/// v1 (legacy): single 256-byte header, no CRC. No DBs in the wild.
+/// v2: single 256-byte header with CRC32 in the last 4 bytes. Catches torn
+///     writes that pass magic+version but leave later bytes garbled.
+///
+/// A future v3 will add A/B double-buffering (slot A at 0, slot B at 256,
+/// data at 512, plus a u64 sequence number per slot) so a torn write to one
+/// slot leaves the other intact. The CRC field added in v2 is the prerequisite
+/// for picking the live slot — readers will compare sequence numbers and pick
+/// the highest one with a valid CRC.
+pub const SUPPORTED_HEADER_VERSION: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
@@ -44,7 +55,7 @@ impl FileHeader {
     let hash_length = hash_algo.hash_length();
 
     FileHeader {
-      header_version: 1,
+      header_version: SUPPORTED_HEADER_VERSION,
       hash_algo,
       created_at: now,
       updated_at: now,
@@ -164,6 +175,13 @@ impl FileHeader {
     buffer[offset..offset + copy_len].copy_from_slice(&self.target_hash[..copy_len]);
     let _ = offset + hash_length; // suppress unused warning
 
+    // CRC32 over the first 252 bytes (all fields + padding zeros). The last
+    // 4 bytes hold the CRC itself. A torn write that lands magic + version
+    // but garbles a later byte (e.g. hot_tail_offset) will fail this check
+    // and trigger dirty startup instead of silently corrupting in-memory state.
+    let crc = crc32fast::hash(&buffer[..FILE_HEADER_SIZE - HEADER_CRC_SIZE]);
+    buffer[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].copy_from_slice(&crc.to_le_bytes());
+
     buffer
   }
 
@@ -182,6 +200,22 @@ impl FileHeader {
     offset += 1;
     if header_version != SUPPORTED_HEADER_VERSION {
       return Err(EngineError::InvalidEntryVersion(header_version));
+    }
+
+    // CRC32 verification — must come BEFORE we interpret any later field so
+    // a torn write doesn't bleed garbled data into the in-memory header.
+    let stored_crc = u32::from_le_bytes(
+      bytes[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].try_into().unwrap(),
+    );
+    let computed_crc = crc32fast::hash(&bytes[..FILE_HEADER_SIZE - HEADER_CRC_SIZE]);
+    if stored_crc != computed_crc {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!(
+          "file header CRC mismatch (stored {:08x}, computed {:08x})",
+          stored_crc, computed_crc
+        ),
+      });
     }
 
     // hash_algo: 2 bytes
