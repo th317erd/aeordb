@@ -55,11 +55,15 @@ pub async fn permission_middleware(
     && request_path != "/files/deleted"
     && request_path != "/files/restore"
     && !request_path.starts_with("/files/share-links");
+  // Symlinks are path-aware writes under /links/*; treat them like file paths
+  // so scoped keys can't create symlinks outside their scope.
+  let is_links_route = request_path.starts_with("/links/");
+  let is_path_route = is_files_route || is_links_route;
 
-  // For non-files routes, we still need to load key rules for downstream filtering
+  // For non-path routes, we still need to load key rules for downstream filtering
   // (e.g. /files/query endpoint filters results by key rules). But we skip the path-level
   // permission checks that are files-specific.
-  if !is_files_route {
+  if !is_path_route {
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
       if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {
@@ -73,8 +77,10 @@ pub async fn permission_middleware(
     return next.run(request).await;
   }
 
-  // Extract the files sub-path (strip the "/files/" prefix).
-  let engine_path = &request_path["/files/".len()..];
+  // Extract the route sub-path. Both /files/ and /links/ have the same prefix
+  // length (7 chars) so this works for either.
+  let prefix_len = if is_links_route { "/links/".len() } else { "/files/".len() };
+  let engine_path = &request_path[prefix_len..];
 
   // Extract claims from extensions (set by auth_middleware).
   let claims = match request.extensions().get::<TokenClaims>() {

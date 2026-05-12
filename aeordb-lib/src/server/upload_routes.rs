@@ -164,8 +164,37 @@ pub struct CommitRequest {
 pub async fn upload_commit(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   Json(body): Json<CommitRequest>,
 ) -> Response {
+  // Beta-audit P0: a scoped key must not be able to commit files at paths
+  // outside its scope, even via /blobs/commit. The path-level permission
+  // middleware doesn't run for /blobs/* routes — enforce inline.
+  if let Some(Extension(rules)) = active_key_rules.as_ref() {
+    use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
+    for file in &body.files {
+      let normalized = if file.path.starts_with('/') {
+        file.path.clone()
+      } else {
+        format!("/{}", file.path)
+      };
+      let permitted = match match_rules(&rules.0, &normalized) {
+        Some(rule) => check_operation_permitted(&rule.permitted, 'c')
+          || check_operation_permitted(&rule.permitted, 'u'),
+        None => false,
+      };
+      if !permitted {
+        return (
+          StatusCode::NOT_FOUND,
+          Json(serde_json::json!({
+            "error": format!("Not found: {}", file.path),
+          })),
+        )
+          .into_response();
+      }
+    }
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
   let engine = state.engine.clone();

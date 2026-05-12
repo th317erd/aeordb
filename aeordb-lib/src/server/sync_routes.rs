@@ -561,14 +561,23 @@ pub async fn sync_diff(
 }
 
 /// POST /sync/chunks -- batch chunk transfer.
+///
+/// Caps both the number of hashes (10,000) and the total response payload
+/// (512 MB) to bound peer memory usage. A worker hitting either limit returns
+/// 413 Payload Too Large; the caller should split the request and retry.
+const SYNC_CHUNKS_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+const SYNC_CHUNKS_MAX_HASHES: usize = 10_000;
+
 pub async fn sync_chunks(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<SyncChunksRequest>,
 ) -> Response {
-    // M3: Cap the number of chunk hashes to prevent abuse.
-    if payload.hashes.len() > 10_000 {
-        return ErrorResponse::new("Too many chunk hashes (max 10000). Split the request into multiple batches")
+    if payload.hashes.len() > SYNC_CHUNKS_MAX_HASHES {
+        return ErrorResponse::new(format!(
+            "Too many chunk hashes (max {}). Split the request into multiple batches",
+            SYNC_CHUNKS_MAX_HASHES
+        ))
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
     }
@@ -598,6 +607,9 @@ pub async fn sync_chunks(
     }
 
     let mut chunks: Vec<serde_json::Value> = Vec::new();
+    // Track accumulated payload size so we don't OOM building a 3.4 GB JSON
+    // response from a worst-case 10k * 256 KB request. base64 expands 4/3.
+    let mut accumulated_payload: usize = 0;
 
     for hex_hash in &payload.hashes {
         let hash = match hex::decode(hex_hash) {
@@ -619,6 +631,23 @@ pub async fn sync_chunks(
             } else {
                 value
             };
+
+            // Project base64-encoded size + JSON overhead. Bail before pushing.
+            let projected = data.len().saturating_mul(4) / 3 + hex_hash.len() + 64;
+            if accumulated_payload.saturating_add(projected) > SYNC_CHUNKS_MAX_RESPONSE_BYTES {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Response would exceed {} bytes; split the request into smaller batches",
+                            SYNC_CHUNKS_MAX_RESPONSE_BYTES
+                        ),
+                        "chunks_so_far": chunks.len(),
+                    })),
+                )
+                    .into_response();
+            }
+            accumulated_payload += projected;
 
             chunks.push(serde_json::json!({
                 "hash": hex_hash,
