@@ -19,7 +19,7 @@ fn test_create_new_file_writes_header() {
     .expect("Failed to create file");
 
   let header = writer.file_header();
-  assert_eq!(header.header_version, 1);
+  assert_eq!(header.header_version, 2);
   assert_eq!(header.hash_algo, HashAlgorithm::Blake3_256);
   assert_eq!(header.entry_count, 0);
   assert!(!header.resize_in_progress);
@@ -43,7 +43,7 @@ fn test_open_existing_file_reads_header() {
     .expect("Failed to open file");
 
   let header = writer.file_header();
-  assert_eq!(header.header_version, 1);
+  assert_eq!(header.header_version, 2);
   assert_eq!(header.hash_algo, HashAlgorithm::Blake3_256);
 }
 
