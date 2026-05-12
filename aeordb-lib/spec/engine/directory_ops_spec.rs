@@ -97,7 +97,7 @@ fn test_store_file_creates_intermediate_directories() {
 fn test_read_nonexistent_returns_error() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let result = ops.read_file("/does_not_exist.txt");
@@ -190,7 +190,7 @@ fn test_list_empty_directory() {
 fn test_list_nonexistent_directory() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   let result = ops.list_directory("/nonexistent");
@@ -244,7 +244,7 @@ fn test_exists_directory() {
 fn test_exists_nonexistent() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(!ops.exists("/nope").unwrap());
@@ -382,7 +382,7 @@ fn test_nested_directories() {
 fn test_root_directory_exists_after_create() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   assert!(ops.exists("/").unwrap());

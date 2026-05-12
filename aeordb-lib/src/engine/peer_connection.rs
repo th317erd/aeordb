@@ -60,7 +60,7 @@ impl SyncStatus {
         if self.consecutive_failures == 0 {
             return base_secs;
         }
-        let exponent = (self.consecutive_failures - 1).min(8) as u32;
+        let exponent = (self.consecutive_failures - 1).min(8);
         let backoff = base_secs.saturating_mul(2u64.pow(exponent));
         let capped = backoff.min(max_secs);
         // Add +/-10% jitter
@@ -122,6 +122,12 @@ pub struct PeerConfig {
 /// Manages all peer connections.
 pub struct PeerManager {
     connections: RwLock<HashMap<u64, PeerConnection>>,
+}
+
+impl Default for PeerManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PeerManager {

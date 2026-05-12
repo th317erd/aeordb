@@ -82,7 +82,7 @@ fn seed_api_key(engine: &StorageEngine) -> String {
     label: None,
     rules: vec![],
   };
-  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  system_store::store_api_key(engine, &ctx, &record).unwrap();
   plaintext_key
 }
 
@@ -128,7 +128,7 @@ async fn test_refresh_returns_new_jwt() {
     token_hash: token_hash.clone(),
     user_subject: "test-user".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_revoked: false,
     key_id: None,
   }).unwrap();
@@ -164,7 +164,7 @@ async fn test_refresh_rotates_refresh_token() {
     token_hash: token_hash.clone(),
     user_subject: "rotate-user".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_revoked: false,
     key_id: None,
   }).unwrap();
@@ -201,7 +201,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
     token_hash: token_hash.clone(),
     user_subject: "rotation-user".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_revoked: false,
     key_id: None,
   }).unwrap();
@@ -247,7 +247,7 @@ async fn test_expired_refresh_token_rejected() {
     token_hash: token_hash.clone(),
     user_subject: "expired-user".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_revoked: false,
     key_id: None,
   }).unwrap();
@@ -354,7 +354,7 @@ async fn test_revoked_refresh_token_rejected() {
     token_hash: token_hash.clone(),
     user_subject: "revoke-test-user".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_revoked: false,
     key_id: None,
   }).unwrap();

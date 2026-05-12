@@ -228,7 +228,7 @@ async fn test_get_file_snapshot_precedence() {
 
   // Verify the other snapshot would give different content (sanity check)
   let app = rebuild_app(&jwt_manager, &engine);
-  let uri2 = format!("/files/file.txt?snapshot=snap2");
+  let uri2 = "/files/file.txt?snapshot=snap2".to_string();
   let (status2, _, bytes2) = get_file(app, &auth, &uri2).await;
   assert_eq!(status2, StatusCode::OK);
   assert_eq!(bytes2, b"v2-content");

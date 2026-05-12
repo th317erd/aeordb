@@ -328,7 +328,7 @@ fn test_gc_snapshot_still_walkable_after_sweep() {
   // GC must not remove any entries that walk_version_tree could reach before
   assert_eq!(tree_before.files.len(), tree_after.files.len(),
     "v1 snapshot should have same file count before and after GC");
-  for (path, _) in &tree_before.files {
+  for path in tree_before.files.keys() {
     assert!(tree_after.files.contains_key(path),
       "v1 snapshot should still have file '{}' after GC", path);
   }

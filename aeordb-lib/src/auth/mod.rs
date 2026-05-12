@@ -39,7 +39,7 @@ pub fn bootstrap_root_key(
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key)
     .map_err(|error| crate::engine::errors::EngineError::IoError(
-      std::io::Error::new(std::io::ErrorKind::Other, format!("failed to hash root API key: {}", error)),
+      std::io::Error::other(format!("failed to hash root API key: {}", error)),
     ))?;
 
   let record = ApiKeyRecord {

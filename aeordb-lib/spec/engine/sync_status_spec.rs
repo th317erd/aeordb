@@ -178,25 +178,25 @@ fn test_next_retry_backoff_exponential() {
     status.consecutive_failures = 1;
     let interval = status.next_retry_interval_secs(base, max);
     // With jitter of +/-10%, range is [27, 33]
-    assert!(interval >= 27 && interval <= 33,
+    assert!((27..=33).contains(&interval),
         "1 failure: expected ~30, got {}", interval);
 
     // 2 failures: base * 2^1 = 60
     status.consecutive_failures = 2;
     let interval = status.next_retry_interval_secs(base, max);
-    assert!(interval >= 54 && interval <= 66,
+    assert!((54..=66).contains(&interval),
         "2 failures: expected ~60, got {}", interval);
 
     // 3 failures: base * 2^2 = 120
     status.consecutive_failures = 3;
     let interval = status.next_retry_interval_secs(base, max);
-    assert!(interval >= 108 && interval <= 132,
+    assert!((108..=132).contains(&interval),
         "3 failures: expected ~120, got {}", interval);
 
     // 4 failures: base * 2^3 = 240
     status.consecutive_failures = 4;
     let interval = status.next_retry_interval_secs(base, max);
-    assert!(interval >= 216 && interval <= 264,
+    assert!((216..=264).contains(&interval),
         "4 failures: expected ~240, got {}", interval);
 }
 
@@ -214,13 +214,13 @@ fn test_next_retry_capped() {
     status.consecutive_failures = 5;
     let interval = status.next_retry_interval_secs(base, max);
     // With jitter of +/-10% of 300: range [270, 330]
-    assert!(interval >= 270 && interval <= 330,
+    assert!((270..=330).contains(&interval),
         "5 failures: expected ~300 (capped), got {}", interval);
 
     // At 10 failures: still capped to max
     status.consecutive_failures = 10;
     let interval = status.next_retry_interval_secs(base, max);
-    assert!(interval >= 270 && interval <= 330,
+    assert!((270..=330).contains(&interval),
         "10 failures: expected ~300 (capped), got {}", interval);
 }
 
@@ -241,9 +241,9 @@ fn test_next_retry_exponent_capped_at_8() {
     // Still 1 * 2^8 = 256
 
     // Both should be approximately equal (within jitter bounds)
-    assert!(interval_at_9 >= 230 && interval_at_9 <= 282,
+    assert!((230..=282).contains(&interval_at_9),
         "9 failures: expected ~256, got {}", interval_at_9);
-    assert!(interval_at_20 >= 230 && interval_at_20 <= 282,
+    assert!((230..=282).contains(&interval_at_20),
         "20 failures: expected ~256, got {}", interval_at_20);
 }
 

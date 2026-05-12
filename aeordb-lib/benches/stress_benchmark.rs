@@ -131,7 +131,7 @@ fn phase1_bulk_store(engine: &StorageEngine, ctx: &RequestContext) -> usize {
             stored += 1;
 
             // Timeout check every 100 files (cheap Instant::now call)
-            if stored % 100 == 0 && start.elapsed() > PHASE1_TIMEOUT {
+            if stored.is_multiple_of(100) && start.elapsed() > PHASE1_TIMEOUT {
                 log_progress(&format!(
                     "  TIMEOUT after {:.1}s with {} files stored",
                     start.elapsed().as_secs_f64(),
@@ -140,7 +140,7 @@ fn phase1_bulk_store(engine: &StorageEngine, ctx: &RequestContext) -> usize {
                 break 'outer;
             }
 
-            if stored % CHECKPOINT_INTERVAL == 0 {
+            if stored.is_multiple_of(CHECKPOINT_INTERVAL) {
                 let elapsed = start.elapsed();
                 let rate = stored as f64 / elapsed.as_secs_f64();
                 let chunk_rate =
@@ -532,7 +532,7 @@ fn phase5_gc_after_deletes(
             Err(_) => delete_errors += 1,
         }
 
-        if (deleted + delete_errors) % 2_000 == 0 && (deleted + delete_errors) > 0 {
+        if (deleted + delete_errors).is_multiple_of(2_000) && (deleted + delete_errors) > 0 {
             log_progress(&format!(
                 "  Deleted {} / {} ({:.1}s)",
                 deleted + delete_errors,

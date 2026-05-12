@@ -6,7 +6,6 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::auth_uri::{AuthMode, expand_tilde, parse_auth_uri, resolve_auth_mode};
-use aeordb::engine::system_store;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::provider::{AuthProvider, FileAuthProvider, NoAuthProvider};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
@@ -218,7 +217,7 @@ fn test_no_auth_provider_allows_everything() {
 
 #[test]
 fn test_no_auth_provider_store_is_noop() {
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let provider = NoAuthProvider::new();
   let record = ApiKeyRecord {
     key_id: uuid::Uuid::new_v4(),
@@ -278,7 +277,7 @@ fn test_file_auth_provider_is_enabled() {
 
 #[test]
 fn test_file_auth_provider_validates_key() {
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let provider = FileAuthProvider::new(engine.clone());
 
@@ -316,7 +315,7 @@ fn test_file_auth_provider_rejects_invalid_key() {
 
 #[test]
 fn test_file_auth_provider_list_and_revoke() {
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let provider = FileAuthProvider::new(engine.clone());
 

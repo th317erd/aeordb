@@ -53,7 +53,7 @@ fn create_scoped_key_and_token(
 
     let ctx = RequestContext::system();
 
-    system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
+    system_store::store_api_key_for_bootstrap(engine, &ctx, &record).unwrap();
 
     let now_ts = now.timestamp();
     let claims = TokenClaims {

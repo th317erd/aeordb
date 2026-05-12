@@ -85,7 +85,7 @@ fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
   while start.elapsed() < timeout {
     if let Ok(file) = File::open(checkpoint_path) {
       let reader = BufReader::new(file);
-      for line in reader.lines().flatten() {
+      for line in reader.lines().map_while(Result::ok) {
         if line.starts_with("# worker up") {
           return true;
         }
@@ -102,7 +102,7 @@ fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
 fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
   let file = File::open(checkpoint_path).expect("open checkpoint");
   let mut entries = Vec::new();
-  for line in BufReader::new(file).lines().flatten() {
+  for line in BufReader::new(file).lines().map_while(Result::ok) {
     if line.starts_with('#') || line.is_empty() { continue; }
     if let Some((path, body)) = line.split_once('\t') {
       entries.push((path.to_string(), body.to_string()));

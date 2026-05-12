@@ -366,7 +366,7 @@ async fn test_remove_peer_returns_200() {
     // Remove the peer
     let response = app
         .oneshot(
-            Request::delete(&format!("/sync/peers/{}", node_id))
+            Request::delete(format!("/sync/peers/{}", node_id))
                 .header("authorization", &token)
                 .body(Body::empty())
                 .unwrap(),

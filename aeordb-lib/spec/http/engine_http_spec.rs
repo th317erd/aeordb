@@ -1344,7 +1344,7 @@ async fn test_get_by_hash_not_found() {
 
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/blobs/{}", fake_hash))
+    .uri(format!("/blobs/{}", fake_hash))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -1535,7 +1535,7 @@ async fn test_get_by_hash_same_content_different_paths() {
     let app = rebuild_app(&jwt_manager, &engine);
     let request = Request::builder()
       .method("GET")
-      .uri(&format!("/blobs/{}", hash))
+      .uri(format!("/blobs/{}", hash))
       .header("authorization", &auth)
       .body(Body::empty())
       .unwrap();

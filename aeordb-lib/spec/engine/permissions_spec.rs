@@ -29,7 +29,7 @@ fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
   let user = User::new(username, None);
   let user_id = user.user_id;
 
-  system_store::store_user(&engine, &ctx, &user).unwrap();
+  system_store::store_user(engine, &ctx, &user).unwrap();
   user_id
 }
 
@@ -44,7 +44,7 @@ fn create_test_group(
   let ctx = RequestContext::system();
   let group = Group::new(name, "........", "........", query_field, query_operator, query_value).unwrap();
 
-  system_store::store_group(&engine, &ctx, &group).unwrap();
+  system_store::store_group(engine, &ctx, &group).unwrap();
 }
 
 /// Write a .permissions file at a given directory path.

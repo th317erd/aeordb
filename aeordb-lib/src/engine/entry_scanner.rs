@@ -124,7 +124,7 @@ impl EntryScanner {
     }
 
     let mut buffer = vec![0u8; window_size];
-    if let Err(_) = self.file.read_exact(&mut buffer) {
+    if self.file.read_exact(&mut buffer).is_err() {
       // Partial read — truncate to what we actually have
       if self.file.seek(SeekFrom::Start(start)).is_err() {
         return None;

@@ -870,12 +870,12 @@ fn build_docx_zip(body_text: &str, core_xml: Option<&str>) -> Vec<u8> {
         body_text
     );
     let mut entries: Vec<(&str, Vec<u8>)> = vec![
-        ("word/document.xml".into(), document_xml.into_bytes()),
+        ("word/document.xml", document_xml.into_bytes()),
     ];
     let core_owned;
     if let Some(core) = core_xml {
         core_owned = core.as_bytes().to_vec();
-        entries.push(("docProps/core.xml".into(), core_owned));
+        entries.push(("docProps/core.xml", core_owned));
     }
 
     // Convert to slices for build_zip
@@ -890,13 +890,13 @@ fn build_xlsx_zip(shared_string: &str, core_xml: Option<&str>) -> Vec<u8> {
         shared_string
     );
     let mut entries: Vec<(&str, Vec<u8>)> = vec![
-        ("xl/workbook.xml".into(), workbook_xml.as_bytes().to_vec()),
-        ("xl/sharedStrings.xml".into(), shared_strings_xml.into_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes().to_vec()),
+        ("xl/sharedStrings.xml", shared_strings_xml.into_bytes()),
     ];
     let core_owned;
     if let Some(core) = core_xml {
         core_owned = core.as_bytes().to_vec();
-        entries.push(("docProps/core.xml".into(), core_owned));
+        entries.push(("docProps/core.xml", core_owned));
     }
 
     let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
@@ -906,13 +906,13 @@ fn build_xlsx_zip(shared_string: &str, core_xml: Option<&str>) -> Vec<u8> {
 fn build_odt_zip(content_xml: &str, meta_xml: Option<&str>) -> Vec<u8> {
     let mimetype = "application/vnd.oasis.opendocument.text";
     let mut entries: Vec<(&str, Vec<u8>)> = vec![
-        ("mimetype".into(), mimetype.as_bytes().to_vec()),
-        ("content.xml".into(), content_xml.as_bytes().to_vec()),
+        ("mimetype", mimetype.as_bytes().to_vec()),
+        ("content.xml", content_xml.as_bytes().to_vec()),
     ];
     let meta_owned;
     if let Some(meta) = meta_xml {
         meta_owned = meta.as_bytes().to_vec();
-        entries.push(("meta.xml".into(), meta_owned));
+        entries.push(("meta.xml", meta_owned));
     }
 
     let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
@@ -922,13 +922,13 @@ fn build_odt_zip(content_xml: &str, meta_xml: Option<&str>) -> Vec<u8> {
 fn build_ods_zip(content_xml: &str, meta_xml: Option<&str>) -> Vec<u8> {
     let mimetype = "application/vnd.oasis.opendocument.spreadsheet";
     let mut entries: Vec<(&str, Vec<u8>)> = vec![
-        ("mimetype".into(), mimetype.as_bytes().to_vec()),
-        ("content.xml".into(), content_xml.as_bytes().to_vec()),
+        ("mimetype", mimetype.as_bytes().to_vec()),
+        ("content.xml", content_xml.as_bytes().to_vec()),
     ];
     let meta_owned;
     if let Some(meta) = meta_xml {
         meta_owned = meta.as_bytes().to_vec();
-        entries.push(("meta.xml".into(), meta_owned));
+        entries.push(("meta.xml", meta_owned));
     }
 
     let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();

@@ -110,7 +110,7 @@ fn main() {
 
     if mode == "mixed" {
       // Occasional delete of an older entry to mix the workload.
-      if counter > 0 && counter % 7 == 0 {
+      if counter > 0 && counter.is_multiple_of(7) {
         let target = format!("/data/file-{:08}.txt", counter - 5);
         let _ = ops.delete_file(&ctx, &target);
         // Don't checkpoint deletes — only positive commits, since the parent's
@@ -127,7 +127,7 @@ fn main() {
     // a SIGKILL from the parent. Without this, on very fast disks the worker
     // can write tens of thousands of entries per second and never get
     // interrupted at an "interesting" moment.
-    if counter % 32 == 0 {
+    if counter.is_multiple_of(32) {
       std::thread::sleep(Duration::from_micros(50));
     }
   }

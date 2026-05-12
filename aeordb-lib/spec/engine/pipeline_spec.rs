@@ -861,7 +861,7 @@ fn test_at_filename_field_gets_indexed() {
   let index = index_manager.load_index("/files", "@filename").unwrap();
   assert!(index.is_some(), "Expected @filename index to be loadable");
   let idx = index.unwrap();
-  assert!(idx.len() > 0, "Expected at least one entry in @filename index");
+  assert!(!idx.is_empty(), "Expected at least one entry in @filename index");
 }
 
 #[test]
@@ -1068,7 +1068,7 @@ fn test_at_field_mixed_with_regular_fields() {
   // @-field should also be indexed
   let filename_idx = index_manager.load_index("/mixed", "@filename").unwrap();
   assert!(filename_idx.is_some(), "Expected @filename index");
-  assert!(filename_idx.unwrap().len() > 0, "Expected entries in @filename index");
+  assert!(!filename_idx.unwrap().is_empty(), "Expected entries in @filename index");
 }
 
 #[test]

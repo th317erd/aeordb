@@ -173,8 +173,8 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
                     }
                 };
 
-                let report = verify::verify_and_repair(&engine2, &work_path);
-                report
+                
+                verify::verify_and_repair(&engine2, &work_path)
             } else {
                 // No expansion needed — repair in place
                 verify::verify_and_repair(&engine, &work_path)

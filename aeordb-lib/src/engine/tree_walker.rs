@@ -20,6 +20,12 @@ pub struct VersionTree {
   pub symlinks: HashMap<String, (Vec<u8>, SymlinkRecord)>,
 }
 
+impl Default for VersionTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionTree {
   pub fn new() -> Self {
     VersionTree {

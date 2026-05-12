@@ -433,7 +433,7 @@ fn write_system_tree(
 
     // Chunks for system files (system files rarely have chunks, but include them)
     let mut chunk_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    for (_path, (_file_hash, record)) in &tree.files {
+    for (_file_hash, record) in tree.files.values() {
         for ch in &record.chunk_hashes { chunk_hashes.insert(ch.clone()); }
     }
     for ch in &chunk_hashes {
@@ -831,15 +831,14 @@ pub fn import_backup_with_mode(
     let (backup_type, base_hash, target_hash) = backup.backup_info()?;
 
     // Restore-mode safety: refuse to clobber live data unless explicitly forced.
-    if mode == ImportMode::Restore && !force {
-        if !is_target_empty(target)? {
+    if mode == ImportMode::Restore && !force
+        && !is_target_empty(target)? {
             return Err(EngineError::InvalidInput(
                 "target database is not empty; refusing restore.\n\
                  Use mode=merge to union, or pass force=true to overwrite anyway."
                     .to_string(),
             ));
         }
-    }
 
     // For patches, verify base version
     if backup_type == 2 && !force {

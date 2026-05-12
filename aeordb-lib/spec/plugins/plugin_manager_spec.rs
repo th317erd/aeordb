@@ -89,7 +89,7 @@ fn test_list_deployed_plugins() {
 
 #[test]
 fn test_remove_deployed_plugin() {
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
@@ -144,7 +144,7 @@ fn test_get_nonexistent_plugin_returns_none() {
 
 #[test]
 fn test_remove_nonexistent_plugin_returns_false() {
-  let ctx = RequestContext::system();
+  let _ctx = RequestContext::system();
   let (manager, _temp_dir) = test_manager();
 
   let removed = manager

@@ -62,7 +62,7 @@ async fn upload_chunk(app: axum::Router, token: &str, data: &[u8]) -> String {
     let hash = compute_chunk_hash(data);
     let resp = app
         .oneshot(
-            Request::put(&format!("/blobs/chunks/{}", hash))
+            Request::put(format!("/blobs/chunks/{}", hash))
                 .header("Authorization", token)
                 .header("Content-Type", "application/octet-stream")
                 .body(Body::from(data.to_vec()))
@@ -181,7 +181,7 @@ async fn test_commit_multiple_files() {
     ] {
         let resp = rebuild_app(&jwt, &engine)
             .oneshot(
-                Request::get(&format!("/files{}", path))
+                Request::get(format!("/files{}", path))
                     .header("Authorization", &token)
                     .body(Body::empty())
                     .unwrap(),

@@ -113,12 +113,7 @@ pub fn validate_rules(rules: &[KeyRule]) -> Result<(), String> {
 /// Match a path against an ordered list of rules. First match wins.
 /// Returns None if no rule matches.
 pub fn match_rules<'a>(rules: &'a [KeyRule], path: &str) -> Option<&'a KeyRule> {
-    for rule in rules {
-        if glob_match::glob_match(&rule.glob, path) {
-            return Some(rule);
-        }
-    }
-    None
+    rules.iter().find(|&rule| glob_match::glob_match(&rule.glob, path)).map(|v| v as _)
 }
 
 /// Check if `path` is an ancestor directory of any rule's target path.

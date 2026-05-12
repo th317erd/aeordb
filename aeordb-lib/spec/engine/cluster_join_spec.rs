@@ -20,7 +20,7 @@ fn store_signing_key(engine: &StorageEngine) -> Vec<u8> {
     let key_bytes = manager.to_bytes();
     let context = RequestContext::system();
 
-    system_store::store_config(&engine, &context, "jwt_signing_key", &key_bytes)
+    system_store::store_config(engine, &context, "jwt_signing_key", &key_bytes)
         .expect("failed to store signing key");
     key_bytes
 }
@@ -88,10 +88,10 @@ fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
 /// tree data, not loose system table KV entries).
 fn simulate_signing_key_sync(source: &StorageEngine, destination: &StorageEngine) {
 
-    if let Ok(Some(key_bytes)) = system_store::get_config(&source, "jwt_signing_key") {
+    if let Ok(Some(key_bytes)) = system_store::get_config(source, "jwt_signing_key") {
         let context = RequestContext::system();
 
-        system_store::store_config(&destination, &context, "jwt_signing_key", &key_bytes)
+        system_store::store_config(destination, &context, "jwt_signing_key", &key_bytes)
             .expect("failed to sync signing key to destination");
     }
 }

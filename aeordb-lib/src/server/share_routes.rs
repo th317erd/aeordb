@@ -102,8 +102,8 @@ pub async fn share(
             .into_response();
     }
 
-    let has_users = body.users.as_ref().map_or(false, |u| !u.is_empty());
-    let has_groups = body.groups.as_ref().map_or(false, |g| !g.is_empty());
+    let has_users = body.users.as_ref().is_some_and(|u| !u.is_empty());
+    let has_groups = body.groups.as_ref().is_some_and(|g| !g.is_empty());
     if !has_users && !has_groups {
         return ErrorResponse::new("At least one user or group is required")
             .with_status(StatusCode::BAD_REQUEST)

@@ -184,15 +184,14 @@ pub enum QueryStrategy {
 
 /// EXPLAIN mode for query introspection.
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum ExplainMode {
+  #[default]
   Off,
   Plan,     // plan only, no execution
   Analyze,  // plan + execution + results
 }
 
-impl Default for ExplainMode {
-  fn default() -> Self { ExplainMode::Off }
-}
 
 /// Result of an EXPLAIN query.
 #[derive(Debug, Clone, Serialize)]
@@ -1950,7 +1949,7 @@ impl<'a> QueryEngine<'a> {
     // Compute aggregates per group
     let mut group_results: Vec<GroupResult> = Vec::new();
 
-    for (_key_str, (key_map, group_hashes)) in &groups {
+    for (key_map, group_hashes) in groups.values() {
         let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
         let (sum, avg, min, max) = compute_aggregates(&group_hash_set, agg, &field_indexes);
 
@@ -1993,7 +1992,7 @@ impl<'a> QueryEngine<'a> {
 pub fn bytes_to_f64(bytes: &[u8], type_tag: u8) -> Option<f64> {
     match type_tag {
         CONVERTER_TYPE_U8 => {
-            if bytes.len() >= 1 { Some(bytes[0] as f64) }
+            if !bytes.is_empty() { Some(bytes[0] as f64) }
             else { None }
         }
         CONVERTER_TYPE_U16 => {
@@ -2024,7 +2023,7 @@ pub fn bytes_to_f64(bytes: &[u8], type_tag: u8) -> Option<f64> {
 pub fn bytes_to_json_value(bytes: &[u8], type_tag: u8) -> serde_json::Value {
     match type_tag {
         CONVERTER_TYPE_U8 => {
-            if bytes.len() >= 1 { serde_json::json!(bytes[0]) }
+            if !bytes.is_empty() { serde_json::json!(bytes[0]) }
             else { serde_json::Value::Null }
         }
         CONVERTER_TYPE_U16 => {

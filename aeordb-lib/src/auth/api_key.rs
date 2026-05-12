@@ -45,7 +45,7 @@ pub struct ApiKeyRecord {
 pub fn generate_api_key(key_id: Uuid) -> String {
   let mut random_bytes = [0u8; 32];
   rand::RngCore::fill_bytes(&mut OsRng, &mut random_bytes);
-  let hex_string = hex::encode(&random_bytes);
+  let hex_string = hex::encode(random_bytes);
   let key_id_prefix = &key_id.simple().to_string()[..16];
   format!("{}{}_{}", API_KEY_PREFIX, key_id_prefix, hex_string)
 }

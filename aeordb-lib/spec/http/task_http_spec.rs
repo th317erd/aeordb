@@ -149,7 +149,7 @@ async fn test_cancel_task_via_http() {
     // Cancel it via HTTP
     let request = Request::builder()
         .method("DELETE")
-        .uri(&format!("/system/tasks/{}", task_id))
+        .uri(format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -180,7 +180,7 @@ async fn test_get_task_by_id() {
 
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/system/tasks/{}", task_id))
+        .uri(format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

@@ -288,7 +288,7 @@ fn test_create_and_open() {
     // Create and insert
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(1, 100));
+        store.insert(make_entry(1, 100)).unwrap();
         store.flush().unwrap();
     }
 
@@ -307,7 +307,7 @@ fn test_insert_and_get() {
     let mut store = create_test_kv(dir.path());
 
     let entry = make_entry(42, 12345);
-    store.insert(entry.clone());
+    store.insert(entry.clone()).unwrap();
 
     let result = store.get(&make_hash(42));
     assert!(result.is_some());
@@ -323,7 +323,7 @@ fn test_insert_multiple() {
     let mut store = create_test_kv(dir.path());
 
     for i in 0..100u8 {
-        store.insert(make_entry(i, i as u64 * 100));
+        store.insert(make_entry(i, i as u64 * 100)).unwrap();
     }
     store.flush().unwrap();
 
@@ -348,7 +348,7 @@ fn test_contains() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert!(store.contains(&make_hash(1)));
     assert!(!store.contains(&make_hash(99)));
 }
@@ -358,7 +358,7 @@ fn test_mark_deleted() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert!(store.contains(&make_hash(1)));
 
     store.mark_deleted(&make_hash(1));
@@ -373,7 +373,7 @@ fn test_flush_persists() {
     // Create, insert, flush
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(7, 777));
+        store.insert(make_entry(7, 777)).unwrap();
         store.flush().unwrap();
     }
 
@@ -401,7 +401,7 @@ fn test_auto_flush() {
                 type_flags: KV_TYPE_CHUNK,
                 hash,
                 offset: i as u64,
-            });
+            }).unwrap();
         }
         // Some should have been auto-flushed already
         // Flush remaining
@@ -427,7 +427,7 @@ fn test_iter_all() {
     let mut store = create_test_kv(dir.path());
 
     for i in 0..10u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
     store.flush().unwrap();
 
@@ -442,13 +442,13 @@ fn test_iter_all_with_unflushed() {
 
     // Flush some entries to disk
     for i in 0..5u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
     store.flush().unwrap();
 
     // Add more to buffer (not flushed)
     for i in 5..10u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
 
     let all = store.iter_all().unwrap();
@@ -460,13 +460,13 @@ fn test_upsert_same_hash() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     store.flush().unwrap();
 
     // Update same hash with different offset
     let mut updated = make_entry(1, 999);
     updated.type_flags = KV_TYPE_FILE_RECORD;
-    store.insert(updated);
+    store.insert(updated).unwrap();
     store.flush().unwrap();
 
     let result = store.get(&make_hash(1)).unwrap();
@@ -489,7 +489,7 @@ fn test_large_dataset() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -509,15 +509,15 @@ fn test_entry_count() {
     assert_eq!(store.len(), 0);
     assert!(store.is_empty());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert_eq!(store.len(), 1);
     assert!(!store.is_empty());
 
-    store.insert(make_entry(2, 200));
+    store.insert(make_entry(2, 200)).unwrap();
     assert_eq!(store.len(), 2);
 
     // Updating existing entry should not change count
-    store.insert(make_entry(1, 999));
+    store.insert(make_entry(1, 999)).unwrap();
     assert_eq!(store.len(), 2);
 }
 
@@ -527,7 +527,7 @@ fn test_update_flags() {
 
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     store.flush().unwrap();
 
     // Update flags
@@ -552,7 +552,7 @@ fn test_update_offset() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
 
     let result = store.update_offset(&make_hash(1), 5555);
     assert!(result);
@@ -590,7 +590,7 @@ fn test_mark_deleted_persists() {
 
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(1, 100));
+        store.insert(make_entry(1, 100)).unwrap();
         store.flush().unwrap();
         store.mark_deleted(&make_hash(1));
         store.flush().unwrap();
@@ -607,9 +607,9 @@ fn test_iter_all_excludes_deleted() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
-    store.insert(make_entry(2, 200));
-    store.insert(make_entry(3, 300));
+    store.insert(make_entry(1, 100)).unwrap();
+    store.insert(make_entry(2, 200)).unwrap();
+    store.insert(make_entry(3, 300)).unwrap();
     store.flush().unwrap();
 
     store.mark_deleted(&make_hash(2));
@@ -647,7 +647,7 @@ fn test_entry_count_after_reopen() {
     {
         let mut store = create_test_kv(dir.path());
         for i in 0..50u8 {
-            store.insert(make_entry(i, i as u64));
+            store.insert(make_entry(i, i as u64)).unwrap();
         }
         store.flush().unwrap();
     }
@@ -670,7 +670,7 @@ fn test_cache_eviction() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -721,7 +721,7 @@ fn test_open_existing_kv_skips_rebuild() {
 
     // Record the file's modification time
     let metadata_before = std::fs::metadata(&engine_path).unwrap();
-    let mtime_before = metadata_before.modified().unwrap();
+    let _mtime_before = metadata_before.modified().unwrap();
 
     // Session 2: reopen — should open without full KV rebuild
     {
@@ -868,7 +868,7 @@ fn test_resize_preserves_all_entries() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -902,7 +902,7 @@ fn test_create_at_stage() {
         type_flags: KV_TYPE_CHUNK,
         hash: hash.clone(),
         offset: 999,
-    });
+    }).unwrap();
     store.flush().unwrap();
 
     let entry = store.get(&hash).unwrap();
@@ -943,7 +943,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -964,7 +964,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+        }).unwrap();
     }
     store.flush().unwrap();
 

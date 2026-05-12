@@ -31,7 +31,7 @@ pub struct RefreshTokenRecord {
 pub fn generate_refresh_token() -> String {
   let mut bytes = [0u8; 32];
   rand::rngs::OsRng.fill_bytes(&mut bytes);
-  format!("{}{}", REFRESH_TOKEN_PREFIX, hex::encode(&bytes))
+  format!("{}{}", REFRESH_TOKEN_PREFIX, hex::encode(bytes))
 }
 
 /// Hash a refresh token using SHA-256.
@@ -39,5 +39,5 @@ pub fn hash_refresh_token(token: &str) -> String {
   let mut hasher = Sha256::new();
   hasher.update(token.as_bytes());
   let result = hasher.finalize();
-  hex::encode(&result)
+  hex::encode(result)
 }

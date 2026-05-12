@@ -181,6 +181,12 @@ impl BTreeNode {
     }
 }
 
+impl Default for LeafNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LeafNode {
     pub fn new() -> Self {
         LeafNode { entries: Vec::new() }

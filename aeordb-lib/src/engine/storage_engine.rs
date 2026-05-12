@@ -44,6 +44,12 @@ struct BatchEntry {
     kv_type: u8,
 }
 
+impl Default for WriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch { entries: Vec::new() }
@@ -739,7 +745,7 @@ impl StorageEngine {
         "get_entry: read failed at KV offset"
       );
     }
-    result.map(|t| Some(t))
+    result.map(Some)
   }
 
   /// Retrieve an entry by hash, including deleted entries.
@@ -760,7 +766,7 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
     let result = writer.read_entry_at_shared(kv_entry.offset);
-    result.map(|t| Some(t))
+    result.map(Some)
   }
 
   /// Retrieve an entry by hash with BLAKE3 hash verification.

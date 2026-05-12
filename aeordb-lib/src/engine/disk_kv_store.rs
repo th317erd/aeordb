@@ -711,12 +711,11 @@ impl DiskKVStore {
         for bucket in 0..self.bucket_count {
             let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
             let mut page_data = vec![0u8; psize];
-            if self.db_file.seek(SeekFrom::Start(offset)).is_ok() {
-                if self.db_file.read_exact(&mut page_data).is_ok() {
+            if self.db_file.seek(SeekFrom::Start(offset)).is_ok()
+                && self.db_file.read_exact(&mut page_data).is_ok() {
                     pages.push(page_data);
                     continue;
                 }
-            }
             pages.push(vec![0u8; psize]);
         }
         Arc::new(pages)

@@ -341,7 +341,7 @@ impl SyncEngine {
         }
 
         // Also transfer file records that we might need
-        for (_path, (file_hash, _record)) in &remote_tree.files {
+        for (file_hash, _record) in remote_tree.files.values() {
             let has_locally = self.engine.has_entry(file_hash)
                 .map_err(|e| format!("Failed to check local file record: {}", e))?;
 
@@ -495,14 +495,14 @@ impl SyncEngine {
             .any(|k| {
                 changes[k]
                     .as_array()
-                    .map_or(false, |a| !a.is_empty())
+                    .is_some_and(|a| !a.is_empty())
             });
         let has_symlink_changes = ["symlinks_added", "symlinks_modified", "symlinks_deleted"]
             .iter()
             .any(|k| {
                 changes[k]
                     .as_array()
-                    .map_or(false, |a| !a.is_empty())
+                    .is_some_and(|a| !a.is_empty())
             });
 
         if !has_file_changes && !has_symlink_changes {

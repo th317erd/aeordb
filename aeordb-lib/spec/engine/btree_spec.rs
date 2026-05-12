@@ -926,10 +926,10 @@ fn test_write_batch_basic() {
     assert!(offsets[0] < offsets[1], "Second offset should be after first");
 
     // Verify both entries are readable
-    let e1 = engine.get_entry(&vec![1u8; 32]).unwrap();
+    let e1 = engine.get_entry(&[1u8; 32]).unwrap();
     assert!(e1.is_some());
     assert_eq!(e1.unwrap().2, b"hello");
-    let e2 = engine.get_entry(&vec![2u8; 32]).unwrap();
+    let e2 = engine.get_entry(&[2u8; 32]).unwrap();
     assert!(e2.is_some());
     assert_eq!(e2.unwrap().2, b"world");
 }
@@ -958,7 +958,7 @@ fn test_write_batch_single_entry() {
     let offsets = engine.flush_batch(batch).unwrap();
     assert_eq!(offsets.len(), 1);
 
-    let entry = engine.get_entry(&vec![0xAA; 32]).unwrap();
+    let entry = engine.get_entry(&[0xAA; 32]).unwrap();
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().2, b"some directory data");
 }
@@ -1007,9 +1007,9 @@ fn test_write_batch_mixed_entry_types() {
     assert_eq!(offsets.len(), 3);
 
     // All should be readable
-    assert!(engine.get_entry(&vec![1u8; 32]).unwrap().is_some());
-    assert!(engine.get_entry(&vec![2u8; 32]).unwrap().is_some());
-    assert!(engine.get_entry(&vec![3u8; 32]).unwrap().is_some());
+    assert!(engine.get_entry(&[1u8; 32]).unwrap().is_some());
+    assert!(engine.get_entry(&[2u8; 32]).unwrap().is_some());
+    assert!(engine.get_entry(&[3u8; 32]).unwrap().is_some());
 }
 
 #[test]
@@ -1025,7 +1025,7 @@ fn test_write_batch_duplicate_key_last_wins() {
     assert_eq!(offsets.len(), 2);
 
     // The KV store should have the second (last) value since it overwrites
-    let entry = engine.get_entry(&vec![1u8; 32]).unwrap().unwrap();
+    let entry = engine.get_entry(&[1u8; 32]).unwrap().unwrap();
     assert_eq!(entry.2, b"second");
 }
 

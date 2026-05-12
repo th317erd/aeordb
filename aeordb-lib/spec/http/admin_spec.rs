@@ -197,7 +197,7 @@ async fn test_get_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/system/users/{}", user_id))
+    .uri(format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -219,7 +219,7 @@ async fn test_get_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/system/users/{}", nonexistent_id))
+    .uri(format!("/system/users/{}", nonexistent_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -250,7 +250,7 @@ async fn test_update_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("PATCH")
-    .uri(&format!("/system/users/{}", user_id))
+    .uri(format!("/system/users/{}", user_id))
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"eve_updated","email":"eve@new.com"}"#))
@@ -272,7 +272,7 @@ async fn test_update_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("PATCH")
-    .uri(&format!("/system/users/{}", nonexistent_id))
+    .uri(format!("/system/users/{}", nonexistent_id))
     .header("content-type", "application/json")
     .header("authorization", &auth)
     .body(Body::from(r#"{"username":"nope","email":"nope@test.com"}"#))
@@ -304,7 +304,7 @@ async fn test_deactivate_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/system/users/{}", user_id))
+    .uri(format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -320,7 +320,7 @@ async fn test_deactivate_user() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/system/users/{}", user_id))
+    .uri(format!("/system/users/{}", user_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -338,7 +338,7 @@ async fn test_deactivate_user_404() {
   let nonexistent_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/system/users/{}", nonexistent_id))
+    .uri(format!("/system/users/{}", nonexistent_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -717,7 +717,7 @@ async fn test_admin_requires_root_user_delete() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/system/users/{}", uuid::Uuid::new_v4()))
+    .uri(format!("/system/users/{}", uuid::Uuid::new_v4()))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -785,7 +785,7 @@ async fn test_create_user_returns_auto_group() {
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("GET")
-    .uri(&format!("/system/groups/{}", expected_group_name))
+    .uri(format!("/system/groups/{}", expected_group_name))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();

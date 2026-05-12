@@ -219,7 +219,7 @@ fn file_record_to_sync_entry(path: &str, hash: &[u8], record: &FileRecord) -> Sy
         hash: hex::encode(hash),
         size: record.total_size,
         content_type: record.content_type.clone(),
-        chunk_hashes: record.chunk_hashes.iter().map(|h| hex::encode(h)).collect(),
+        chunk_hashes: record.chunk_hashes.iter().map(hex::encode).collect(),
     }
 }
 

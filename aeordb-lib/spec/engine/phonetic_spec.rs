@@ -370,7 +370,7 @@ fn test_phonetic_converter_not_order_preserving() {
 fn test_phonetic_converter_to_scalar_range() {
   let conv = PhoneticConverter::soundex();
   let scalar = conv.to_scalar(b"R163");
-  assert!(scalar >= 0.0 && scalar <= 1.0, "scalar {} out of [0,1]", scalar);
+  assert!((0.0..=1.0).contains(&scalar), "scalar {} out of [0,1]", scalar);
 }
 
 #[test]

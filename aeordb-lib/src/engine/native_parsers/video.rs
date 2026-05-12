@@ -11,7 +11,7 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
     let mut result = VideoMetadata {
         filename: filename.to_string(),
         content_type: content_type.to_string(),
-        size: size,
+        size,
         format: None,
         brand: None,
         duration_seconds: None,
@@ -25,9 +25,7 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
         tags: None,
     };
 
-    if data.len() >= 8 && &data[4..8] == b"ftyp" {
-        parse_mp4(data, &mut result);
-    } else if data.len() >= 8 && is_mp4_box_type(&data[4..8]) {
+    if data.len() >= 8 && (&data[4..8] == b"ftyp" || is_mp4_box_type(&data[4..8])) {
         parse_mp4(data, &mut result);
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"AVI " {
         parse_avi(data, &mut result);
@@ -372,8 +370,8 @@ fn parse_trak(data: &[u8], result: &mut VideoMetadata) {
     iter_boxes(data, |box_type, box_data, _| {
         if box_type == b"mdia" {
             iter_boxes(box_data, |inner_type, inner_data, _| {
-                if inner_type == b"hdlr" {
-                    if inner_data.len() >= 12 {
+                if inner_type == b"hdlr"
+                    && inner_data.len() >= 12 {
                         // [version: 1][flags: 3][pre_defined: 4][handler_type: 4]
                         let handler = &inner_data[8..12];
                         if handler == b"vide" {
@@ -382,7 +380,6 @@ fn parse_trak(data: &[u8], result: &mut VideoMetadata) {
                             track_is_audio = true;
                         }
                     }
-                }
                 true
             });
         }
@@ -473,15 +470,14 @@ fn parse_avi(data: &[u8], result: &mut VideoMetadata) {
             None => break,
         };
 
-        if &chunk_type == b"LIST" {
-            if offset + 12 <= data.len() {
+        if &chunk_type == b"LIST"
+            && offset + 12 <= data.len() {
                 let list_type = &data[offset + 8..offset + 12];
                 if list_type == b"hdrl" {
                     parse_avi_hdrl(&data[offset + 12..], chunk_size.saturating_sub(4), result);
                     return;
                 }
             }
-        }
 
         // Advance: 8 (header) + chunk_size, padded to even boundary
         let padded_size = (chunk_size + 1) & !1;

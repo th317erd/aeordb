@@ -201,7 +201,7 @@ async fn test_promote_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri(&format!("/versions/promote?hash={}", head_hash))
+        .uri(format!("/versions/promote?hash={}", head_hash))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -250,7 +250,7 @@ async fn test_promote_nonexistent_hash() {
 
     let request = Request::builder()
         .method("POST")
-        .uri(&format!("/versions/promote?hash={}", bogus))
+        .uri(format!("/versions/promote?hash={}", bogus))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();

@@ -121,7 +121,7 @@ pub async fn run(
     .unwrap_or(Path::new("."))
     .to_path_buf();
   let hot_dir = hot_dir_arg
-    .map(|s| std::path::PathBuf::from(s))
+    .map(std::path::PathBuf::from)
     .unwrap_or(default_hot_dir);
   let hot_dir_ref = hot_dir.as_path();
 

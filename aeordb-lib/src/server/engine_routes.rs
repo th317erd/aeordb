@@ -478,7 +478,7 @@ fn build_file_streaming_response(
 
   let body = Body::from_stream(chunk_stream);
 
-  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let safe_path = file_record.path.replace(['\n', '\r'], "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
     .header("X-AeorDB-Path", safe_path)
@@ -488,7 +488,7 @@ fn build_file_streaming_response(
 
   if let Some(target) = symlink_target {
     response_builder = response_builder
-      .header("X-AeorDB-Link-Target", target.replace('\n', "").replace('\r', ""));
+      .header("X-AeorDB-Link-Target", target.replace(['\n', '\r'], ""));
   }
 
   if let Some(ref content_type) = file_record.content_type {
@@ -751,7 +751,7 @@ fn handle_file_response(
 
   let body = Body::from_stream(chunk_stream);
 
-  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let safe_path = file_record.path.replace(['\n', '\r'], "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
     .header("X-AeorDB-Path", safe_path)
@@ -1045,7 +1045,7 @@ async fn engine_get_at_version(
 
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+    .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
     .header("X-AeorDB-Size", file_record.total_size.to_string())
     .header("X-AeorDB-Created", file_record.created_at.to_string())
     .header("X-AeorDB-Updated", file_record.updated_at.to_string());
@@ -1259,8 +1259,8 @@ pub async fn engine_head(
     return axum::http::Response::builder()
       .status(StatusCode::OK)
       .header("X-AeorDB-Type", "symlink")
-      .header("X-AeorDB-Link-Target", symlink_record.target.replace('\n', "").replace('\r', ""))
-      .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+      .header("X-AeorDB-Link-Target", symlink_record.target.replace(['\n', '\r'], ""))
+      .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
       .header("X-AeorDB-Created", symlink_record.created_at.to_string())
       .header("X-AeorDB-Updated", symlink_record.updated_at.to_string())
       .body(Body::empty())
@@ -1269,7 +1269,7 @@ pub async fn engine_head(
 
   match directory_ops.get_metadata(&path) {
     Ok(Some(file_record)) => {
-      let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+      let safe_path = file_record.path.replace(['\n', '\r'], "");
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("X-AeorDB-Type", "file")
@@ -1290,7 +1290,7 @@ pub async fn engine_head(
       // Check if it is a directory
       match directory_ops.list_directory(&path) {
         Ok(_) => {
-          let safe_path = path.replace('\n', "").replace('\r', "");
+          let safe_path = path.replace(['\n', '\r'], "");
           axum::http::Response::builder()
             .status(StatusCode::OK)
             .header("X-AeorDB-Type", "directory")

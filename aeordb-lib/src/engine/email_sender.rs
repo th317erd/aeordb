@@ -27,7 +27,7 @@ fn validate_url(url: &str) -> Result<(), String> {
 /// Used as defense-in-depth for paths that construct raw email headers (e.g. Gmail).
 fn validate_email(email: &str) -> Result<(), String> {
     if email.contains('\r') || email.contains('\n') {
-        return Err(format!("Invalid email address: contains newline characters"));
+        return Err("Invalid email address: contains newline characters".to_string());
     }
     Ok(())
 }

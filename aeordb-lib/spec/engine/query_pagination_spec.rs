@@ -115,7 +115,7 @@ fn setup_trigram_indexed(dir: &tempfile::TempDir) -> StorageEngine {
     ops.store_file_with_indexing(
         &ctx,
         "/items/a.json",
-        &r#"{"title":"hello world","age":25}"#.as_bytes(),
+        r#"{"title":"hello world","age":25}"#.as_bytes(),
         Some("application/json"),
     ).unwrap();
 
@@ -788,8 +788,8 @@ fn test_cursor_contains_version() {
 
     assert!(cursor_json.get("_version").is_some(), "Cursor should contain _version");
     assert!(cursor_json.get("_hash").is_some(), "Cursor should contain _hash");
-    assert!(cursor_json["_version"].as_str().unwrap().len() > 0, "Version should be non-empty hex");
-    assert!(cursor_json["_hash"].as_str().unwrap().len() > 0, "Hash should be non-empty hex");
+    assert!(!cursor_json["_version"].as_str().unwrap().is_empty(), "Version should be non-empty hex");
+    assert!(!cursor_json["_hash"].as_str().unwrap().is_empty(), "Hash should be non-empty hex");
 }
 
 #[test]

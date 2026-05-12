@@ -400,7 +400,7 @@ fn test_import_full_export_skips_base_check() {
 
     // Target has a totally different HEAD, but full exports don't check base
     let (target, _target_temp) = create_temp_engine_for_tests();
-    target.update_head(&vec![0xFF; 32]).unwrap();
+    target.update_head(&[0xFF; 32]).unwrap();
 
     let ctx = RequestContext::system();
     let result = import_backup(&ctx, &target, &export_path, false, false, false);

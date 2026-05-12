@@ -24,14 +24,14 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
         return Err("not a PDF file (missing %PDF- magic)".to_string());
     }
 
-    let version = extract_version(&data);
-    let page_count = count_pages(&data);
+    let version = extract_version(data);
+    let page_count = count_pages(data);
 
     // Parse the Info dictionary for structured metadata
-    let info = extract_info_dictionary(&data);
+    let info = extract_info_dictionary(data);
 
     // Best-effort text extraction from stream objects
-    let extracted_text = extract_text(&data);
+    let extracted_text = extract_text(data);
 
     // Use /Title from Info dict if available, otherwise use filename
     let title = info.title.clone().unwrap_or_default();

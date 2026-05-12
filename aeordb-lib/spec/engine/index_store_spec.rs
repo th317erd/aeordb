@@ -308,7 +308,7 @@ fn test_remove_nonexistent_hash_is_noop() {
   assert_eq!(index.len(), 1);
 
   // Remove a hash that doesn't exist
-  index.remove(&vec![0xFF; 32]);
+  index.remove(&[0xFF; 32]);
   assert_eq!(index.len(), 1);
 }
 
@@ -457,13 +457,13 @@ fn test_field_index_nvt_insert_marks_dirty() {
   assert!(!index.is_dirty());
 
   // Remove marks dirty
-  index.remove(&vec![0x10; 32]);
+  index.remove(&[0x10; 32]);
   assert!(index.is_dirty());
 
   // Removing a non-existent hash does NOT mark dirty
   index.ensure_nvt_current();
   assert!(!index.is_dirty());
-  index.remove(&vec![0xFF; 32]);
+  index.remove(&[0xFF; 32]);
   assert!(!index.is_dirty());
 }
 

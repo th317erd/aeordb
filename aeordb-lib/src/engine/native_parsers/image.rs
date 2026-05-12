@@ -179,8 +179,8 @@ fn parse_jpeg(data: &[u8]) -> FormatResult {
         let segment_end = segment_start + segment_length;
 
         // SOF0 (baseline) or SOF2 (progressive) -- dimensions
-        if marker == 0xC0 || marker == 0xC2 {
-            if segment_start + segment_length <= data.len() && segment_length >= 7 {
+        if (marker == 0xC0 || marker == 0xC2)
+            && segment_start + segment_length <= data.len() && segment_length >= 7 {
                 result.bit_depth = Some(data[segment_start + 2] as u32);
                 result.height = Some(read_u16_big_endian(data, segment_start + 3) as u32);
                 result.width = Some(read_u16_big_endian(data, segment_start + 5) as u32);
@@ -195,7 +195,6 @@ fn parse_jpeg(data: &[u8]) -> FormatResult {
                     });
                 }
             }
-        }
 
         // APP1 (EXIF) marker
         if marker == 0xE1 && segment_start + segment_length <= data.len() {

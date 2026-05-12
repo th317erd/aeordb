@@ -1389,7 +1389,7 @@ impl<'a> DirectoryOps<'a> {
     if known.is_empty() {
       let mut candidates_tried = 0;
       let mut candidates_found = 0;
-      for (_hash, children) in &dir_hashes {
+      for children in dir_hashes.values() {
         for child in children {
           if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() { continue; }
           let candidate = format!("/{}", child.name);

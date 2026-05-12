@@ -341,8 +341,7 @@ fn extract_xml_namespaces(content: &str) -> Vec<String> {
             let absolute_position = namespace_search + xmlns_position;
             let after_xmlns = &root_tag[absolute_position + 5..];
 
-            let value = if after_xmlns.starts_with(':') {
-                let after_colon = &after_xmlns[1..];
+            let value = if let Some(after_colon) = after_xmlns.strip_prefix(':') {
                 if let Some(equals_position) = after_colon.find('=') {
                     let after_equals = after_colon[equals_position + 1..].trim_start();
                     extract_quoted_value(after_equals)
@@ -450,7 +449,7 @@ fn strip_tags(content: &str) -> String {
             }
         }
 
-        while let Some((_, tag_character)) = characters.next() {
+        for (_, tag_character) in characters.by_ref() {
             if tag_character == '>' {
                 result.push(' ');
                 break;

@@ -366,7 +366,7 @@ fn test_log_config_clone() {
   let cloned = original.clone();
   assert_eq!(cloned.format, LogFormat::Json);
   assert_eq!(cloned.level, "trace");
-  assert_eq!(cloned.show_target, false);
-  assert_eq!(cloned.show_thread, true);
-  assert_eq!(cloned.show_file_line, true);
+  assert!(!cloned.show_target);
+  assert!(cloned.show_thread);
+  assert!(cloned.show_file_line);
 }

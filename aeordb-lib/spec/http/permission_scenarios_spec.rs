@@ -6,7 +6,6 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::system_store;
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{EventBus, StorageEngine};
 use aeordb::plugins::PluginManager;
@@ -287,7 +286,7 @@ impl TestHarness {
   async fn deactivate_user(&self, user_id: &str) {
     let request = Request::builder()
       .method("DELETE")
-      .uri(&format!("/system/users/{}", user_id))
+      .uri(format!("/system/users/{}", user_id))
       .header("authorization", &self.root_jwt)
       .body(Body::empty())
       .unwrap();

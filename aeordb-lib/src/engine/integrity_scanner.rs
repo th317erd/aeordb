@@ -69,7 +69,7 @@ fn run_scan_cycle(engine: &StorageEngine) {
   // in lockstep after a deploy (which would amplify the I/O cost across
   // the cluster and miss other slices for the same wall-clock period).
   static PROCESS_JITTER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-  let jitter = *PROCESS_JITTER.get_or_init(|| rand::random::<u64>());
+  let jitter = *PROCESS_JITTER.get_or_init(rand::random::<u64>);
   let cycle_offset = ((std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default()
@@ -81,7 +81,7 @@ fn run_scan_cycle(engine: &StorageEngine) {
   let mut failures = 0u64;
 
   for (i, entry) in all_entries.iter().enumerate() {
-    if (i + cycle_offset) % stride != 0 {
+    if !(i + cycle_offset).is_multiple_of(stride) {
       continue;
     }
 

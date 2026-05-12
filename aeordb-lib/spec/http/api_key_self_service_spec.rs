@@ -348,7 +348,7 @@ async fn test_revoke_own_key() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/auth/keys/{}", key_id))
+    .uri(format!("/auth/keys/{}", key_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -367,7 +367,7 @@ async fn test_revoke_nonexistent_key() {
   let fake_id = uuid::Uuid::new_v4();
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/auth/keys/{}", fake_id))
+    .uri(format!("/auth/keys/{}", fake_id))
     .header("authorization", &auth)
     .body(Body::empty())
     .unwrap();
@@ -476,7 +476,7 @@ async fn test_revoke_other_users_key_forbidden() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/auth/keys/{}", key_id))
+    .uri(format!("/auth/keys/{}", key_id))
     .header("authorization", &auth_attacker)
     .body(Body::empty())
     .unwrap();
@@ -513,7 +513,7 @@ async fn test_root_can_revoke_other_users_key() {
   let app = rebuild_app(&jwt_manager, &engine);
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/auth/keys/{}", key_id))
+    .uri(format!("/auth/keys/{}", key_id))
     .header("authorization", &auth_root)
     .body(Body::empty())
     .unwrap();
@@ -677,7 +677,7 @@ async fn test_unauthenticated_revoke_rejected() {
 
   let request = Request::builder()
     .method("DELETE")
-    .uri(&format!("/auth/keys/{}", fake_id))
+    .uri(format!("/auth/keys/{}", fake_id))
     .body(Body::empty())
     .unwrap();
 
@@ -709,7 +709,7 @@ async fn test_create_key_zero_days_clamped_to_one() {
   let json = body_json(response.into_body()).await;
   let expires_at = json["expires_at"].as_i64().unwrap();
   let now_millis = chrono::Utc::now().timestamp_millis();
-  let one_day_millis = 1 * 24 * 60 * 60 * 1000;
+  let one_day_millis = 24 * 60 * 60 * 1000;
 
   // Should be approximately 1 day from now.
   let diff = (expires_at - now_millis - one_day_millis).abs();

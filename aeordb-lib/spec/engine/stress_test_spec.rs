@@ -1299,20 +1299,17 @@ fn test_stress_wasm_plugin_under_load() {
             "metadata": {"function_name": "read", "path": "/test/stress/plugin/read"}
         });
         let request_bytes = serde_json::to_vec(&request).unwrap();
-        match pm.invoke_wasm_plugin_with_context(
+        if let Ok(response) = pm.invoke_wasm_plugin_with_context(
             "test/stress/plugin",
             &request_bytes,
             engine.clone(),
             RequestContext::system(),
         ) {
-            Ok(response) => {
-                let resp: serde_json::Value =
-                    serde_json::from_slice(&response).unwrap_or_default();
-                if resp["status_code"] == 200 {
-                    read_successes += 1;
-                }
+            let resp: serde_json::Value =
+                serde_json::from_slice(&response).unwrap_or_default();
+            if resp["status_code"] == 200 {
+                read_successes += 1;
             }
-            Err(_) => {}
         }
     }
     println!(

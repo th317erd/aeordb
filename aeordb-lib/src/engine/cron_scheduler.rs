@@ -142,7 +142,7 @@ fn convert_dow_simple(field: &str) -> String {
     if field.contains(',') {
         return field
             .split(',')
-            .map(|part| convert_dow_simple(part))
+            .map(convert_dow_simple)
             .collect::<Vec<_>>()
             .join(",");
     }

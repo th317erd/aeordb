@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_basic_notification() {
         let paths = vec!["/docs/report.pdf".to_string(), "/images/".to_string()];
-        let (subject, html, text) = build_share_notification("Alice", &paths, "crudl...", &"/portal");
+        let (subject, html, text) = build_share_notification("Alice", &paths, "crudl...", "/portal");
 
         assert_eq!(subject, "Alice shared files with you");
         assert!(html.contains("Alice shared files with you"));

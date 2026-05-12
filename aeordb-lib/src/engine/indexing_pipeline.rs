@@ -181,7 +181,7 @@ impl<'a> IndexingPipeline<'a> {
     } else {
       // Not JSON: try native parser for metadata extraction (images, audio, etc.)
       let native_result = crate::engine::native_parsers::parse_native(
-        data, ct, &filename, path, data.len() as u64,
+        data, ct, filename, path, data.len() as u64,
       );
 
       if let Some(result) = native_result {
@@ -426,7 +426,7 @@ impl<'a> IndexingPipeline<'a> {
     })?;
 
     let memory_limit = config.parser_memory_limit.as_deref()
-      .map(|s| Self::parse_memory_limit(s))
+      .map(Self::parse_memory_limit)
       .unwrap_or(256 * 1024 * 1024); // 256MB default
 
     let envelope = Self::build_parser_envelope(data, path, content_type);

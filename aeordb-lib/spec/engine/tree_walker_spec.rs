@@ -152,8 +152,8 @@ fn tree_from_files(files: &[(&str, &[u8])]) -> aeordb::engine::tree_walker::Vers
   }
   let head = engine.head_hash().unwrap();
   // _temp must stay alive until walk completes
-  let tree = walk_version_tree(&engine, &head).unwrap();
-  tree
+  
+  walk_version_tree(&engine, &head).unwrap()
 }
 
 #[test]
@@ -398,7 +398,6 @@ fn test_tree_diff_is_not_empty_with_added() {
 #[test]
 fn test_tree_diff_is_not_empty_with_deleted() {
   use aeordb::engine::tree_walker::TreeDiff;
-use aeordb::engine::RequestContext;
 
   let diff = TreeDiff {
     added: HashMap::new(),

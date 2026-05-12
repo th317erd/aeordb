@@ -682,7 +682,7 @@ impl<'a> IndexManager<'a> {
     let indexes = self.list_indexes(path)?;
     for index_name in &indexes {
       if index_name.starts_with(&format!("{}.", field_name)) {
-        let strategy = index_name.splitn(2, '.').nth(1).unwrap_or("string");
+        let strategy = index_name.split_once('.').map(|x| x.1).unwrap_or("string");
         return self.load_index_by_strategy(path, field_name, strategy);
       }
     }
@@ -834,7 +834,7 @@ impl<'a> IndexManager<'a> {
       if is_match {
         // Determine strategy from the name
         let strategy = if index_name.contains('.') {
-          index_name.splitn(2, '.').nth(1).unwrap_or("string")
+          index_name.split_once('.').map(|x| x.1).unwrap_or("string")
         } else {
           "string" // old format
         };

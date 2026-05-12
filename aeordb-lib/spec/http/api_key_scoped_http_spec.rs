@@ -71,7 +71,7 @@ fn create_scoped_key_and_token_with_expiry(
 
     let ctx = RequestContext::system();
 
-    system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
+    system_store::store_api_key_for_bootstrap(engine, &ctx, &record).unwrap();
 
     // Create JWT with key_id embedded.
     let now_ts = now.timestamp();

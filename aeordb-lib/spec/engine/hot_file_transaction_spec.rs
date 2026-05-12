@@ -49,11 +49,11 @@ fn transaction_guard_increments_and_decrements_depth() {
 fn transaction_guard_fires_on_error() {
     let (engine, _temp) = create_test_db_with_hot_dir();
 
-    let result: Result<(), String> = (|| {
+    let result: Result<(), String> = {
         let _guard = TransactionGuard::new(&engine);
         // Simulate an error mid-transaction
-        return Err("simulated error".to_string());
-    })();
+        Err("simulated error".to_string())
+    };
 
     assert!(result.is_err());
     // Guard should have dropped -- verify we can start a new transaction
@@ -156,10 +156,10 @@ fn mixed_success_and_error_transactions() {
     }
 
     // Failed transaction (error)
-    let _: Result<(), String> = (|| {
+    let _: Result<(), String> = {
         let _guard = TransactionGuard::new(&engine);
         Err("fail".to_string())
-    })();
+    };
 
     // Another successful transaction
     {

@@ -551,7 +551,7 @@ async fn test_stats_health_dedup_hit_rate_zero_on_fresh_db() {
   // On a fresh db with no operations, dedup_hit_rate should be 0.0
   // (no chunks stored = no dedup opportunities)
   assert!(
-    dedup_hit_rate >= 0.0 && dedup_hit_rate <= 1.0,
+    (0.0..=1.0).contains(&dedup_hit_rate),
     "dedup_hit_rate should be between 0.0 and 1.0, got: {}",
     dedup_hit_rate,
   );
@@ -706,7 +706,7 @@ async fn test_stats_health_disk_usage_is_percentage() {
   let json = body_json(response.into_body()).await;
   let usage = json["health"]["disk_usage_percent"].as_f64().unwrap_or(-1.0);
   assert!(
-    usage >= 0.0 && usage <= 100.0,
+    (0.0..=100.0).contains(&usage),
     "disk_usage_percent should be between 0 and 100, got: {}",
     usage,
   );

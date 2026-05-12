@@ -298,7 +298,7 @@ pub async fn auth_token(
   // limit here is the shared default (5/60s) — increase via
   // RateLimiter::new(max, window_secs) if your legitimate users see 429s.
   let rl_key = format!("token:{}", key_id_prefix);
-  if let Err(_) = state.rate_limiter.check_rate_limit(&rl_key) {
+  if state.rate_limiter.check_rate_limit(&rl_key).is_err() {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "rate_limited").increment(1);
     return ErrorResponse::new("Too many authentication attempts for this key. Wait a moment and retry.".to_string())
       .with_status(StatusCode::TOO_MANY_REQUESTS)

@@ -198,55 +198,52 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
         Err(_) => return,
     };
 
-    match writer.scan_entries_reporting() {
-        Ok(mut scanner) => {
-            while let Some(result) = scanner.next() {
-                match result {
-                    Ok(scanned) => {
-                        report.total_entries += 1;
-                        report.valid_entries += 1;
+    if let Ok(mut scanner) = writer.scan_entries_reporting() {
+        for result in scanner.by_ref() {
+            match result {
+                Ok(scanned) => {
+                    report.total_entries += 1;
+                    report.valid_entries += 1;
 
-                        match scanned.header.entry_type {
-                            EntryType::Chunk => {
-                                report.chunks += 1;
-                                report.chunk_data_size += scanned.value.len() as u64;
-                            }
-                            EntryType::FileRecord => {
-                                report.file_records += 1;
-                                report.logical_data_size += scanned.header.value_length as u64;
-                            }
-                            EntryType::DirectoryIndex => report.directory_indexes += 1,
-                            EntryType::Symlink => report.symlinks += 1,
-                            EntryType::Snapshot => report.snapshots += 1,
-                            EntryType::DeletionRecord => report.deletion_records += 1,
-                            EntryType::Fork => report.forks += 1,
-                            EntryType::Void => {
-                                report.voids += 1;
-                                report.void_bytes += scanned.header.total_length as u64;
-                            }
+                    match scanned.header.entry_type {
+                        EntryType::Chunk => {
+                            report.chunks += 1;
+                            report.chunk_data_size += scanned.value.len() as u64;
+                        }
+                        EntryType::FileRecord => {
+                            report.file_records += 1;
+                            report.logical_data_size += scanned.header.value_length as u64;
+                        }
+                        EntryType::DirectoryIndex => report.directory_indexes += 1,
+                        EntryType::Symlink => report.symlinks += 1,
+                        EntryType::Snapshot => report.snapshots += 1,
+                        EntryType::DeletionRecord => report.deletion_records += 1,
+                        EntryType::Fork => report.forks += 1,
+                        EntryType::Void => {
+                            report.voids += 1;
+                            report.void_bytes += scanned.header.total_length as u64;
                         }
                     }
-                    Err(EngineError::CorruptEntry { ref reason, .. }) => {
-                        report.total_entries += 1;
-                        if reason.contains("Hash verification") {
-                            report.corrupt_hash += 1;
-                        } else {
-                            report.corrupt_header += 1;
-                        }
-                    }
-                    Err(_) => {
-                        report.total_entries += 1;
+                }
+                Err(EngineError::CorruptEntry { ref reason, .. }) => {
+                    report.total_entries += 1;
+                    if reason.contains("Hash verification") {
+                        report.corrupt_hash += 1;
+                    } else {
                         report.corrupt_header += 1;
                     }
                 }
-            }
-
-            // Collect skipped regions from the scanner
-            for (offset, length) in &scanner.skipped_regions {
-                report.skipped_regions.push((*offset, *length as u64));
+                Err(_) => {
+                    report.total_entries += 1;
+                    report.corrupt_header += 1;
+                }
             }
         }
-        Err(_) => {}
+
+        // Collect skipped regions from the scanner
+        for (offset, length) in &scanner.skipped_regions {
+            report.skipped_regions.push((*offset, *length as u64));
+        }
     }
 
     report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
@@ -255,11 +252,8 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
 fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
     // Count KV entries from snapshot
     let snapshot = engine.kv_snapshot.load();
-    match snapshot.iter_all() {
-        Ok(entries) => {
-            report.kv_entries = entries.len() as u64;
-        }
-        Err(_) => {}
+    if let Ok(entries) = snapshot.iter_all() {
+        report.kv_entries = entries.len() as u64;
     }
 
     // Count unique hashes from the WAL scan (not total entries, since
@@ -276,10 +270,8 @@ fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
         match writer.scan_entries() {
             Ok(scanner) => {
                 let mut seen = std::collections::HashSet::new();
-                for result in scanner {
-                    if let Ok(scanned) = result {
-                        seen.insert(scanned.key);
-                    }
+                for scanned in scanner.flatten() {
+                    seen.insert(scanned.key);
                 }
                 seen.len() as u64
             }

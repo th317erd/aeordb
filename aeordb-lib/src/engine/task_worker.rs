@@ -507,7 +507,7 @@ fn compute_eta(
     let average_batch_ms = total_batch_ms / batch_times.len() as u128;
     let remaining_files = total_count - indexed_count;
     let remaining_batches =
-        (remaining_files + REINDEX_BATCH_SIZE - 1) / REINDEX_BATCH_SIZE;
+        remaining_files.div_ceil(REINDEX_BATCH_SIZE);
     let eta_ms = average_batch_ms * remaining_batches as u128;
 
     Some(eta_ms as i64)

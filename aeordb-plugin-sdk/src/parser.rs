@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_encode_decode() {
-        use base64::Engine as _;
+        
         // Encode a response, then wrap it in an envelope and decode
         let original = serde_json::json!({"text": "round trip", "count": 7});
         let response_bytes = encode_response(&original).unwrap();

@@ -11,7 +11,6 @@ use aeordb::engine::peer_connection::PeerConfig;
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_store;
-use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::user::{ROOT_USER_ID, User};
 use aeordb::engine::DirectoryOps;
 use aeordb::server::create_temp_engine_for_tests;

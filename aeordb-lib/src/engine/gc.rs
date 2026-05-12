@@ -134,43 +134,40 @@ fn walk_directory_tree(
     value
   };
 
-  match header.entry_type {
-    EntryType::DirectoryIndex => {
-      if value.is_empty() {
-        return Ok(());
-      }
-      let children = if is_btree_format(&value) {
-        collect_btree_children(engine, &value, hash_length, live)?
+  if header.entry_type == EntryType::DirectoryIndex {
+    if value.is_empty() {
+      return Ok(());
+    }
+    let children = if is_btree_format(&value) {
+      collect_btree_children(engine, &value, hash_length, live)?
+    } else {
+      deserialize_child_entries(&value, hash_length, header.entry_version)?
+    };
+
+    for child in &children {
+      let child_path = if dir_path == "/" {
+        format!("/{}", child.name)
       } else {
-        deserialize_child_entries(&value, hash_length, header.entry_version)?
+        format!("{}/{}", dir_path, child.name)
       };
 
-      for child in &children {
-        let child_path = if dir_path == "/" {
-          format!("/{}", child.name)
-        } else {
-          format!("{}/{}", dir_path, child.name)
-        };
-
-        let child_type = EntryType::from_u8(child.entry_type)?;
-        match child_type {
-          EntryType::DirectoryIndex => {
-            // Recurse into subdirectory — child.hash is the content-addressed hash
-            walk_directory_tree(engine, &child.hash, &child_path, hash_length, live)?;
-          }
-          EntryType::FileRecord => {
-            mark_file_entry(engine, &child.hash, hash_length, live)?;
-          }
-          EntryType::Symlink => {
-            mark_symlink_entry(engine, &child.hash, &child_path, live)?;
-          }
-          _ => {
-            live.insert(child.hash.clone());
-          }
+      let child_type = EntryType::from_u8(child.entry_type)?;
+      match child_type {
+        EntryType::DirectoryIndex => {
+          // Recurse into subdirectory — child.hash is the content-addressed hash
+          walk_directory_tree(engine, &child.hash, &child_path, hash_length, live)?;
+        }
+        EntryType::FileRecord => {
+          mark_file_entry(engine, &child.hash, hash_length, live)?;
+        }
+        EntryType::Symlink => {
+          mark_symlink_entry(engine, &child.hash, &child_path, live)?;
+        }
+        _ => {
+          live.insert(child.hash.clone());
         }
       }
     }
-    _ => {}
   }
 
   Ok(())

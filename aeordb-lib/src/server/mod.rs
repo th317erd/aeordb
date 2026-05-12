@@ -335,7 +335,7 @@ fn create_app_with_all_and_task_queue_inner(
   // exits cleanly on shutdown. Tests construct the router without a token
   // and rely on runtime drop to stop the loop.
   let sync_loop_cancel = cancel.clone()
-    .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+    .unwrap_or_default();
   let _sync_loop_handle = crate::engine::spawn_sync_loop(
     Arc::clone(&sync_engine),
     30,
@@ -540,7 +540,7 @@ fn create_app_with_all_and_task_queue_inner(
   let router = public_routes
     .merge(protected_routes)
     .with_state(app_state)
-    .layer(axum::extract::DefaultBodyLimit::max(1 * 1024 * 1024)) // 1 MB default for non-upload routes
+    .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)) // 1 MB default for non-upload routes
     .layer(HttpMetricsLayer)
     .layer(from_fn(request_id_middleware))
     .layer(TraceLayer::new_for_http());

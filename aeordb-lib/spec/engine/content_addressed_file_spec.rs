@@ -45,7 +45,7 @@ fn test_child_entry_uses_identity_hash_not_path_hash() {
   ops.store_file(&ctx, "/check.txt", b"check content", Some("text/plain")).unwrap();
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
+  let _hash_length = algo.hash_length();
 
   // Get the path hash
   let path_key = file_path_hash("/check.txt", &algo).unwrap();

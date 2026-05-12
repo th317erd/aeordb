@@ -196,7 +196,7 @@ fn test_e2e_parser_query_u64_after_store() {
 
     let results = qe.execute(&query).expect("query word_count=3");
     assert!(
-        results.len() >= 1,
+        !results.is_empty(),
         "should find at least one result for word_count=3, got {}",
         results.len()
     );
@@ -227,7 +227,7 @@ fn test_e2e_parser_query_u64_after_store() {
 
     let results_6 = qe.execute(&query_6).expect("query word_count=6");
     assert!(
-        results_6.len() >= 1,
+        !results_6.is_empty(),
         "should find at least one result for word_count=6, got {}",
         results_6.len()
     );
@@ -546,7 +546,7 @@ fn test_e2e_parser_empty_file() {
 #[test]
 fn test_e2e_wasm_binary_is_valid() {
     let wasm_bytes = require_wasm_parser!();
-    assert!(wasm_bytes.len() > 0, "WASM binary should not be empty");
+    assert!(!wasm_bytes.is_empty(), "WASM binary should not be empty");
     // WASM magic bytes: \0asm
     assert_eq!(&wasm_bytes[0..4], b"\0asm", "should start with WASM magic bytes");
 }
