@@ -15,7 +15,7 @@ use crate::auth::refresh::RefreshTokenRecord;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
-use crate::engine::json_store::JsonStore;
+use crate::engine::json_store::{JsonDoc, JsonStore};
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -79,50 +79,28 @@ pub fn store_api_key_for_bootstrap(
     store_api_key_unchecked(engine, ctx, record)
 }
 
+static API_KEY_STORE: JsonStore<ApiKeyRecord> =
+    JsonStore::new("/.aeordb-system/api-keys");
+
 /// Internal: store an API key record without user_id validation.
 fn store_api_key_unchecked(
     engine: &StorageEngine,
     ctx: &RequestContext,
     record: &ApiKeyRecord,
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/api-keys/{}", record.key_id);
-    let json = serde_json::to_vec(record)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    API_KEY_STORE.put(engine, ctx, &record.key_id.to_string(), record)
 }
 
 /// Look up a single API key record by key_id prefix (first 16 hex chars
-/// of the UUID, no dashes).
+/// of the UUID, no dashes). Scan-based secondary lookup — no index yet.
 pub fn get_api_key_by_prefix(
     engine: &StorageEngine,
     key_id_prefix: &str,
 ) -> EngineResult<Option<ApiKeyRecord>> {
-    let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.aeordb-system/api-keys") {
-        Ok(entries) => entries,
-        Err(EngineError::NotFound(_)) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-
-    for entry in &entries {
-        let uuid = match Uuid::parse_str(&entry.name) {
-            Ok(uuid) => uuid,
-            Err(_) => continue, // skip non-UUID filenames
-        };
-
-        let simple = uuid.simple().to_string();
-        let record_prefix = &simple[..16];
-        if record_prefix != key_id_prefix {
-            continue;
-        }
-
-        let path = format!("/.aeordb-system/api-keys/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
-            if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
-                return Ok(Some(record));
-            }
+    for record in API_KEY_STORE.list(engine)? {
+        let simple = record.key_id.simple().to_string();
+        if &simple[..16] == key_id_prefix {
+            return Ok(Some(record));
         }
     }
     Ok(None)
@@ -133,37 +111,12 @@ pub fn get_api_key(
     engine: &StorageEngine,
     key_id: Uuid,
 ) -> EngineResult<Option<ApiKeyRecord>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/api-keys/{}", key_id);
-    match ops.read_file(&path) {
-        Ok(data) => match serde_json::from_slice::<ApiKeyRecord>(&data) {
-            Ok(record) => Ok(Some(record)),
-            Err(_) => Ok(None),
-        },
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    API_KEY_STORE.get(engine, &key_id.to_string())
 }
 
 /// List all API key records.
 pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> {
-    let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.aeordb-system/api-keys") {
-        Ok(entries) => entries,
-        Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
-    let mut records = Vec::new();
-    for entry in &entries {
-        let path = format!("/.aeordb-system/api-keys/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
-            if let Ok(record) = serde_json::from_slice::<ApiKeyRecord>(&data) {
-                records.push(record);
-            }
-        }
-    }
-    Ok(records)
+    API_KEY_STORE.list(engine)
 }
 
 /// Revoke an API key by setting is_revoked = true.
@@ -173,21 +126,12 @@ pub fn revoke_api_key(
     ctx: &RequestContext,
     key_id: Uuid,
 ) -> EngineResult<bool> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/api-keys/{}", key_id);
-    let data = match ops.read_file(&path) {
-        Ok(data) => data,
-        Err(EngineError::NotFound(_)) => return Ok(false),
-        Err(error) => return Err(error),
+    let mut record = match API_KEY_STORE.get(engine, &key_id.to_string())? {
+        Some(record) => record,
+        None => return Ok(false),
     };
-
-    let mut record: ApiKeyRecord = serde_json::from_slice(&data)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     record.is_revoked = true;
-
-    let json = serde_json::to_vec(&record)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
+    API_KEY_STORE.put(engine, ctx, &key_id.to_string(), &record)?;
     Ok(true)
 }
 
@@ -536,31 +480,21 @@ pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
     }
 }
 
+static PEER_CONFIGS_DOC: JsonDoc<Vec<PeerConfig>> =
+    JsonDoc::new("/.aeordb-system/cluster/peers");
+
 /// Persist the full set of peer configurations.
 pub fn store_peer_configs(
     engine: &StorageEngine,
     ctx: &RequestContext,
     peers: &[PeerConfig],
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let json = serde_json::to_vec(peers)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, "/.aeordb-system/cluster/peers", &json, Some("application/json"))?;
-    Ok(())
+    PEER_CONFIGS_DOC.put(engine, ctx, &peers.to_vec())
 }
 
 /// Load persisted peer configurations.
 pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>> {
-    let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.aeordb-system/cluster/peers") {
-        Ok(data) => {
-            let peers: Vec<PeerConfig> = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(peers)
-        }
-        Err(EngineError::NotFound(_)) => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
+    PEER_CONFIGS_DOC.get_or_default(engine, Vec::new())
 }
 
 // ---------------------------------------------------------------------------

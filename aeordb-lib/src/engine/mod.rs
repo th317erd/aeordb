@@ -103,7 +103,7 @@ pub use entry_type::EntryType;
 pub use errors::{EngineError, EngineResult};
 pub use file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
 pub use header_repair::{inspect_header, repair_header_in_place, HeaderRepairReport, HotTailMismatch};
-pub use json_store::JsonStore;
+pub use json_store::{JsonDoc, JsonStore};
 pub use file_record::FileRecord;
 pub use hash_algorithm::HashAlgorithm;
 pub use disk_kv_store::DiskKVStore;

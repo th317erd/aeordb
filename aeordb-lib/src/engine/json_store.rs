@@ -31,6 +31,57 @@ pub struct JsonStore<T> {
     _phantom: PhantomData<T>,
 }
 
+/// Single-document variant of [`JsonStore`] for entities stored at one
+/// fixed path rather than a directory of per-id files. Used for things like
+/// the peer_configs list (one JSON array at `/.aeordb-system/cluster/peers`).
+pub struct JsonDoc<T> {
+    path: &'static str,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> JsonDoc<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    pub const fn new(path: &'static str) -> Self {
+        Self {
+            path,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn put(
+        &self,
+        engine: &StorageEngine,
+        ctx: &RequestContext,
+        value: &T,
+    ) -> EngineResult<()> {
+        let ops = DirectoryOps::new(engine);
+        let json = serde_json::to_vec(value)
+            .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+        ops.store_file(ctx, self.path, &json, Some("application/json"))?;
+        Ok(())
+    }
+
+    pub fn get(&self, engine: &StorageEngine) -> EngineResult<Option<T>> {
+        let ops = DirectoryOps::new(engine);
+        match ops.read_file(self.path) {
+            Ok(data) => {
+                let value: T = serde_json::from_slice(&data)
+                    .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+                Ok(Some(value))
+            }
+            Err(EngineError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Convenience: `get` returning the supplied default when absent.
+    pub fn get_or_default(&self, engine: &StorageEngine, default: T) -> EngineResult<T> {
+        Ok(self.get(engine)?.unwrap_or(default))
+    }
+}
+
 impl<T> JsonStore<T>
 where
     T: Serialize + DeserializeOwned,
