@@ -53,9 +53,75 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
 
     let engine = match StorageEngine::open(&work_path) {
         Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("Error opening database: {}", e);
-            process::exit(1);
+        Err(open_error) => {
+            // Some databases can't even be opened — old format version, header
+            // CRC failure, or a hot_tail_offset that points past EOF (the
+            // 2026-05-11 xenocept corruption mode). When --repair is set, try
+            // a low-level header repair first: rewrite the header in the
+            // current format, reset hot_tail_offset if it's past EOF, then
+            // reopen. StorageEngine::open's dirty-startup path rebuilds the
+            // KV from a full WAL scan and recovers the data.
+            if !repair {
+                eprintln!("Error opening database: {}", open_error);
+                eprintln!();
+                eprintln!("  Run with --repair to attempt low-level header recovery:");
+                eprintln!("    aeordb verify --repair -D {}", database);
+                process::exit(1);
+            }
+
+            println!("Initial open failed: {}", open_error);
+            println!("Attempting low-level header repair...");
+
+            match aeordb::engine::inspect_header(&work_path) {
+                Ok(inspect) => {
+                    if inspect.bad_magic {
+                        eprintln!("File is not an AeorDB database (bad magic). Refusing to touch it.");
+                        process::exit(1);
+                    }
+                    if let Some(ref m) = inspect.hot_tail_past_eof {
+                        println!(
+                            "  hot_tail_offset {} > file size {} (off by {} bytes)",
+                            m.recorded_offset, m.actual_file_size, m.bytes_past_eof,
+                        );
+                    }
+                    if let Some((from, to)) = inspect.upgraded_version {
+                        println!("  header version v{} → v{}", from, to);
+                    }
+                    if inspect.crc_failed {
+                        println!("  header CRC mismatch");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Header inspect failed: {}", error);
+                    process::exit(1);
+                }
+            }
+
+            match aeordb::engine::repair_header_in_place(&work_path) {
+                Ok(report) if report.repaired => {
+                    println!("  Header repaired. Reopening to trigger dirty startup...");
+                }
+                Ok(_) => {
+                    println!("  Header was already clean — nothing to repair at the header level.");
+                }
+                Err(error) => {
+                    eprintln!("Header repair failed: {}", error);
+                    process::exit(1);
+                }
+            }
+
+            match StorageEngine::open(&work_path) {
+                Ok(engine) => {
+                    println!("  Reopened successfully (dirty startup rebuilt the KV index from WAL)");
+                    println!();
+                    engine
+                }
+                Err(error) => {
+                    eprintln!("Reopen after header repair still failed: {}", error);
+                    eprintln!("The damage extends beyond the header — escalate.");
+                    process::exit(1);
+                }
+            }
         }
     };
 
