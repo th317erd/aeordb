@@ -165,14 +165,25 @@ impl DiskKVStore {
             "DiskKVStore::open"
         );
 
-        // Rebuild entry count by reading each page header
+        // Rebuild entry count by reading each page header. The entry_count
+        // u16 lives at offset PAGE_HEADER_SIZE-2 within the page (after magic
+        // u32 + crc32 u32). Empty (zero-magic) pages contribute 0.
         let mut entry_count = 0;
-        let mut header_buf = [0u8; 2];
+        let mut header_buf = [0u8; crate::engine::kv_pages::PAGE_HEADER_SIZE];
         for bucket in 0..bucket_count {
             let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
             db_file.seek(SeekFrom::Start(offset))?;
             if db_file.read_exact(&mut header_buf).is_ok() {
-                entry_count += u16::from_le_bytes(header_buf) as usize;
+                // Skip zero-magic pages — those are fresh empty pages.
+                let magic = u32::from_le_bytes([
+                    header_buf[0], header_buf[1], header_buf[2], header_buf[3],
+                ]);
+                if magic == crate::engine::kv_pages::PAGE_MAGIC {
+                    let count_offset = crate::engine::kv_pages::PAGE_HEADER_SIZE - 2;
+                    entry_count += u16::from_le_bytes([
+                        header_buf[count_offset], header_buf[count_offset + 1],
+                    ]) as usize;
+                }
             }
         }
 

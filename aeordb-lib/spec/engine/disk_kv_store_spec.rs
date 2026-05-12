@@ -190,14 +190,15 @@ fn test_upsert_full() {
 
 #[test]
 fn test_page_size() {
+    // PAGE_HEADER_SIZE = 10 (magic u32 + crc32 u32 + entry_count u16)
     // BLAKE3: 32-byte hash
-    // page_size = 2 + 32 * (32 + 1 + 8) = 2 + 32 * 41 = 2 + 1312 = 1314
-    assert_eq!(page_size(32), 2 + 32 * (32 + 1 + 8));
-    assert_eq!(page_size(32), 1314);
+    // page_size = 10 + 32 * (32 + 1 + 8) = 10 + 32 * 41 = 10 + 1312 = 1322
+    assert_eq!(page_size(32), 10 + 32 * (32 + 1 + 8));
+    assert_eq!(page_size(32), 1322);
 
     // SHA-512: 64-byte hash
-    // page_size = 2 + 32 * (64 + 1 + 8) = 2 + 32 * 73 = 2 + 2336 = 2338
-    assert_eq!(page_size(64), 2338);
+    // page_size = 10 + 32 * (64 + 1 + 8) = 10 + 32 * 73 = 10 + 2336 = 2346
+    assert_eq!(page_size(64), 2346);
 }
 
 #[test]
