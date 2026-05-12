@@ -78,6 +78,71 @@ pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
 }
 
 // ---------------------------------------------------------------------------
+// EngineError → HTTP mapping
+// ---------------------------------------------------------------------------
+
+use crate::engine::errors::EngineError;
+
+/// Map an `EngineError` to its HTTP status code.
+pub fn engine_error_status(error: &EngineError) -> StatusCode {
+  match error {
+    EngineError::NotFound(_) => StatusCode::NOT_FOUND,
+    EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
+    EngineError::InvalidInput(_)
+    | EngineError::ReservedUserId
+    | EngineError::UnsafeQueryField(_)
+    | EngineError::CyclicSymlink(_)
+    | EngineError::SymlinkDepthExceeded(_)
+    | EngineError::RangeQueryNotSupported(_)
+    | EngineError::JsonParseError(_) => StatusCode::BAD_REQUEST,
+    _ => StatusCode::INTERNAL_SERVER_ERROR,
+  }
+}
+
+/// Map an `EngineError` to its machine-readable code (from [`error_codes`]).
+pub fn engine_error_code(error: &EngineError) -> &'static str {
+  match error {
+    EngineError::NotFound(_) => error_codes::NOT_FOUND,
+    EngineError::AlreadyExists(_) => error_codes::ALREADY_EXISTS,
+    EngineError::InvalidInput(_)
+    | EngineError::ReservedUserId
+    | EngineError::UnsafeQueryField(_)
+    | EngineError::CyclicSymlink(_)
+    | EngineError::SymlinkDepthExceeded(_)
+    | EngineError::RangeQueryNotSupported(_)
+    | EngineError::JsonParseError(_) => error_codes::INVALID_INPUT,
+    _ => error_codes::INTERNAL_ERROR,
+  }
+}
+
+/// Return a safe error message for client responses.
+/// Passes through user-facing validation messages but suppresses internal
+/// details for IO / corruption / patch-database variants.
+pub fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
+  match error {
+    EngineError::InvalidInput(message)
+    | EngineError::NotFound(message)
+    | EngineError::AlreadyExists(message)
+    | EngineError::UnsafeQueryField(message)
+    | EngineError::CyclicSymlink(message)
+    | EngineError::SymlinkDepthExceeded(message)
+    | EngineError::RangeQueryNotSupported(message)
+    | EngineError::JsonParseError(message) => format!("{}: {}", prefix, message),
+    EngineError::ReservedUserId => format!("{}: cannot use the root user ID", prefix),
+    _ => prefix.to_string(),
+  }
+}
+
+/// Build a full HTTP error response from an `EngineError`. Wraps the three
+/// helpers into the typical pattern used at almost every call site.
+pub fn engine_error_response(prefix: &str, error: &EngineError) -> Response {
+  ErrorResponse::new(sanitize_engine_error(prefix, error))
+    .with_code(engine_error_code(error))
+    .with_status(engine_error_status(error))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Engine response types
 // ---------------------------------------------------------------------------
 

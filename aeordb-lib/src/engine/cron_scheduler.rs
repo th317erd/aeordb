@@ -57,6 +57,40 @@ pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineRe
     Ok(())
 }
 
+/// Seed default cron schedules if no config file exists yet. Idempotent —
+/// if the file already exists (even an empty `schedules: []`), this is a no-op,
+/// so users can disable defaults without them being re-added on restart.
+pub fn seed_default_cron_if_missing(engine: &StorageEngine) -> EngineResult<bool> {
+    let ops = DirectoryOps::new(engine);
+    match ops.read_file(CRON_CONFIG_PATH) {
+        Ok(_) => Ok(false),
+        Err(EngineError::NotFound(_)) => {
+            let defaults = CronConfig {
+                schedules: vec![
+                    CronSchedule {
+                        id: "default-cleanup".to_string(),
+                        task_type: "cleanup".to_string(),
+                        schedule: "0 * * * *".to_string(),
+                        args: serde_json::json!({}),
+                        enabled: true,
+                    },
+                    CronSchedule {
+                        id: "default-gc".to_string(),
+                        task_type: "gc".to_string(),
+                        schedule: "0 3 * * *".to_string(),
+                        args: serde_json::json!({"dry_run": false}),
+                        enabled: true,
+                    },
+                ],
+            };
+            save_cron_config(engine, &defaults)?;
+            tracing::info!("Seeded default cron schedules: hourly cleanup, daily 03:00 GC");
+            Ok(true)
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// Convert a 5-field Unix cron expression to a 6-field expression compatible
 /// with the `cron` crate. The cron crate uses the format:
 ///   sec min hour dom month dow

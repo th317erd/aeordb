@@ -136,6 +136,7 @@ fn process_next_task_internal(
         "reindex" => execute_reindex(queue, &task, engine, plugin_manager),
         "gc" => execute_gc(queue, &task, engine),
         "backup" => execute_backup(&task, engine),
+        "cleanup" => execute_cleanup(&task, engine, event_bus),
         unknown => Err(format!("unknown task type: {}", unknown)),
     };
 
@@ -426,6 +427,22 @@ fn execute_backup(
         result.chunks_written,
         result.files_written,
         result.directories_written,
+    ))
+}
+
+/// Execute a cleanup task: remove expired refresh tokens and used/expired
+/// magic links from the system store. Intended to run on a default hourly cron.
+fn execute_cleanup(
+    _task: &TaskRecord,
+    engine: &StorageEngine,
+    _event_bus: &EventBus,
+) -> Result<String, String> {
+    let ctx = RequestContext::system();
+    let (tokens, links) = crate::engine::system_store::cleanup_expired_tokens(engine, &ctx)
+        .map_err(|error| format!("cleanup failed: {}", error))?;
+    Ok(format!(
+        "cleaned {} tokens and {} magic links",
+        tokens, links
     ))
 }
 

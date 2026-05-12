@@ -14,17 +14,13 @@ pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Resu
 
     let format = detect_format(data, filename);
 
-    let mut metadata = json!({
-        "filename": filename,
-        "content_type": content_type,
-        "size": size,
-        "format": format,
-        "duration_seconds": serde_json::Value::Null,
-        "sample_rate": serde_json::Value::Null,
-        "channels": serde_json::Value::Null,
-        "bitrate": serde_json::Value::Null,
-        "bits_per_sample": serde_json::Value::Null,
-    });
+    let mut metadata = super::base_metadata(filename, content_type, size);
+    metadata["format"] = json!(format);
+    metadata["duration_seconds"] = serde_json::Value::Null;
+    metadata["sample_rate"] = serde_json::Value::Null;
+    metadata["channels"] = serde_json::Value::Null;
+    metadata["bitrate"] = serde_json::Value::Null;
+    metadata["bits_per_sample"] = serde_json::Value::Null;
 
     match format {
         "mp3" => parse_mp3(data, size, &mut metadata),

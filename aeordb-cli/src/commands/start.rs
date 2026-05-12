@@ -275,6 +275,12 @@ pub async fn run(
     }
   }
 
+  // Seed default cron schedules on first start (hourly cleanup, daily GC).
+  // No-op if a cron config already exists.
+  if let Err(error) = aeordb::engine::seed_default_cron_if_missing(&engine) {
+    tracing::warn!("Failed to seed default cron schedules: {}", error);
+  }
+
   // Start the cron scheduler (enqueues tasks based on cron config every 60s).
   let cron_handle = spawn_cron_scheduler(task_queue.clone(), engine.clone(), event_bus.clone(), cancel.clone());
 

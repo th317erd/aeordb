@@ -1,11 +1,102 @@
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
 use axum::{
     Extension,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
+
+/// Per-IP sliding-window rate limiter for /sync/join. Defends against signing-key
+/// extraction attempts in case root credentials are compromised. Bounded by IP
+/// string (X-Forwarded-For / X-Real-IP first, then "unknown").
+static JOIN_RATE_LIMITER: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+
+fn join_rate_limiter() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
+    JOIN_RATE_LIMITER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const JOIN_RATE_PER_MIN: usize = 5;
+const JOIN_RATE_PER_HOUR: usize = 30;
+
+fn caller_ip_from_headers(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+        if let Some(first) = v.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Check whether a fresh /sync/join attempt from `ip` is within rate limits.
+/// Returns `Err((retry_after_secs, reason))` if rate-limited.
+fn check_join_rate(ip: &str) -> Result<(), (u64, &'static str)> {
+    let now = Instant::now();
+    let mut limiter = join_rate_limiter().lock().map_err(|_| (60, "limiter poisoned"))?;
+    let entry = limiter.entry(ip.to_string()).or_insert_with(Vec::new);
+    let one_hour_ago = now - std::time::Duration::from_secs(3600);
+    entry.retain(|t| *t >= one_hour_ago);
+
+    let last_minute = now - std::time::Duration::from_secs(60);
+    let per_min_count = entry.iter().filter(|t| **t >= last_minute).count();
+    if per_min_count >= JOIN_RATE_PER_MIN {
+        return Err((60, "per-minute limit exceeded"));
+    }
+    if entry.len() >= JOIN_RATE_PER_HOUR {
+        return Err((3600, "per-hour limit exceeded"));
+    }
+    entry.push(now);
+    Ok(())
+}
+
+/// Append a join-attempt audit entry to /.aeordb-system/join-audit/.
+/// Best-effort — log on failure but don't surface to the caller; the join
+/// itself is the load-bearing path.
+fn record_join_audit(
+    engine: &crate::engine::StorageEngine,
+    ip: &str,
+    node_url: &str,
+    result: &str,
+) {
+    let ts = chrono::Utc::now().timestamp_millis();
+    let path = format!("/.aeordb-system/join-audit/{}-{}.json", ts, sanitize_ip_for_path(ip));
+    let body = serde_json::json!({
+        "timestamp_ms": ts,
+        "remote_ip": ip,
+        "node_url": node_url,
+        "result": result,
+    });
+    let ctx = crate::engine::RequestContext::system();
+    let ops = crate::engine::DirectoryOps::new(engine);
+    let data = match serde_json::to_vec_pretty(&body) {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::warn!("join_audit: serialize failed: {}", error);
+            return;
+        }
+    };
+    if let Err(error) = ops.store_file(&ctx, &path, &data, Some("application/json")) {
+        tracing::warn!("join_audit: write failed at {}: {}", path, error);
+    }
+}
+
+fn sanitize_ip_for_path(ip: &str) -> String {
+    ip.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect()
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TriggerSyncParams {
@@ -282,15 +373,36 @@ pub async fn remove_peer(
 pub async fn join_cluster(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
+    headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     if let Err(response) = require_root(&claims) {
         return response;
     }
 
+    let caller_ip = caller_ip_from_headers(&headers);
+
+    // Rate limit BEFORE inspecting the payload so even malformed bodies count
+    // against the budget. Otherwise an attacker could spin forever on parse errors.
+    if let Err((retry_after, reason)) = check_join_rate(&caller_ip) {
+        tracing::warn!(
+            caller_ip = %caller_ip,
+            reason = reason,
+            "/sync/join rate-limited"
+        );
+        record_join_audit(&state.engine, &caller_ip, "<unknown>", &format!("rate_limited: {}", reason));
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", retry_after.to_string())],
+            Json(serde_json::json!({"error": format!("rate limit exceeded: {}", reason)})),
+        )
+            .into_response();
+    }
+
     let node_url = match payload.get("node_url").and_then(|v| v.as_str()) {
         Some(url) => url.to_string(),
         None => {
+            record_join_audit(&state.engine, &caller_ip, "<missing>", "rejected: missing node_url");
             return ErrorResponse::new("Missing required field 'node_url' in request body. Provide the URL where the joining node can be reached.")
                 .with_status(StatusCode::BAD_REQUEST)
                 .into_response();
@@ -366,6 +478,13 @@ pub async fn join_cluster(
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
     }
+
+    record_join_audit(
+        &state.engine,
+        &caller_ip,
+        &node_url,
+        &format!("admitted: peer_node_id={}", new_peer_node_id),
+    );
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     (

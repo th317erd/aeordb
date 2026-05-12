@@ -34,27 +34,60 @@ pub fn export_version(
     output_path: &str,
     include_system: bool,
 ) -> EngineResult<ExportResult> {
-    // Walk the source tree to collect all live entries
-    let tree = walk_version_tree(source, version_hash)?;
+    export_atomic(output_path, |part_path| {
+        let tree = walk_version_tree(source, version_hash)?;
+        let output = StorageEngine::create(part_path)?;
+        output.set_backup_info(1, version_hash, version_hash)?;
+        let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+        output.update_head(version_hash)?;
 
-    // Create output database
-    let output = StorageEngine::create(output_path)?;
-
-    // Set backup metadata: type=1 (full export), base=target=version_hash
-    output.set_backup_info(1, version_hash, version_hash)?;
-
-    let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
-
-    // Set HEAD to the version hash
-    output.update_head(version_hash)?;
-
-    Ok(ExportResult {
-        chunks_written: stats.0,
-        files_written: stats.1,
-        directories_written: stats.2,
-        version_hash: version_hash.to_vec(),
-        snapshots_written: 0,
+        Ok(ExportResult {
+            chunks_written: stats.0,
+            files_written: stats.1,
+            directories_written: stats.2,
+            version_hash: version_hash.to_vec(),
+            snapshots_written: 0,
+        })
     })
+}
+
+/// Wrap an export operation so it writes to `<output_path>.part` first, then
+/// renames atomically once the StorageEngine is dropped (which fsyncs). If
+/// the operation fails or the process is killed mid-write, the destination
+/// is never partially populated. The parent directory is also fsynced so the
+/// rename itself is durable.
+fn export_atomic<F>(output_path: &str, work: F) -> EngineResult<ExportResult>
+where
+    F: FnOnce(&str) -> EngineResult<ExportResult>,
+{
+    let part_path = format!("{}.part", output_path);
+    let _ = std::fs::remove_file(&part_path);
+
+    let result = work(&part_path);
+    // `output` is dropped at the end of `work`, which fsyncs the file (see
+    // StorageEngine::drop → shutdown → sync_all). The .part file is now durable.
+
+    match result {
+        Ok(stats) => {
+            std::fs::rename(&part_path, output_path).map_err(EngineError::from)?;
+            // fsync the parent directory so the rename survives a crash.
+            if let Some(parent) = std::path::Path::new(output_path).parent() {
+                let parent_path = if parent.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    parent
+                };
+                if let Ok(dir) = std::fs::File::open(parent_path) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(stats)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&part_path);
+            Err(error)
+        }
+    }
 }
 
 /// Export HEAD or a named snapshot.
@@ -93,64 +126,56 @@ pub fn export_full(
     output_path: &str,
     include_system: bool,
 ) -> EngineResult<ExportResult> {
-    // Create output database
-    let output = StorageEngine::create(output_path)?;
+    export_atomic(output_path, |part_path| {
+        let output = StorageEngine::create(part_path)?;
 
-    // Use HEAD as the primary version hash for backup metadata
-    let head_hash = source.head_hash()?;
-    output.set_backup_info(1, &head_hash, &head_hash)?;
+        let head_hash = source.head_hash()?;
+        output.set_backup_info(1, &head_hash, &head_hash)?;
 
-    let mut total_chunks = 0u64;
-    let mut total_files = 0u64;
-    let mut total_dirs = 0u64;
+        let mut total_chunks = 0u64;
+        let mut total_files = 0u64;
+        let mut total_dirs = 0u64;
 
-    // Track which version hashes we've already walked to avoid duplicate work
-    let mut walked: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut walked: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-    // 1. Walk and write HEAD
-    let head_tree = walk_version_tree(source, &head_hash)?;
-    let stats = write_tree_to_engine(&head_tree, source, &output, include_system)?;
-    total_chunks += stats.0;
-    total_files += stats.1;
-    total_dirs += stats.2;
-    walked.insert(head_hash.clone());
-
-    // 2. Walk and write each named snapshot
-    let vm = VersionManager::new(source);
-    let snapshots = vm.list_snapshots()?;
-    let snapshot_count = snapshots.len() as u64;
-    for snap in &snapshots {
-        if walked.contains(&snap.root_hash) {
-            continue;
-        }
-        let tree = walk_version_tree(source, &snap.root_hash)?;
-        let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+        let head_tree = walk_version_tree(source, &head_hash)?;
+        let stats = write_tree_to_engine(&head_tree, source, &output, include_system)?;
         total_chunks += stats.0;
         total_files += stats.1;
         total_dirs += stats.2;
-        walked.insert(snap.root_hash.clone());
-    }
+        walked.insert(head_hash.clone());
 
-    // 3. System data is stored under /.aeordb-system/ but is NOT propagated
-    //    to root (see directory_ops.rs:1662) — the tree walker can't reach
-    //    it from HEAD. Walk it as a separate subtree.
-    if include_system {
-        let system_stats = export_system_subtree(source, &output)?;
-        total_files += system_stats.0;
-        total_dirs += system_stats.1;
-        // Also copy all Snapshot-type entries (the version chain records)
-        copy_snapshot_entries(source, &output)?;
-    }
+        let vm = VersionManager::new(source);
+        let snapshots = vm.list_snapshots()?;
+        let snapshot_count = snapshots.len() as u64;
+        for snap in &snapshots {
+            if walked.contains(&snap.root_hash) {
+                continue;
+            }
+            let tree = walk_version_tree(source, &snap.root_hash)?;
+            let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+            total_chunks += stats.0;
+            total_files += stats.1;
+            total_dirs += stats.2;
+            walked.insert(snap.root_hash.clone());
+        }
 
-    // Set HEAD to the source's HEAD
-    output.update_head(&head_hash)?;
+        if include_system {
+            let system_stats = export_system_subtree(source, &output)?;
+            total_files += system_stats.0;
+            total_dirs += system_stats.1;
+            copy_snapshot_entries(source, &output)?;
+        }
 
-    Ok(ExportResult {
-        chunks_written: total_chunks,
-        files_written: total_files,
-        directories_written: total_dirs,
-        version_hash: head_hash,
-        snapshots_written: if include_system { snapshot_count } else { 0 },
+        output.update_head(&head_hash)?;
+
+        Ok(ExportResult {
+            chunks_written: total_chunks,
+            files_written: total_files,
+            directories_written: total_dirs,
+            version_hash: head_hash,
+            snapshots_written: if include_system { snapshot_count } else { 0 },
+        })
     })
 }
 
@@ -729,6 +754,49 @@ pub fn backup_contains_system_data(backup: &StorageEngine) -> EngineResult<bool>
 /// `include_system`: when true, system entries (users, groups, keys) from the
 /// backup are imported. The CALLER must verify root-key authority before
 /// passing true. When false, system entries in the backup are silently skipped.
+/// Check whether the target database contains any user data. Considers
+/// system paths (under /.aeordb-system, /.aeordb-config) as empty signal,
+/// since fresh databases initialize those with bootstrap data automatically.
+fn is_target_empty(target: &StorageEngine) -> EngineResult<bool> {
+    let ops = crate::engine::DirectoryOps::new(target);
+    let children = match ops.list_directory("/") {
+        Ok(c) => c,
+        Err(EngineError::NotFound(_)) => return Ok(true),
+        Err(other) => return Err(other),
+    };
+    for child in &children {
+        if !is_system_path(&format!("/{}", child.name)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// What to do with an existing target when importing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMode {
+    /// Refuse to import unless the target is empty (or `force=true`). Use this
+    /// when restoring from a backup — overlaying onto live data is almost
+    /// always wrong.
+    Restore,
+    /// Union the backup into the target. Use when you genuinely want to layer
+    /// backup contents on top of existing data. This is the original behavior.
+    Merge,
+}
+
+impl ImportMode {
+    pub fn parse(s: Option<&str>) -> EngineResult<Self> {
+        match s {
+            Some("restore") => Ok(ImportMode::Restore),
+            Some("merge") | None => Ok(ImportMode::Merge),
+            Some(other) => Err(EngineError::InvalidInput(format!(
+                "import mode must be 'restore' or 'merge', got '{}'",
+                other
+            ))),
+        }
+    }
+}
+
 pub fn import_backup(
     ctx: &RequestContext,
     target: &StorageEngine,
@@ -737,9 +805,32 @@ pub fn import_backup(
     promote: bool,
     include_system: bool,
 ) -> EngineResult<ImportResult> {
+    import_backup_with_mode(ctx, target, backup_path, force, promote, include_system, ImportMode::Merge)
+}
+
+pub fn import_backup_with_mode(
+    ctx: &RequestContext,
+    target: &StorageEngine,
+    backup_path: &str,
+    force: bool,
+    promote: bool,
+    include_system: bool,
+    mode: ImportMode,
+) -> EngineResult<ImportResult> {
     // Open backup for import (allows patches)
     let backup = StorageEngine::open_for_import(backup_path)?;
     let (backup_type, base_hash, target_hash) = backup.backup_info()?;
+
+    // Restore-mode safety: refuse to clobber live data unless explicitly forced.
+    if mode == ImportMode::Restore && !force {
+        if !is_target_empty(target)? {
+            return Err(EngineError::InvalidInput(
+                "target database is not empty; refusing restore.\n\
+                 Use mode=merge to union, or pass force=true to overwrite anyway."
+                    .to_string(),
+            ));
+        }
+    }
 
     // For patches, verify base version
     if backup_type == 2 && !force {

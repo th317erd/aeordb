@@ -12,7 +12,9 @@ use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 
 use uuid::Uuid;
-use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
+use super::responses::{
+  engine_error_response, EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse,
+};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
@@ -364,10 +366,7 @@ pub async fn engine_store_file(
     Ok(record) => record,
     Err(error) => {
       tracing::error!("Engine: failed to store file at '{}': {}", path, error);
-      let status = engine_error_status(&error);
-      return ErrorResponse::new(sanitize_engine_error("Failed to store file", &error))
-        .with_status(status)
-        .into_response();
+      return engine_error_response("Failed to store file", &error);
     }
   };
 
@@ -2530,12 +2529,8 @@ pub async fn engine_rename(
         }))).into_response()
       }
       Err(ref error) => {
-        let status = engine_error_status(error);
-        let message = sanitize_engine_error("Rename failed", error);
         tracing::error!("Engine: failed to rename symlink '{}': {}", path, error);
-        ErrorResponse::new(message)
-          .with_status(status)
-          .into_response()
+        engine_error_response("Rename failed", error)
       }
     };
   }
@@ -2553,12 +2548,8 @@ pub async fn engine_rename(
       }))).into_response()
     }
     Err(ref error) => {
-      let status = engine_error_status(error);
-      let message = sanitize_engine_error("Rename failed", error);
       tracing::error!("Engine: failed to rename file '{}': {}", path, error);
-      ErrorResponse::new(message)
-        .with_status(status)
-        .into_response()
+      engine_error_response("Rename failed", error)
     }
   }
 }
@@ -2601,26 +2592,8 @@ pub async fn repair_kv(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn engine_error_status(error: &EngineError) -> StatusCode {
-  match error {
-    EngineError::NotFound(_) => StatusCode::NOT_FOUND,
-    EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
-    EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-    _ => StatusCode::INTERNAL_SERVER_ERROR,
-  }
-}
-
-/// L12: Return a safe error message for client responses.
-/// Passes through user-facing validation messages (InvalidInput, NotFound,
-/// AlreadyExists) but suppresses internal details for all other error variants.
-fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
-  match error {
-    EngineError::InvalidInput(msg) => format!("{}: {}", prefix, msg),
-    EngineError::NotFound(msg) => format!("{}: {}", prefix, msg),
-    EngineError::AlreadyExists(msg) => format!("{}: {}", prefix, msg),
-    _ => prefix.to_string(),
-  }
-}
+// engine_error_status / sanitize_engine_error live in server::responses now;
+// import them at the top of this file. Keep this section header for navigation.
 
 // ---------------------------------------------------------------------------
 // POST /files/copy — copy one or more files/directories to a destination

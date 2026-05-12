@@ -387,16 +387,17 @@ impl SyncEngine {
     /// Inactive peers are silently skipped.
     pub async fn sync_all_peers(&self) -> Vec<(u64, Result<SyncCycleResult, String>)> {
         let peers = self.peer_manager.all_peers();
-        let mut results = Vec::new();
 
-        for peer in peers {
+        let futures = peers.into_iter().filter_map(|peer| {
             if peer.state == ConnectionState::Active {
-                let result = self.sync_with_peer(peer.node_id).await;
-                results.push((peer.node_id, result));
+                let node_id = peer.node_id;
+                Some(async move { (node_id, self.sync_with_peer(node_id).await) })
+            } else {
+                None
             }
-        }
+        });
 
-        results
+        futures_util::future::join_all(futures).await
     }
 
     /// Get a reference to the underlying engine.

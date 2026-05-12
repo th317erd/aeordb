@@ -239,16 +239,27 @@ pub async fn import_backup(
             .into_response();
     }
 
+    let mode = match crate::engine::backup::ImportMode::parse(params.mode.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return ErrorResponse::new(format!("{}", e))
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+        }
+    };
+
     let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
     // HTTP imports never accept system data — security boundary.
     // System data import requires the CLI with root key.
-    let result = crate::engine::backup::import_backup(
+    let result = crate::engine::backup::import_backup_with_mode(
         &ctx,
         &state.engine,
         &temp_path,
         params.force.unwrap_or(false),
         params.promote.unwrap_or(false),
         false,
+        mode,
     );
 
     let _ = std::fs::remove_file(&temp_path);
@@ -340,6 +351,10 @@ pub struct DiffParams {
 pub struct ImportParams {
     pub force: Option<bool>,
     pub promote: Option<bool>,
+    /// "restore" or "merge". Restore refuses to write into a non-empty target
+    /// (unless `force=true`); merge unions the backup into the target. Defaults
+    /// to "merge" for compatibility with existing callers.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

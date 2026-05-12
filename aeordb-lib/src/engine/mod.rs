@@ -185,7 +185,7 @@ pub use heartbeat::spawn_heartbeat;
 pub use integrity_scanner::spawn_integrity_scanner;
 pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
-pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
+pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, seed_default_cron_if_missing, validate_cron_expression};
 pub use request_context::RequestContext;
 pub use rate_tracker::{RateTracker, RateSnapshot, RateTrackerSet, RateSetSnapshot};
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};

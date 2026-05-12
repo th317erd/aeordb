@@ -10,9 +10,15 @@
 
 Manual mark-and-sweep GC. The user decides when to run it. No automatic triggers, no ref counting, no deletion cascades.
 
-**Mark:** Walk all live version trees (HEAD + snapshots + forks). Collect every reachable hash.
+GC runs concurrently with writers. It captures a HEAD-version snapshot at start, walks that snapshot to compute the live set, and uses a re-check queue to catch writes that happen during the run.
 
-**Sweep:** Everything in the KV store not in the reachable set is garbage. Overwrite in-place with best-effort strategy: DeletionRecord if it fits, then Void in remaining space if it fits, fallback to append for anything that doesn't fit in-place.
+**Snapshot:** At the very start of GC, capture the current HEAD root hash and the current snapshot/fork list. The mark phase walks these roots. Subscribe to the event bus so any entry written after the snapshot is recorded in a `recheck_set`.
+
+**Mark:** Walk all live version trees as of the snapshot (HEAD + existing snapshots + forks). Collect every reachable hash into `live`.
+
+**Sweep:** Iterate KV entries. An entry is garbage if it is NOT in `live` AND NOT in `recheck_set`. Overwrite garbage in-place with best-effort strategy: DeletionRecord if it fits, then Void in remaining space if it fits, fallback to append for anything that doesn't fit in-place.
+
+**Re-check drain:** Between mark and sweep, drain the `recheck_set` events: for every hash that was written during mark, walk it (and any new roots it became reachable from) and union into `live`. Repeat until the queue is empty for one iteration. The event bus subscription stays active through sweep so any in-flight writes are protected.
 
 ---
 
@@ -33,28 +39,45 @@ Everything else — old B-tree nodes from structural sharing, orphaned chunks fr
 
 ```
 fn gc(engine: &StorageEngine) -> GcResult {
-    // MARK: collect all reachable hashes
-    let mut live: HashSet<Vec<u8>> = HashSet::new();
+    // Subscribe to write events BEFORE capturing the snapshot. Anything that
+    // lands after this point gets recorded in recheck for protection during sweep.
+    let recheck = Arc::new(Mutex::new(HashSet::<Vec<u8>>::new()));
+    let _sub = engine.event_bus.subscribe_writes({
+        let recheck = recheck.clone();
+        move |hash| { recheck.lock().insert(hash.clone()); }
+    });
 
-    // Walk HEAD
+    // Capture a consistent view of the version forest at this instant.
     let head = engine.head_hash()?;
-    walk_and_mark(engine, &head, &mut live)?;
-
-    // Walk every snapshot
     let vm = VersionManager::new(engine);
-    for snapshot in vm.list_snapshots()? {
+    let snapshots = vm.list_snapshots()?;
+    let forks = vm.list_forks()?;
+
+    // MARK: collect all reachable hashes from the captured roots
+    let mut live: HashSet<Vec<u8>> = HashSet::new();
+    walk_and_mark(engine, &head, &mut live)?;
+    for snapshot in &snapshots {
         walk_and_mark(engine, &snapshot.root_hash, &mut live)?;
-        // Also mark the snapshot entry itself
         live.insert(snapshot_key_hash);
     }
-
-    // Walk every fork
-    for fork in vm.list_forks()? {
+    for fork in &forks {
         walk_and_mark(engine, &fork.root_hash, &mut live)?;
         live.insert(fork_key_hash);
     }
 
-    // SWEEP: iterate all KV entries, overwrite non-live in-place
+    // RE-CHECK DRAIN: any entry written during mark must be considered. Walk
+    // each one (it may bring new reachable hashes with it) and union into live.
+    // Loop until the queue is empty for a full pass.
+    loop {
+        let pending: Vec<Vec<u8>> = recheck.lock().drain().collect();
+        if pending.is_empty() { break; }
+        for hash in pending {
+            walk_and_mark(engine, &hash, &mut live)?;
+        }
+    }
+
+    // SWEEP: iterate all KV entries. An entry is garbage iff it's neither in
+    // `live` nor in the still-active `recheck` set (writers may add to it during sweep).
     let all_entries = engine.kv_store.iter_all()?;
     let mut garbage_count = 0;
     let mut reclaimed_bytes = 0;
@@ -65,7 +88,10 @@ fn gc(engine: &StorageEngine) -> GcResult {
     let min_void_size = header_size;                       // 63 for Blake3_256
 
     for entry in &all_entries {
-        if !live.contains(&entry.hash) && !entry.is_deleted() {
+        // recheck.lock().contains() catches writes that landed during the sweep
+        // itself. Cheap per-entry check; keeps in-flight writes from being clobbered.
+        let in_flight = recheck.lock().contains(&entry.hash);
+        if !live.contains(&entry.hash) && !in_flight && !entry.is_deleted() {
             let entry_size = engine.read_entry_size(entry.offset)?;
 
             // Best-effort in-place overwrite:
@@ -277,7 +303,7 @@ Emit an event when GC runs:
 
 ## 11. Edge cases
 
-- **GC during writes:** The engine is single-writer. GC acquires the write lock. No concurrent writes during GC. This is fine — GC is a maintenance operation.
+- **GC during writes:** GC runs concurrently with writers. It captures a consistent snapshot of the version forest at start, walks that snapshot for the mark phase, and uses a re-check queue fed by the event bus to protect entries written during mark or sweep. No writer lock is taken — writes proceed normally.
 - **Empty database:** 0 garbage. No-op.
 - **No snapshots/forks:** Only HEAD is live. Everything not reachable from HEAD is garbage.
 - **All versions share everything:** Structural sharing dedup means walk_and_mark is fast (visited set short-circuits).
@@ -322,4 +348,3 @@ Emit an event when GC runs:
 - Void consolidation (merging adjacent voids — separate feature)
 - File defragmentation (rewriting file to eliminate voids — separate feature)
 - Incremental GC (partial collection without full mark phase)
-- Concurrent GC (running GC while writes continue)

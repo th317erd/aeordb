@@ -69,6 +69,8 @@ Small databases start with 1,024 buckets (same as today). The NVT grows alongsid
 ### Bucket page format
 
 ```
+[magic:       u32]    = 0xAE0DB905  marks the start of a valid bucket page
+[crc32:       u32]    CRC32 over (magic..end_of_page), with crc32 field zeroed during computation
 [entry_count: u16]
 [entry 0: hash(32 bytes) + type_flags(1 byte) + offset(8 bytes)]
 [entry 1: ...]
@@ -76,13 +78,20 @@ Small databases start with 1,024 buckets (same as today). The NVT grows alongsid
 [<empty slots>]
 ```
 
-Each KV entry is 41 bytes (32-byte hash + 1 type_flags + 8 offset). Page size = 2 + (max_entries_per_page × 41).
+Each KV entry is 41 bytes (32-byte hash + 1 type_flags + 8 offset). Page size = 10 (header) + (max_entries_per_page × 41).
+
+On read, validate `magic` and `crc32`. If either is wrong:
+1. Log an error with the bucket index and the on-disk hash range that should land in this bucket.
+2. **Per-bucket rebuild:** use the NVT to determine which entry hashes belong to this bucket, then scan the WAL for those entries (forward scan from KV-block-end through hot tail, in WAL-write order). Re-derive the bucket from authoritative WAL entries. Bounded work — proportional to one bucket, not the whole file.
+3. Write the rebuilt page back with a fresh CRC.
+
+The per-bucket rebuild is why a corrupted page is recoverable without a full dirty startup. The WAL is the source of truth; the KV pages are an index.
 
 ### Page size calculation
 
 Target: room for ~32 entries per page (handles 1M+ files at 64K buckets with headroom).
 
-Page size: 2 + (32 × 41) = 1,314 bytes. Round to 1,536 bytes (1.5KB) for alignment.
+Page size: 10 + (32 × 41) = 1,322 bytes. Round to 1,536 bytes (1.5KB) for alignment.
 
 Total KV block at 64K buckets: 64K × 1,536 = 96MB. Acceptable for databases with millions of files.
 

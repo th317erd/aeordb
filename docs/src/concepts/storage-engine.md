@@ -145,9 +145,11 @@ A complete AeorDB lives in one `.aeordb` file:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  File Header (256 bytes)                                     │
+│  File Header Slot A (256 bytes) — magic + version + CRC      │
 ├──────────────────────────────────────────────────────────────┤
-│  KV Block — bucket pages, pinned at head                     │
+│  File Header Slot B (256 bytes) — magic + version + CRC      │
+├──────────────────────────────────────────────────────────────┤
+│  KV Block — bucket pages with per-page magic + CRC           │
 │  (stages: 64 KB → 512 KB → 4 MB → 32 MB → 128 MB → …)        │
 ├──────────────────────────────────────────────────────────────┤
 │  WAL — entries appended forward (chunks, file records,       │
@@ -159,7 +161,11 @@ A complete AeorDB lives in one `.aeordb` file:
 
 No sidecar files. No journal directory. The single file is the entire database.
 
-The **KV block** at the head is a flat bucket array — `hash → entry offset` mappings indexed by a normalized vector table (NVT). Lookups are O(1): hash the key, find the bucket, read the page.
+The **file header** lives in two slots: slot A at byte 0, slot B at byte 256. Each carries a u64 `sequence`, the header fields, a `format_magic = "AEORDB\0\0"` byte string, a `format_version: u8`, and a u32 CRC over the slot. Writers update whichever slot has the lower sequence (increment then write, then fsync). Readers parse both and pick the highest sequence with a valid CRC. A torn write on one slot leaves the other intact — the database always opens.
+
+On open, if `format_magic` is wrong the engine refuses with "not an AeorDB file". If `format_version` doesn't match what this build understands, the engine refuses with a clear "DB format vN, this build expects vM" message. Format-breaking changes must bump the version.
+
+The **KV block** at the head is a flat bucket array — `hash → entry offset` mappings indexed by a normalized vector table (NVT). Each bucket page carries `[magic: u32][crc32: u32][entry_count: u16][entries…]`. Lookups validate magic + CRC before scanning. If a page fails validation, the engine performs a **per-bucket rebuild**: using the NVT to identify which hashes belong to that bucket, it scans the WAL for those entries and reconstructs the page. The WAL is the source of truth; bucket pages are a recoverable index.
 
 The **WAL** grows forward from the end of the KV block. New entries are appended.
 
@@ -232,6 +238,9 @@ The recovery hierarchy, from least to most damage:
 | What's Lost | Recovery Method |
 |-------------|-----------------|
 | Nothing | Read HEAD from KV store, load directory index, ready |
+| One file-header slot torn | Read the other slot (highest valid sequence + CRC wins) |
+| One KV bucket page corrupted | Per-bucket rebuild from WAL, bounded work |
+| Hot tail torn | Dirty startup — full WAL scan rebuilds the KV from scratch |
 | KV store only | Entry-by-entry scan, rebuild KV store, load latest directory index |
 | Directory index only | Scan FileRecords + DeletionRecords, reconstruct from paths + timestamps |
 | KV store + directory | Full entry scan, rebuild KV, reconstruct directory |

@@ -11,14 +11,7 @@ use super::exif::{
 };
 
 pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Result<serde_json::Value, String> {
-    // data is already passed as parameter
-    
-
-    let mut metadata = json!({
-        "filename": filename,
-        "content_type": content_type,
-        "size": size,
-    });
+    let mut metadata = super::base_metadata(filename, content_type, size);
 
     if data.is_empty() {
         metadata["format"] = json!("unknown");
