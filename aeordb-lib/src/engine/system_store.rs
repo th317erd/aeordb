@@ -15,6 +15,7 @@ use crate::auth::refresh::RefreshTokenRecord;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
+use crate::engine::json_store::JsonStore;
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -194,6 +195,8 @@ pub fn revoke_api_key(
 // Users
 // ---------------------------------------------------------------------------
 
+static USER_STORE: JsonStore<User> = JsonStore::new("/.aeordb-system/users");
+
 /// Store a user. Validates user_id != nil UUID.
 /// Automatically creates a per-user auto-group `user:{user_id}`.
 pub fn store_user(
@@ -202,12 +205,7 @@ pub fn store_user(
     user: &User,
 ) -> EngineResult<()> {
     validate_user_id(&user.user_id)?;
-
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/users/{}", user.user_id);
-    let json = serde_json::to_vec(user)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
+    USER_STORE.put(engine, ctx, &user.user_id.to_string(), user)?;
 
     // Create per-user auto-group.
     let group_name = format!("user:{}", user.user_id);
@@ -226,38 +224,12 @@ pub fn store_user(
 
 /// Retrieve a user by user_id.
 pub fn get_user(engine: &StorageEngine, user_id: &Uuid) -> EngineResult<Option<User>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/users/{}", user_id);
-    match ops.read_file(&path) {
-        Ok(data) => {
-            let user: User = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(Some(user))
-        }
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    USER_STORE.get(engine, &user_id.to_string())
 }
 
 /// List all users.
 pub fn list_users(engine: &StorageEngine) -> EngineResult<Vec<User>> {
-    let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.aeordb-system/users") {
-        Ok(entries) => entries,
-        Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
-    let mut users = Vec::new();
-    for entry in &entries {
-        let path = format!("/.aeordb-system/users/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
-            if let Ok(user) = serde_json::from_slice::<User>(&data) {
-                users.push(user);
-            }
-        }
-    }
-    Ok(users)
+    USER_STORE.list(engine)
 }
 
 /// Retrieve a user by username (scan-based; no secondary index).
@@ -274,13 +246,7 @@ pub fn update_user(
     user: &User,
 ) -> EngineResult<()> {
     validate_user_id(&user.user_id)?;
-
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/users/{}", user.user_id);
-    let json = serde_json::to_vec(user)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    USER_STORE.put(engine, ctx, &user.user_id.to_string(), user)
 }
 
 /// Count all users.
@@ -320,57 +286,29 @@ pub fn delete_user(
 // Groups
 // ---------------------------------------------------------------------------
 
+static GROUP_STORE: JsonStore<Group> = JsonStore::new("/.aeordb-system/groups");
+
 /// Store a group.
 pub fn store_group(
     engine: &StorageEngine,
     ctx: &RequestContext,
     group: &Group,
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/groups/{}", group.name);
-    let json = serde_json::to_vec(group)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    GROUP_STORE.put(engine, ctx, &group.name, group)
 }
 
 /// Retrieve a group by name.
 pub fn get_group(engine: &StorageEngine, name: &str) -> EngineResult<Option<Group>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/groups/{}", name);
-    match ops.read_file(&path) {
-        Ok(data) => {
-            let group: Group = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(Some(group))
-        }
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    GROUP_STORE.get(engine, name)
 }
 
 /// List all groups.
 pub fn list_groups(engine: &StorageEngine) -> EngineResult<Vec<Group>> {
-    let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory("/.aeordb-system/groups") {
-        Ok(entries) => entries,
-        Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
-    let mut groups = Vec::new();
-    for entry in &entries {
-        let path = format!("/.aeordb-system/groups/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
-            if let Ok(group) = serde_json::from_slice::<Group>(&data) {
-                groups.push(group);
-            }
-        }
-    }
-    Ok(groups)
+    GROUP_STORE.list(engine)
 }
 
-/// Update a group (same as store but does not add to "registry" -- just overwrites).
+/// Update a group. Currently identical to `store_group`; kept distinct for
+/// callers that want to express update intent.
 pub fn update_group(
     engine: &StorageEngine,
     ctx: &RequestContext,
@@ -379,20 +317,13 @@ pub fn update_group(
     store_group(engine, ctx, group)
 }
 
-/// Delete a group.
-/// Returns true if the group existed, false otherwise.
+/// Delete a group. Returns `Ok(true)` if it existed, `Ok(false)` if not.
 pub fn delete_group(
     engine: &StorageEngine,
     ctx: &RequestContext,
     name: &str,
 ) -> EngineResult<bool> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/groups/{}", name);
-    match ops.delete_file(ctx, &path) {
-        Ok(()) => Ok(true),
-        Err(EngineError::NotFound(_)) => Ok(false),
-        Err(error) => Err(error),
-    }
+    GROUP_STORE.delete(engine, ctx, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,18 +361,16 @@ pub fn get_permissions(engine: &StorageEngine, path: &str) -> EngineResult<Optio
 // Magic Links
 // ---------------------------------------------------------------------------
 
+static MAGIC_LINK_STORE: JsonStore<MagicLinkRecord> =
+    JsonStore::new("/.aeordb-system/magic-links");
+
 /// Store a magic link record.
 pub fn store_magic_link(
     engine: &StorageEngine,
     ctx: &RequestContext,
     record: &MagicLinkRecord,
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/magic-links/{}", record.code_hash);
-    let json = serde_json::to_vec(record)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    MAGIC_LINK_STORE.put(engine, ctx, &record.code_hash, record)
 }
 
 /// Retrieve a magic link record by code_hash.
@@ -449,17 +378,7 @@ pub fn get_magic_link(
     engine: &StorageEngine,
     code_hash: &str,
 ) -> EngineResult<Option<MagicLinkRecord>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/magic-links/{}", code_hash);
-    match ops.read_file(&path) {
-        Ok(data) => {
-            let record: MagicLinkRecord = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(Some(record))
-        }
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    MAGIC_LINK_STORE.get(engine, code_hash)
 }
 
 /// Mark a magic link as used.
@@ -480,18 +399,16 @@ pub fn mark_magic_link_used(
 // Refresh Tokens
 // ---------------------------------------------------------------------------
 
+static REFRESH_TOKEN_STORE: JsonStore<RefreshTokenRecord> =
+    JsonStore::new("/.aeordb-system/refresh-tokens");
+
 /// Store a refresh token record.
 pub fn store_refresh_token(
     engine: &StorageEngine,
     ctx: &RequestContext,
     record: &RefreshTokenRecord,
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/refresh-tokens/{}", record.token_hash);
-    let json = serde_json::to_vec(record)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    REFRESH_TOKEN_STORE.put(engine, ctx, &record.token_hash, record)
 }
 
 /// Retrieve a refresh token record by token_hash.
@@ -499,17 +416,7 @@ pub fn get_refresh_token(
     engine: &StorageEngine,
     token_hash: &str,
 ) -> EngineResult<Option<RefreshTokenRecord>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/refresh-tokens/{}", token_hash);
-    match ops.read_file(&path) {
-        Ok(data) => {
-            let record: RefreshTokenRecord = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(Some(record))
-        }
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    REFRESH_TOKEN_STORE.get(engine, token_hash)
 }
 
 /// Revoke a refresh token by setting is_revoked = true.
@@ -519,21 +426,12 @@ pub fn revoke_refresh_token(
     ctx: &RequestContext,
     token_hash: &str,
 ) -> EngineResult<bool> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/refresh-tokens/{}", token_hash);
-    let data = match ops.read_file(&path) {
-        Ok(data) => data,
-        Err(EngineError::NotFound(_)) => return Ok(false),
-        Err(error) => return Err(error),
+    let mut record = match REFRESH_TOKEN_STORE.get(engine, token_hash)? {
+        Some(record) => record,
+        None => return Ok(false),
     };
-
-    let mut record: RefreshTokenRecord = serde_json::from_slice(&data)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     record.is_revoked = true;
-
-    let json = serde_json::to_vec(&record)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
+    REFRESH_TOKEN_STORE.put(engine, ctx, token_hash, &record)?;
     Ok(true)
 }
 
@@ -748,6 +646,9 @@ pub fn remove_plugin(
 // Peer Sync State
 // ---------------------------------------------------------------------------
 
+static PEER_SYNC_STATE_STORE: JsonStore<crate::engine::sync_engine::PeerSyncState> =
+    JsonStore::new("/.aeordb-system/sync-peers");
+
 /// Persist sync state for a specific peer.
 pub fn store_peer_sync_state(
     engine: &StorageEngine,
@@ -755,12 +656,7 @@ pub fn store_peer_sync_state(
     peer_node_id: u64,
     state: &crate::engine::sync_engine::PeerSyncState,
 ) -> EngineResult<()> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/sync-peers/{}", peer_node_id);
-    let json = serde_json::to_vec(state)
-        .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-    ops.store_file(ctx, &path, &json, Some("application/json"))?;
-    Ok(())
+    PEER_SYNC_STATE_STORE.put(engine, ctx, &peer_node_id.to_string(), state)
 }
 
 /// Load sync state for a specific peer.
@@ -768,17 +664,7 @@ pub fn get_peer_sync_state(
     engine: &StorageEngine,
     peer_node_id: u64,
 ) -> EngineResult<Option<crate::engine::sync_engine::PeerSyncState>> {
-    let ops = DirectoryOps::new(engine);
-    let path = format!("/.aeordb-system/sync-peers/{}", peer_node_id);
-    match ops.read_file(&path) {
-        Ok(data) => {
-            let state: crate::engine::sync_engine::PeerSyncState = serde_json::from_slice(&data)
-                .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-            Ok(Some(state))
-        }
-        Err(EngineError::NotFound(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
+    PEER_SYNC_STATE_STORE.get(engine, &peer_node_id.to_string())
 }
 
 // ---------------------------------------------------------------------------
