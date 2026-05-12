@@ -20,6 +20,7 @@ pub mod share_routes;
 pub mod symlink_routes;
 pub mod sync_routes;
 pub mod version_file_routes;
+pub mod version_routes;
 
 use std::sync::Arc;
 
@@ -477,16 +478,16 @@ fn create_app_with_all_and_task_queue_inner(
     // in large_upload_routes (same router as /files/{*path} wildcard) to
     // prevent the wildcard from shadowing them after merge.
     // Versions: snapshot routes
-    .route("/versions/snapshots", post(engine_routes::snapshot_create)
-                                 .get(engine_routes::snapshot_list))
-    .route("/versions/restore", post(engine_routes::snapshot_restore))
-    .route("/versions/snapshots/{name}", delete(engine_routes::snapshot_delete)
-                                       .patch(engine_routes::snapshot_rename))
+    .route("/versions/snapshots", post(version_routes::snapshot_create)
+                                 .get(version_routes::snapshot_list))
+    .route("/versions/restore", post(version_routes::snapshot_restore))
+    .route("/versions/snapshots/{name}", delete(version_routes::snapshot_delete)
+                                       .patch(version_routes::snapshot_rename))
     // Versions: fork routes
-    .route("/versions/forks", post(engine_routes::fork_create)
-                             .get(engine_routes::fork_list))
-    .route("/versions/forks/{name}/promote", post(engine_routes::fork_promote))
-    .route("/versions/forks/{name}", delete(engine_routes::fork_abandon))
+    .route("/versions/forks", post(version_routes::fork_create)
+                             .get(version_routes::fork_list))
+    .route("/versions/forks/{name}/promote", post(version_routes::fork_promote))
+    .route("/versions/forks/{name}", delete(version_routes::fork_abandon))
     // Versions: file-level access routes
     .route("/versions/history/{*path}", get(version_file_routes::file_history))
     .route("/versions/restore/{*path}", post(version_file_routes::file_restore))
