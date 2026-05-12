@@ -88,6 +88,62 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
 }
 
 #[test]
+fn header_crc_catches_single_byte_corruption() {
+    // A torn write within the header — one byte flipped — must fail the CRC
+    // check on next open. Without v2's CRC, this byte flip would silently
+    // alter (say) hot_tail_offset and the engine would happily build state
+    // around a corrupted value.
+    let (_dir, path) = make_temp_db();
+    {
+        let engine = StorageEngine::create(&path).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let ctx = RequestContext::system();
+        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain"))
+            .unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    // Flip a byte at offset 50 (within the CRC-covered region 0..252).
+    {
+        let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(50)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(50)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    let report = inspect_header(&path).unwrap();
+    assert!(report.crc_failed, "byte flip in header should fail CRC");
+
+    let result = StorageEngine::open(&path);
+    assert!(result.is_err(), "open should refuse a CRC-failed header");
+}
+
+#[test]
+fn repair_writes_v2_header_with_valid_crc() {
+    let (_dir, path) = make_temp_db();
+    {
+        let engine = StorageEngine::create(&path).unwrap();
+        let ops = DirectoryOps::new(&engine);
+        let ctx = RequestContext::system();
+        ops.store_file(&ctx, "/x.txt", b"x", Some("text/plain"))
+            .unwrap();
+        engine.shutdown().unwrap();
+    }
+    poison_hot_tail_offset_past_eof(&path);
+
+    let repaired = repair_header_in_place(&path).unwrap();
+    assert!(repaired.repaired);
+
+    // Re-inspect — should now be already_ok
+    let post = inspect_header(&path).unwrap();
+    assert!(post.already_ok, "post-repair header should be clean, got {:?}", post);
+}
+
+#[test]
 fn inspect_reports_already_ok_on_clean_db() {
     let (_dir, path) = make_temp_db();
     {
