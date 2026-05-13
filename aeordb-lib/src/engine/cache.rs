@@ -123,4 +123,16 @@ impl<L: CacheLoader> Cache<L> {
             entries.clear();
         }
     }
+
+    /// Current number of cached entries. Best-effort: returns 0 if the read
+    /// lock is poisoned. Used by soak-test instrumentation to attribute RSS
+    /// growth to specific caches.
+    pub fn len(&self) -> usize {
+        self.entries.read().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// True if the cache currently holds zero entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

@@ -1069,6 +1069,16 @@ impl StorageEngine {
     }
   }
 
+  /// Best-effort sizes of the engine's in-memory caches. Returns
+  /// (permissions, index_config, dir_content) entry counts. Used by
+  /// soak-test instrumentation to attribute RSS growth to specific caches.
+  pub fn engine_cache_sizes(&self) -> (usize, usize, usize) {
+    let perms = self.permissions_cache.len();
+    let idx = self.index_config_cache.len();
+    let dirc = self.dir_content_cache.read().map(|m| m.len()).unwrap_or(0);
+    (perms, idx, dirc)
+  }
+
   /// Perform online KV block expansion. Called after a KV flush detects
   /// that the block needs to grow (kv.needs_expansion is Some).
   ///
