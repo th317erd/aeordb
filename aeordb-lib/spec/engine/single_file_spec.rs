@@ -34,12 +34,12 @@ fn store_and_retrieve_100_entries() {
     for i in 0..100 {
         let path = format!("/test/file_{}.txt", i);
         let data = format!("content {}", i);
-        ops.store_file(&ctx, &path, data.as_bytes(), Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, &path, data.as_bytes(), Some("text/plain")).unwrap();
     }
 
     for i in 0..100 {
         let path = format!("/test/file_{}.txt", i);
-        let data = ops.read_file(&path).unwrap();
+        let data = ops.read_file_buffered(&path).unwrap();
         assert_eq!(String::from_utf8_lossy(&data), format!("content {}", i));
     }
 }
@@ -56,8 +56,8 @@ fn reopen_preserves_data() {
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
 
-        ops.store_file(&ctx, "/persistent.txt", b"hello world", Some("text/plain")).unwrap();
-        ops.store_file(&ctx, "/dir/nested.txt", b"nested data", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/persistent.txt", b"hello world", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/dir/nested.txt", b"nested data", Some("text/plain")).unwrap();
         engine.shutdown().unwrap();
     }
 
@@ -66,10 +66,10 @@ fn reopen_preserves_data() {
         let engine = Arc::new(StorageEngine::open(db_str).unwrap());
         let ops = DirectoryOps::new(&engine);
 
-        let data = ops.read_file("/persistent.txt").unwrap();
+        let data = ops.read_file_buffered("/persistent.txt").unwrap();
         assert_eq!(data, b"hello world");
 
-        let data = ops.read_file("/dir/nested.txt").unwrap();
+        let data = ops.read_file_buffered("/dir/nested.txt").unwrap();
         assert_eq!(data, b"nested data");
     }
 }
@@ -88,7 +88,7 @@ fn reopen_with_many_entries() {
 
         for i in 0..500 {
             let path = format!("/batch/file_{}.txt", i);
-            ops.store_file(&ctx, &path, format!("data_{}", i).as_bytes(), None).unwrap();
+            ops.store_file_buffered(&ctx, &path, format!("data_{}", i).as_bytes(), None).unwrap();
         }
         engine.shutdown().unwrap();
     }
@@ -100,7 +100,7 @@ fn reopen_with_many_entries() {
 
         for i in 0..500 {
             let path = format!("/batch/file_{}.txt", i);
-            let data = ops.read_file(&path).unwrap();
+            let data = ops.read_file_buffered(&path).unwrap();
             assert_eq!(String::from_utf8_lossy(&data), format!("data_{}", i));
         }
     }
@@ -118,7 +118,7 @@ fn hot_tail_survives_no_flush() {
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
 
-        ops.store_file(&ctx, "/hot.txt", b"hot data", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/hot.txt", b"hot data", Some("text/plain")).unwrap();
         // Drop without shutdown — hot buffer may not be flushed to KV pages
     }
 
@@ -127,7 +127,7 @@ fn hot_tail_survives_no_flush() {
         let engine = Arc::new(StorageEngine::open(db_str).unwrap());
         let ops = DirectoryOps::new(&engine);
 
-        let data = ops.read_file("/hot.txt").unwrap();
+        let data = ops.read_file_buffered("/hot.txt").unwrap();
         assert_eq!(data, b"hot data");
     }
 }
@@ -144,9 +144,9 @@ fn delete_and_reopen() {
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
 
-        ops.store_file(&ctx, "/ephemeral.txt", b"gone soon", None).unwrap();
+        ops.store_file_buffered(&ctx, "/ephemeral.txt", b"gone soon", None).unwrap();
         ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
-        ops.store_file(&ctx, "/survivor.txt", b"still here", None).unwrap();
+        ops.store_file_buffered(&ctx, "/survivor.txt", b"still here", None).unwrap();
         engine.shutdown().unwrap();
     }
 
@@ -155,8 +155,8 @@ fn delete_and_reopen() {
         let engine = Arc::new(StorageEngine::open(db_str).unwrap());
         let ops = DirectoryOps::new(&engine);
 
-        assert!(ops.read_file("/ephemeral.txt").is_err(), "Deleted file should stay deleted");
-        assert_eq!(ops.read_file("/survivor.txt").unwrap(), b"still here");
+        assert!(ops.read_file_buffered("/ephemeral.txt").is_err(), "Deleted file should stay deleted");
+        assert_eq!(ops.read_file_buffered("/survivor.txt").unwrap(), b"still here");
     }
 }
 
@@ -172,7 +172,7 @@ fn no_sidecar_files_during_operations() {
 
     // Store many files to trigger flushes
     for i in 0..600 {
-        ops.store_file(&ctx, &format!("/files/f{}.txt", i), b"x", None).unwrap();
+        ops.store_file_buffered(&ctx, &format!("/files/f{}.txt", i), b"x", None).unwrap();
     }
 
     // Check: no sidecar files

@@ -65,13 +65,13 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, None).unwrap();
+    ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 fn store_file_with_type(engine: &StorageEngine, path: &str, content: &[u8], content_type: &str) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, Some(content_type)).unwrap();
+    ops.store_file_buffered(&ctx, path, content, Some(content_type)).unwrap();
 }
 
 fn create_snapshot(engine: &StorageEngine, name: &str) {
@@ -82,7 +82,7 @@ fn create_snapshot(engine: &StorageEngine, name: &str) {
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 // ---------------------------------------------------------------------------

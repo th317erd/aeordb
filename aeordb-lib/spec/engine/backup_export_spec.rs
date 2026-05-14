@@ -15,9 +15,9 @@ fn setup_engine_with_files() -> (Arc<StorageEngine>, tempfile::TempDir) {
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
 
     (engine, temp)
 }
@@ -44,7 +44,7 @@ fn test_export_head() {
     // Verify exported file can be opened and has the files
     let exported = StorageEngine::open(&out).unwrap();
     let ops = DirectoryOps::new(&exported);
-    let content = ops.read_file("/docs/hello.txt").unwrap();
+    let content = ops.read_file_buffered("/docs/hello.txt").unwrap();
     assert_eq!(content, b"Hello World");
 }
 
@@ -72,8 +72,8 @@ fn test_export_snapshot() {
     // Verify exported file is openable and has the original files
     let exported = StorageEngine::open(&out).unwrap();
     let export_ops = DirectoryOps::new(&exported);
-    assert_eq!(export_ops.read_file("/docs/hello.txt").unwrap(), b"Hello World");
-    assert_eq!(export_ops.read_file("/images/photo.jpg").unwrap(), b"fake jpg data");
+    assert_eq!(export_ops.read_file_buffered("/docs/hello.txt").unwrap(), b"Hello World");
+    assert_eq!(export_ops.read_file_buffered("/images/photo.jpg").unwrap(), b"fake jpg data");
 
     // Verify backup hashes match the snapshot
     let (btype, base, target) = exported.backup_info().unwrap();
@@ -98,7 +98,7 @@ fn test_export_is_usable() {
 
     // Can read files
     let ops = DirectoryOps::new(&exported);
-    let content = ops.read_file("/images/photo.jpg").unwrap();
+    let content = ops.read_file_buffered("/images/photo.jpg").unwrap();
     assert_eq!(content, b"fake jpg data");
 
     // Can list directories
@@ -155,7 +155,7 @@ fn test_export_no_voids() {
 
     // Create some churn in the source to generate voids
     let ops = DirectoryOps::new(&source);
-    ops.store_file(&ctx, "/temp/file1.txt", b"temporary", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/temp/file1.txt", b"temporary", Some("text/plain")).unwrap();
     ops.delete_file(&ctx, "/temp/file1.txt").unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
@@ -179,7 +179,7 @@ fn test_export_no_deletion_records() {
 
     // Create and delete a file to produce deletion records
     let ops = DirectoryOps::new(&source);
-    ops.store_file(&ctx, "/temp/doomed.txt", b"going away", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/temp/doomed.txt", b"going away", Some("text/plain")).unwrap();
     ops.delete_file(&ctx, "/temp/doomed.txt").unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
@@ -214,9 +214,9 @@ fn test_export_preserves_file_content() {
     let exported = StorageEngine::open(&out).unwrap();
     let ops = DirectoryOps::new(&exported);
 
-    assert_eq!(ops.read_file("/docs/hello.txt").unwrap(), b"Hello World");
-    assert_eq!(ops.read_file("/docs/goodbye.txt").unwrap(), b"Goodbye World");
-    assert_eq!(ops.read_file("/images/photo.jpg").unwrap(), b"fake jpg data");
+    assert_eq!(ops.read_file_buffered("/docs/hello.txt").unwrap(), b"Hello World");
+    assert_eq!(ops.read_file_buffered("/docs/goodbye.txt").unwrap(), b"Goodbye World");
+    assert_eq!(ops.read_file_buffered("/images/photo.jpg").unwrap(), b"fake jpg data");
 }
 
 // ─── 9. test_export_nonexistent_snapshot ────────────────────────────────
@@ -276,9 +276,9 @@ fn test_export_nested_directories() {
     let ops = DirectoryOps::new(&source);
 
     // Create deeply nested files
-    ops.store_file(&ctx, "/a/b/c/d/deep.txt", b"deep content", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/a/b/shallow.txt", b"shallow content", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/a/b/c/mid.txt", b"mid content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/a/b/c/d/deep.txt", b"deep content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/a/b/shallow.txt", b"shallow content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/a/b/c/mid.txt", b"mid content", Some("text/plain")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -291,9 +291,9 @@ fn test_export_nested_directories() {
     let exported = StorageEngine::open(&out).unwrap();
     let export_ops = DirectoryOps::new(&exported);
 
-    assert_eq!(export_ops.read_file("/a/b/c/d/deep.txt").unwrap(), b"deep content");
-    assert_eq!(export_ops.read_file("/a/b/shallow.txt").unwrap(), b"shallow content");
-    assert_eq!(export_ops.read_file("/a/b/c/mid.txt").unwrap(), b"mid content");
+    assert_eq!(export_ops.read_file_buffered("/a/b/c/d/deep.txt").unwrap(), b"deep content");
+    assert_eq!(export_ops.read_file_buffered("/a/b/shallow.txt").unwrap(), b"shallow content");
+    assert_eq!(export_ops.read_file_buffered("/a/b/c/mid.txt").unwrap(), b"mid content");
 
     // Verify intermediate directories exist
     let exported_head = exported.head_hash().unwrap();
@@ -368,7 +368,7 @@ fn test_export_large_file_multiple_chunks() {
 
     // Create a file larger than the default chunk size (256KB)
     let large_data = vec![0x42u8; 300_000];
-    ops.store_file(&ctx, "/big/large.bin", &large_data, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/big/large.bin", &large_data, Some("application/octet-stream")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -383,7 +383,7 @@ fn test_export_large_file_multiple_chunks() {
     // Verify content round-trips
     let exported = StorageEngine::open(&out).unwrap();
     let export_ops = DirectoryOps::new(&exported);
-    let read_back = export_ops.read_file("/big/large.bin").unwrap();
+    let read_back = export_ops.read_file_buffered("/big/large.bin").unwrap();
     assert_eq!(read_back.len(), 300_000);
     assert_eq!(read_back, large_data);
 }
@@ -397,8 +397,8 @@ fn test_export_overwritten_file_only_latest() {
     let ops = DirectoryOps::new(&source);
 
     // Write, then overwrite the same file
-    ops.store_file(&ctx, "/docs/file.txt", b"version 1", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/docs/file.txt", b"version 2", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/file.txt", b"version 1", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/file.txt", b"version 2", Some("text/plain")).unwrap();
 
     let output_temp = tempfile::tempdir().unwrap();
     let out = output_path(&output_temp);
@@ -411,7 +411,7 @@ fn test_export_overwritten_file_only_latest() {
 
     let exported = StorageEngine::open(&out).unwrap();
     let export_ops = DirectoryOps::new(&exported);
-    let content = export_ops.read_file("/docs/file.txt").unwrap();
+    let content = export_ops.read_file_buffered("/docs/file.txt").unwrap();
     assert_eq!(content, b"version 2", "export should contain latest version");
 }
 

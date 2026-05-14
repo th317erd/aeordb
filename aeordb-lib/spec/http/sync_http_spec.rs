@@ -53,7 +53,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_test_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some("application/octet-stream"))
+    ops.store_file_buffered(&ctx, path, data, Some("application/octet-stream"))
         .expect("store file");
 }
 

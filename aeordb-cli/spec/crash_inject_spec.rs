@@ -156,7 +156,7 @@ fn run_sigkill_iteration(iteration: usize, mode: &str, kill_after: Duration) {
   let mut missing: Vec<String> = Vec::new();
   let mut corrupted: Vec<(String, String, String)> = Vec::new();
   for (path, expected) in &committed {
-    match ops.read_file(path) {
+    match ops.read_file_buffered(path) {
       Ok(data) => {
         let actual = String::from_utf8_lossy(&data).to_string();
         if actual != *expected {
@@ -217,7 +217,7 @@ fn test_bit_flip_in_kv_page_caught_by_crc() {
     let ctx = aeordb::engine::RequestContext::system();
     for i in 0..100 {
       let path = format!("/file-{:04}.txt", i);
-      ops.store_file(&ctx, &path, format!("body {}", i).as_bytes(), Some("text/plain"))
+      ops.store_file_buffered(&ctx, &path, format!("body {}", i).as_bytes(), Some("text/plain"))
         .expect("store");
     }
     engine.shutdown().expect("shutdown");
@@ -250,7 +250,7 @@ fn test_bit_flip_in_kv_page_caught_by_crc() {
   // had NOT caught it, some reads would either fail or return garbage.
   for i in 0..100 {
     let path = format!("/file-{:04}.txt", i);
-    let data = ops.read_file(&path).expect("read survived bit flip");
+    let data = ops.read_file_buffered(&path).expect("read survived bit flip");
     assert_eq!(data, format!("body {}", i).as_bytes(), "{} content match", path);
   }
 }
@@ -353,7 +353,7 @@ fn test_trailing_truncation_recoverable() {
     let ctx = aeordb::engine::RequestContext::system();
     for i in 0..200 {
       let path = format!("/data-{:04}.txt", i);
-      ops.store_file(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
+      ops.store_file_buffered(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
         .expect("store");
       last_path_written = Some(path);
     }
@@ -380,7 +380,7 @@ fn test_trailing_truncation_recoverable() {
   let mut earlier_surviving = 0usize;
   for i in 0..199 {
     let path = format!("/data-{:04}.txt", i);
-    if ops.read_file(&path).is_ok() {
+    if ops.read_file_buffered(&path).is_ok() {
       earlier_surviving += 1;
     }
   }

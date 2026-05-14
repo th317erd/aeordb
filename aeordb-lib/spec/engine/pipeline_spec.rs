@@ -24,7 +24,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_simple_config(field_name: &str, index_type: &str) -> PathIndexConfig {
@@ -124,7 +124,7 @@ fn test_system_path_config() {
   ops.store_file_with_indexing(&ctx, "/data/.aeordb-config/settings.json", &data[..], Some("application/json")).unwrap();
 
   // File should still be stored
-  let stored = ops.read_file("/data/.aeordb-config/settings.json").unwrap();
+  let stored = ops.read_file_buffered("/data/.aeordb-config/settings.json").unwrap();
   assert_eq!(stored, data.to_vec());
 }
 
@@ -168,9 +168,9 @@ fn test_store_to_logs_does_not_index() {
   ops.store_file_with_indexing(&ctx, "/app/.logs/log2.json", &log2[..], Some("application/json")).unwrap();
 
   // Files should be stored
-  let stored1 = ops.read_file("/app/.logs/log1.json").unwrap();
+  let stored1 = ops.read_file_buffered("/app/.logs/log1.json").unwrap();
   assert_eq!(stored1, log1.to_vec());
-  let stored2 = ops.read_file("/app/.logs/log2.json").unwrap();
+  let stored2 = ops.read_file_buffered("/app/.logs/log2.json").unwrap();
   assert_eq!(stored2, log2.to_vec());
 
   // No indexes should exist at /app/.logs
@@ -191,7 +191,7 @@ fn test_store_to_config_does_not_index() {
   ops.store_file_with_indexing(&ctx, "/myapp/.aeordb-config/other.json", &data[..], Some("application/json")).unwrap();
 
   // File should exist
-  let stored = ops.read_file("/myapp/.aeordb-config/other.json").unwrap();
+  let stored = ops.read_file_buffered("/myapp/.aeordb-config/other.json").unwrap();
   assert_eq!(stored, data.to_vec());
 
   // No indexes at /myapp/.config
@@ -360,7 +360,7 @@ fn test_pipeline_non_json_data_skips() {
   assert!(result.is_ok(), "Non-JSON data should not cause an error");
 
   // File should still be stored
-  let stored = ops.read_file("/bindata/blob.bin").unwrap();
+  let stored = ops.read_file_buffered("/bindata/blob.bin").unwrap();
   assert_eq!(stored, binary_data);
 
   // No index entries for the binary file
@@ -382,7 +382,7 @@ fn test_pipeline_type_array_expansion() {
   // PathIndexConfig::deserialize handles this by creating two IndexFieldConfig entries
   let config_json = br#"{"indexes":[{"name":"title","type":["string","trigram"]}]}"#;
   let ops = DirectoryOps::new(&engine);
-  ops.store_file(&ctx,
+  ops.store_file_buffered(&ctx,
     "/articles/.aeordb-config/indexes.json",
     &config_json[..],
     Some("application/json"),
@@ -429,7 +429,7 @@ fn test_pipeline_logging_creates_log_on_error() {
 
   // Check that .logs/system/parsing.log was created
   let ops = DirectoryOps::new(&engine);
-  let log_result = ops.read_file("/logged/.logs/system/parsing.log");
+  let log_result = ops.read_file_buffered("/logged/.logs/system/parsing.log");
   assert!(log_result.is_ok(), "Expected parsing.log to be created");
   let log_content = String::from_utf8(log_result.unwrap()).unwrap();
   assert!(log_content.contains("parser") || log_content.contains("failed") || log_content.contains("no parser"),
@@ -454,7 +454,7 @@ fn test_pipeline_logging_disabled_no_log() {
 
   // Check that .logs/system/parsing.log was NOT created
   let ops = DirectoryOps::new(&engine);
-  let log_result = ops.read_file("/nolog/.logs/system/parsing.log");
+  let log_result = ops.read_file_buffered("/nolog/.logs/system/parsing.log");
   assert!(log_result.is_err(), "Expected no parsing.log when logging is disabled");
 }
 
@@ -478,7 +478,7 @@ fn test_system_path_deeply_nested() {
   ).unwrap();
 
   // File should be stored
-  let stored = ops.read_file("/a/b/c/.logs/deep/entry.json").unwrap();
+  let stored = ops.read_file_buffered("/a/b/c/.logs/deep/entry.json").unwrap();
   assert_eq!(stored, data.to_vec());
 }
 

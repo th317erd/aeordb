@@ -48,7 +48,7 @@ fn inspect_detects_hot_tail_past_eof() {
         let engine = StorageEngine::create(&path).unwrap();
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
-        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain"))
             .unwrap();
         engine.shutdown().unwrap();
     }
@@ -69,9 +69,9 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
         let engine = StorageEngine::create(&path).unwrap();
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
-        ops.store_file(&ctx, "/test.txt", b"hello world", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/test.txt", b"hello world", Some("text/plain"))
             .unwrap();
-        ops.store_file(&ctx, "/dir/nested.txt", b"nested", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/dir/nested.txt", b"nested", Some("text/plain"))
             .unwrap();
         engine.shutdown().unwrap();
     }
@@ -87,9 +87,9 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
     // Now StorageEngine::open should succeed and recover the files
     let engine = StorageEngine::open(&path).unwrap();
     let ops = DirectoryOps::new(&engine);
-    let recovered = ops.read_file("/test.txt").unwrap();
+    let recovered = ops.read_file_buffered("/test.txt").unwrap();
     assert_eq!(recovered, b"hello world");
-    let recovered_nested = ops.read_file("/dir/nested.txt").unwrap();
+    let recovered_nested = ops.read_file_buffered("/dir/nested.txt").unwrap();
     assert_eq!(recovered_nested, b"nested");
 }
 
@@ -104,7 +104,7 @@ fn header_crc_catches_single_byte_corruption_in_one_slot() {
         let engine = StorageEngine::create(&path).unwrap();
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
-        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain"))
             .unwrap();
         engine.shutdown().unwrap();
     }
@@ -130,7 +130,7 @@ fn header_crc_catches_single_byte_corruption_in_one_slot() {
     assert!(result.is_ok(), "open should fall back to slot B");
     let engine = result.unwrap();
     let ops = DirectoryOps::new(&engine);
-    assert_eq!(ops.read_file("/test.txt").unwrap(), b"hello");
+    assert_eq!(ops.read_file_buffered("/test.txt").unwrap(), b"hello");
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn corrupting_both_slots_refuses_open() {
         let engine = StorageEngine::create(&path).unwrap();
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
-        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain"))
             .unwrap();
         engine.shutdown().unwrap();
     }
@@ -172,7 +172,7 @@ fn repair_writes_v2_header_with_valid_crc() {
         let engine = StorageEngine::create(&path).unwrap();
         let ops = DirectoryOps::new(&engine);
         let ctx = RequestContext::system();
-        ops.store_file(&ctx, "/x.txt", b"x", Some("text/plain"))
+        ops.store_file_buffered(&ctx, "/x.txt", b"x", Some("text/plain"))
             .unwrap();
         engine.shutdown().unwrap();
     }

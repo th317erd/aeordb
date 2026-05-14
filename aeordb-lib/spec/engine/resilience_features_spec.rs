@@ -25,11 +25,11 @@ fn inject_corruption(db_path: &str, offset: u64, size: usize) {
 fn store_test_files(engine: &StorageEngine) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain"))
         .unwrap();
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/images/photo.jpg",
         b"jpeg-data-here",
@@ -93,7 +93,7 @@ fn gc_keeps_only_last_3_pre_gc_snapshots() {
         // Store and delete a file to create garbage
         let ops = DirectoryOps::new(&engine);
         let path = format!("/temp_{}.txt", i);
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &path,
             format!("content-{}", i).as_bytes(),

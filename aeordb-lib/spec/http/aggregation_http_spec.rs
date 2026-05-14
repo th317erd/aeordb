@@ -55,7 +55,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
         format!("{}/.aeordb-config/indexes.json", parent_path)
     };
     let config_data = config.serialize();
-    ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_person_json(age: u64, department: &str, salary: u64) -> Vec<u8> {

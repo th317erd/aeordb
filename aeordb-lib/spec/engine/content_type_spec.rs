@@ -134,7 +134,7 @@ fn test_stored_file_gets_detected_content_type() {
 
     // Store PNG data without content type
     let png_header = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
-    let record = ops.store_file(&ctx, "/test.png", &png_header, None).unwrap();
+    let record = ops.store_file_buffered(&ctx, "/test.png", &png_header, None).unwrap();
     assert_eq!(record.content_type, Some("image/png".to_string()));
 }
 
@@ -147,7 +147,7 @@ fn test_stored_text_file_detected() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    let record = ops.store_file(&ctx, "/readme.txt", b"Hello world\nThis is text", None).unwrap();
+    let record = ops.store_file_buffered(&ctx, "/readme.txt", b"Hello world\nThis is text", None).unwrap();
     assert_eq!(record.content_type, Some("text/plain".to_string()));
 }
 
@@ -160,7 +160,7 @@ fn test_explicit_content_type_preserved() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    let record = ops.store_file(&ctx, "/data.json", b"{}", Some("application/json")).unwrap();
+    let record = ops.store_file_buffered(&ctx, "/data.json", b"{}", Some("application/json")).unwrap();
     assert_eq!(record.content_type, Some("application/json".to_string()));
 }
 
@@ -175,7 +175,7 @@ fn test_octet_stream_overridden_in_storage() {
 
     // Client sends application/octet-stream but data is PNG
     let png_header = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
-    let record = ops.store_file(&ctx, "/image.bin", &png_header, Some("application/octet-stream")).unwrap();
+    let record = ops.store_file_buffered(&ctx, "/image.bin", &png_header, Some("application/octet-stream")).unwrap();
     assert_eq!(record.content_type, Some("image/png".to_string()));
 }
 
@@ -188,7 +188,7 @@ fn test_empty_file_stored_with_octet_stream() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
 
-    let record = ops.store_file(&ctx, "/empty", b"", None).unwrap();
+    let record = ops.store_file_buffered(&ctx, "/empty", b"", None).unwrap();
     assert_eq!(record.content_type, Some("application/octet-stream".to_string()));
 }
 
@@ -203,7 +203,7 @@ fn test_metadata_reflects_detected_type() {
 
     // Store PDF without content type
     let pdf_data = b"%PDF-1.4 some pdf content here";
-    ops.store_file(&ctx, "/doc.pdf", pdf_data, None).unwrap();
+    ops.store_file_buffered(&ctx, "/doc.pdf", pdf_data, None).unwrap();
 
     // Read back metadata and verify detected type is persisted
     let metadata = ops.get_metadata("/doc.pdf").unwrap().unwrap();
@@ -220,7 +220,7 @@ fn test_directory_listing_shows_detected_type() {
     let ctx = RequestContext::system();
 
     let png_header = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
-    ops.store_file(&ctx, "/images/photo.png", &png_header, None).unwrap();
+    ops.store_file_buffered(&ctx, "/images/photo.png", &png_header, None).unwrap();
 
     let children = ops.list_directory("/images").unwrap();
     assert_eq!(children.len(), 1);

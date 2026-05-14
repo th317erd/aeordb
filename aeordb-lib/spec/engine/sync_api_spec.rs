@@ -14,7 +14,7 @@ use aeordb::server::create_temp_engine_for_tests;
 fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, path, data, Some("text/plain"))
         .unwrap();
 }
 
@@ -26,7 +26,7 @@ fn store_symlink(engine: &StorageEngine, path: &str, target: &str) {
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 fn head_hash(engine: &StorageEngine) -> Vec<u8> {
@@ -271,14 +271,14 @@ fn test_list_conflicts_typed() {
     // Store files for winner/loser identity hashes
     let winner_data = b"winner content";
     let loser_data = b"loser content";
-    ops.store_file(&ctx, "/tmp/w", winner_data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/tmp/w", winner_data, Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/tmp/l", loser_data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/tmp/l", loser_data, Some("text/plain"))
         .unwrap();
 
     let algo = engine.hash_algo();
     let w_record = ops
-        .store_file(&ctx, "/test/file.txt", winner_data, Some("text/plain"))
+        .store_file_buffered(&ctx, "/test/file.txt", winner_data, Some("text/plain"))
         .unwrap();
     let w_hash = aeordb::engine::directory_ops::file_identity_hash(
         "/test/file.txt",
@@ -289,7 +289,7 @@ fn test_list_conflicts_typed() {
     .unwrap();
 
     let l_record = ops
-        .store_file(&ctx, "/test/file_loser.txt", loser_data, Some("text/plain"))
+        .store_file_buffered(&ctx, "/test/file_loser.txt", loser_data, Some("text/plain"))
         .unwrap();
     let l_hash = aeordb::engine::directory_ops::file_identity_hash(
         "/test/file_loser.txt",
@@ -383,7 +383,7 @@ fn test_full_library_sync_cycle() {
         }
 
         ops_b
-            .store_file(
+            .store_file_buffered(
                 &ctx,
                 &file_entry.path,
                 &file_data,

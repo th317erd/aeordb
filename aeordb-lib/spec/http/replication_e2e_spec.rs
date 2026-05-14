@@ -106,25 +106,25 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some("application/octet-stream"))
+    ops.store_file_buffered(&ctx, path, data, Some("application/octet-stream"))
         .expect("store file");
 }
 
 fn store_file_typed(engine: &StorageEngine, path: &str, data: &[u8], content_type: &str) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some(content_type))
+    ops.store_file_buffered(&ctx, path, data, Some(content_type))
         .expect("store file");
 }
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 fn file_exists(engine: &StorageEngine, path: &str) -> bool {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).is_ok()
+    ops.read_file_buffered(path).is_ok()
 }
 
 fn store_symlink(engine: &StorageEngine, path: &str, target: &str) {
@@ -281,7 +281,7 @@ async fn sync_pull(
 
                 if ok {
                     let ct = entry["content_type"].as_str();
-                    ops.store_file(&ctx, path, &file_data, ct).unwrap();
+                    ops.store_file_buffered(&ctx, path, &file_data, ct).unwrap();
                     ops_count += 1;
                 }
             }

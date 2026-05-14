@@ -23,7 +23,7 @@ async fn test_store_file_emits_entries_created() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.event_type, "entries_created");
@@ -62,10 +62,10 @@ async fn test_store_file_compressed_emits_entries_created() {
 async fn test_store_file_overwrite_emits_entries_created() {
     let (engine, bus, ctx, _temp) = setup_with_events();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"version1", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"version1", Some("text/plain")).unwrap();
 
     let mut rx = bus.subscribe(); // subscribe AFTER first store
-    ops.store_file(&ctx, "/test.txt", b"version2", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"version2", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.event_type, "entries_created");
@@ -79,7 +79,7 @@ async fn test_store_file_overwrite_emits_entries_created() {
 async fn test_delete_file_emits_entries_deleted() {
     let (engine, bus, ctx, _temp) = setup_with_events();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let mut rx = bus.subscribe(); // subscribe AFTER store to skip create event
     ops.delete_file(&ctx, "/test.txt").unwrap();
@@ -120,7 +120,7 @@ async fn test_delete_file_not_found_no_event() {
 async fn test_delete_file_with_indexing_emits_entries_deleted() {
     let (engine, bus, ctx, _temp) = setup_with_events();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/indexed.txt", b"data", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/indexed.txt", b"data", Some("text/plain")).unwrap();
 
     let mut rx = bus.subscribe();
     ops.delete_file_with_indexing(&ctx, "/indexed.txt").unwrap();
@@ -359,7 +359,7 @@ async fn test_import_backup_emits_imports_completed() {
     let (source, _source_temp) = create_temp_engine_for_tests();
     let sys_ctx = RequestContext::system();
     let ops = DirectoryOps::new(&source);
-    ops.store_file(&sys_ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&sys_ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     // Export
     let export_temp = tempfile::tempdir().unwrap();
@@ -391,7 +391,7 @@ async fn test_import_backup_no_event_with_system_ctx() {
     let (source, _source_temp) = create_temp_engine_for_tests();
     let sys_ctx = RequestContext::system();
     let ops = DirectoryOps::new(&source);
-    ops.store_file(&sys_ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&sys_ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let export_temp = tempfile::tempdir().unwrap();
     let export_path = export_temp.path().join("export.aeordb").to_str().unwrap().to_string();
@@ -421,7 +421,7 @@ async fn test_no_events_with_system_context() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
     ops.create_directory(&ctx, "/somedir/").unwrap();
 
     let vm = VersionManager::new(&engine);
@@ -446,7 +446,7 @@ async fn test_event_user_id_from_context() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.user_id, "alice-uuid-123");
@@ -462,8 +462,8 @@ async fn test_different_users_produce_correct_user_ids() {
     let ctx_bob = RequestContext::from_claims("bob", bus.clone());
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx_alice, "/alice.txt", b"a", Some("text/plain")).unwrap();
-    ops.store_file(&ctx_bob, "/bob.txt", b"b", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx_alice, "/alice.txt", b"a", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx_bob, "/bob.txt", b"b", Some("text/plain")).unwrap();
 
     let event1 = rx.recv().await.unwrap();
     let event2 = rx.recv().await.unwrap();
@@ -479,8 +479,8 @@ async fn test_multiple_operations_produce_multiple_events() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
 
     let event1 = rx.recv().await.unwrap();
     let event2 = rx.recv().await.unwrap();
@@ -543,7 +543,7 @@ async fn test_store_empty_file_emits_event() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.event_type, "entries_created");
@@ -561,7 +561,7 @@ async fn test_entry_event_has_no_previous_hash() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     // previous_hash should not be present (skip_serializing_if = None)
@@ -623,7 +623,7 @@ async fn test_mixed_operations_event_ordering() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/file1.txt", b"data", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/file1.txt", b"data", Some("text/plain")).unwrap();
     vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
     ops.create_directory(&ctx, "/newdir/").unwrap();
     ops.delete_file(&ctx, "/file1.txt").unwrap();
@@ -649,7 +649,7 @@ async fn test_with_bus_context_emits_events() {
     let mut rx = bus.subscribe();
 
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert_eq!(event.event_type, "entries_created");

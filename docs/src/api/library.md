@@ -22,12 +22,23 @@ let ctx = RequestContext::system();
 let ops = DirectoryOps::new(&engine);
 ops.ensure_root_directory(&ctx).unwrap();
 
-// Store a file
-ops.store_file(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
+// Store a small file (full content in memory — fine for KB-range data)
+ops.store_file_buffered(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
 
-// Read it back
-let data = ops.read_file("/hello.txt").unwrap();
+// Read it back into a single Vec
+let data = ops.read_file_buffered("/hello.txt").unwrap();
 assert_eq!(data, b"Hello, world!");
+
+// For arbitrary-size content, stream from any `Read` source:
+let file = std::fs::File::open("big.mp4").unwrap();
+ops.store_file_from_reader(&ctx, "/big.mp4", file, Some("video/mp4")).unwrap();
+
+// And read it back chunk-by-chunk without materializing:
+let stream = ops.read_file_streaming("/big.mp4").unwrap();
+for chunk in stream {
+    let chunk = chunk.unwrap();
+    // ... write to network / file / hasher / etc.
+}
 ```
 
 ## File Operations
@@ -40,9 +51,10 @@ let ops = DirectoryOps::new(&engine);
 
 | Function | Description |
 |----------|-------------|
-| `store_file(ctx, path, data, content_type)` | Store a file at the given path |
-| `read_file(path)` | Read a file's content |
-| `read_file_streaming(path)` | Read a file as a streaming iterator of chunks |
+| `store_file_buffered(ctx, path, data, content_type)` | Store a file at the given path. **Buffered — loads `data` fully into memory; use only for small payloads.** |
+| `store_file_from_reader(ctx, path, reader, content_type)` | Store a file by streaming chunks from any `Read` source. Bounded memory. Use for arbitrary-size content. |
+| `read_file_buffered(path)` | Read a file's content into a single `Vec<u8>`. **Buffered — materializes the full file; use only for small payloads.** |
+| `read_file_streaming(path)` | Read a file as a streaming iterator of chunks. Bounded memory. Use for arbitrary-size content. |
 | `delete_file(ctx, path)` | Delete a file |
 | `exists(path)` | Check if a file or directory exists |
 | `get_metadata(path)` | Get file metadata without reading content |

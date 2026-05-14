@@ -22,7 +22,7 @@ fn store_n_files(engine: &StorageEngine, dir: &str, n: usize) {
     for i in 0..n {
         let name = format!("{}/file_{:05}.json", dir, i);
         let data = format!("{{\"idx\":{}}}", i);
-        ops.store_file(&ctx, &name, data.as_bytes(), Some("application/json")).unwrap();
+        ops.store_file_buffered(&ctx, &name, data.as_bytes(), Some("application/json")).unwrap();
     }
 }
 
@@ -156,7 +156,7 @@ fn test_btree_directory_add_file_after_conversion() {
     // Add one more after conversion
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
-    ops.store_file(&ctx, "/grow/extra.json", b"{}", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/grow/extra.json", b"{}", Some("application/json"))
         .unwrap();
 
     let children = ops.list_directory("/grow/").unwrap();
@@ -174,7 +174,7 @@ fn test_btree_directory_add_many_after_conversion() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     for i in 0..100 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/grow2/extra_{:03}.json", i),
             b"{}",
@@ -271,7 +271,7 @@ fn test_btree_directory_overwrite_file() {
 
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/overwrite/file_00050.json",
         b"new_data",
@@ -283,7 +283,7 @@ fn test_btree_directory_overwrite_file() {
     assert_eq!(children.len(), 300); // same count, not duplicated
 
     // Verify the content was updated
-    let data = ops.read_file("/overwrite/file_00050.json").unwrap();
+    let data = ops.read_file_buffered("/overwrite/file_00050.json").unwrap();
     assert_eq!(data, b"new_data");
 }
 
@@ -298,7 +298,7 @@ fn test_btree_directory_read_file_works() {
     store_n_files(&engine, "/read", 300);
 
     let ops = DirectoryOps::new(&engine);
-    let data = ops.read_file("/read/file_00150.json").unwrap();
+    let data = ops.read_file_buffered("/read/file_00150.json").unwrap();
     assert_eq!(data, b"{\"idx\":150}");
 }
 
@@ -309,8 +309,8 @@ fn test_btree_directory_read_first_and_last_files() {
     store_n_files(&engine, "/readfl", 300);
 
     let ops = DirectoryOps::new(&engine);
-    assert_eq!(ops.read_file("/readfl/file_00000.json").unwrap(), b"{\"idx\":0}");
-    assert_eq!(ops.read_file("/readfl/file_00299.json").unwrap(), b"{\"idx\":299}");
+    assert_eq!(ops.read_file_buffered("/readfl/file_00000.json").unwrap(), b"{\"idx\":0}");
+    assert_eq!(ops.read_file_buffered("/readfl/file_00299.json").unwrap(), b"{\"idx\":299}");
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +330,7 @@ fn test_btree_directory_snapshot_preserves_state() {
     // Add more files after the snapshot
     let ops = DirectoryOps::new(&engine);
     for i in 300..310 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/snap/file_{:05}.json", i),
             b"{}",
@@ -400,7 +400,7 @@ fn test_root_directory_stays_flat() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     for i in 0..5 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/dir{}/file.json", i),
             b"{}",
@@ -472,7 +472,7 @@ fn test_btree_directory_file_not_found_after_delete() {
     ops.delete_file(&ctx, "/notfound/file_00050.json").unwrap();
 
     // File should not be readable
-    let result = ops.read_file("/notfound/file_00050.json");
+    let result = ops.read_file_buffered("/notfound/file_00050.json");
     assert!(result.is_err(), "deleted file should not be readable");
 }
 
@@ -532,7 +532,7 @@ fn test_btree_directory_interleaved_insert_delete() {
     for i in 0..20 {
         ops.delete_file(&ctx, &format!("/interleave/file_{:05}.json", i * 5))
             .unwrap();
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/interleave/new_{:03}.json", i),
             b"{}",
@@ -574,7 +574,7 @@ fn test_snapshot_before_btree_conversion() {
     // Now push over the threshold
     let ops = DirectoryOps::new(&engine);
     for i in below..(BTREE_CONVERSION_THRESHOLD + 50) {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/conv/file_{:05}.json", i),
             b"{}",

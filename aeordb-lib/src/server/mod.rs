@@ -476,6 +476,7 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/system/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
     .route("/system/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/system/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
+    .route("/system/lifecycle", get(task_routes::get_lifecycle).put(task_routes::put_lifecycle))
     // Blobs: upload check, commit, and config (small payloads)
     .route("/blobs/check", post(upload_routes::upload_check))
     .route("/blobs/commit", post(upload_routes::upload_commit))

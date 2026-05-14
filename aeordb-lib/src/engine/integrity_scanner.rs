@@ -149,13 +149,13 @@ mod tests {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
     ops
-      .store_file(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain"))
+      .store_file_buffered(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain"))
       .unwrap();
     ops
-      .store_file(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain"))
+      .store_file_buffered(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain"))
       .unwrap();
     ops
-      .store_file(
+      .store_file_buffered(
         &ctx,
         "/images/photo.jpg",
         b"jpeg-data-here",

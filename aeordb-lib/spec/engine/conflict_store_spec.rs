@@ -21,13 +21,13 @@ fn make_test_conflict(
     // Store winner file at a temporary path to get its identity hash
     let winner_path = format!("/tmp/winner{}", path);
     let winner_record = ops
-        .store_file(&ctx, &winner_path, winner_data, Some("text/plain"))
+        .store_file_buffered(&ctx, &winner_path, winner_data, Some("text/plain"))
         .unwrap();
 
     // Store loser file at a temporary path to get its identity hash
     let loser_path = format!("/tmp/loser{}", path);
     let loser_record = ops
-        .store_file(&ctx, &loser_path, loser_data, Some("text/plain"))
+        .store_file_buffered(&ctx, &loser_path, loser_data, Some("text/plain"))
         .unwrap();
 
     // Compute identity hashes (same as what merge.rs produces)
@@ -48,7 +48,7 @@ fn make_test_conflict(
     .unwrap();
 
     // Store the winner at the real path (simulating merge auto-winner)
-    ops.store_file(&ctx, path, winner_data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, path, winner_data, Some("text/plain"))
         .unwrap();
 
     ConflictEntry {
@@ -230,7 +230,7 @@ fn test_store_modify_delete_conflict() {
     // ModifyDelete conflict: loser has empty hash (deleted)
     let ops = DirectoryOps::new(&engine);
     let winner_record = ops
-        .store_file(&ctx, "/docs/md.txt", b"modified", Some("text/plain"))
+        .store_file_buffered(&ctx, "/docs/md.txt", b"modified", Some("text/plain"))
         .unwrap();
     let algo = engine.hash_algo();
     let winner_hash = aeordb::engine::directory_ops::file_identity_hash(

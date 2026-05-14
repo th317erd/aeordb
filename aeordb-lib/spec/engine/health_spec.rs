@@ -100,7 +100,7 @@ fn test_engine_health_reflects_entries() {
     // Store some data to increase entry count.
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test/data.json", b"{}", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/test/data.json", b"{}", Some("application/json"))
         .unwrap();
 
     let health = check_engine(&engine, db_path_str);

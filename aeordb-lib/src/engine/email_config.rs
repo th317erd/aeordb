@@ -81,7 +81,7 @@ impl EmailConfig {
 
 pub fn load_email_config(engine: &StorageEngine) -> EngineResult<Option<EmailConfig>> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file(EMAIL_CONFIG_PATH) {
+    match ops.read_file_buffered(EMAIL_CONFIG_PATH) {
         Ok(data) => {
             let config: EmailConfig = serde_json::from_slice(&data)
                 .map_err(|e| EngineError::JsonParseError(format!("Invalid email config: {}", e)))?;
@@ -97,7 +97,7 @@ pub fn save_email_config(engine: &StorageEngine, config: &EmailConfig) -> Engine
     let ctx = RequestContext::system();
     let data = serde_json::to_vec_pretty(config)
         .map_err(|e| EngineError::JsonParseError(e.to_string()))?;
-    ops.store_file(&ctx, EMAIL_CONFIG_PATH, &data, Some("application/json"))?;
+    ops.store_file_buffered(&ctx, EMAIL_CONFIG_PATH, &data, Some("application/json"))?;
     Ok(())
 }
 

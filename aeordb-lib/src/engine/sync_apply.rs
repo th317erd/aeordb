@@ -40,7 +40,7 @@ pub fn apply_merge_operations(
             MergeOp::AddFile { path, file_hash: _, file_record } => {
                 // Reconstruct file data from chunks
                 let data = reassemble_file_data(engine, &file_record.chunk_hashes)?;
-                directory_ops.store_file(
+                directory_ops.store_file_buffered(
                     context,
                     path,
                     &data,

@@ -17,7 +17,7 @@ fn store_and_get_record(
 ) -> (Vec<u8>, FileRecord) {
     let context = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&context, path, data, Some("text/plain")).unwrap();
+    ops.store_file_buffered(&context, path, data, Some("text/plain")).unwrap();
 
     // Walk the tree to find the record
     let head = engine.head_hash().unwrap();
@@ -63,7 +63,7 @@ fn test_apply_deletes_file() {
 
     // Store a file first
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&context, "/to_delete.txt", b"data", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&context, "/to_delete.txt", b"data", Some("text/plain")).unwrap();
 
     // Verify it exists
     let head = engine.head_hash().unwrap();

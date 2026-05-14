@@ -10,9 +10,9 @@ fn setup_test_engine_with_files() -> (Arc<StorageEngine>, tempfile::TempDir) {
   let (engine, temp) = create_temp_engine_for_tests();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg")).unwrap();
 
   (engine, temp)
 }
@@ -91,7 +91,7 @@ fn test_walk_nested_directories() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/a/b/c/deep.txt", b"deep content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/deep.txt", b"deep content", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
@@ -125,7 +125,7 @@ fn test_walk_tree_file_records_contain_correct_metadata() {
   let ops = DirectoryOps::new(&engine);
 
   let content = b"test content for metadata check";
-  ops.store_file(&ctx, "/meta/test.txt", content, Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/meta/test.txt", content, Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
@@ -148,7 +148,7 @@ fn tree_from_files(files: &[(&str, &[u8])]) -> aeordb::engine::tree_walker::Vers
   let (engine, _temp) = create_temp_engine_for_tests();
   let ops = DirectoryOps::new(&engine);
   for (path, data) in files {
-    ops.store_file(&ctx, path, data, Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, path, data, Some("text/plain")).unwrap();
   }
   let head = engine.head_hash().unwrap();
   // _temp must stay alive until walk completes
@@ -166,8 +166,8 @@ fn test_diff_added_files() {
 
   let (engine_b, _temp_b) = create_temp_engine_for_tests();
   let ops_b = DirectoryOps::new(&engine_b);
-  ops_b.store_file(&ctx, "/data/file1.txt", b"content1", Some("text/plain")).unwrap();
-  ops_b.store_file(&ctx, "/data/file2.txt", b"content2", Some("text/plain")).unwrap();
+  ops_b.store_file_buffered(&ctx, "/data/file1.txt", b"content1", Some("text/plain")).unwrap();
+  ops_b.store_file_buffered(&ctx, "/data/file2.txt", b"content2", Some("text/plain")).unwrap();
   let head_b = engine_b.head_hash().unwrap();
   let tree_b = walk_version_tree(&engine_b, &head_b).unwrap();
 
@@ -312,7 +312,7 @@ fn test_walk_tree_empty_file() {
   let ops = DirectoryOps::new(&engine);
 
   // Store an empty file (0 bytes)
-  ops.store_file(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
@@ -329,9 +329,9 @@ fn test_walk_tree_multiple_files_same_directory() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/dir/a.txt", b"aaa", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/dir/b.txt", b"bbb", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/dir/c.txt", b"ccc", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir/a.txt", b"aaa", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir/b.txt", b"bbb", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir/c.txt", b"ccc", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();

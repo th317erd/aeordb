@@ -1696,7 +1696,7 @@ impl<'a> QueryEngine<'a> {
       Ok(Some((header, _key, value))) => {
         let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
-        match ops.read_file(&file_record.path) {
+        match ops.read_file_buffered(&file_record.path) {
           Ok(data) => Ok(Some((file_record, data))),
           Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
           Err(e) => Err(e),

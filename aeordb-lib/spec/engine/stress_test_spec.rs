@@ -55,7 +55,7 @@ fn test_stress_many_small_files() {
     for i in 0..count {
         let path = format!("/files/file-{:05}.txt", i);
         let content = format!("Content of file {}", i);
-        ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
     }
     let store_elapsed = start.elapsed();
     println!(
@@ -70,7 +70,7 @@ fn test_stress_many_small_files() {
     let mut reads = 0usize;
     for i in (0..count).step_by(20) {
         let path = format!("/files/file-{:05}.txt", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         let expected = format!("Content of file {}", i);
         assert_eq!(content, expected.as_bytes(), "mismatch at file {}", i);
         reads += 1;
@@ -92,14 +92,14 @@ fn test_stress_many_small_files() {
     );
 
     // Boundary checks: first and last file
-    let first = ops.read_file("/files/file-00000.txt").unwrap();
+    let first = ops.read_file_buffered("/files/file-00000.txt").unwrap();
     assert_eq!(first, b"Content of file 0");
     let last_path = format!("/files/file-{:05}.txt", count - 1);
-    let last = ops.read_file(&last_path).unwrap();
+    let last = ops.read_file_buffered(&last_path).unwrap();
     assert_eq!(last, format!("Content of file {}", count - 1).as_bytes());
 
     // Non-existent file should fail
-    let missing = ops.read_file("/files/file-99999.txt");
+    let missing = ops.read_file_buffered("/files/file-99999.txt");
     assert!(missing.is_err(), "reading non-existent file should fail");
 }
 
@@ -122,7 +122,7 @@ fn test_stress_query_indexed_files() {
             {"name": "city", "type": "string", "source": ["city"]}
         ]
     });
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/people/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -265,7 +265,7 @@ fn test_stress_concurrent_writes_during_queries() {
     let config = serde_json::json!({
         "indexes": [{"name": "value", "type": "u64", "source": ["value"]}]
     });
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/data/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -356,7 +356,7 @@ fn test_stress_concurrent_writes_during_queries() {
     let ops = DirectoryOps::new(&engine);
     for i in [new_start, new_start + 10, new_start + 25, new_start + 40, new_end - 1] {
         let path = format!("/data/item-{:04}.json", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&content).unwrap();
         assert_eq!(parsed["value"], i, "file {} has wrong value", i);
     }
@@ -364,7 +364,7 @@ fn test_stress_concurrent_writes_during_queries() {
     // Spot-check that seed files are still readable and correct
     for i in [0u64, 25, 50, 99] {
         let path = format!("/data/item-{:04}.json", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&content).unwrap();
         assert_eq!(parsed["value"], i, "seed file {} has wrong value", i);
     }
@@ -386,7 +386,7 @@ fn test_stress_wasm_query_vs_direct_query() {
     let config = serde_json::json!({
         "indexes": [{"name": "score", "type": "u64", "source": ["score"]}]
     });
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/scores/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -491,7 +491,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // Cycle 1: Create 200, delete 120
     for i in 0..200 {
         let path = format!("/frag/cycle1-{:04}.txt", i);
-        ops.store_file(&ctx, &path, format!("cycle1 file {}", i).as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, format!("cycle1 file {}", i).as_bytes(), Some("text/plain"))
             .unwrap();
         total_created += 1;
     }
@@ -505,7 +505,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // Cycle 2: Create 400, delete 300
     for i in 0..400 {
         let path = format!("/frag/cycle2-{:04}.txt", i);
-        ops.store_file(&ctx, &path, format!("cycle2 file {}", i).as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, format!("cycle2 file {}", i).as_bytes(), Some("text/plain"))
             .unwrap();
         total_created += 1;
     }
@@ -519,7 +519,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // Cycle 3: Create 200 more (should reuse some void space)
     for i in 0..200 {
         let path = format!("/frag/cycle3-{:04}.txt", i);
-        ops.store_file(&ctx, &path, format!("cycle3 file {}", i).as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, format!("cycle3 file {}", i).as_bytes(), Some("text/plain"))
             .unwrap();
         total_created += 1;
     }
@@ -554,7 +554,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // cycle1: files 120-199 should survive (80 files)
     for i in 120..200 {
         let path = format!("/frag/cycle1-{:04}.txt", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         assert_eq!(
             content,
             format!("cycle1 file {}", i).as_bytes(),
@@ -567,7 +567,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     for i in [0, 50, 119] {
         let path = format!("/frag/cycle1-{:04}.txt", i);
         assert!(
-            ops.read_file(&path).is_err(),
+            ops.read_file_buffered(&path).is_err(),
             "deleted cycle1 file {} should not be readable",
             i,
         );
@@ -576,7 +576,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // cycle2: files 300-399 should survive (100 files)
     for i in 300..400 {
         let path = format!("/frag/cycle2-{:04}.txt", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         assert_eq!(
             content,
             format!("cycle2 file {}", i).as_bytes(),
@@ -589,7 +589,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     for i in [0, 150, 299] {
         let path = format!("/frag/cycle2-{:04}.txt", i);
         assert!(
-            ops.read_file(&path).is_err(),
+            ops.read_file_buffered(&path).is_err(),
             "deleted cycle2 file {} should not be readable",
             i,
         );
@@ -598,7 +598,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
     // cycle3: all 200 should survive
     for i in 0..200 {
         let path = format!("/frag/cycle3-{:04}.txt", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         assert_eq!(
             content,
             format!("cycle3 file {}", i).as_bytes(),
@@ -654,12 +654,12 @@ fn test_stress_deep_directory_nesting() {
 
     // Time the store — this triggers 100 directory propagations
     let start = std::time::Instant::now();
-    ops.store_file(&ctx, &path, b"deep content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, b"deep content", Some("text/plain")).unwrap();
     let elapsed = start.elapsed();
     println!("100-level deep file store: {:.1}ms", elapsed.as_millis());
 
     // Verify it's readable
-    let content = ops.read_file(&path).unwrap();
+    let content = ops.read_file_buffered(&path).unwrap();
     assert_eq!(content, b"deep content");
 
     // Store a second file at the same depth (directories already exist)
@@ -673,7 +673,7 @@ fn test_stress_deep_directory_nesting() {
     };
 
     let start2 = std::time::Instant::now();
-    ops.store_file(&ctx, &path2, b"another", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path2, b"another", Some("text/plain")).unwrap();
     let elapsed2 = start2.elapsed();
     println!("Second file at depth 100: {:.1}ms (dirs already exist)", elapsed2.as_millis());
 
@@ -685,7 +685,7 @@ fn test_stress_deep_directory_nesting() {
         }
         p.push_str("/file.txt");
         let start = std::time::Instant::now();
-        ops.store_file(&ctx, &p, b"data", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, &p, b"data", Some("text/plain")).unwrap();
         println!("Depth {}: {:.1}ms", depth, start.elapsed().as_millis());
     }
 
@@ -710,11 +710,11 @@ fn test_stress_large_files() {
     // 1MB file
     let data_1mb = vec![0x42u8; 1_000_000];
     let start = std::time::Instant::now();
-    ops.store_file(&ctx, "/large/1mb.bin", &data_1mb, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/large/1mb.bin", &data_1mb, Some("application/octet-stream")).unwrap();
     println!("1MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (1_000_000 + 262143) / 262144);
 
     let start = std::time::Instant::now();
-    let read_back = ops.read_file("/large/1mb.bin").unwrap();
+    let read_back = ops.read_file_buffered("/large/1mb.bin").unwrap();
     println!("1MB read: {:.1}ms", start.elapsed().as_millis());
     assert_eq!(read_back.len(), 1_000_000);
     assert!(read_back.iter().all(|&b| b == 0x42));
@@ -722,28 +722,28 @@ fn test_stress_large_files() {
     // 10MB file
     let data_10mb = vec![0xAB; 10_000_000];
     let start = std::time::Instant::now();
-    ops.store_file(&ctx, "/large/10mb.bin", &data_10mb, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/large/10mb.bin", &data_10mb, Some("application/octet-stream")).unwrap();
     println!("10MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (10_000_000 + 262143) / 262144);
 
     let start = std::time::Instant::now();
-    let read_back = ops.read_file("/large/10mb.bin").unwrap();
+    let read_back = ops.read_file_buffered("/large/10mb.bin").unwrap();
     println!("10MB read: {:.1}ms", start.elapsed().as_millis());
     assert_eq!(read_back.len(), 10_000_000);
 
     // 50MB file
     let data_50mb = vec![0xCD; 50_000_000];
     let start = std::time::Instant::now();
-    ops.store_file(&ctx, "/large/50mb.bin", &data_50mb, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/large/50mb.bin", &data_50mb, Some("application/octet-stream")).unwrap();
     println!("50MB store: {:.1}ms ({} chunks)", start.elapsed().as_millis(), (50_000_000 + 262143) / 262144);
 
     let start = std::time::Instant::now();
-    let read_back = ops.read_file("/large/50mb.bin").unwrap();
+    let read_back = ops.read_file_buffered("/large/50mb.bin").unwrap();
     println!("50MB read: {:.1}ms", start.elapsed().as_millis());
     assert_eq!(read_back.len(), 50_000_000);
 
     // Verify dedup: store another 1MB file with same content — should be fast (chunks already exist)
     let start = std::time::Instant::now();
-    ops.store_file(&ctx, "/large/1mb-dup.bin", &data_1mb, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/large/1mb-dup.bin", &data_1mb, Some("application/octet-stream")).unwrap();
     let dedup_elapsed = start.elapsed();
     println!("1MB dedup store: {:.1}ms (chunks already exist)", dedup_elapsed.as_millis());
 
@@ -769,7 +769,7 @@ fn test_stress_index_cardinality() {
             {"name": "category", "type": "string", "source": ["category"]}
         ]
     });
-    ops.store_file(&ctx, "/card/.aeordb-config/indexes.json",
+    ops.store_file_buffered(&ctx, "/card/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
         Some("application/json")).unwrap();
 
@@ -853,7 +853,7 @@ fn test_stress_concurrent_http_simulation() {
     // Seed with 200 files
     for i in 0..200 {
         let data = serde_json::json!({"id": i, "name": format!("file-{}", i)});
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/http/file-{:04}.json", i),
             serde_json::to_string(&data).unwrap().as_bytes(),
@@ -877,7 +877,7 @@ fn test_stress_concurrent_http_simulation() {
             for i in 0..100 {
                 let idx = (t * 7 + i * 13) % 200; // pseudo-random spread
                 let path = format!("/http/file-{:04}.json", idx);
-                match ops.read_file(&path) {
+                match ops.read_file_buffered(&path) {
                     Ok(_) => ok += 1,
                     Err(_) => err += 1,
                 }
@@ -897,7 +897,7 @@ fn test_stress_concurrent_http_simulation() {
             for i in 0..20 {
                 let idx = 200 + t * 20 + i;
                 let data = serde_json::json!({"id": idx, "name": format!("new-{}", idx)});
-                match ops.store_file(
+                match ops.store_file_buffered(
                     &ctx,
                     &format!("/http/file-{:04}.json", idx),
                     serde_json::to_string(&data).unwrap().as_bytes(),
@@ -1014,7 +1014,7 @@ fn test_stress_snapshot_at_scale() {
     let start = std::time::Instant::now();
     for i in 0..1000 {
         let data = format!("original content {}", i);
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/snap/file-{:04}.txt", i),
             data.as_bytes(),
@@ -1034,7 +1034,7 @@ fn test_stress_snapshot_at_scale() {
     let start = std::time::Instant::now();
     for i in 0..500 {
         let data = format!("MODIFIED content {}", i);
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/snap/file-{:04}.txt", i),
             data.as_bytes(),
@@ -1118,7 +1118,7 @@ fn test_stress_query_many_results() {
             {"name": "tag", "type": "string", "source": ["tag"]}
         ]
     });
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/many/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -1242,7 +1242,7 @@ fn test_stress_wasm_plugin_under_load() {
     // Store some files for the plugin to read
     let ops = DirectoryOps::new(&engine);
     for i in 0..10 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/plugin-data/file-{}.txt", i),
             format!("data {}", i).as_bytes(),
@@ -1340,7 +1340,7 @@ fn test_stress_mixed_workload() {
     let config = serde_json::json!({
         "indexes": [{"name": "val", "type": "u64", "source": ["val"]}]
     });
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/mix/.aeordb-config/indexes.json",
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -1372,7 +1372,7 @@ fn test_stress_mixed_workload() {
             let mut ok = 0u32;
             for i in 0..50u64 {
                 let idx = (t * 13 + i * 7) % 200;
-                if ops.read_file(&format!("/mix/entry-{:04}.json", idx)).is_ok() {
+                if ops.read_file_buffered(&format!("/mix/entry-{:04}.json", idx)).is_ok() {
                     ok += 1;
                 }
             }
@@ -1391,7 +1391,7 @@ fn test_stress_mixed_workload() {
                 let idx = 200 + t * 30 + i;
                 let data = serde_json::json!({"val": idx, "label": format!("new-{}", idx)});
                 if ops
-                    .store_file(
+                    .store_file_buffered(
                         &ctx,
                         &format!("/mix/entry-{:04}.json", idx),
                         serde_json::to_string(&data).unwrap().as_bytes(),

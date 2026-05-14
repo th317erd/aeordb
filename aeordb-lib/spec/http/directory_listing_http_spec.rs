@@ -49,7 +49,7 @@ async fn body_bytes(body: Body) -> Vec<u8> {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
-  ops.store_file(&ctx, path, content, None).unwrap();
+  ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ async fn test_listing_with_limit() {
 
   // Store 5 files
   for i in 0..5 {
-    ops.store_file(&ctx, &format!("/page/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+    ops.store_file_buffered(&ctx, &format!("/page/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
   }
 
   let app = rebuild_app(&jwt, &engine);
@@ -347,7 +347,7 @@ async fn test_listing_with_offset() {
   let ops = DirectoryOps::new(&engine);
 
   for i in 0..5 {
-    ops.store_file(&ctx, &format!("/page2/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+    ops.store_file_buffered(&ctx, &format!("/page2/file{}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
   }
 
   let app = rebuild_app(&jwt, &engine);
@@ -372,7 +372,7 @@ async fn test_listing_with_limit_and_offset() {
   let ops = DirectoryOps::new(&engine);
 
   for i in 0..10 {
-    ops.store_file(&ctx, &format!("/page3/file{:02}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
+    ops.store_file_buffered(&ctx, &format!("/page3/file{:02}.txt", i), format!("data{}", i).as_bytes(), None).unwrap();
   }
 
   let app = rebuild_app(&jwt, &engine);
@@ -397,7 +397,7 @@ async fn test_listing_offset_beyond_total_returns_empty() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/page4/only.txt", b"data", None).unwrap();
+  ops.store_file_buffered(&ctx, "/page4/only.txt", b"data", None).unwrap();
 
   let app = rebuild_app(&jwt, &engine);
   let request = Request::get("/files/page4?offset=100")
@@ -420,7 +420,7 @@ async fn test_listing_no_pagination_returns_total() {
   let ops = DirectoryOps::new(&engine);
 
   for i in 0..3 {
-    ops.store_file(&ctx, &format!("/page5/f{}.txt", i), b"data", None).unwrap();
+    ops.store_file_buffered(&ctx, &format!("/page5/f{}.txt", i), b"data", None).unwrap();
   }
 
   let app = rebuild_app(&jwt, &engine);

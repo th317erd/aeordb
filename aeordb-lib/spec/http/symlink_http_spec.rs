@@ -47,7 +47,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, None).unwrap();
+    ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 fn store_symlink(engine: &StorageEngine, path: &str, target: &str) {

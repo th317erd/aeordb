@@ -124,7 +124,7 @@ fn phase1_bulk_store(engine: &StorageEngine, ctx: &RequestContext) -> usize {
         for file in 0..FILES_PER_SHARD {
             let path = file_path(shard, file);
             let content = file_content(shard, file);
-            if let Err(e) = ops.store_file(ctx, &path, &content, Some("text/plain")) {
+            if let Err(e) = ops.store_file_buffered(ctx, &path, &content, Some("text/plain")) {
                 log_progress(&format!("  ERROR storing {}: {}", path, e));
                 break 'outer;
             }
@@ -205,7 +205,7 @@ fn phase2_random_reads(engine: &StorageEngine, total_stored: usize) {
 
     for &(shard, file) in &paths {
         let path = file_path(shard, file);
-        match ops.read_file(&path) {
+        match ops.read_file_buffered(&path) {
             Ok(data) => {
                 let expected = file_content(shard, file);
                 if data == expected {
@@ -280,7 +280,7 @@ fn phase3_query_benchmark(engine: &StorageEngine, ctx: &RequestContext) {
         ],
     };
     let config_data = config.serialize();
-    ops.store_file(
+    ops.store_file_buffered(
         ctx,
         "/indexed/.config/indexes.json",
         &config_data,
@@ -443,7 +443,7 @@ fn phase4_concurrent(engine: &Arc<StorageEngine>, total_stored: usize) {
                 let shard = flat / FILES_PER_SHARD;
                 let file = flat % FILES_PER_SHARD;
                 let path = file_path(shard, file);
-                match ops.read_file(&path) {
+                match ops.read_file_buffered(&path) {
                     Ok(_) => ok += 1,
                     Err(_) => err += 1,
                 }
@@ -463,7 +463,7 @@ fn phase4_concurrent(engine: &Arc<StorageEngine>, total_stored: usize) {
             let path = format!("/concurrent/file-{:05}.txt", i);
             let content = format!("concurrent-data-{}", i);
             if ops
-                .store_file(&ctx, &path, content.as_bytes(), Some("text/plain"))
+                .store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
                 .is_ok()
             {
                 written += 1;
@@ -612,7 +612,7 @@ fn phase6_verify_integrity(engine: &StorageEngine, surviving: &[(usize, usize)])
         let path = file_path(shard, file);
         let expected = file_content(shard, file);
 
-        match ops.read_file(&path) {
+        match ops.read_file_buffered(&path) {
             Ok(data) => {
                 if data == expected {
                     ok += 1;

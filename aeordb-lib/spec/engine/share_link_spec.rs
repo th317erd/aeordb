@@ -62,7 +62,7 @@ fn user_bearer_token(jwt_manager: &JwtManager, user_id: &Uuid) -> String {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, None).unwrap();
+    ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {

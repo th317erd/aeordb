@@ -412,11 +412,11 @@ fn test_initialize_from_kv_counts_files() {
     let ops = DirectoryOps::new(&engine);
 
     // Store 5 files
-    ops.store_file(&ctx, "/alpha.txt", b"hello alpha", None).unwrap();
-    ops.store_file(&ctx, "/beta.txt", b"hello beta", None).unwrap();
-    ops.store_file(&ctx, "/gamma.txt", b"hello gamma", None).unwrap();
-    ops.store_file(&ctx, "/delta.txt", b"hello delta", None).unwrap();
-    ops.store_file(&ctx, "/epsilon.txt", b"hello epsilon", None).unwrap();
+    ops.store_file_buffered(&ctx, "/alpha.txt", b"hello alpha", None).unwrap();
+    ops.store_file_buffered(&ctx, "/beta.txt", b"hello beta", None).unwrap();
+    ops.store_file_buffered(&ctx, "/gamma.txt", b"hello gamma", None).unwrap();
+    ops.store_file_buffered(&ctx, "/delta.txt", b"hello delta", None).unwrap();
+    ops.store_file_buffered(&ctx, "/epsilon.txt", b"hello epsilon", None).unwrap();
 
     // Cross-check: counters should match the existing stats() method
     let stats = engine.stats();
@@ -442,8 +442,8 @@ fn test_initialize_from_kv_counts_all_types() {
     let version_manager = VersionManager::new(&engine);
 
     // Create directories via file storage (parent directories created automatically)
-    ops.store_file(&ctx, "/docs/readme.txt", b"readme", None).unwrap();
-    ops.store_file(&ctx, "/docs/changelog.txt", b"changelog", None).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/readme.txt", b"readme", None).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/changelog.txt", b"changelog", None).unwrap();
 
     // Create a symlink
     ops.store_symlink(&ctx, "/link", "/docs/readme.txt").unwrap();
@@ -484,9 +484,9 @@ fn test_initialize_from_kv_sums_logical_size() {
     let data_b = vec![1u8; 200];
     let data_c = vec![2u8; 300];
 
-    ops.store_file(&ctx, "/a.bin", &data_a, None).unwrap();
-    ops.store_file(&ctx, "/b.bin", &data_b, None).unwrap();
-    ops.store_file(&ctx, "/c.bin", &data_c, None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.bin", &data_a, None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.bin", &data_b, None).unwrap();
+    ops.store_file_buffered(&ctx, "/c.bin", &data_c, None).unwrap();
 
     let counters = EngineCounters::initialize_from_kv(&engine);
     let snapshot = counters.snapshot();
@@ -626,11 +626,11 @@ fn test_live_counters_store_files() {
     let ops = DirectoryOps::new(&engine);
 
     // Store 5 files
-    ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
-    ops.store_file(&ctx, "/c.txt", b"ccc", None).unwrap();
-    ops.store_file(&ctx, "/d.txt", b"ddd", None).unwrap();
-    ops.store_file(&ctx, "/e.txt", b"eee", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"aaa", None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"bbb", None).unwrap();
+    ops.store_file_buffered(&ctx, "/c.txt", b"ccc", None).unwrap();
+    ops.store_file_buffered(&ctx, "/d.txt", b"ddd", None).unwrap();
+    ops.store_file_buffered(&ctx, "/e.txt", b"eee", None).unwrap();
 
     let snap = engine.counters().snapshot();
     // Each file stored produces one increment_files call
@@ -647,11 +647,11 @@ fn test_live_counters_delete_files() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
-    ops.store_file(&ctx, "/c.txt", b"ccc", None).unwrap();
-    ops.store_file(&ctx, "/d.txt", b"ddd", None).unwrap();
-    ops.store_file(&ctx, "/e.txt", b"eee", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"aaa", None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"bbb", None).unwrap();
+    ops.store_file_buffered(&ctx, "/c.txt", b"ccc", None).unwrap();
+    ops.store_file_buffered(&ctx, "/d.txt", b"ddd", None).unwrap();
+    ops.store_file_buffered(&ctx, "/e.txt", b"eee", None).unwrap();
 
     ops.delete_file(&ctx, "/a.txt").unwrap();
     ops.delete_file(&ctx, "/b.txt").unwrap();
@@ -668,7 +668,7 @@ fn test_live_counters_symlink() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/target.txt", b"hello", None).unwrap();
+    ops.store_file_buffered(&ctx, "/target.txt", b"hello", None).unwrap();
     ops.store_symlink(&ctx, "/link", "/target.txt").unwrap();
 
     let snap = engine.counters().snapshot();
@@ -682,7 +682,7 @@ fn test_live_counters_symlink_delete() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/target.txt", b"hello", None).unwrap();
+    ops.store_file_buffered(&ctx, "/target.txt", b"hello", None).unwrap();
     ops.store_symlink(&ctx, "/link1", "/target.txt").unwrap();
     ops.store_symlink(&ctx, "/link2", "/target.txt").unwrap();
 
@@ -718,9 +718,9 @@ fn test_live_counters_snapshot_delete() {
 
     // Writes between snapshots prevent dedup (back-to-back snapshots at the
     // same HEAD return the prior snapshot rather than creating a new one).
-    ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"a", None).unwrap();
     version_manager.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"b", None).unwrap();
     version_manager.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
 
     let snap = engine.counters().snapshot();
@@ -771,13 +771,13 @@ fn test_live_counters_reads() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/file.txt", b"hello world", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"hello world", None).unwrap();
 
     let snap_before = engine.counters().snapshot();
     assert_eq!(snap_before.reads_total, 0);
 
-    let _data = ops.read_file("/file.txt").unwrap();
-    let _data2 = ops.read_file("/file.txt").unwrap();
+    let _data = ops.read_file_buffered("/file.txt").unwrap();
+    let _data2 = ops.read_file_buffered("/file.txt").unwrap();
 
     let snap_after = engine.counters().snapshot();
     assert_eq!(snap_after.reads_total, 2, "should count 2 reads");
@@ -791,14 +791,14 @@ fn test_live_counters_overwrite_adjusts_logical_size() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/file.txt", b"short", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"short", None).unwrap();
 
     let snap1 = engine.counters().snapshot();
     assert_eq!(snap1.logical_data_size, 5, "initial logical size is 5");
     assert_eq!(snap1.files, 1, "should count 1 file");
 
     // Overwrite with longer content
-    ops.store_file(&ctx, "/file.txt", b"much longer content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"much longer content", None).unwrap();
 
     let snap2 = engine.counters().snapshot();
     assert_eq!(snap2.files, 1, "overwrite should NOT increment file count");
@@ -812,13 +812,13 @@ fn test_live_counters_overwrite_shrink_adjusts_logical_size() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/file.txt", b"this is a long piece of content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"this is a long piece of content", None).unwrap();
 
     let snap1 = engine.counters().snapshot();
     assert_eq!(snap1.logical_data_size, 31);
 
     // Overwrite with shorter content
-    ops.store_file(&ctx, "/file.txt", b"tiny", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"tiny", None).unwrap();
 
     let snap2 = engine.counters().snapshot();
     assert_eq!(snap2.logical_data_size, 4, "logical size should shrink on overwrite");
@@ -832,7 +832,7 @@ fn test_live_counters_chunk_dedup() {
     let ops = DirectoryOps::new(&engine);
 
     let data = b"identical content";
-    ops.store_file(&ctx, "/a.txt", data, None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", data, None).unwrap();
 
     let snap1 = engine.counters().snapshot();
     let chunks_after_first = snap1.chunks;
@@ -840,7 +840,7 @@ fn test_live_counters_chunk_dedup() {
     assert_eq!(snap1.chunks_deduped_total, 0, "no dedup on first store");
 
     // Store same content under different path — chunk should be deduped
-    ops.store_file(&ctx, "/b.txt", data, None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", data, None).unwrap();
 
     let snap2 = engine.counters().snapshot();
     assert_eq!(snap2.chunks, chunks_after_first, "chunk count should not increase on dedup");
@@ -854,8 +854,8 @@ fn test_live_counters_symlink_update_does_not_double_count() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/target1.txt", b"hello", None).unwrap();
-    ops.store_file(&ctx, "/target2.txt", b"world", None).unwrap();
+    ops.store_file_buffered(&ctx, "/target1.txt", b"hello", None).unwrap();
+    ops.store_file_buffered(&ctx, "/target2.txt", b"world", None).unwrap();
 
     ops.store_symlink(&ctx, "/link", "/target1.txt").unwrap();
     let snap1 = engine.counters().snapshot();
@@ -876,9 +876,9 @@ fn test_live_counters_full_lifecycle() {
     let vm = VersionManager::new(&engine);
 
     // Store files
-    ops.store_file(&ctx, "/doc1.txt", b"alpha", None).unwrap();
-    ops.store_file(&ctx, "/doc2.txt", b"beta", None).unwrap();
-    ops.store_file(&ctx, "/doc3.txt", b"gamma", None).unwrap();
+    ops.store_file_buffered(&ctx, "/doc1.txt", b"alpha", None).unwrap();
+    ops.store_file_buffered(&ctx, "/doc2.txt", b"beta", None).unwrap();
+    ops.store_file_buffered(&ctx, "/doc3.txt", b"gamma", None).unwrap();
 
     // Create symlink
     ops.store_symlink(&ctx, "/link1", "/doc1.txt").unwrap();
@@ -941,8 +941,8 @@ fn test_live_counters_initialized_on_reopen() {
         let engine = StorageEngine::create(path_str).unwrap();
         let ops = DirectoryOps::new(&engine);
         ops.ensure_root_directory(&ctx).unwrap();
-        ops.store_file(&ctx, "/a.txt", b"aaa", None).unwrap();
-        ops.store_file(&ctx, "/b.txt", b"bbb", None).unwrap();
+        ops.store_file_buffered(&ctx, "/a.txt", b"aaa", None).unwrap();
+        ops.store_file_buffered(&ctx, "/b.txt", b"bbb", None).unwrap();
         ops.store_symlink(&ctx, "/link", "/a.txt").unwrap();
     }
 
@@ -966,7 +966,7 @@ fn test_live_counters_empty_file_store() {
     let ops = DirectoryOps::new(&engine);
 
     // Store an empty file — 0 bytes, 0 chunks
-    ops.store_file(&ctx, "/empty.txt", b"", None).unwrap();
+    ops.store_file_buffered(&ctx, "/empty.txt", b"", None).unwrap();
 
     let snap = engine.counters().snapshot();
     assert_eq!(snap.files, 1, "empty file should still count as a file");
@@ -982,7 +982,7 @@ fn test_live_counters_delete_nonexistent_file_does_not_decrement() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/exists.txt", b"data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/exists.txt", b"data", None).unwrap();
 
     let snap_before = engine.counters().snapshot();
     assert_eq!(snap_before.files, 1);
@@ -1002,7 +1002,7 @@ fn test_live_counters_delete_nonexistent_symlink_does_not_decrement() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/target.txt", b"data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/target.txt", b"data", None).unwrap();
     ops.store_symlink(&ctx, "/link", "/target.txt").unwrap();
 
     let snap_before = engine.counters().snapshot();
@@ -1022,10 +1022,10 @@ fn test_live_counters_multiple_reads_accumulate() {
     let engine = create_engine(&directory);
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/file.txt", b"abcdef", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"abcdef", None).unwrap();
 
     for _ in 0..10 {
-        let _data = ops.read_file("/file.txt").unwrap();
+        let _data = ops.read_file_buffered("/file.txt").unwrap();
     }
 
     let snap = engine.counters().snapshot();

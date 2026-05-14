@@ -263,9 +263,14 @@ impl<'a> DirectoryOps<'a> {
     DirectoryOps { engine }
   }
 
-  /// Store a file at the given path, splitting data into chunks.
-  /// Creates intermediate directories as needed and updates HEAD.
-  pub fn store_file(
+  /// Store a file at the given path from a fully-buffered byte slice.
+  ///
+  /// **WARNING — buffered, not streaming.** The entire file content must fit
+  /// in `data`. This is convenient for small payloads (JSON configs, indexes,
+  /// short logs) but a footgun for large files. For arbitrary-size files
+  /// (e.g. user uploads), use [`store_file_from_reader`] which streams chunks
+  /// from any `Read` source without buffering the whole file.
+  pub fn store_file_buffered(
     &self,
     ctx: &RequestContext,
     path: &str,
@@ -273,6 +278,56 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
+  }
+
+  /// Store a file at the given path by streaming chunks from a `Read` source.
+  ///
+  /// Memory usage is bounded to a single chunk buffer (`DEFAULT_CHUNK_SIZE`,
+  /// 256 KB) regardless of file size. Use this for arbitrary-size uploads,
+  /// bulk imports, and anything that might not fit in memory.
+  pub fn store_file_from_reader<R: std::io::Read>(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    mut reader: R,
+    content_type: Option<&str>,
+  ) -> EngineResult<FileRecord> {
+    let chunk_size = DEFAULT_CHUNK_SIZE;
+    let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
+    let mut first_bytes: Vec<u8> = Vec::with_capacity(8192);
+    let mut total_size: u64 = 0;
+    let mut buffer = vec![0u8; chunk_size];
+    let mut filled = 0usize;
+
+    loop {
+      // Top up the buffer to a full chunk before emitting, so we end up with
+      // uniformly-sized chunks (last one may be smaller).
+      while filled < chunk_size {
+        let n = reader.read(&mut buffer[filled..])
+          .map_err(EngineError::IoError)?;
+        if n == 0 { break; }
+        filled += n;
+      }
+      if filled == 0 { break; }
+
+      // Capture the first up-to-8 KB for content-type detection.
+      if first_bytes.len() < 8192 {
+        let need = (8192 - first_bytes.len()).min(filled);
+        first_bytes.extend_from_slice(&buffer[..need]);
+      }
+
+      let hash = self.store_chunk(&buffer[..filled])?;
+      chunk_hashes.push(hash);
+      total_size += filled as u64;
+
+      if filled < chunk_size {
+        // Reader is exhausted (short read).
+        break;
+      }
+      filled = 0;
+    }
+
+    self.finalize_file(ctx, path, chunk_hashes, total_size, content_type, &first_bytes)
   }
 
   /// Store a single data chunk and return its hash. Deduplicates automatically.
@@ -715,7 +770,13 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Read a file's full content into memory.
-  pub fn read_file(&self, path: &str) -> EngineResult<Vec<u8>> {
+  ///
+  /// **WARNING — buffered, not streaming.** The full decompressed file is
+  /// materialized in a single `Vec<u8>`. Convenient for small payloads
+  /// (JSON configs, sub-MB content) but a footgun for large files. For
+  /// arbitrary-size reads, use [`read_file_streaming`] and iterate its
+  /// `EngineFileStream` so memory stays bounded to one chunk.
+  pub fn read_file_buffered(&self, path: &str) -> EngineResult<Vec<u8>> {
     let result = self.read_file_streaming(path)?.collect_to_vec()?;
     Ok(result)
   }
@@ -1108,7 +1169,12 @@ impl<'a> DirectoryOps<'a> {
     // remains the observable signal.
     let sys_ctx = crate::engine::request_context::RequestContext::system();
     let _ = ctx; // Keep ctx parameter for future use (currently unused after the suppression above)
-    match vm.create_snapshot(&sys_ctx, &name, std::collections::HashMap::new()) {
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_AUTO.to_string(),
+    );
+    match vm.create_snapshot(&sys_ctx, &name, metadata) {
       Ok(_) => {
         tracing::info!(snapshot = %name, "Auto-snapshot ({})", prefix);
       }
@@ -1490,7 +1556,7 @@ impl<'a> DirectoryOps<'a> {
       format!("{}/.aeordb-config/indexes.json", parent)
     };
 
-    match self.read_file(&config_path) {
+    match self.read_file_buffered(&config_path) {
       Ok(config_data) => {
         match PathIndexConfig::deserialize_with_compression(&config_data) {
           Ok(Some(algo_str)) if algo_str == "zstd" => {

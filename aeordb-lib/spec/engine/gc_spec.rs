@@ -89,7 +89,7 @@ fn test_iter_kv_entries_returns_live_entries() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
   let entries = engine.iter_kv_entries().unwrap();
   assert!(!entries.is_empty(), "should have KV entries after storing a file");
@@ -103,16 +103,16 @@ fn setup_engine_with_versions() -> (Arc<StorageEngine>, tempfile::TempDir) {
   let ops = DirectoryOps::new(&engine);
 
   // Create initial files
-  ops.store_file(&ctx, "/docs/readme.txt", b"README content", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/docs/notes.txt", b"Notes content", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/config.json", b"{}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/readme.txt", b"README content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/notes.txt", b"Notes content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/config.json", b"{}", Some("application/json")).unwrap();
 
   // Create a snapshot
   let vm = VersionManager::new(&engine);
   vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
   // Modify a file (creates garbage: old FileRecord + old chunks + old dir entries)
-  ops.store_file(&ctx, "/docs/readme.txt", b"Updated README content!!", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/readme.txt", b"Updated README content!!", Some("text/plain")).unwrap();
 
   // Delete a file (creates garbage)
   ops.delete_file(&ctx, "/docs/notes.txt").unwrap();
@@ -134,7 +134,7 @@ fn test_gc_mark_collects_head_entries() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/hello.txt", b"hello", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/hello.txt", b"hello", Some("text/plain")).unwrap();
 
   let live = gc_mark(&engine).unwrap();
 
@@ -185,7 +185,7 @@ fn test_gc_mark_structural_sharing_dedup() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/test.txt", b"test", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/test.txt", b"test", Some("text/plain")).unwrap();
 
   let vm = VersionManager::new(&engine);
   vm.create_snapshot(&ctx, "same-as-head", HashMap::new()).unwrap();
@@ -207,7 +207,7 @@ fn test_gc_mark_no_snapshots_or_forks() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
-  ops.store_file(&ctx, "/only-file.txt", b"alone", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/only-file.txt", b"alone", Some("text/plain")).unwrap();
 
   let live = gc_mark(&engine).unwrap();
   assert!(live.len() >= 3, "should have dir + file + chunk, got {}", live.len());
@@ -230,7 +230,7 @@ fn test_gc_sweep_preserves_live_entries() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
-  ops.store_file(&ctx, "/keep.txt", b"keep me", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/keep.txt", b"keep me", Some("text/plain")).unwrap();
 
   let live = gc_mark(&engine).unwrap();
   let (garbage_count, _) = gc_sweep(&engine, &live, false).unwrap();
@@ -239,7 +239,7 @@ fn test_gc_sweep_preserves_live_entries() {
   // is stored and the root directory content hash changes.
   assert!(garbage_count <= 1, "at most 1 garbage (stale empty root), got {}", garbage_count);
 
-  let content = ops.read_file("/keep.txt").unwrap();
+  let content = ops.read_file_buffered("/keep.txt").unwrap();
   assert_eq!(content, b"keep me");
 }
 
@@ -299,14 +299,14 @@ fn test_gc_files_still_readable_after_sweep() {
   let result = run_gc(&engine, &ctx, false).unwrap();
   assert!(result.garbage_entries > 0);
 
-  let content = ops.read_file("/docs/readme.txt").unwrap();
+  let content = ops.read_file_buffered("/docs/readme.txt").unwrap();
   assert_eq!(content, b"Updated README content!!");
 
-  let config = ops.read_file("/config.json").unwrap();
+  let config = ops.read_file_buffered("/config.json").unwrap();
   assert_eq!(config, b"{}");
 
   // Deleted file should return an error
-  let notes = ops.read_file("/docs/notes.txt");
+  let notes = ops.read_file_buffered("/docs/notes.txt");
   assert!(notes.is_err(), "/docs/notes.txt should not exist (was deleted)");
 }
 
@@ -363,16 +363,16 @@ fn test_gc_after_delete_all_files() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
   ops.delete_file(&ctx, "/a.txt").unwrap();
   ops.delete_file(&ctx, "/b.txt").unwrap();
 
   let result = run_gc(&engine, &ctx, false).unwrap();
   assert!(result.garbage_entries > 0);
 
-  ops.store_file(&ctx, "/c.txt", b"ccc", Some("text/plain")).unwrap();
-  let content = ops.read_file("/c.txt").unwrap();
+  ops.store_file_buffered(&ctx, "/c.txt", b"ccc", Some("text/plain")).unwrap();
+  let content = ops.read_file_buffered("/c.txt").unwrap();
   assert_eq!(content, b"ccc");
 }
 
@@ -384,13 +384,13 @@ fn test_gc_with_overwritten_files() {
 
   for i in 0..10 {
     let content = format!("version {}", i);
-    ops.store_file(&ctx, "/evolving.txt", content.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/evolving.txt", content.as_bytes(), Some("text/plain")).unwrap();
   }
 
   let result = run_gc(&engine, &ctx, false).unwrap();
   assert!(result.garbage_entries > 0);
 
-  let content = ops.read_file("/evolving.txt").unwrap();
+  let content = ops.read_file_buffered("/evolving.txt").unwrap();
   assert_eq!(content, b"version 9");
 }
 
@@ -415,8 +415,8 @@ fn test_gc_with_deep_directory_tree() {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/a/b/c/d/e/deep.txt", b"deep file", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/a/b/other.txt", b"other", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/d/e/deep.txt", b"deep file", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/other.txt", b"other", Some("text/plain")).unwrap();
 
   let live = gc_mark(&engine).unwrap();
   assert!(live.len() >= 8, "deep tree should have many live entries, got {}", live.len());
@@ -427,9 +427,9 @@ fn test_gc_with_deep_directory_tree() {
   run_gc(&engine, &ctx, false).unwrap();
 
   // After GC, all remaining files should still be readable
-  let content = ops.read_file("/a/b/c/d/e/deep.txt").unwrap();
+  let content = ops.read_file_buffered("/a/b/c/d/e/deep.txt").unwrap();
   assert_eq!(content, b"deep file");
-  let content = ops.read_file("/a/b/other.txt").unwrap();
+  let content = ops.read_file_buffered("/a/b/other.txt").unwrap();
   assert_eq!(content, b"other");
 }
 

@@ -35,7 +35,7 @@ pub struct CronConfig {
 /// Returns empty vec if the file is not found or cannot be parsed.
 pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file(CRON_CONFIG_PATH) {
+    match ops.read_file_buffered(CRON_CONFIG_PATH) {
         Ok(data) => match serde_json::from_slice::<CronConfig>(&data) {
             Ok(config) => config.schedules,
             Err(e) => {
@@ -53,7 +53,7 @@ pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineRe
     let ctx = RequestContext::system();
     let data = serde_json::to_vec_pretty(config)
         .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-    ops.store_file(&ctx, CRON_CONFIG_PATH, &data, Some("application/json"))?;
+    ops.store_file_buffered(&ctx, CRON_CONFIG_PATH, &data, Some("application/json"))?;
     Ok(())
 }
 
@@ -62,7 +62,7 @@ pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineRe
 /// so users can disable defaults without them being re-added on restart.
 pub fn seed_default_cron_if_missing(engine: &StorageEngine) -> EngineResult<bool> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file(CRON_CONFIG_PATH) {
+    match ops.read_file_buffered(CRON_CONFIG_PATH) {
         Ok(_) => Ok(false),
         Err(EngineError::NotFound(_)) => {
             let defaults = CronConfig {

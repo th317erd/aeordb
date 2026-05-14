@@ -715,8 +715,8 @@ fn test_open_existing_kv_skips_rebuild() {
         let engine = StorageEngine::create(engine_path_str).unwrap();
         let ops = DirectoryOps::new(&engine);
         ops.ensure_root_directory(&ctx).unwrap();
-        ops.store_file(&ctx, "/file1.txt", b"hello", Some("text/plain")).unwrap();
-        ops.store_file(&ctx, "/file2.txt", b"world", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/file1.txt", b"hello", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/file2.txt", b"world", Some("text/plain")).unwrap();
     }
 
     // Record the file's modification time
@@ -729,9 +729,9 @@ fn test_open_existing_kv_skips_rebuild() {
         let ops = DirectoryOps::new(&engine);
 
         // Verify all entries still accessible
-        let content1 = ops.read_file("/file1.txt").unwrap();
+        let content1 = ops.read_file_buffered("/file1.txt").unwrap();
         assert_eq!(content1, b"hello");
-        let content2 = ops.read_file("/file2.txt").unwrap();
+        let content2 = ops.read_file_buffered("/file2.txt").unwrap();
         assert_eq!(content2, b"world");
     }
 }
@@ -752,7 +752,7 @@ fn test_cross_restart_with_disk_kv_500_files() {
         for i in 0..500u32 {
             let path = format!("/data/file_{:04}.txt", i);
             let content = format!("Content for file {}", i);
-            ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+            ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
         }
         engine.shutdown().unwrap();
     }
@@ -765,7 +765,7 @@ fn test_cross_restart_with_disk_kv_500_files() {
         for i in 0..500u32 {
             let path = format!("/data/file_{:04}.txt", i);
             let expected = format!("Content for file {}", i);
-            let content = ops.read_file(&path).unwrap();
+            let content = ops.read_file_buffered(&path).unwrap();
             assert_eq!(content, expected.as_bytes(), "File {} mismatch after restart", i);
         }
     }
@@ -831,7 +831,7 @@ fn test_kv_stage_grows_via_storage_engine() {
     let count = 1_500u32;
     for i in 0..count {
         let path = format!("/many/file_{:05}.txt", i);
-        ops.store_file(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
             .unwrap();
     }
 
@@ -848,7 +848,7 @@ fn test_kv_stage_grows_via_storage_engine() {
     // Stored files must still be readable after the expansion.
     for i in (0..count).step_by(100) {
         let path = format!("/many/file_{:05}.txt", i);
-        let content = ops.read_file(&path).unwrap();
+        let content = ops.read_file_buffered(&path).unwrap();
         assert_eq!(content, format!("v{}", i).as_bytes());
     }
 }

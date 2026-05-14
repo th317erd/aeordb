@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -300,15 +300,29 @@ fn run(config: Config) -> Result<(), String> {
         }
         let path = pick_random(&committed, &mut rng_state);
         let ops = DirectoryOps::new(&engine);
-        match ops.read_file(&path) {
-          Ok(_) => {
-            reads.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut s) = last_action.lock() { *s = format!("R {}", path); }
+        // Stream the file. We don't actually care about the content — only
+        // that the read path exercises chunk fetch + decompress + iterate.
+        // Memory stays bounded to one chunk regardless of file size.
+        match ops.read_file_streaming(&path) {
+          Ok(stream) => {
+            let mut total: u64 = 0;
+            let mut failure: Option<String> = None;
+            for chunk_result in stream {
+              match chunk_result {
+                Ok(chunk) => { total += chunk.len() as u64; }
+                Err(e) => { failure = Some(format!("{}", e)); break; }
+              }
+            }
+            if let Some(err) = failure {
+              eprintln!("read stream failed for {}: {}", path, err);
+              if let Ok(mut s) = last_action.lock() { *s = format!("R FAIL {}: {}", path, err); }
+            } else {
+              reads.fetch_add(1, Ordering::Relaxed);
+              if let Ok(mut s) = last_action.lock() { *s = format!("R {} ({} bytes)", path, total); }
+            }
           }
           Err(e) => {
             eprintln!("read failed for {}: {}", path, e);
-            // A read of a committed path should not fail. This is a real signal.
-            // Don't abort — log + keep going so the soak surfaces patterns.
             if let Ok(mut s) = last_action.lock() { *s = format!("R FAIL {}: {}", path, e); }
           }
         }
@@ -386,10 +400,6 @@ fn run(config: Config) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn do_write(engine: &StorageEngine, source: &Path, source_root: &str) -> Result<String, String> {
-  let mut buf = Vec::new();
-  File::open(source).and_then(|mut f| f.read_to_end(&mut buf))
-    .map_err(|e| format!("read source: {}", e))?;
-
   // Map the source path into the soak namespace by replacing the source root
   // with /soak. So `/media/Data/.../Pictures/foo.jpg` →
   // `/soak/Pictures/foo.jpg`. Overwriting the same path exercises the
@@ -399,11 +409,17 @@ fn do_write(engine: &StorageEngine, source: &Path, source_root: &str) -> Result<
   let rel = rel.strip_prefix(trimmed_root).unwrap_or(&rel);
   let aeordb_path = format!("/soak{}", rel);
 
+  // Stream the source file directly into the engine — no full-file buffer.
+  // store_file_from_reader chunks at 256 KB regardless of file size, so a
+  // 4 GB MP4 uses the same peak memory as a 4 KB text file.
+  let file = File::open(source).map_err(|e| format!("open source: {}", e))?;
+  let reader = std::io::BufReader::with_capacity(262_144, file);
+
   let content_type = guess_content_type(source);
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
-  ops.store_file(&ctx, &aeordb_path, &buf, Some(&content_type))
-    .map_err(|e| format!("store_file: {}", e))?;
+  ops.store_file_from_reader(&ctx, &aeordb_path, reader, Some(&content_type))
+    .map_err(|e| format!("store_file_from_reader: {}", e))?;
 
   Ok(aeordb_path)
 }

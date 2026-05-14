@@ -53,7 +53,7 @@ fn lock_released_on_drop() {
         // Store something to verify the DB works
         let ops = aeordb::engine::DirectoryOps::new(&engine);
         let ctx = aeordb::engine::RequestContext::system();
-        ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
     }
     // Engine dropped here — lock released
 
@@ -61,7 +61,7 @@ fn lock_released_on_drop() {
     let engine2 = StorageEngine::open_with_hot_dir(db_str, None)
         .expect("open after drop should succeed");
     let ops = aeordb::engine::DirectoryOps::new(&engine2);
-    let data = ops.read_file("/test.txt").expect("file should be readable");
+    let data = ops.read_file_buffered("/test.txt").expect("file should be readable");
     assert_eq!(data, b"hello");
 }
 

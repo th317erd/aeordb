@@ -26,7 +26,7 @@ impl CacheLoader for PermissionsLoader {
             format!("{}/.aeordb-permissions", path)
         };
 
-        match ops.read_file(&permissions_path) {
+        match ops.read_file_buffered(&permissions_path) {
             Ok(data) => {
                 let permissions = PathPermissions::deserialize(&data)?;
                 Ok(Some(permissions))
@@ -96,7 +96,7 @@ impl CacheLoader for IndexConfigLoader {
             format!("{}/.aeordb-config/indexes.json", path)
         };
 
-        match ops.read_file(&config_path) {
+        match ops.read_file_buffered(&config_path) {
             Ok(data) => PathIndexConfig::deserialize(&data).map(Some),
             Err(EngineError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),

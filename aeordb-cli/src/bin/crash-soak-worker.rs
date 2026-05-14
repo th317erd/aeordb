@@ -84,7 +84,7 @@ fn main() {
     let path = format!("/data/file-{:08}.txt", counter);
     let body = format!("entry {} payload {}", counter, fastish_hash(counter));
 
-    let result = ops.store_file(&ctx, &path, body.as_bytes(), Some("text/plain"));
+    let result = ops.store_file_buffered(&ctx, &path, body.as_bytes(), Some("text/plain"));
     match result {
       Ok(_) => {
         // Record the commit AFTER the engine reports success. fsync on the

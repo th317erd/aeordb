@@ -34,7 +34,7 @@ pub fn store_config(
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let path = format!("/.aeordb-system/config/{}", key);
-    ops.store_file(ctx, &path, value, Some("application/octet-stream"))?;
+    ops.store_file_buffered(ctx, &path, value, Some("application/octet-stream"))?;
     Ok(())
 }
 
@@ -42,7 +42,7 @@ pub fn store_config(
 pub fn get_config(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
     let ops = DirectoryOps::new(engine);
     let path = format!("/.aeordb-system/config/{}", key);
-    match ops.read_file(&path) {
+    match ops.read_file_buffered(&path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
@@ -285,7 +285,7 @@ pub fn store_permissions(
     let ops = DirectoryOps::new(engine);
     let path_hash = blake3::hash(path.as_bytes());
     let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
-    ops.store_file(ctx, &store_path, permissions_json, Some("application/json"))?;
+    ops.store_file_buffered(ctx, &store_path, permissions_json, Some("application/json"))?;
     Ok(())
 }
 
@@ -294,7 +294,7 @@ pub fn get_permissions(engine: &StorageEngine, path: &str) -> EngineResult<Optio
     let ops = DirectoryOps::new(engine);
     let path_hash = blake3::hash(path.as_bytes());
     let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
-    match ops.read_file(&store_path) {
+    match ops.read_file_buffered(&store_path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
@@ -406,7 +406,7 @@ pub fn cleanup_expired_tokens(
 
     for entry in &token_entries {
         let path = format!("/.aeordb-system/refresh-tokens/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
+        if let Ok(data) = ops.read_file_buffered(&path) {
             if let Ok(record) = serde_json::from_slice::<RefreshTokenRecord>(&data) {
                 if record.is_revoked || record.expires_at < now {
                     let _ = ops.delete_file(ctx, &path);
@@ -425,7 +425,7 @@ pub fn cleanup_expired_tokens(
 
     for entry in &link_entries {
         let path = format!("/.aeordb-system/magic-links/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
+        if let Ok(data) = ops.read_file_buffered(&path) {
             if let Ok(record) = serde_json::from_slice::<MagicLinkRecord>(&data) {
                 if record.is_used || record.expires_at < now {
                     let _ = ops.delete_file(ctx, &path);
@@ -463,14 +463,14 @@ pub fn store_node_id(
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
     let value = node_id.to_le_bytes().to_vec();
-    ops.store_file(ctx, "/.aeordb-system/cluster/node_id", &value, Some("application/octet-stream"))?;
+    ops.store_file_buffered(ctx, "/.aeordb-system/cluster/node_id", &value, Some("application/octet-stream"))?;
     Ok(())
 }
 
 /// Load the persisted node identifier, if any.
 pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.aeordb-system/cluster/node_id") {
+    match ops.read_file_buffered("/.aeordb-system/cluster/node_id") {
         Ok(data) if data.len() == 8 => {
             Ok(Some(u64::from_le_bytes(data[..8].try_into().unwrap())))
         }
@@ -522,7 +522,7 @@ pub fn store_plugin(
     let ops = DirectoryOps::new(engine);
     let safe_key = encode_plugin_key(key);
     let path = format!("/.aeordb-system/plugins/{}", safe_key);
-    ops.store_file(ctx, &path, encoded, Some("application/octet-stream"))?;
+    ops.store_file_buffered(ctx, &path, encoded, Some("application/octet-stream"))?;
     Ok(())
 }
 
@@ -531,7 +531,7 @@ pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<
     let ops = DirectoryOps::new(engine);
     let safe_key = encode_plugin_key(key);
     let path = format!("/.aeordb-system/plugins/{}", safe_key);
-    match ops.read_file(&path) {
+    match ops.read_file_buffered(&path) {
         Ok(data) => Ok(Some(data)),
         Err(EngineError::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
@@ -551,7 +551,7 @@ pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>
     let mut results = Vec::new();
     for entry in &entries {
         let path = format!("/.aeordb-system/plugins/{}", entry.name);
-        if let Ok(data) = ops.read_file(&path) {
+        if let Ok(data) = ops.read_file_buffered(&path) {
             let original_key = decode_plugin_key(&entry.name);
             results.push((original_key, data));
         }
@@ -653,7 +653,7 @@ fn migrate_directory(
         let new_path = format!("{}/{}", new_dir, entry.name);
 
         // Skip if the entry already exists at the new path (idempotent).
-        match ops.read_file(&new_path) {
+        match ops.read_file_buffered(&new_path) {
             Ok(_) => {
                 tracing::info!(
                     old = %old_path,
@@ -666,8 +666,8 @@ fn migrate_directory(
             Err(error) => return Err(error),
         }
 
-        let data = ops.read_file(&old_path)?;
-        ops.store_file(ctx, &new_path, &data, Some("application/octet-stream"))?;
+        let data = ops.read_file_buffered(&old_path)?;
+        ops.store_file_buffered(ctx, &new_path, &data, Some("application/octet-stream"))?;
         ops.delete_file(ctx, &old_path)?;
 
         tracing::info!(

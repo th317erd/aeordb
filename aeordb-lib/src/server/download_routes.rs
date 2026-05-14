@@ -87,7 +87,7 @@ pub async fn download_zip(
             }
 
             // Try as file first
-            match ops.read_file(&normalized) {
+            match ops.read_file_buffered(&normalized) {
                 Ok(data) => {
                     cumulative_size += data.len() as u64;
                     if cumulative_size > MAX_ZIP_SIZE {
@@ -190,7 +190,7 @@ fn add_directory_to_zip(
         if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
             let _ = add_directory_to_zip(walk, &normalized, state);
         } else if entry.entry_type == EntryType::FileRecord.to_u8() {
-            if let Ok(data) = walk.ops.read_file(&normalized) {
+            if let Ok(data) = walk.ops.read_file_buffered(&normalized) {
                 *state.cumulative_size += data.len() as u64;
                 if *state.cumulative_size > walk.max_size {
                     return Err(());

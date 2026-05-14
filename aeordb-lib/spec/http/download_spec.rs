@@ -36,9 +36,9 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
 fn store_test_files(engine: &aeordb::engine::StorageEngine) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, "/docs/readme.md", b"# Hello", Some("text/markdown")).unwrap();
-    ops.store_file(&ctx, "/docs/notes.txt", b"Some notes", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/images/logo.svg", b"<svg></svg>", Some("image/svg+xml")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/readme.md", b"# Hello", Some("text/markdown")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/notes.txt", b"Some notes", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/images/logo.svg", b"<svg></svg>", Some("image/svg+xml")).unwrap();
 }
 
 #[tokio::test]

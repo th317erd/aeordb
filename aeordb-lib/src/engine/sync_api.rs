@@ -513,6 +513,10 @@ pub fn file_restore_from_version(
             let mut metadata = HashMap::new();
             metadata.insert("reason".to_string(), "auto-snapshot before file restore".to_string());
             metadata.insert("restored_path".to_string(), path.to_string());
+            metadata.insert(
+                crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+                crate::engine::lifecycle_config::SNAPSHOT_TYPE_AUTO.to_string(),
+            );
             match vm.create_snapshot(ctx, &name, metadata) {
                 Ok(_) => break name,
                 Err(_) if attempt < 10 => {
@@ -530,7 +534,7 @@ pub fn file_restore_from_version(
 
     // Write to HEAD
     let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
-    ops.store_file(ctx, path, &content, file_record.content_type.as_deref())?;
+    ops.store_file_buffered(ctx, path, &content, file_record.content_type.as_deref())?;
 
     Ok((auto_snapshot_name, size))
 }

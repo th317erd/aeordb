@@ -381,6 +381,13 @@ impl<'a> VersionManager<'a> {
       }
     }
 
+    // Default snapshot type to "manual" if the caller didn't specify.
+    // Callers creating safety/auto snapshots should set "type" = "auto" so
+    // they're eligible for lifecycle retention pruning.
+    let mut metadata = metadata;
+    metadata.entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
+      .or_insert_with(|| crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string());
+
     let snapshot_info = SnapshotInfo {
       name: name.to_string(),
       root_hash,
@@ -520,11 +527,20 @@ impl<'a> VersionManager<'a> {
       return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", new_name)));
     }
 
+    // User-initiated rename promotes auto-snapshots to manual: the user has
+    // expressed intent to keep this snapshot, so it shouldn't be pruned by the
+    // auto-retention policy.
+    let mut metadata = old_snapshot.metadata;
+    metadata.insert(
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string(),
+    );
+
     let new_snapshot = SnapshotInfo {
       name: new_name.to_string(),
       root_hash: old_snapshot.root_hash,
       created_at: old_snapshot.created_at,
-      metadata: old_snapshot.metadata,
+      metadata,
     };
 
     let new_value = new_snapshot.serialize(hash_length)?;

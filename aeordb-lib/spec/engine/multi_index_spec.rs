@@ -29,7 +29,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
@@ -206,7 +206,7 @@ fn test_index_manager_backward_compat() {
   let data = index.serialize(hash_length);
 
   // Per-directory legacy path: /data/.indexes/score.idx (no .strategy suffix).
-  ops.store_file(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
+  ops.store_file_buffered(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let loaded = index_manager.load_index("/data", "score")

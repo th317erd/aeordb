@@ -87,7 +87,7 @@ fn record_join_audit(
             return;
         }
     };
-    if let Err(error) = ops.store_file(&ctx, &path, &data, Some("application/json")) {
+    if let Err(error) = ops.store_file_buffered(&ctx, &path, &data, Some("application/json")) {
         tracing::warn!("join_audit: write failed at {}: {}", path, error);
     }
 }

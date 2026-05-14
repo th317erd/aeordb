@@ -47,22 +47,22 @@ fn test_files_persist_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/data/record.json", b"{\"id\": 1}", Some("application/json")).unwrap();
-    ops.store_file(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/data/record.json", b"{\"id\": 1}", Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
   }
 
   // Session 2: reopen and verify
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  let content1 = ops.read_file("/hello.txt").unwrap();
+  let content1 = ops.read_file_buffered("/hello.txt").unwrap();
   assert_eq!(content1, b"Hello, world!");
 
-  let content2 = ops.read_file("/data/record.json").unwrap();
+  let content2 = ops.read_file_buffered("/data/record.json").unwrap();
   assert_eq!(content2, b"{\"id\": 1}");
 
-  let content3 = ops.read_file("/empty.txt").unwrap();
+  let content3 = ops.read_file_buffered("/empty.txt").unwrap();
   assert!(content3.is_empty());
 }
 
@@ -75,9 +75,9 @@ fn test_directories_persist_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/docs/readme.txt", b"readme content", None).unwrap();
-    ops.store_file(&ctx, "/docs/guide.txt", b"guide content", None).unwrap();
-    ops.store_file(&ctx, "/src/main.rs", b"fn main() {}", None).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/readme.txt", b"readme content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/guide.txt", b"guide content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/src/main.rs", b"fn main() {}", None).unwrap();
   }
 
   // Session 2: verify directory listings
@@ -106,7 +106,7 @@ fn test_head_persists_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/file.txt", b"content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/file.txt", b"content", None).unwrap();
     head_before = engine.head_hash().unwrap();
     assert!(!head_before.is_empty());
   }
@@ -130,16 +130,16 @@ fn test_deleted_files_stay_deleted() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/ephemeral.txt", b"temporary data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/ephemeral.txt", b"temporary data", None).unwrap();
 
     // Verify it exists before deletion
-    let content = ops.read_file("/ephemeral.txt").unwrap();
+    let content = ops.read_file_buffered("/ephemeral.txt").unwrap();
     assert_eq!(content, b"temporary data");
 
     ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
 
     // Verify it's gone in this session
-    let result = ops.read_file("/ephemeral.txt");
+    let result = ops.read_file_buffered("/ephemeral.txt");
     assert!(result.is_err(), "deleted file should not be readable");
   }
 
@@ -147,7 +147,7 @@ fn test_deleted_files_stay_deleted() {
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  let result = ops.read_file("/ephemeral.txt");
+  let result = ops.read_file_buffered("/ephemeral.txt");
   assert!(result.is_err(), "deleted file should remain inaccessible after restart");
 }
 
@@ -160,8 +160,8 @@ fn test_deleted_files_not_in_directory_listing() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/keep.txt", b"keeper", None).unwrap();
-    ops.store_file(&ctx, "/remove.txt", b"removable", None).unwrap();
+    ops.store_file_buffered(&ctx, "/keep.txt", b"keeper", None).unwrap();
+    ops.store_file_buffered(&ctx, "/remove.txt", b"removable", None).unwrap();
     ops.delete_file(&ctx, "/remove.txt").unwrap();
   }
 
@@ -185,7 +185,7 @@ fn test_has_entry_returns_false_for_deleted() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/doomed.txt", b"doomed", None).unwrap();
+    ops.store_file_buffered(&ctx, "/doomed.txt", b"doomed", None).unwrap();
 
     let algo = engine.hash_algo();
     file_key = algo.compute_hash(b"file:/doomed.txt").unwrap();
@@ -213,14 +213,14 @@ fn test_snapshots_persist_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/base.txt", b"base content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/base.txt", b"base content", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     let mut meta = HashMap::new();
     meta.insert("author".to_string(), "test".to_string());
     vm.create_snapshot(&ctx, "v1.0", meta).unwrap();
 
-    ops.store_file(&ctx, "/extra.txt", b"extra content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/extra.txt", b"extra content", None).unwrap();
     vm.create_snapshot(&ctx, "v2.0", HashMap::new()).unwrap();
   }
 
@@ -250,7 +250,7 @@ fn test_snapshot_root_hash_preserved() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data.txt", b"snapshot data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"snapshot data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     let snapshot = vm.create_snapshot(&ctx, "pinned", HashMap::new()).unwrap();
@@ -274,13 +274,13 @@ fn test_snapshot_tree_walkable_after_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/alpha.txt", b"alpha", None).unwrap();
+    ops.store_file_buffered(&ctx, "/alpha.txt", b"alpha", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     // Add more files AFTER snapshot
-    ops.store_file(&ctx, "/beta.txt", b"beta", None).unwrap();
+    ops.store_file_buffered(&ctx, "/beta.txt", b"beta", None).unwrap();
   }
 
   // Session 2: snapshot should resolve
@@ -308,7 +308,7 @@ fn test_forks_persist_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/base.txt", b"base", None).unwrap();
+    ops.store_file_buffered(&ctx, "/base.txt", b"base", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     vm.create_fork(&ctx, "feature-a", None).unwrap();
@@ -337,7 +337,7 @@ fn test_fork_root_hash_preserved() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data.txt", b"fork data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"fork data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     let fork = vm.create_fork(&ctx, "my-fork", None).unwrap();
@@ -384,7 +384,7 @@ fn test_indexes_persist_across_restart() {
 
     };
     let config_data = config.serialize();
-    ops.store_file(&ctx, "/people/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, "/people/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     // Store files with indexing
     ops.store_file_with_indexing(&ctx,
@@ -435,7 +435,7 @@ fn test_index_values_persist_across_restart() {
 
     };
     let config_data = config.serialize();
-    ops.store_file(&ctx, "/contacts/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, "/contacts/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     ops.store_file_with_indexing(&ctx,
       "/contacts/john.json",
@@ -482,7 +482,7 @@ fn test_compressed_files_readable_after_restart() {
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  let content = ops.read_file("/compressed.txt").unwrap();
+  let content = ops.read_file_buffered("/compressed.txt").unwrap();
   assert_eq!(content, large_content.as_bytes(), "compressed file should decompress correctly after restart");
 }
 
@@ -614,9 +614,9 @@ fn test_complex_scenario_across_restart() {
     let ops = DirectoryOps::new(&engine);
 
     // Store files
-    ops.store_file(&ctx, "/project/README.md", b"# My Project", Some("text/markdown")).unwrap();
-    ops.store_file(&ctx, "/project/src/lib.rs", b"pub fn hello() {}", Some("text/x-rust")).unwrap();
-    ops.store_file(&ctx, "/project/temp.log", b"log data", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/project/README.md", b"# My Project", Some("text/markdown")).unwrap();
+    ops.store_file_buffered(&ctx, "/project/src/lib.rs", b"pub fn hello() {}", Some("text/x-rust")).unwrap();
+    ops.store_file_buffered(&ctx, "/project/temp.log", b"log data", Some("text/plain")).unwrap();
 
     // Create snapshot before deletion
     let vm = VersionManager::new(&engine);
@@ -657,18 +657,18 @@ fn test_complex_scenario_across_restart() {
   let vm = VersionManager::new(&engine);
 
   // Files that should exist
-  let readme = ops.read_file("/project/README.md").unwrap();
+  let readme = ops.read_file_buffered("/project/README.md").unwrap();
   assert_eq!(readme, b"# My Project");
 
-  let lib = ops.read_file("/project/src/lib.rs").unwrap();
+  let lib = ops.read_file_buffered("/project/src/lib.rs").unwrap();
   assert_eq!(lib, b"pub fn hello() {}");
 
   // Deleted file should NOT exist
-  let deleted = ops.read_file("/project/temp.log");
+  let deleted = ops.read_file_buffered("/project/temp.log");
   assert!(deleted.is_err(), "deleted file should remain deleted after restart");
 
   // Compressed file should be readable
-  let large = ops.read_file("/project/large.bin").unwrap();
+  let large = ops.read_file_buffered("/project/large.bin").unwrap();
   let expected = "repeated data ".repeat(200);
   assert_eq!(large, expected.as_bytes());
 
@@ -722,14 +722,14 @@ fn test_overwritten_file_persists_latest_version() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/mutable.txt", b"version 1", None).unwrap();
-    ops.store_file(&ctx, "/mutable.txt", b"version 2", None).unwrap();
+    ops.store_file_buffered(&ctx, "/mutable.txt", b"version 1", None).unwrap();
+    ops.store_file_buffered(&ctx, "/mutable.txt", b"version 2", None).unwrap();
   }
 
   // Session 2: should read the latest version
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
-  let content = ops.read_file("/mutable.txt").unwrap();
+  let content = ops.read_file_buffered("/mutable.txt").unwrap();
   assert_eq!(content, b"version 2", "should read latest version after restart");
 }
 
@@ -742,9 +742,9 @@ fn test_multiple_deletions_stay_deleted() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
-    ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"a", None).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"b", None).unwrap();
+    ops.store_file_buffered(&ctx, "/c.txt", b"c", None).unwrap();
     ops.delete_file(&ctx, "/a.txt").unwrap();
     ops.delete_file(&ctx, "/c.txt").unwrap();
   }
@@ -753,9 +753,9 @@ fn test_multiple_deletions_stay_deleted() {
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  assert!(ops.read_file("/a.txt").is_err());
-  assert_eq!(ops.read_file("/b.txt").unwrap(), b"b");
-  assert!(ops.read_file("/c.txt").is_err());
+  assert!(ops.read_file_buffered("/a.txt").is_err());
+  assert_eq!(ops.read_file_buffered("/b.txt").unwrap(), b"b");
+  assert!(ops.read_file_buffered("/c.txt").is_err());
 
   let children = ops.list_directory("/").unwrap();
   let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
@@ -771,15 +771,15 @@ fn test_store_delete_recreate_persists() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/phoenix.txt", b"original", None).unwrap();
+    ops.store_file_buffered(&ctx, "/phoenix.txt", b"original", None).unwrap();
     ops.delete_file(&ctx, "/phoenix.txt").unwrap();
-    ops.store_file(&ctx, "/phoenix.txt", b"reborn", None).unwrap();
+    ops.store_file_buffered(&ctx, "/phoenix.txt", b"reborn", None).unwrap();
   }
 
   // Session 2: should read the recreated version
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
-  let content = ops.read_file("/phoenix.txt").unwrap();
+  let content = ops.read_file_buffered("/phoenix.txt").unwrap();
   assert_eq!(content, b"reborn", "recreated file should persist after restart");
 }
 
@@ -813,13 +813,13 @@ fn test_large_file_persists_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/big.bin", &large_data, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, "/big.bin", &large_data, Some("application/octet-stream")).unwrap();
   }
 
   // Session 2: verify all chunks reassemble correctly
   let engine = reopen_engine(&dir);
   let ops = DirectoryOps::new(&engine);
-  let content = ops.read_file("/big.bin").unwrap();
+  let content = ops.read_file_buffered("/big.bin").unwrap();
   assert_eq!(content.len(), large_data.len(), "large file length should match");
   assert_eq!(content, large_data, "large file content should match byte-for-byte");
 }
@@ -834,11 +834,11 @@ fn test_deleted_snapshot_stays_deleted_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data.txt", b"data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     vm.create_snapshot(&ctx, "doomed-snap", HashMap::new()).unwrap();
-    ops.store_file(&ctx, "/data2.txt", b"data2", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data2.txt", b"data2", None).unwrap();
     vm.create_snapshot(&ctx, "keeper-snap", HashMap::new()).unwrap();
     vm.delete_snapshot(&ctx, "doomed-snap").unwrap();
 
@@ -865,7 +865,7 @@ fn test_abandoned_fork_stays_gone_across_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data.txt", b"data", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"data", None).unwrap();
 
     let vm = VersionManager::new(&engine);
     vm.create_fork(&ctx, "keep-fork", None).unwrap();

@@ -24,7 +24,7 @@ fn test_resolve_file_at_root_level() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/readme.txt", b"hello readme", None).unwrap();
+    ops.store_file_buffered(&ctx, "/readme.txt", b"hello readme", None).unwrap();
     let snapshot = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     let (hash, file_record) = resolve_file_at_version(&engine, &snapshot.root_hash, "/readme.txt").unwrap();
@@ -41,7 +41,7 @@ fn test_resolve_file_nested() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/a/b/c/file.txt", b"deep content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a/b/c/file.txt", b"deep content", None).unwrap();
     let snapshot = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     let (hash, file_record) = resolve_file_at_version(&engine, &snapshot.root_hash, "/a/b/c/file.txt").unwrap();
@@ -71,7 +71,7 @@ fn test_resolve_directory_segment_missing() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/a/b/file.txt", b"content", None).unwrap();
+    ops.store_file_buffered(&ctx, "/a/b/file.txt", b"content", None).unwrap();
     let snapshot = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     let result = resolve_file_at_version(&engine, &snapshot.root_hash, "/a/b/missing/file.txt");
@@ -86,10 +86,10 @@ fn test_resolve_file_modified_between_snapshots() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/data.txt", b"v1", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"v1", None).unwrap();
     let snap1 = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
-    ops.store_file(&ctx, "/data.txt", b"v2", None).unwrap();
+    ops.store_file_buffered(&ctx, "/data.txt", b"v2", None).unwrap();
     let snap2 = vm.create_snapshot(&ctx, "snap2", HashMap::new()).unwrap();
 
     let (hash1, record1) = resolve_file_at_version(&engine, &snap1.root_hash, "/data.txt").unwrap();
@@ -108,7 +108,7 @@ fn test_resolve_file_deleted_between_snapshots() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/ephemeral.txt", b"now you see me", None).unwrap();
+    ops.store_file_buffered(&ctx, "/ephemeral.txt", b"now you see me", None).unwrap();
     let snap1 = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     ops.delete_file(&ctx, "/ephemeral.txt").unwrap();
@@ -131,11 +131,11 @@ fn test_read_file_at_version_content() {
     let ops = DirectoryOps::new(&engine);
     let vm = VersionManager::new(&engine);
 
-    ops.store_file(&ctx, "/greeting.txt", b"hello world", None).unwrap();
+    ops.store_file_buffered(&ctx, "/greeting.txt", b"hello world", None).unwrap();
     let snapshot = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
 
     // Modify after snapshot
-    ops.store_file(&ctx, "/greeting.txt", b"goodbye", None).unwrap();
+    ops.store_file_buffered(&ctx, "/greeting.txt", b"goodbye", None).unwrap();
 
     // Reading at the snapshot should return the original content
     let content = read_file_at_version(&engine, &snapshot.root_hash, "/greeting.txt").unwrap();

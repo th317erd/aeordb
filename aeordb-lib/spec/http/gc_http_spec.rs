@@ -66,9 +66,9 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn seed_engine(engine: &StorageEngine) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
         .unwrap();
 }
 

@@ -321,7 +321,7 @@ fn check_directory_recursive(
                     check_directory_recursive(ops, engine, &child_path, report, depth + 1);
                 } else if child.entry_type == EntryType::FileRecord.to_u8() {
                     // Verify file record is readable
-                    match ops.read_file(&child_path) {
+                    match ops.read_file_buffered(&child_path) {
                         Ok(_) => {}
                         Err(e) => {
                             report.missing_children.push(format!(

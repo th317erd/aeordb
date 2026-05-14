@@ -134,7 +134,7 @@ pub async fn share(
 
         // Determine whether this is a file or directory.
         // Try reading as a file first; if NotFound, check as directory.
-        let is_file = ops.read_file(&normalized).is_ok();
+        let is_file = ops.read_file_buffered(&normalized).is_ok();
         let is_dir = if !is_file {
             ops.list_directory(&normalized).is_ok()
         } else {
@@ -164,7 +164,7 @@ pub async fn share(
             format!("{}/.aeordb-permissions", perm_dir)
         };
 
-        let mut perms = match ops.read_file(&perm_file_path) {
+        let mut perms = match ops.read_file_buffered(&perm_file_path) {
             Ok(data) => match PathPermissions::deserialize(&data) {
                 Ok(p) => p,
                 Err(_) => PathPermissions { links: Vec::new() },
@@ -213,7 +213,7 @@ pub async fn share(
 
         // Write back the .permissions file
         let serialized = perms.serialize();
-        if let Err(e) = ops.store_file(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+        if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
             return ErrorResponse::new(format!("Failed to store permissions: {}", e))
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response();
@@ -281,7 +281,7 @@ pub async fn list_shares(
     let ops = DirectoryOps::new(&state.engine);
 
     // Determine perm_dir: if path is a file, look at parent
-    let is_file = ops.read_file(&normalized).is_ok();
+    let is_file = ops.read_file_buffered(&normalized).is_ok();
     let perm_dir = if is_file {
         parent_path(&normalized).unwrap_or_else(|| "/".to_string())
     } else {
@@ -294,7 +294,7 @@ pub async fn list_shares(
         format!("{}/.aeordb-permissions", perm_dir)
     };
 
-    let perms = match ops.read_file(&perm_file_path) {
+    let perms = match ops.read_file_buffered(&perm_file_path) {
         Ok(data) => match PathPermissions::deserialize(&data) {
             Ok(p) => p,
             Err(_) => PathPermissions { links: Vec::new() },
@@ -383,7 +383,7 @@ pub async fn unshare(
     let ctx = RequestContext::system();
 
     // Determine perm_dir
-    let is_file = ops.read_file(&normalized).is_ok();
+    let is_file = ops.read_file_buffered(&normalized).is_ok();
     let perm_dir = if is_file {
         parent_path(&normalized).unwrap_or_else(|| "/".to_string())
     } else {
@@ -396,7 +396,7 @@ pub async fn unshare(
         format!("{}/.aeordb-permissions", perm_dir)
     };
 
-    let mut perms = match ops.read_file(&perm_file_path) {
+    let mut perms = match ops.read_file_buffered(&perm_file_path) {
         Ok(data) => match PathPermissions::deserialize(&data) {
             Ok(p) => p,
             Err(_) => {
@@ -425,7 +425,7 @@ pub async fn unshare(
 
     // Write back
     let serialized = perms.serialize();
-    if let Err(e) = ops.store_file(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+    if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
         return ErrorResponse::new(format!("Failed to update permissions: {}", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
@@ -491,7 +491,7 @@ pub async fn shared_with_me(
     let mut shared_paths: Vec<serde_json::Value> = Vec::new();
 
     for entry in &perm_files {
-        let data = match ops.read_file(&entry.path) {
+        let data = match ops.read_file_buffered(&entry.path) {
             Ok(d) => d,
             Err(_) => continue,
         };

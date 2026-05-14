@@ -289,6 +289,10 @@ pub async fn file_restore(
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("reason".to_string(), "auto-snapshot before file restore".to_string());
                 metadata.insert("restored_path".to_string(), path.clone());
+                metadata.insert(
+                    crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+                    crate::engine::lifecycle_config::SNAPSHOT_TYPE_AUTO.to_string(),
+                );
                 metadata
             }) {
                 Ok(_) => break name,

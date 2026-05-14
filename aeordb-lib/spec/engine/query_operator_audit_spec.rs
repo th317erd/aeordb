@@ -72,7 +72,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 // ============================================================================

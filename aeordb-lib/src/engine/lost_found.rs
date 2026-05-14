@@ -33,7 +33,7 @@ pub fn quarantine_bytes(
         reason,
     );
 
-    if let Err(e) = ops.store_file(&ctx, &lf_path, data, Some("application/octet-stream")) {
+    if let Err(e) = ops.store_file_buffered(&ctx, &lf_path, data, Some("application/octet-stream")) {
         tracing::warn!(
             "Failed to write quarantine file {}: {}. Data may be lost.",
             lf_path,
@@ -78,7 +78,7 @@ pub fn quarantine_metadata(
         reason,
     );
 
-    if let Err(e) = ops.store_file(&ctx, &lf_path, &data, Some("application/json")) {
+    if let Err(e) = ops.store_file_buffered(&ctx, &lf_path, &data, Some("application/json")) {
         tracing::warn!(
             "Failed to write quarantine metadata {}: {}. Metadata may be lost.",
             lf_path,

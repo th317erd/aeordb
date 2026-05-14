@@ -57,7 +57,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     format!("{}/.aeordb-permissions", dir_path)
   };
   let data = permissions.serialize();
-  directory_ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
+  directory_ops.store_file_buffered(&ctx, &perm_path, &data, Some("application/json")).unwrap();
 }
 
 /// Create a PermissionLink with member-only flags.

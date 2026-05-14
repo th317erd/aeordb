@@ -32,7 +32,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 // ============================================================
@@ -87,7 +87,7 @@ fn test_parse_memory_limit_mb() {
 
   // Verify log was written about the parser failure
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/data/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/data/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("parser '/parsers/test' failed"), "Log: {}", log_str);
 }
@@ -230,7 +230,7 @@ fn test_parser_envelope_structure() {
   pipeline.run(&ctx, "/envelope/test.txt", data, Some("text/plain")).unwrap();
 
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/envelope/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/envelope/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("/parsers/envelope_test"), "Log should mention parser name: {}", log_str);
   assert!(log_str.contains("/envelope/test.txt"), "Log should mention file path: {}", log_str);
@@ -339,7 +339,7 @@ fn test_parser_envelope_filename_extraction() {
 
   // The log should mention the file path
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/docs/reports/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/docs/reports/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("/docs/reports/test.pdf"), "Log: {}", log_str);
 }
@@ -400,7 +400,7 @@ fn test_content_type_registry_lookup() {
 
   // Store content-type registry
   let registry = br#"{"application/pdf":"/parsers/pdf","text/csv":"/parsers/csv"}"#;
-  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   // Store index config with NO explicit parser (should fall back to registry)
   let config = PathIndexConfig {
@@ -423,7 +423,7 @@ fn test_content_type_registry_lookup() {
   pipeline.run(&ctx, "/uploads/report.pdf", b"pdf bytes", Some("application/pdf")).unwrap();
 
   // The log should mention the PDF parser was attempted
-  let log = ops.read_file("/uploads/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/uploads/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("/parsers/pdf"), "Expected PDF parser to be attempted: {}", log_str);
 }
@@ -439,7 +439,7 @@ fn test_content_type_registry_not_found() {
 
   // Store registry with only PDF
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -483,7 +483,7 @@ fn test_content_type_json_skips_registry() {
 
   // Store registry that maps application/json to a parser (should be ignored)
   let registry = br#"{"application/json":"/parsers/should_not_be_used"}"#;
-  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,
@@ -595,7 +595,7 @@ fn test_plugin_mapper_source_detection() {
 
   // Should have logged a mapper failure
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/mapped/.logs/system/indexing.log").unwrap();
+  let log = ops.read_file_buffered("/mapped/.logs/system/indexing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("computed"), "Log should mention the field name: {}", log_str);
   assert!(log_str.contains("Mapper"), "Log should mention mapper failure: {}", log_str);
@@ -771,7 +771,7 @@ fn test_pipeline_with_none_plugin_manager_parser_config() {
 
   // Log should indicate plugin manager was required
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/nopm/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/nopm/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("Plugin manager required"), "Log: {}", log_str);
 }
@@ -807,7 +807,7 @@ fn test_pipeline_with_none_plugin_manager_mapper_source() {
   assert!(result.is_ok(), "Pipeline should not crash without plugin manager for mapper");
 
   let ops = DirectoryOps::new(&engine);
-  let log = ops.read_file("/nopm_mapper/.logs/system/indexing.log").unwrap();
+  let log = ops.read_file_buffered("/nopm_mapper/.logs/system/indexing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("Plugin manager required"), "Log: {}", log_str);
 }
@@ -834,7 +834,7 @@ fn test_full_pipeline_method_exists() {
   assert!(result.is_ok(), "store_file_with_full_pipeline should work without plugin manager");
 
   // Verify file was stored
-  let data = ops.read_file("/test/file.json").unwrap();
+  let data = ops.read_file_buffered("/test/file.json").unwrap();
   assert_eq!(data, br#"{"name":"test"}"#);
 }
 
@@ -859,7 +859,7 @@ fn test_full_pipeline_with_plugin_manager() {
   );
   assert!(result.is_ok());
 
-  let data = ops.read_file("/test2/data.json").unwrap();
+  let data = ops.read_file_buffered("/test2/data.json").unwrap();
   assert_eq!(data, br#"{"value":"hello"}"#);
 }
 
@@ -1003,7 +1003,7 @@ fn test_explicit_parser_overrides_content_type_registry() {
 
   // Store registry
   let registry = br#"{"application/pdf":"/parsers/registry_pdf"}"#;
-  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let engine_arc = Arc::new(StorageEngine::create(
     dir.path().join("pm.aeor").to_str().unwrap()
@@ -1026,7 +1026,7 @@ fn test_explicit_parser_overrides_content_type_registry() {
   pipeline.run(&ctx, "/override/doc.pdf", b"pdf data", Some("application/pdf")).unwrap();
 
   // Log should mention the explicit parser, not the registry one
-  let log = ops.read_file("/override/.logs/system/parsing.log").unwrap();
+  let log = ops.read_file_buffered("/override/.logs/system/parsing.log").unwrap();
   let log_str = String::from_utf8(log).unwrap();
   assert!(log_str.contains("/parsers/explicit_pdf"), "Explicit parser should be used: {}", log_str);
   assert!(!log_str.contains("registry_pdf"), "Registry parser should NOT be used: {}", log_str);
@@ -1041,7 +1041,7 @@ fn test_content_type_none_skips_registry() {
   let ops = DirectoryOps::new(&engine);
 
   let registry = br#"{"application/pdf":"/parsers/pdf"}"#;
-  ops.store_file(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   let config = PathIndexConfig {
     parser: None,

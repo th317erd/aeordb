@@ -16,7 +16,7 @@ fn populate_engine(engine: &aeordb::engine::storage_engine::StorageEngine) {
     for i in 0..5 {
         let data = serde_json::json!({"id": i, "value": format!("item-{}", i)});
         let path = format!("/data/item-{}.json", i);
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &path,
             serde_json::to_string(&data).unwrap().as_bytes(),

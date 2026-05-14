@@ -668,7 +668,7 @@ impl<'a> IndexManager<'a> {
     let old_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
 
-    match ops.read_file(&old_path) {
+    match ops.read_file_buffered(&old_path) {
       Ok(data) => {
         let hash_length = self.engine.hash_algo().hash_length();
         let index = FieldIndex::deserialize(&data, hash_length)?;
@@ -695,7 +695,7 @@ impl<'a> IndexManager<'a> {
     let index_path = Self::index_file_path(path, field_name, strategy);
     let ops = DirectoryOps::new(self.engine);
 
-    match ops.read_file(&index_path) {
+    match ops.read_file_buffered(&index_path) {
       Ok(data) => {
         let hash_length = self.engine.hash_algo().hash_length();
         let index = FieldIndex::deserialize(&data, hash_length)?;
@@ -714,7 +714,7 @@ impl<'a> IndexManager<'a> {
     let data = index.serialize(hash_length);
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(self.engine);
-    ops.store_file(&ctx, &index_path, &data, Some("application/octet-stream"))?;
+    ops.store_file_buffered(&ctx, &index_path, &data, Some("application/octet-stream"))?;
     Ok(())
   }
 

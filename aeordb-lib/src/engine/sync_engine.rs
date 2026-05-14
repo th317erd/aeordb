@@ -634,7 +634,7 @@ impl SyncEngine {
 
                     if all_chunks_available {
                         let content_type = entry["content_type"].as_str();
-                        let _ = ops.store_file(&ctx, path, &file_data, content_type);
+                        let _ = ops.store_file_buffered(&ctx, path, &file_data, content_type);
                         operations_count += 1;
                     }
                 }

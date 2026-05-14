@@ -41,7 +41,11 @@ fn test_create_snapshot_stores_metadata() {
   metadata.insert("description".to_string(), "initial release".to_string());
 
   let snapshot = vm.create_snapshot(&ctx, "v1", metadata.clone()).unwrap();
-  assert_eq!(snapshot.metadata, metadata);
+  // create_snapshot auto-injects "type"=manual for callers that don't specify;
+  // user-provided fields are preserved verbatim.
+  assert_eq!(snapshot.metadata.get("author").unwrap(), "test-user");
+  assert_eq!(snapshot.metadata.get("description").unwrap(), "initial release");
+  assert_eq!(snapshot.metadata.get("type").unwrap(), "manual");
 
   // Verify it persists through listing
   let listed = vm.list_snapshots().unwrap();
@@ -59,7 +63,7 @@ fn test_create_snapshot_captures_head_hash() {
   let vm = VersionManager::new(&engine);
 
   // Store a file to change HEAD
-  ops.store_file(&ctx, "/test.txt", b"hello", None).unwrap();
+  ops.store_file_buffered(&ctx, "/test.txt", b"hello", None).unwrap();
   let head_hash = vm.get_head_hash().unwrap();
 
   let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
@@ -127,11 +131,11 @@ fn test_list_snapshots() {
   // Snapshot dedup: back-to-back snapshots with no writes between them
   // get deduplicated to the prior snapshot. Write something between each
   // to force HEAD changes.
-  ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a.txt", b"a", None).unwrap();
   vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
-  ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
+  ops.store_file_buffered(&ctx, "/b.txt", b"b", None).unwrap();
   vm.create_snapshot(&ctx, "v2", HashMap::new()).unwrap();
-  ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
+  ops.store_file_buffered(&ctx, "/c.txt", b"c", None).unwrap();
   vm.create_snapshot(&ctx, "v3", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();
@@ -147,13 +151,13 @@ fn test_list_snapshots_ordered_by_time() {
 
   let ops = DirectoryOps::new(&engine);
   // Writes between snapshots prevent dedup; small sleeps keep timestamps distinct.
-  ops.store_file(&ctx, "/a.txt", b"a", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a.txt", b"a", None).unwrap();
   vm.create_snapshot(&ctx, "alpha", HashMap::new()).unwrap();
   std::thread::sleep(std::time::Duration::from_millis(2));
-  ops.store_file(&ctx, "/b.txt", b"b", None).unwrap();
+  ops.store_file_buffered(&ctx, "/b.txt", b"b", None).unwrap();
   vm.create_snapshot(&ctx, "beta", HashMap::new()).unwrap();
   std::thread::sleep(std::time::Duration::from_millis(2));
-  ops.store_file(&ctx, "/c.txt", b"c", None).unwrap();
+  ops.store_file_buffered(&ctx, "/c.txt", b"c", None).unwrap();
   vm.create_snapshot(&ctx, "gamma", HashMap::new()).unwrap();
 
   let snapshots = vm.list_snapshots().unwrap();
@@ -202,7 +206,7 @@ fn test_create_fork_from_head() {
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file(&ctx, "/base.txt", b"base content", None).unwrap();
+  ops.store_file_buffered(&ctx, "/base.txt", b"base content", None).unwrap();
   let head_hash = vm.get_head_hash().unwrap();
 
   let fork = vm.create_fork(&ctx, "from-head", Some("HEAD")).unwrap();
@@ -217,11 +221,11 @@ fn test_create_fork_from_snapshot() {
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file(&ctx, "/v1-file.txt", b"v1 content", None).unwrap();
+  ops.store_file_buffered(&ctx, "/v1-file.txt", b"v1 content", None).unwrap();
   let snapshot = vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
 
   // Move HEAD forward
-  ops.store_file(&ctx, "/v2-file.txt", b"v2 content", None).unwrap();
+  ops.store_file_buffered(&ctx, "/v2-file.txt", b"v2 content", None).unwrap();
 
   // Fork from the snapshot, not HEAD
   let fork = vm.create_fork(&ctx, "from-v1", Some("v1")).unwrap();
@@ -237,7 +241,7 @@ fn test_fork_isolation() {
   let vm = VersionManager::new(&engine);
 
   // Establish baseline HEAD
-  ops.store_file(&ctx, "/shared.txt", b"shared", None).unwrap();
+  ops.store_file_buffered(&ctx, "/shared.txt", b"shared", None).unwrap();
   let head_before_fork = vm.get_head_hash().unwrap();
 
   // Create a fork
@@ -287,7 +291,7 @@ fn test_promote_fork_updates_head() {
   let ops = DirectoryOps::new(&engine);
   let vm = VersionManager::new(&engine);
 
-  ops.store_file(&ctx, "/before.txt", b"before", None).unwrap();
+  ops.store_file_buffered(&ctx, "/before.txt", b"before", None).unwrap();
   let original_head = vm.get_head_hash().unwrap();
 
   let fork = vm.create_fork(&ctx, "update-head", None).unwrap();
@@ -626,11 +630,14 @@ fn test_snapshot_with_empty_metadata() {
   let vm = VersionManager::new(&engine);
 
   let snapshot = vm.create_snapshot(&ctx, "no-meta", HashMap::new()).unwrap();
-  assert!(snapshot.metadata.is_empty());
+  // Even with no user metadata, the engine injects "type"=manual so lifecycle
+  // retention has the information it needs.
+  assert_eq!(snapshot.metadata.len(), 1);
+  assert_eq!(snapshot.metadata.get("type").unwrap(), "manual");
 
   let listed = vm.list_snapshots().unwrap();
   assert_eq!(listed.len(), 1);
-  assert!(listed[0].metadata.is_empty());
+  assert_eq!(listed[0].metadata.get("type").unwrap(), "manual");
 }
 
 #[test]

@@ -45,12 +45,12 @@ fn add_active_peer(peer_manager: &PeerManager, node_id: u64) {
 fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let context = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&context, path, data, Some("text/plain")).unwrap();
+    ops.store_file_buffered(&context, path, data, Some("text/plain")).unwrap();
 }
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 fn file_exists(engine: &StorageEngine, path: &str) -> bool {

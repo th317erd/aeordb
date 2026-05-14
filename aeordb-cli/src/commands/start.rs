@@ -268,7 +268,7 @@ pub async fn run(config: StartConfig<'_>) {
     let ctx = aeordb::engine::RequestContext::system();
     let config_path = "/.config/indexes.json";
 
-    match ops.read_file(config_path) {
+    match ops.read_file_buffered(config_path) {
       Ok(_) => {
         // Config exists — don't overwrite.
       }
@@ -285,7 +285,7 @@ pub async fn run(config: StartConfig<'_>) {
           ]
         });
         let config_bytes = serde_json::to_vec_pretty(&default_config).unwrap();
-        if let Err(e) = ops.store_file(&ctx, config_path, &config_bytes, Some("application/json")) {
+        if let Err(e) = ops.store_file_buffered(&ctx, config_path, &config_bytes, Some("application/json")) {
           tracing::warn!("Failed to write default index config: {}", e);
         } else {
           tracing::info!("Created default global index config");

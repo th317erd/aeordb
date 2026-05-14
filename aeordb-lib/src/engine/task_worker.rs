@@ -204,7 +204,7 @@ fn execute_reindex(
     } else {
         format!("{}/.aeordb-config/indexes.json", path)
     };
-    let config_data = ops.read_file(&config_path)
+    let config_data = ops.read_file_buffered(&config_path)
         .map_err(|e| format!("cannot read index config at {}: {}", config_path, e))?;
     let config = crate::engine::index_config::PathIndexConfig::deserialize(&config_data)
         .map_err(|e| format!("cannot parse index config at {}: {}", config_path, e))?;
@@ -264,7 +264,7 @@ fn execute_reindex(
 
         for file_path in batch {
             // Read file content.
-            let data = match ops.read_file(file_path) {
+            let data = match ops.read_file_buffered(file_path) {
                 Ok(data) => data,
                 Err(_) => {
                     consecutive_failures += 1;

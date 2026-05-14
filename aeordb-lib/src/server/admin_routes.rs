@@ -499,7 +499,7 @@ pub async fn update_api_key(
 
   let ops = crate::engine::DirectoryOps::new(&state.engine);
   let path = format!("/.aeordb-system/api-keys/{}", key_uuid);
-  let data = match ops.read_file(&path) {
+  let data = match ops.read_file_buffered(&path) {
     Ok(data) => data,
     Err(crate::engine::EngineError::NotFound(_)) => {
       return ErrorResponse::new(format!("API key not found: {}", key_id_string))

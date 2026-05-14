@@ -67,7 +67,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 /// Set up the engine with indexed user data.
@@ -935,15 +935,15 @@ fn setup_virtual_field_files(engine: &StorageEngine) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
 
-  ops.store_file(&ctx, "/docs/quarterly-report.pdf", b"fake pdf data for quarterly report",
+  ops.store_file_buffered(&ctx, "/docs/quarterly-report.pdf", b"fake pdf data for quarterly report",
     Some("application/pdf")).unwrap();
-  ops.store_file(&ctx, "/docs/annual-report.pdf", b"fake pdf data for annual report document",
+  ops.store_file_buffered(&ctx, "/docs/annual-report.pdf", b"fake pdf data for annual report document",
     Some("application/pdf")).unwrap();
-  ops.store_file(&ctx, "/docs/notes.txt", b"some plain text notes",
+  ops.store_file_buffered(&ctx, "/docs/notes.txt", b"some plain text notes",
     Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/images/photo.jpeg", b"fake jpeg image data bytes here",
+  ops.store_file_buffered(&ctx, "/images/photo.jpeg", b"fake jpeg image data bytes here",
     Some("image/jpeg")).unwrap();
-  ops.store_file(&ctx, "/images/logo.png", b"ab",
+  ops.store_file_buffered(&ctx, "/images/logo.png", b"ab",
     Some("image/png")).unwrap();
 }
 

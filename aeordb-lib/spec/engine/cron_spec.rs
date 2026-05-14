@@ -106,7 +106,7 @@ fn test_load_cron_config_from_engine() {
     };
 
     let data = serde_json::to_vec_pretty(&config).unwrap();
-    ops.store_file(&ctx, "/.aeordb-config/cron.json", &data, Some("application/json"))
+    ops.store_file_buffered(&ctx, "/.aeordb-config/cron.json", &data, Some("application/json"))
         .unwrap();
 
     let schedules = load_cron_config(&engine);
@@ -194,7 +194,7 @@ fn test_load_cron_config_malformed_json() {
     let ctx = RequestContext::system();
 
     // Store garbage at the config path
-    ops.store_file(&ctx, "/.aeordb-config/cron.json", b"not json at all{{{", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/.aeordb-config/cron.json", b"not json at all{{{", Some("application/json"))
         .unwrap();
 
     let schedules = load_cron_config(&engine);

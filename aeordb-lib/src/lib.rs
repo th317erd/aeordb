@@ -19,8 +19,8 @@
 //! let engine = StorageEngine::create("my.aeordb").unwrap();
 //! let ctx = RequestContext::system();
 //! let ops = DirectoryOps::new(&engine);
-//! ops.store_file(&ctx, "/hello.txt", b"Hello World", Some("text/plain")).unwrap();
-//! let content = ops.read_file("/hello.txt").unwrap();
+//! ops.store_file_buffered(&ctx, "/hello.txt", b"Hello World", Some("text/plain")).unwrap();
+//! let content = ops.read_file_buffered("/hello.txt").unwrap();
 //! assert_eq!(content, b"Hello World");
 //! ```
 

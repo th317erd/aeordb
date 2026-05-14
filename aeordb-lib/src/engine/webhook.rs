@@ -30,7 +30,7 @@ pub struct WebhookRegistry {
 /// Load webhook configuration from the database.
 pub fn load_webhook_config(engine: &StorageEngine) -> Option<WebhookRegistry> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file(WEBHOOK_CONFIG_PATH) {
+    match ops.read_file_buffered(WEBHOOK_CONFIG_PATH) {
         Ok(data) => {
             let text = std::str::from_utf8(&data).ok()?;
             serde_json::from_str(text).ok()

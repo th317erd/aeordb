@@ -41,26 +41,26 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   let mut live: HashSet<Vec<u8>> = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
 
-  // Walk HEAD
+  // Gather all merkle roots and walk them BFS with offset-sorted I/O.
+  // The walk visits each unique hash once across all roots (visited-set
+  // short-circuit), so structural sharing between snapshots is free.
+  let mut roots: Vec<(Vec<u8>, String)> = Vec::new();
   let head_hash = engine.head_hash()?;
   if !head_hash.is_empty() && head_hash.iter().any(|&b| b != 0) {
-    // HEAD points to a content-addressed directory hash for "/"
-    // Mark both the content hash and the path-based hash
-    walk_directory_tree(engine, &head_hash, "/", hash_length, &mut live)?;
+    roots.push((head_hash, "/".to_string()));
   }
 
-  // Walk every snapshot
   let vm = VersionManager::new(engine);
   let snapshots = vm.list_snapshots()?;
   for snapshot in &snapshots {
-    walk_directory_tree(engine, &snapshot.root_hash, "/", hash_length, &mut live)?;
+    roots.push((snapshot.root_hash.clone(), "/".to_string()));
   }
-
-  // Walk every fork
   let forks = vm.list_forks()?;
   for fork in &forks {
-    walk_directory_tree(engine, &fork.root_hash, "/", hash_length, &mut live)?;
+    roots.push((fork.root_hash.clone(), "/".to_string()));
   }
+
+  walk_versions_bfs(engine, roots, hash_length, &mut live)?;
 
   // Mark snapshot and fork KV key hashes as live
   for snapshot in &snapshots {
@@ -92,142 +92,140 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   Ok(live)
 }
 
-/// Walk a directory tree from a root hash, knowing the directory path.
-/// Marks both content-addressed and path-based hashes for directories.
-fn walk_directory_tree(
+/// Walk all version roots level-by-level, sorting each level by KV offset
+/// for sequential WAL I/O instead of random reads in tree-walk order.
+///
+/// The KV is in-memory, so type lookups and offset lookups are free. The
+/// expensive part — reading entry payloads from the WAL — happens in
+/// offset-ascending order, which lets the page cache and disk scheduler do
+/// large sequential reads instead of seeking on every entry.
+///
+/// **Type-aware leaf skip**: entries whose KV type is `KV_TYPE_CHUNK` are
+/// leaves — they have no children to follow. We mark them live without
+/// reading their payload from disk.
+fn walk_versions_bfs(
   engine: &StorageEngine,
-  root_hash: &[u8],
-  dir_path: &str,
+  roots: Vec<(Vec<u8>, String)>,
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
-  // Mark the content-addressed root hash
-  if !live.insert(root_hash.to_vec()) {
-    // Already visited this exact content hash — but we still need to mark
-    // the path-based hash for this directory path if it differs.
-    let path_hash = engine.compute_hash(format!("dir:{}", dir_path).as_bytes())?;
-    live.insert(path_hash);
-    return Ok(());
-  }
+  let algo = engine.hash_algo();
+  let mut frontier = roots;
 
-  // Also mark the path-based directory hash
-  let path_hash = engine.compute_hash(format!("dir:{}", dir_path).as_bytes())?;
-  live.insert(path_hash);
-
-  // Use get_entry_including_deleted: content-addressed entries may be marked
-  // deleted at HEAD but still reachable from historical snapshot roots.
-  let entry = match engine.get_entry_including_deleted(root_hash)? {
-    Some(entry) => entry,
-    None => return Ok(()),
-  };
-
-  let (header, _key, value) = entry;
-
-  // Follow hard links: if value is exactly hash_length bytes, it's a content hash pointer
-  let value = if value.len() == hash_length {
-    live.insert(value.clone()); // Mark the content hash as live
-    match engine.get_entry_including_deleted(&value)? {
-      Some((_h, _k, v)) => v,
-      None => return Ok(()),
-    }
-  } else {
-    value
-  };
-
-  if header.entry_type == EntryType::DirectoryIndex {
-    if value.is_empty() {
-      return Ok(());
-    }
-    let children = if is_btree_format(&value) {
-      collect_btree_children(engine, &value, hash_length, live)?
-    } else {
-      deserialize_child_entries(&value, hash_length, header.entry_version)?
-    };
-
-    for child in &children {
-      let child_path = if dir_path == "/" {
-        format!("/{}", child.name)
-      } else {
-        format!("{}/{}", dir_path, child.name)
-      };
-
-      let child_type = EntryType::from_u8(child.entry_type)?;
-      match child_type {
-        EntryType::DirectoryIndex => {
-          // Recurse into subdirectory — child.hash is the content-addressed hash
-          walk_directory_tree(engine, &child.hash, &child_path, hash_length, live)?;
+  while !frontier.is_empty() {
+    // Stage 1: dedup, mark path-keys for directories, fold in leaf-only entries.
+    // Survivors need a disk read; collect them with their KV offset.
+    let mut to_read: Vec<(Vec<u8>, String, u64)> = Vec::with_capacity(frontier.len());
+    for (hash, path) in frontier.drain(..) {
+      if !live.insert(hash.clone()) {
+        // Already visited content hash — still mark the path-key for this
+        // appearance because the same content can be referenced under
+        // multiple paths.
+        let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+        live.insert(path_key);
+        continue;
+      }
+      // In-memory KV lookup tells us the type and offset without disk I/O.
+      match engine.get_kv_entry(&hash) {
+        Some(kv) => {
+          let t = kv.entry_type();
+          if t == KV_TYPE_CHUNK {
+            // Leaf — already in `live`, nothing more to do.
+            continue;
+          }
+          to_read.push((hash, path, kv.offset));
         }
-        EntryType::FileRecord => {
-          mark_file_entry(engine, &child.hash, hash_length, live)?;
-        }
-        EntryType::Symlink => {
-          mark_symlink_entry(engine, &child.hash, &child_path, live)?;
-        }
-        _ => {
-          live.insert(child.hash.clone());
+        None => {
+          // Unknown to current KV (may be a hash from a deleted snapshot
+          // that hasn't been swept yet). Skip — `get_entry_including_deleted`
+          // can't help if it's not in the index either.
         }
       }
     }
-  }
 
-  Ok(())
-}
+    // Stage 2: sort by WAL offset so reads are sequential.
+    to_read.sort_by_key(|(_, _, offset)| *offset);
 
-/// Mark a file entry and its chunks as live.
-fn mark_file_entry(
-  engine: &StorageEngine,
-  file_hash: &[u8],
-  hash_length: usize,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
-  if !live.insert(file_hash.to_vec()) {
-    return Ok(());
-  }
+    // Stage 3: read each entry in offset order; emit children to next frontier.
+    let mut next_frontier: Vec<(Vec<u8>, String)> = Vec::new();
+    for (hash, path, _offset) in to_read {
+      let entry = match engine.get_entry_including_deleted(&hash)? {
+        Some(e) => e,
+        None => continue,
+      };
+      let (header, _key, value) = entry;
 
-  // Use get_entry_including_deleted: file entries may be deleted at HEAD
-  // but still referenced by historical snapshots.
-  if let Some((header, _key, value)) = engine.get_entry_including_deleted(file_hash)? {
-    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-    for chunk_hash in &file_record.chunk_hashes {
-      live.insert(chunk_hash.clone());
+      // Follow hard-link: if value is exactly a content hash, dereference.
+      let value = if value.len() == hash_length {
+        live.insert(value.clone());
+        match engine.get_entry_including_deleted(&value)? {
+          Some((_h, _k, v)) => v,
+          None => continue,
+        }
+      } else {
+        value
+      };
+
+      match header.entry_type {
+        EntryType::DirectoryIndex => {
+          // Mark the path-keyed lookup for this directory.
+          let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+          live.insert(path_key);
+
+          if value.is_empty() {
+            continue;
+          }
+          let children = if is_btree_format(&value) {
+            collect_btree_children(engine, &value, hash_length, live)?
+          } else {
+            deserialize_child_entries(&value, hash_length, header.entry_version)?
+          };
+
+          for child in &children {
+            let child_path = if path == "/" {
+              format!("/{}", child.name)
+            } else {
+              format!("{}/{}", path, child.name)
+            };
+            let child_type = EntryType::from_u8(child.entry_type)?;
+            match child_type {
+              EntryType::DirectoryIndex
+              | EntryType::FileRecord
+              | EntryType::Symlink => {
+                next_frontier.push((child.hash.clone(), child_path));
+              }
+              _ => {
+                live.insert(child.hash.clone());
+              }
+            }
+          }
+        }
+        EntryType::FileRecord => {
+          let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+          // Chunks are leaves — mark them as live without disk reads.
+          for chunk_hash in &file_record.chunk_hashes {
+            live.insert(chunk_hash.clone());
+          }
+          // Mark path-key (mutable index used for reads) and content-key
+          // (immutable content-addressed entry).
+          let file_path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+          live.insert(file_path_key);
+          let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+          live.insert(content_key);
+        }
+        EntryType::Symlink => {
+          let path_key = symlink_path_hash(&path, &algo)?;
+          live.insert(path_key);
+          let content_key = symlink_content_hash(&value, &algo)?;
+          live.insert(content_key);
+        }
+        _ => {
+          // Unhandled types are simply present in `live` already.
+        }
+      }
     }
 
-    let algo = engine.hash_algo();
-
-    // Also mark the path-based key as live (mutable index for reads/indexing)
-    let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
-    live.insert(path_key);
-
-    // Also mark the content-addressed key as live (immutable KV store entry)
-    let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
-    live.insert(content_key);
-  }
-
-  Ok(())
-}
-
-/// Mark a symlink entry and its path-based key as live.
-fn mark_symlink_entry(
-  engine: &StorageEngine,
-  symlink_hash: &[u8],
-  symlink_path: &str,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
-  if !live.insert(symlink_hash.to_vec()) {
-    return Ok(());
-  }
-
-  let algo = engine.hash_algo();
-
-  // Also mark the path-based key as live (mutable index for reads)
-  let path_key = symlink_path_hash(symlink_path, &algo)?;
-  live.insert(path_key);
-
-  // Also mark the content-addressed key as live (immutable KV store entry)
-  // Use _including_deleted: symlink may be deleted at HEAD but snapshot-referenced.
-  if let Some((_header, _key, value)) = engine.get_entry_including_deleted(symlink_hash)? {
-    let content_key = symlink_content_hash(&value, &algo)?;
-    live.insert(content_key);
+    frontier = next_frontier;
   }
 
   Ok(())
@@ -569,6 +567,21 @@ pub fn run_gc(
           tracing::warn!("Failed to delete old pre-GC snapshot {}: {}", old_name, e);
         }
       }
+    }
+
+    // Apply user-configured retention to non-engine snapshots before the
+    // mark phase. Snapshots deleted here have their orphaned data swept in
+    // this same GC cycle.
+    match crate::engine::lifecycle_config::prune_expired_snapshots(engine, ctx) {
+      Ok(result) if result.pruned_count > 0 => {
+        tracing::info!(
+          pruned = result.pruned_count,
+          names = ?result.pruned_names,
+          "Lifecycle retention pruned snapshots",
+        );
+      }
+      Ok(_) => {}
+      Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
     }
   }
 

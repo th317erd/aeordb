@@ -59,13 +59,13 @@ where
         let ops = DirectoryOps::new(engine);
         let json = serde_json::to_vec(value)
             .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-        ops.store_file(ctx, self.path, &json, Some("application/json"))?;
+        ops.store_file_buffered(ctx, self.path, &json, Some("application/json"))?;
         Ok(())
     }
 
     pub fn get(&self, engine: &StorageEngine) -> EngineResult<Option<T>> {
         let ops = DirectoryOps::new(engine);
-        match ops.read_file(self.path) {
+        match ops.read_file_buffered(self.path) {
             Ok(data) => {
                 let value: T = serde_json::from_slice(&data)
                     .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
@@ -111,7 +111,7 @@ where
         let path = self.path_for(id);
         let json = serde_json::to_vec(value)
             .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-        ops.store_file(ctx, &path, &json, Some("application/json"))?;
+        ops.store_file_buffered(ctx, &path, &json, Some("application/json"))?;
         Ok(())
     }
 
@@ -119,7 +119,7 @@ where
     pub fn get(&self, engine: &StorageEngine, id: &str) -> EngineResult<Option<T>> {
         let ops = DirectoryOps::new(engine);
         let path = self.path_for(id);
-        match ops.read_file(&path) {
+        match ops.read_file_buffered(&path) {
             Ok(data) => {
                 let value: T = serde_json::from_slice(&data)
                     .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
@@ -143,7 +143,7 @@ where
         let mut values = Vec::with_capacity(entries.len());
         for entry in &entries {
             let path = self.path_for(&entry.name);
-            if let Ok(data) = ops.read_file(&path) {
+            if let Ok(data) = ops.read_file_buffered(&path) {
                 if let Ok(value) = serde_json::from_slice::<T>(&data) {
                     values.push(value);
                 }

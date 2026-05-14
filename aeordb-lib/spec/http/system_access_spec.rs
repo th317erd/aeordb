@@ -192,7 +192,7 @@ impl TestHarness {
             Arc::new(EventBus::new()),
         );
         let ops = DirectoryOps::new(&self.engine);
-        ops.store_file(&ctx, path, content, Some("application/octet-stream"))
+        ops.store_file_buffered(&ctx, path, content, Some("application/octet-stream"))
             .unwrap_or_else(|e| panic!("Failed to store file at '{}': {}", path, e));
     }
 
@@ -843,7 +843,7 @@ async fn test_internal_engine_access_still_works() {
 
     // Read via engine (bypassing HTTP) -- should succeed
     let ops = DirectoryOps::new(&harness.engine);
-    let result = ops.read_file("/.aeordb-system/config/internal.json");
+    let result = ops.read_file_buffered("/.aeordb-system/config/internal.json");
     assert!(result.is_ok(), "Internal engine read of .system/ should succeed");
     assert_eq!(result.unwrap(), b"engine-data");
 }

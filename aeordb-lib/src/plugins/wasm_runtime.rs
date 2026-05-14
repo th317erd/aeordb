@@ -345,7 +345,7 @@ impl WasmPluginRuntime {
           let dir_ops = DirectoryOps::new(&engine);
 
           // Read file content
-          let data = match dir_ops.read_file(&path) {
+          let data = match dir_ops.read_file_buffered(&path) {
             Ok(d) => d,
             Err(e) => return write_error_response(&mut caller, &format!("Read failed: {}", e)),
           };
@@ -411,7 +411,7 @@ impl WasmPluginRuntime {
           let dir_ops = DirectoryOps::new(&engine);
           let size = data.len();
 
-          match dir_ops.store_file(&ctx, &path, &data, content_type.as_deref()) {
+          match dir_ops.store_file_buffered(&ctx, &path, &data, content_type.as_deref()) {
             Ok(_) => {
               let response = serde_json::json!({
                 "ok": true,

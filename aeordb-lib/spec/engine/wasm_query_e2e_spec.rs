@@ -141,7 +141,7 @@ fn test_echo_plugin_reads_file() {
     // Store a file in the engine first
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test-data/hello.txt", b"Hello from the host!", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/test-data/hello.txt", b"Hello from the host!", Some("text/plain"))
         .expect("store test file");
 
     // Now invoke the plugin's "read" function
@@ -183,7 +183,7 @@ fn test_echo_plugin_writes_file() {
 
     // Verify the file was written to the engine
     let ops = DirectoryOps::new(&engine);
-    let data = ops.read_file("/plugin-output/result.json").expect("read written file");
+    let data = ops.read_file_buffered("/plugin-output/result.json").expect("read written file");
     let parsed: serde_json::Value =
         serde_json::from_slice(&data).expect("parse written file as JSON");
     assert_eq!(parsed["written"], true);
@@ -196,11 +196,11 @@ fn test_echo_plugin_deletes_file() {
     // First store a file, then delete it via the plugin
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/deleteme/temp.json", b"{}", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/deleteme/temp.json", b"{}", Some("application/json"))
         .expect("store file for deletion");
 
     // Verify the file exists
-    let data = ops.read_file("/deleteme/temp.json");
+    let data = ops.read_file_buffered("/deleteme/temp.json");
     assert!(data.is_ok(), "file should exist before deletion");
 
     // Delete via plugin
@@ -211,7 +211,7 @@ fn test_echo_plugin_deletes_file() {
     assert_eq!(body["deleted"], true);
 
     // Verify the file is gone
-    let data_after = ops.read_file("/deleteme/temp.json");
+    let data_after = ops.read_file_buffered("/deleteme/temp.json");
     assert!(data_after.is_err(), "file should not exist after deletion");
 }
 
@@ -222,7 +222,7 @@ fn test_echo_plugin_file_metadata() {
     // Store a file first
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/meta-test/doc.txt", b"metadata test content", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/meta-test/doc.txt", b"metadata test content", Some("text/plain"))
         .expect("store file for metadata test");
 
     let response = invoke_raw(&pm, &engine, "metadata", b"/meta-test/doc.txt");
@@ -257,11 +257,11 @@ fn test_echo_plugin_lists_directory() {
     // Store several files in /listing/
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/listing/alpha.txt", b"a", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/listing/alpha.txt", b"a", Some("text/plain"))
         .expect("store alpha");
-    ops.store_file(&ctx, "/listing/beta.txt", b"bb", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/listing/beta.txt", b"bb", Some("text/plain"))
         .expect("store beta");
-    ops.store_file(&ctx, "/listing/gamma.json", b"{}", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/listing/gamma.json", b"{}", Some("application/json"))
         .expect("store gamma");
 
     let response = invoke_raw(&pm, &engine, "list", b"/listing");
