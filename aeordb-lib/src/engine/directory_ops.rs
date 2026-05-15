@@ -161,64 +161,71 @@ fn deletion_record_hash(
 /// All chunks are eagerly loaded upfront to avoid storing a raw pointer
 /// or reference to the StorageEngine. Each chunk is yielded one at a time,
 /// which still allows the HTTP layer to stream chunk-by-chunk from the Vec.
-pub struct EngineFileStream {
-  chunks: Vec<Result<Vec<u8>, EngineError>>,
-  current_index: usize,
+/// Internal handle that lets [`EngineFileStream`] satisfy both lifetime
+/// regimes: a borrowed `&StorageEngine` for fast in-process calls
+/// (e.g. CLI, soak-worker), and an owned `Arc<StorageEngine>` for cases
+/// that need `'static` (e.g. axum HTTP body streams).
+enum EngineHandle<'a> {
+  Borrowed(&'a StorageEngine),
+  Owned(std::sync::Arc<StorageEngine>),
 }
 
-impl EngineFileStream {
+impl<'a> EngineHandle<'a> {
+  fn engine(&self) -> &StorageEngine {
+    match self {
+      EngineHandle::Borrowed(e) => e,
+      EngineHandle::Owned(arc) => arc,
+    }
+  }
+}
+
+/// Lazy chunk stream over a file's chunk_hashes list.
+///
+/// **Truly streaming.** Construction is O(1) — no I/O happens in `new()`.
+/// Each call to `next()` fetches exactly one chunk from the engine, returns
+/// it, and frees the previous chunk on the subsequent call. Peak memory
+/// is one chunk (~256 KB), regardless of file size.
+///
+/// History: an earlier version of this struct loaded every chunk eagerly
+/// in its constructor and just iterated a pre-populated `Vec`. That made
+/// reads of large files (audiobooks, video files) spike RSS to file size.
+/// Caught during the 2026-05-15 soak diagnostics.
+pub struct EngineFileStream<'a> {
+  chunk_hashes: Vec<Vec<u8>>,
+  engine: EngineHandle<'a>,
+  current_index: usize,
+  include_deleted: bool,
+}
+
+impl<'a> EngineFileStream<'a> {
   /// Build a stream from an explicit list of chunk hashes (public entry point
   /// for hash-based retrieval where we already have the FileRecord).
-  pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+  pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine) -> EngineResult<Self> {
     Self::new(chunk_hashes, engine, false)
   }
 
   /// Like `from_chunk_hashes` but reads chunks even if they are marked deleted.
   /// Used for streaming files from historical snapshots.
-  pub fn from_chunk_hashes_including_deleted(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+  pub fn from_chunk_hashes_including_deleted(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine) -> EngineResult<Self> {
     Self::new(chunk_hashes, engine, true)
   }
 
-  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine, include_deleted: bool) -> EngineResult<Self> {
-    let mut chunks = Vec::with_capacity(chunk_hashes.len());
-
-    for hash in &chunk_hashes {
-      // Chunks are user-facing data — verify integrity on read
-      let result = if include_deleted {
-        engine.get_entry_verified_including_deleted(hash)
-      } else {
-        engine.get_entry_verified(hash)
-      };
-      match result {
-        Ok(Some((header, _key, value))) => {
-          // Decompress if the chunk was stored compressed
-          if header.compression_algo != CompressionAlgorithm::None {
-            match decompress(&value, header.compression_algo) {
-              Ok(decompressed) => chunks.push(Ok(decompressed)),
-              Err(error) => chunks.push(Err(error)),
-            }
-          } else {
-            chunks.push(Ok(value));
-          }
-        }
-        Ok(None) => {
-          chunks.push(Err(EngineError::NotFound(
-            format!("Chunk not found: {}", hex::encode(hash)),
-          )));
-        }
-        Err(error) => {
-          chunks.push(Err(error));
-        }
-      }
-    }
-
+  pub(crate) fn new(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine, include_deleted: bool) -> EngineResult<Self> {
     Ok(EngineFileStream {
-      chunks,
+      chunk_hashes,
+      engine: EngineHandle::Borrowed(engine),
       current_index: 0,
+      include_deleted,
     })
   }
 
-  /// Collect all chunks into a single Vec<u8>.
+  /// Number of chunks the stream will yield.
+  pub fn chunk_count(&self) -> usize { self.chunk_hashes.len() }
+
+  /// Collect all chunks into a single `Vec<u8>`. Materializes the full file
+  /// in memory by definition — use only when the caller actually needs the
+  /// whole content (e.g. small config files). Prefer iterating chunks for
+  /// arbitrary-size reads.
   pub fn collect_to_vec(self) -> EngineResult<Vec<u8>> {
     let mut result = Vec::new();
     for item in self {
@@ -226,29 +233,81 @@ impl EngineFileStream {
     }
     Ok(result)
   }
+
+  fn fetch_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
+    let engine = self.engine.engine();
+    let entry = if self.include_deleted {
+      engine.get_entry_verified_including_deleted(hash)?
+    } else {
+      engine.get_entry_verified(hash)?
+    };
+    match entry {
+      Some((header, _key, value)) => {
+        if header.compression_algo != CompressionAlgorithm::None {
+          decompress(&value, header.compression_algo)
+        } else {
+          Ok(value)
+        }
+      }
+      None => Err(EngineError::NotFound(
+        format!("Chunk not found: {}", hex::encode(hash)),
+      )),
+    }
+  }
 }
 
-impl Iterator for EngineFileStream {
+impl EngineFileStream<'static> {
+  /// Build a `'static` stream from an owned `Arc<StorageEngine>`. Required
+  /// when the stream must outlive the calling stack frame (e.g. axum HTTP
+  /// response bodies that demand `'static + Send`).
+  pub fn from_chunk_hashes_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+  ) -> EngineResult<Self> {
+    Self::new_owned(chunk_hashes, engine, false)
+  }
+
+  /// Owned-Arc variant of [`from_chunk_hashes_including_deleted`].
+  pub fn from_chunk_hashes_including_deleted_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+  ) -> EngineResult<Self> {
+    Self::new_owned(chunk_hashes, engine, true)
+  }
+
+  pub(crate) fn new_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+    include_deleted: bool,
+  ) -> EngineResult<Self> {
+    Ok(EngineFileStream {
+      chunk_hashes,
+      engine: EngineHandle::Owned(engine),
+      current_index: 0,
+      include_deleted,
+    })
+  }
+}
+
+impl<'a> Iterator for EngineFileStream<'a> {
   type Item = EngineResult<Vec<u8>>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if self.current_index >= self.chunks.len() {
+    if self.current_index >= self.chunk_hashes.len() {
       return None;
     }
-
-    let index = self.current_index;
+    let hash = self.chunk_hashes[self.current_index].clone();
     self.current_index += 1;
+    Some(self.fetch_chunk(&hash))
+  }
 
-    // Take the pre-read result, replacing with a placeholder error
-    // (the index will never be visited again since current_index only moves forward)
-    let chunk = std::mem::replace(
-      &mut self.chunks[index],
-      Err(EngineError::NotFound("already consumed".to_string())),
-    );
-
-    Some(chunk)
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let remaining = self.chunk_hashes.len() - self.current_index;
+    (remaining, Some(remaining))
   }
 }
+
+impl<'a> ExactSizeIterator for EngineFileStream<'a> {}
 
 /// Directory operations built on top of the StorageEngine.
 ///
@@ -293,6 +352,7 @@ impl<'a> DirectoryOps<'a> {
     mut reader: R,
     content_type: Option<&str>,
   ) -> EngineResult<FileRecord> {
+    let _mem = PhaseSampler::start("store_file_from_reader", std::time::Duration::from_millis(50));
     let chunk_size = DEFAULT_CHUNK_SIZE;
     let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
     let mut first_bytes: Vec<u8> = Vec::with_capacity(8192);
@@ -334,6 +394,7 @@ impl<'a> DirectoryOps<'a> {
   /// Store a single data chunk and return its hash. Deduplicates automatically.
   /// Used by streaming upload to store chunks as they arrive without buffering.
   pub fn store_chunk(&self, data: &[u8]) -> EngineResult<Vec<u8>> {
+    let _mem = PhaseSampler::start("store_chunk", std::time::Duration::from_millis(50));
     let algo = self.engine.hash_algo();
     let chunk_key = chunk_content_hash(data, &algo)?;
     if !self.engine.has_entry(&chunk_key)? {
@@ -747,7 +808,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Read a file as a streaming iterator of chunk data.
-  pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream> {
+  pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream<'_>> {
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
@@ -2498,5 +2559,113 @@ impl<'a> DirectoryOps<'a> {
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
 
     Ok(new_record)
+  }
+}
+
+#[cfg(test)]
+mod engine_file_stream_tests {
+  use super::*;
+  use crate::engine::request_context::RequestContext;
+  use crate::engine::storage_engine::StorageEngine;
+
+  fn create_test_engine() -> (StorageEngine, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("test.aeordb");
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    (engine, temp)
+  }
+
+  /// Build a payload big enough to span several 256 KB chunks so we can
+  /// verify the stream walks them one at a time.
+  fn multi_chunk_payload() -> Vec<u8> {
+    // 5 full chunks + a partial = 6 chunks. Use deterministic bytes per
+    // chunk so we can identify which chunk we got back.
+    let mut data = Vec::with_capacity(DEFAULT_CHUNK_SIZE * 5 + 1024);
+    for i in 0..5 {
+      data.extend(std::iter::repeat(i as u8).take(DEFAULT_CHUNK_SIZE));
+    }
+    data.extend(std::iter::repeat(0xFFu8).take(1024));
+    data
+  }
+
+  #[test]
+  fn lazy_stream_yields_chunks_in_order() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let payload = multi_chunk_payload();
+    ops
+      .store_file_buffered(&ctx, "/big.bin", &payload, Some("application/octet-stream"))
+      .unwrap();
+
+    let stream = ops.read_file_streaming("/big.bin").unwrap();
+    let expected_chunks = (payload.len() + DEFAULT_CHUNK_SIZE - 1) / DEFAULT_CHUNK_SIZE;
+    assert_eq!(stream.chunk_count(), expected_chunks);
+
+    let mut assembled = Vec::with_capacity(payload.len());
+    for chunk in stream {
+      assembled.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(assembled, payload);
+  }
+
+  #[test]
+  fn constructor_does_no_chunk_io() {
+    // With lazy semantics, building the stream is O(1) — no chunk reads
+    // happen until next(). Verify by constructing a stream whose chunk
+    // hashes are bogus: construction must succeed; iteration must surface
+    // the chunk-not-found errors only after next() is called.
+    let (engine, _temp) = create_test_engine();
+    let bogus_hashes: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 32]).collect();
+    let mut stream = EngineFileStream::from_chunk_hashes(bogus_hashes, &engine).unwrap();
+
+    // Constructor returned Ok — no errors surfaced yet.
+    // Each next() call surfaces the chunk-not-found error individually.
+    for _ in 0..4 {
+      let r = stream.next().unwrap();
+      assert!(r.is_err(), "expected NotFound for bogus chunk hash");
+    }
+    assert!(stream.next().is_none(), "stream should be exhausted");
+  }
+
+  #[test]
+  fn owned_arc_stream_can_be_static() {
+    // Smoke test for the 'static path used by the HTTP server. The stream
+    // must compile and run when the caller passes an Arc<StorageEngine>
+    // and the stream outlives the function's borrow scope.
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/x.bin", b"hello world", Some("text/plain")).unwrap();
+
+    // Look up the file_key path -> FileRecord -> chunk_hashes.
+    let algo = engine.hash_algo();
+    let file_key = file_path_hash("/x.bin", &algo).unwrap();
+    let (header, _key, value) = engine.get_entry(&file_key).unwrap().unwrap();
+    let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+
+    let arc = std::sync::Arc::new(engine);
+    let stream: EngineFileStream<'static> =
+      EngineFileStream::from_chunk_hashes_owned(record.chunk_hashes, arc).unwrap();
+    let collected = stream.collect_to_vec().unwrap();
+    assert_eq!(collected, b"hello world");
+  }
+
+  #[test]
+  fn size_hint_decrements_with_progress() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let payload = multi_chunk_payload();
+    ops.store_file_buffered(&ctx, "/bigger.bin", &payload, None).unwrap();
+    let mut stream = ops.read_file_streaming("/bigger.bin").unwrap();
+    let total = stream.chunk_count();
+    let (lo, hi) = stream.size_hint();
+    assert_eq!(lo, total);
+    assert_eq!(hi, Some(total));
+    let _ = stream.next().unwrap();
+    let (lo2, hi2) = stream.size_hint();
+    assert_eq!(lo2, total - 1);
+    assert_eq!(hi2, Some(total - 1));
   }
 }

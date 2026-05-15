@@ -458,8 +458,9 @@ fn build_file_streaming_response(
   file_record: &FileRecord,
   symlink_target: Option<&str>,
 ) -> Response {
-  let file_stream = match EngineFileStream::from_chunk_hashes(
-    file_record.chunk_hashes.clone(), engine,
+  let file_stream = match EngineFileStream::from_chunk_hashes_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(engine),
   ) {
     Ok(s) => s,
     Err(error) => {
@@ -732,8 +733,14 @@ fn handle_file_response(
     }
   };
 
-  // Use read_file_streaming for direct file reads (reads via path, not chunk hashes)
-  let file_stream = match directory_ops.read_file_streaming(path) {
+  // Build a 'static stream so axum's Body::from_stream is satisfied. The
+  // EngineFileStream now owns an Arc<StorageEngine> rather than borrowing
+  // from `directory_ops`. We pass the chunk_hashes from the file_record we
+  // just fetched — same as what read_file_streaming would have used.
+  let file_stream = match crate::engine::directory_ops::EngineFileStream::from_chunk_hashes_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(engine),
+  ) {
     Ok(s) => s,
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}': {}", path, error);
@@ -1042,8 +1049,9 @@ async fn engine_get_at_version(
 
   // Stream the file content from historical chunks (include deleted —
   // chunks may have been marked deleted after the snapshot was taken)
-  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted(
-    file_record.chunk_hashes.clone(), &state.engine,
+  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(&state.engine),
   ) {
     Ok(stream) => stream,
     Err(error) => {
@@ -1436,7 +1444,10 @@ pub async fn engine_get_by_hash(
         }
       };
 
-      let file_stream = match EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, &state.engine) {
+      let file_stream = match EngineFileStream::from_chunk_hashes_owned(
+        file_record.chunk_hashes,
+        std::sync::Arc::clone(&state.engine),
+      ) {
         Ok(s) => s,
         Err(e) => {
           tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
