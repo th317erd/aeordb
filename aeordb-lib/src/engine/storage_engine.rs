@@ -389,20 +389,12 @@ impl StorageEngine {
         detected_kv_corruption = true;
       }
 
-      // Scan for void entries (in-memory, not in KV)
-      let scanner = writer.scan_entries()?;
-      for scanned_result in scanner {
-        let scanned = match scanned_result {
-          Ok(entry) => entry,
-          Err(e) => {
-            tracing::warn!("Skipping corrupt entry during void scan: {}", e);
-            continue;
-          }
-        };
-        if scanned.header.entry_type == EntryType::Void {
-          void_manager.register_void(scanned.offset, scanned.header.total_length);
-        }
-      }
+      // Voids live in the hot tail (already loaded into void_manager above).
+      // No WAL scan needed on clean startup — pre-refactor we walked the
+      // entire WAL here to find EntryType::Void records, but those records
+      // no longer represent the source of truth for void state. On a 60 GB
+      // DB on a rotational disk that scan was a >50 minute startup cost
+      // finding zero useful records.
 
       kv
     } else {
@@ -427,13 +419,13 @@ impl StorageEngine {
             continue;
           }
         };
-        // Collect deletion records and register void entries during the scan.
+        // Collect deletion records. Voids are recovered via gap-scan
+        // (recover_voids_via_gap_scan) on dirty startup — the WAL void
+        // entries we used to register here are not the source of truth.
         if scanned.header.entry_type == EntryType::DeletionRecord {
           if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
             deletion_records.push((record.path, scanned.offset));
           }
-        } else if scanned.header.entry_type == EntryType::Void {
-          void_manager.register_void(scanned.offset, scanned.header.total_length);
         }
         let kv_type = scanned.header.entry_type.to_kv_type();
 

@@ -35,6 +35,7 @@ pub mod json_store;
 pub mod file_record;
 pub mod fuzzy;
 pub mod gc;
+pub mod rss_sampler;
 pub mod hot_tail;
 pub mod group;
 pub mod health;

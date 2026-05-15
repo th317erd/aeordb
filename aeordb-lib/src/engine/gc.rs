@@ -12,6 +12,7 @@ use crate::engine::kv_store::{
     KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
 };
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
 use crate::engine::version_manager::VersionManager;
@@ -67,7 +68,9 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
 
   let bfs_start = std::time::Instant::now();
+  let bfs_mem = PhaseSampler::start("mark.bfs", std::time::Duration::from_millis(50));
   walk_versions_bfs(engine, roots, hash_length, &mut live)?;
+  bfs_mem.finish();
   if timing {
     eprintln!("[gc-timing] mark.bfs: {:?} (live={})", bfs_start.elapsed(), live.len());
   }
@@ -97,6 +100,7 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
   let del_start = std::time::Instant::now();
+  let del_mem = PhaseSampler::start("mark.deletion-pass", std::time::Duration::from_millis(50));
   let all_entries = engine.iter_kv_entries()?;
   let mut deletion_count = 0usize;
   for entry in &all_entries {
@@ -105,6 +109,7 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
       deletion_count += 1;
     }
   }
+  del_mem.finish();
   if timing {
     eprintln!("[gc-timing] mark.deletion-pass: {:?} (kv_entries={}, deletions={})",
       del_start.elapsed(), all_entries.len(), deletion_count);
@@ -650,12 +655,18 @@ pub fn run_gc(
   let fork_count = vm.list_forks()?.len();
   let versions_scanned = 1 + snapshot_count + fork_count;
 
+  // RSS sampling: bracket mark, recheck-drain, and sweep separately so we can
+  // attribute the multi-GB transient to a specific phase. No-op unless
+  // AEORDB_GC_MEM_PROFILE is set.
+  let mark_mem = PhaseSampler::start("mark", std::time::Duration::from_millis(50));
   let mut live = gc_mark(engine)?;
+  mark_mem.finish();
 
   // Re-check drain: any entry that was written during the mark phase is now in
   // the recheck set. Walk each one and union into `live` so the sweep doesn't
   // clobber freshly-written data. Loop until the queue is empty for one pass.
   if !dry_run {
+    let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
     loop {
       let pending = engine.take_gc_recheck();
       if pending.is_empty() {
@@ -666,6 +677,7 @@ pub fn run_gc(
         mark_entry_recursive(engine, &hash, hash_length, &mut live)?;
       }
     }
+    drain_mem.finish();
   }
 
   let live_entries = live.len();
@@ -673,7 +685,9 @@ pub fn run_gc(
   // The RAII guard above calls end_gc_recheck on scope exit so failure paths
   // don't leave recheck recording on indefinitely.
   let sweep_start = std::time::Instant::now();
+  let sweep_mem = PhaseSampler::start("sweep", std::time::Duration::from_millis(50));
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
+  sweep_mem.finish();
   if std::env::var("AEORDB_GC_TIMING").is_ok() {
     eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})",
       sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
