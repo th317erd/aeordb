@@ -3,10 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::entry_header::EntryHeader;
 
+/// Smallest void worth tracking at all. Voids strictly smaller than this are
+/// dropped — they're indistinguishable from byte-alignment noise and would
+/// bloat the void index without ever being useful. Default is 1 (track any
+/// non-zero gap); set higher if you want to suppress micro-gaps in metrics.
+pub const MINIMUM_VOID_SIZE: u32 = 1;
+
 /// Smallest void that can still hold a real entry (header + zero-length key+value).
-/// Provided for callers that want to filter for "useful" voids; the VoidManager
-/// itself tracks ALL voids regardless of size — small voids are still useful
-/// for diagnostics, fragmentation analysis, and future coalescing logic.
+/// Voids smaller than this are still TRACKED (counted in metrics, visible to
+/// fragmentation analysis) but never returned by `find_void` because no entry
+/// would fit. For BLAKE3-256: fixed_header(31) + hash(32) + key(0) + value(0) = 63.
 pub const MINIMUM_USEFUL_VOID_SIZE: u32 = 63;
 
 /// Tracks reusable free space (voids) in the data file.
@@ -51,14 +57,17 @@ impl VoidManager {
 
   /// Register a void at the given offset with the given size.
   ///
-  /// **Tracks all sizes** (no MINIMUM_VOID_SIZE filter). Use
-  /// [`find_void`] which can be called with the minimum useful size to skip
-  /// voids too small to hold an entry.
+  /// **Floor:** voids strictly smaller than [`MINIMUM_VOID_SIZE`] are silently
+  /// dropped — they're alignment noise, not real reclaimable space. Voids
+  /// between MINIMUM_VOID_SIZE and MINIMUM_USEFUL_VOID_SIZE are tracked
+  /// (for metrics + fragmentation analysis) but won't be returned by
+  /// `find_void` because no entry would fit.
   ///
   /// **Deduplicates on the offset key.** Registering the same offset twice
   /// is a no-op as long as the size matches. Re-registering an offset with a
   /// different size updates the entry — used when voids merge or split.
   pub fn register_void(&mut self, offset: u64, size: u32) {
+    if size < MINIMUM_VOID_SIZE { return; }
     if let Some(&existing_size) = self.by_offset.get(&offset) {
       if existing_size == size {
         return; // exact duplicate

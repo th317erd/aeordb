@@ -538,7 +538,21 @@ impl StorageEngine {
   /// Gap-scan the live KV index and register each gap (between consecutive
   /// non-deleted entries' offset ranges) as a void in VoidManager. Used
   /// after dirty startup when the hot tail's void section was lost.
+  ///
+  /// The cursor starts at the WAL's start offset (immediately after the KV
+  /// block), so any gap between the KV block boundary and the first live
+  /// entry is captured. Previously this started at `ranges.first()` which
+  /// missed the very first void if it lived between kv_block_end and the
+  /// first entry.
   pub(crate) fn recover_voids_via_gap_scan(&self) -> EngineResult<()> {
+    // WAL begins immediately after the KV block.
+    let wal_start: u64 = {
+      let writer = self.writer.read()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let hdr = writer.file_header();
+      hdr.kv_block_offset + hdr.kv_block_length
+    };
+
     // Collect (offset, total_length) of all live (non-deleted) entries.
     let mut ranges: Vec<(u64, u32)> = {
       let snapshot = self.kv_snapshot.load();
@@ -553,14 +567,10 @@ impl StorageEngine {
     let mut vm = self.void_manager.write()
       .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
 
-    // The first entry in the WAL starts after the KV block. Voids before
-    // the first entry's offset would be in the KV block region, which is
-    // not subject to void tracking — only the WAL region matters here.
-    let mut cursor: u64 = ranges.first().map(|(o, _)| *o).unwrap_or(0);
+    let mut cursor: u64 = wal_start;
     for (offset, total_length) in &ranges {
       if *offset > cursor {
         let gap_size = *offset - cursor;
-        // Cap at u32::MAX defensively; in practice voids are far smaller.
         let gap_size_u32 = u32::try_from(gap_size).unwrap_or(u32::MAX);
         vm.register_void(cursor, gap_size_u32);
       }
@@ -570,6 +580,7 @@ impl StorageEngine {
     tracing::info!(
       void_count = vm.void_count(),
       total_void_bytes = vm.total_void_space(),
+      wal_start,
       "Recovered voids via gap-scan after dirty startup"
     );
 
@@ -740,19 +751,15 @@ impl StorageEngine {
     // the entry in-place at the void's offset instead of growing the WAL.
     // This is how the GC's freed space gets recycled into new writes.
     //
-    // Skip void-consumption when compression is requested — the on-disk
-    // total_length depends on compressed size, which we can't know without
-    // actually compressing, and write_entry_at_nosync doesn't yet support
-    // compression. Tail-append handles compressed entries today.
-    let void_slot = if compression_algo == CompressionAlgorithm::None {
-      let needed = crate::engine::entry_header::EntryHeader::compute_total_length(
-        self.hash_algo, key.len(), value.len(),
-      )?;
-      if let Ok(mut vm) = self.void_manager.write() {
-        vm.find_void(needed)
-      } else {
-        None
-      }
+    // The size is computed from the caller-provided `value` length — for
+    // compressed entries, the caller has already compressed the bytes and
+    // `value` holds the compressed payload, so compute_total_length gives
+    // the right disk size.
+    let needed = crate::engine::entry_header::EntryHeader::compute_total_length(
+      self.hash_algo, key.len(), value.len(),
+    )?;
+    let void_slot = if let Ok(mut vm) = self.void_manager.write() {
+      vm.find_void(needed)
     } else {
       None
     };
@@ -762,10 +769,13 @@ impl StorageEngine {
       // In-place write at the void's offset. The void is already removed
       // from void_manager (find_void did it). After this write, the bytes
       // at void_offset belong to the new entry.
-      let written = writer.write_entry_at_nosync_with_flags(
-        void_offset, entry_type, key, value, flags,
+      //
+      // No explicit fsync here — void-consumption writes ride the same
+      // hot-tail-flush durability path as appends. The whole point of this
+      // plumbing is to AVOID per-entry random fsyncs.
+      let written = writer.write_entry_at_nosync_full(
+        void_offset, entry_type, key, value, flags, compression_algo,
       )?;
-      writer.sync()?;
       (void_offset, written)
     } else {
       writer.append_entry_with_compression(

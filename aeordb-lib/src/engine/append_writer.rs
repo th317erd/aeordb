@@ -254,7 +254,7 @@ impl AppendWriter {
     key: &[u8],
     value: &[u8],
   ) -> EngineResult<u32> {
-    self.write_entry_at_nosync_with_flags(offset, entry_type, key, value, 0)
+    self.write_entry_at_nosync_full(offset, entry_type, key, value, 0, CompressionAlgorithm::None)
   }
 
   /// Same as [`write_entry_at_nosync`] but lets the caller specify the
@@ -266,6 +266,21 @@ impl AppendWriter {
     key: &[u8],
     value: &[u8],
     flags: u8,
+  ) -> EngineResult<u32> {
+    self.write_entry_at_nosync_full(offset, entry_type, key, value, flags, CompressionAlgorithm::None)
+  }
+
+  /// Full-fidelity in-place write: flags + compression_algo. The `value`
+  /// bytes are written verbatim — the caller is responsible for compressing
+  /// the data before this call if `compression_algo != None`.
+  pub fn write_entry_at_nosync_full(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
@@ -279,7 +294,7 @@ impl AppendWriter {
       entry_type,
       flags,
       hash_algo,
-      compression_algo: CompressionAlgorithm::None,
+      compression_algo,
       encryption_algo: 0,
       key_length: key.len() as u32,
       value_length: value.len() as u32,
