@@ -104,6 +104,8 @@ pub fn prune_expired_snapshots(
   engine: &StorageEngine,
   ctx: &RequestContext,
 ) -> EngineResult<PruneResult> {
+  let _mem = crate::engine::rss_sampler::PhaseSampler::start(
+    "prune_expired_snapshots", std::time::Duration::from_millis(50));
   let config = load_lifecycle_config(engine);
   let auto_months = config.snapshot_retention.auto_months;
   let manual_months = config.snapshot_retention.manual_months;

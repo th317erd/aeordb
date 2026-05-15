@@ -242,6 +242,37 @@ fn run(config: Config) -> Result<(), String> {
     })
   };
 
+  // Wide-cadence RSS sampler: 50 ms polling, peak-per-second row out.
+  // Catches transient spikes that the 60 s metrics cadence misses entirely.
+  // Output: <db>.wide_rss.tsv with iso_time, peak_rss_kb, cur_rss_kb, hwm_kb.
+  let wide_handle = {
+    let stop_flag = Arc::clone(&stop_flag);
+    let wide_path = format!("{}.wide_rss.tsv", config.database);
+    std::thread::spawn(move || {
+      let mut file = match std::fs::File::create(&wide_path) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("wide_rss create failed: {e}"); return; }
+      };
+      let _ = writeln!(file, "iso_time\tpeak_rss_kb\tcur_rss_kb\thwm_kb");
+      let mut bucket_start = Instant::now();
+      let mut bucket_peak_kb: u64 = 0;
+      while !stop_flag.load(Ordering::Relaxed) {
+        let mem = read_self_memory_stats().unwrap_or_default();
+        if mem.rss_kb > bucket_peak_kb { bucket_peak_kb = mem.rss_kb; }
+        if bucket_start.elapsed() >= Duration::from_secs(1) {
+          let _ = writeln!(file, "{}\t{}\t{}\t{}",
+            chrono::Utc::now().to_rfc3339(),
+            bucket_peak_kb, mem.rss_kb, mem.hwm_kb,
+          );
+          let _ = file.flush();
+          bucket_start = Instant::now();
+          bucket_peak_kb = 0;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+      }
+    })
+  };
+
   // 4. Main workload loop. Each iteration picks an action and executes it
   //    synchronously. The committed-paths set stays in-memory authoritative;
   //    the checkpoint file is the recovery oracle.
@@ -379,6 +410,7 @@ fn run(config: Config) -> Result<(), String> {
   println!("duration reached, shutting down");
   stop_flag.store(true, Ordering::Relaxed);
   let _ = metrics_handle.join();
+  let _ = wide_handle.join();
 
   // Final flush of the engine so any in-memory state is durable.
   if let Err(e) = engine.shutdown() {

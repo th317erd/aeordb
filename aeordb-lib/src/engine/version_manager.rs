@@ -6,6 +6,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Information about a named snapshot (a saved point-in-time reference).
@@ -359,6 +360,7 @@ impl<'a> VersionManager<'a> {
     name: &str,
     metadata: HashMap<String, String>,
   ) -> EngineResult<SnapshotInfo> {
+    let _mem = PhaseSampler::start("create_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
 
     // Check for duplicate name (only if not deleted)
@@ -483,6 +485,7 @@ impl<'a> VersionManager<'a> {
   /// Delete a named snapshot by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
   pub fn delete_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
+    let _mem = PhaseSampler::start("delete_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {

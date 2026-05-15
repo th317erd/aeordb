@@ -1597,6 +1597,8 @@ impl StorageEngine {
   /// every entry in the `.aeordb` file. Corrupt entries are skipped with a
   /// warning. The rebuilt KV store is swapped in atomically.
   pub fn rebuild_kv(&self) -> EngineResult<()> {
+    let _mem = crate::engine::rss_sampler::PhaseSampler::start(
+      "rebuild_kv", std::time::Duration::from_millis(50));
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
 

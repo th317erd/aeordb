@@ -14,6 +14,7 @@ use crate::engine::index_store::IndexManager;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 
 /// Default chunk size for splitting file data (256 KB).
@@ -358,6 +359,7 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
     first_bytes: &[u8],
   ) -> EngineResult<FileRecord> {
+    let _mem = PhaseSampler::start("finalize_file", std::time::Duration::from_millis(50));
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
