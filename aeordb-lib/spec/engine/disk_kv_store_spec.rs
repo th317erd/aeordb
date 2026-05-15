@@ -22,7 +22,8 @@ fn make_entry(seed: u8, offset: u64) -> KVEntry {
         type_flags: KV_TYPE_CHUNK,
         hash: make_hash(seed),
         offset,
-    }
+        total_length: 64,
+        }
 }
 
 fn create_test_kv(dir: &std::path::Path) -> DiskKVStore {
@@ -191,36 +192,35 @@ fn test_upsert_full() {
 #[test]
 fn test_page_size() {
     // PAGE_HEADER_SIZE = 10 (magic u32 + crc32 u32 + entry_count u16)
+    // Per-entry: hash + type_flags(1) + offset(8) + total_length(4)
     // BLAKE3: 32-byte hash
-    // page_size = 10 + 32 * (32 + 1 + 8) = 10 + 32 * 41 = 10 + 1312 = 1322
-    assert_eq!(page_size(32), 10 + 32 * (32 + 1 + 8));
-    assert_eq!(page_size(32), 1322);
+    // page_size = 10 + 32 * (32 + 1 + 8 + 4) = 10 + 32 * 45 = 10 + 1440 = 1450
+    assert_eq!(page_size(32), 10 + 32 * (32 + 1 + 8 + 4));
+    assert_eq!(page_size(32), 1450);
 
     // SHA-512: 64-byte hash
-    // page_size = 10 + 32 * (64 + 1 + 8) = 10 + 32 * 73 = 10 + 2336 = 2346
-    assert_eq!(page_size(64), 2346);
+    // page_size = 10 + 32 * (64 + 1 + 8 + 4) = 10 + 32 * 77 = 10 + 2464 = 2474
+    assert_eq!(page_size(64), 2474);
 }
 
 #[test]
 fn test_stage_for_count() {
     let hl = 32;
 
-    // page_size(32) = 1314
-    // Stage 0: 64KB / 1314 = 49 buckets * 32 = 1568 capacity
-    // Stage 1: 512KB / 1314 = 399 buckets * 32 = 12768 capacity
-    // Stage 2: 4MB / 1314 = 3192 buckets * 32 = 102144 capacity
+    // page_size(32) = 1450
+    // Stage 0: 64KB / 1450 = 45 buckets * 32 = 1440 capacity
+    // Stage 1: 512KB / 1450 = 361 buckets * 32 = 11552 capacity
+    // Stage 2: 4MB / 1450 = 2892 buckets * 32 = 92544 capacity
     assert_eq!(stage_for_count(0, hl), 0);
     assert_eq!(stage_for_count(100, hl), 0);
-    assert_eq!(stage_for_count(1500, hl), 0);
+    assert_eq!(stage_for_count(1000, hl), 0);
 
-    assert_eq!(stage_for_count(1568, hl), 1);
+    assert_eq!(stage_for_count(1440, hl), 1);
     assert_eq!(stage_for_count(10_000, hl), 1);
 
-    assert_eq!(stage_for_count(12_768, hl), 2);
+    assert_eq!(stage_for_count(11_552, hl), 2);
 
     // Very large count should return last stage
-    // Stage 9: 8GB / 1314 = ~6.1M buckets * 32 = ~195M capacity
-    // Need > 195M to overflow all stages
     assert_eq!(stage_for_count(200_000_000, hl), KV_STAGE_SIZES.len() - 1);
 }
 
@@ -401,7 +401,8 @@ fn test_auto_flush() {
                 type_flags: KV_TYPE_CHUNK,
                 hash,
                 offset: i as u64,
-            }).unwrap();
+                total_length: 64,
+        }).unwrap();
         }
         // Some should have been auto-flushed already
         // Flush remaining
@@ -489,6 +490,7 @@ fn test_large_dataset() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
+            total_length: 64,
         }).unwrap();
     }
     store.flush().unwrap();
@@ -670,6 +672,7 @@ fn test_cache_eviction() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
+            total_length: 64,
         }).unwrap();
     }
     store.flush().unwrap();
@@ -868,6 +871,7 @@ fn test_resize_preserves_all_entries() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
+            total_length: 64,
         }).unwrap();
     }
     store.flush().unwrap();
@@ -902,7 +906,8 @@ fn test_create_at_stage() {
         type_flags: KV_TYPE_CHUNK,
         hash: hash.clone(),
         offset: 999,
-    }).unwrap();
+        total_length: 64,
+        }).unwrap();
     store.flush().unwrap();
 
     let entry = store.get(&hash).unwrap();
@@ -943,6 +948,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
+            total_length: 64,
         }).unwrap();
     }
     store.flush().unwrap();
@@ -964,6 +970,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
+            total_length: 64,
         }).unwrap();
     }
     store.flush().unwrap();

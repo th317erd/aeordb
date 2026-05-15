@@ -142,7 +142,7 @@ pub use symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash}
 pub use symlink_resolver::{resolve_symlink, ResolvedTarget, MAX_SYMLINK_DEPTH};
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
-pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
+pub use void_manager::{VoidManager, MINIMUM_USEFUL_VOID_SIZE};
 pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash, symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, is_system_path, DEFAULT_CHUNK_SIZE};
 pub use indexing_pipeline::IndexingPipeline;

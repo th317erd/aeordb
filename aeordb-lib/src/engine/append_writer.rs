@@ -140,13 +140,14 @@ impl AppendWriter {
     Ok(())
   }
 
+  /// Append an entry at the current WAL tail. Returns (entry_offset, total_length).
   pub fn append_entry(
     &mut self,
     entry_type: EntryType,
     key: &[u8],
     value: &[u8],
     flags: u8,
-  ) -> EngineResult<u64> {
+  ) -> EngineResult<(u64, u32)> {
     self.append_entry_with_compression(
       entry_type,
       key,
@@ -156,6 +157,8 @@ impl AppendWriter {
     )
   }
 
+  /// Append an entry at the current WAL tail with optional compression.
+  /// Returns (entry_offset, total_length).
   pub fn append_entry_with_compression(
     &mut self,
     entry_type: EntryType,
@@ -163,7 +166,7 @@ impl AppendWriter {
     value: &[u8],
     flags: u8,
     compression_algo: CompressionAlgorithm,
-  ) -> EngineResult<u64> {
+  ) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
@@ -202,10 +205,10 @@ impl AppendWriter {
     self.file_header.entry_count += 1;
     self.file_header.updated_at = now;
 
-    Ok(entry_offset)
+    Ok((entry_offset, total_length))
   }
 
-  pub fn write_void(&mut self, size: u32) -> EngineResult<u64> {
+  pub fn write_void(&mut self, size: u32) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let header_size = 31 + hash_algo.hash_length(); // fixed header + hash
 
@@ -243,13 +246,26 @@ impl AppendWriter {
 
   /// Write an entry at a specific offset WITHOUT syncing.
   /// Caller is responsible for calling `sync()` after all writes are done.
-  /// Used by GC sweep for batch in-place overwrites.
+  /// Used by GC sweep for batch in-place overwrites and by void consumption.
   pub fn write_entry_at_nosync(
     &mut self,
     offset: u64,
     entry_type: EntryType,
     key: &[u8],
     value: &[u8],
+  ) -> EngineResult<u32> {
+    self.write_entry_at_nosync_with_flags(offset, entry_type, key, value, 0)
+  }
+
+  /// Same as [`write_entry_at_nosync`] but lets the caller specify the
+  /// entry header `flags` (e.g. `FLAG_SYSTEM`).
+  pub fn write_entry_at_nosync_with_flags(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
   ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
@@ -261,7 +277,7 @@ impl AppendWriter {
     let header = EntryHeader {
       entry_version: CURRENT_ENTRY_VERSION,
       entry_type,
-      flags: 0,
+      flags,
       hash_algo,
       compression_algo: CompressionAlgorithm::None,
       encryption_algo: 0,
@@ -315,9 +331,14 @@ impl AppendWriter {
     Ok(())
   }
 
-  /// Write hot tail entries at a specific offset using this writer's file handle.
-  pub fn write_hot_tail_at(&mut self, offset: u64, entries: &[crate::engine::kv_store::KVEntry], hash_length: usize) -> EngineResult<u64> {
-    let end = crate::engine::hot_tail::write_hot_tail(&mut self.file, offset, entries, hash_length)?;
+  /// Write hot tail payload (pending KV writes + voids) at a specific offset.
+  pub fn write_hot_tail_at(
+    &mut self,
+    offset: u64,
+    payload: &crate::engine::hot_tail::HotTailPayload,
+    hash_length: usize,
+  ) -> EngineResult<u64> {
+    let end = crate::engine::hot_tail::write_hot_tail(&mut self.file, offset, payload, hash_length)?;
     Ok(end)
   }
 
@@ -334,14 +355,20 @@ impl AppendWriter {
     Ok(())
   }
 
-  /// Read hot tail entries from this writer's reader handle.
-  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
+  /// Read hot tail payload (writes + voids) from this writer's reader handle.
+  /// Returns an empty payload if the hot tail is missing, torn, or unreadable.
+  pub fn read_hot_tail_payload(&self, offset: u64, hash_length: usize) -> crate::engine::hot_tail::HotTailPayload {
     let mut reader = match self.reader.try_clone() {
       Ok(r) => r,
-      Err(_) => return Vec::new(),
+      Err(_) => return crate::engine::hot_tail::HotTailPayload::default(),
     };
     crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length)
       .unwrap_or_default()
+  }
+
+  /// Backwards-compatible wrapper that returns only the write entries.
+  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
+    self.read_hot_tail_payload(offset, hash_length).writes
   }
 
   /// Write a void entry at a specific file offset (in-place overwrite).

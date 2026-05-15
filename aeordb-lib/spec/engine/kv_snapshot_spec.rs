@@ -26,7 +26,8 @@ fn make_entry(seed: u8, offset: u64) -> KVEntry {
         type_flags: KV_TYPE_CHUNK,
         hash: make_hash(seed),
         offset,
-    }
+        total_length: 64,
+        }
 }
 
 fn make_deleted_entry(seed: u8, offset: u64) -> KVEntry {
@@ -34,7 +35,8 @@ fn make_deleted_entry(seed: u8, offset: u64) -> KVEntry {
         type_flags: KV_TYPE_CHUNK | KV_FLAG_DELETED,
         hash: make_hash(seed),
         offset,
-    }
+        total_length: 64,
+        }
 }
 
 /// Create an in-file DiskKVStore at stage 0 inside a temp .aeordb file.

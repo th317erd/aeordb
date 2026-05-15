@@ -17,7 +17,8 @@ fn make_entry(hash_byte: u8, offset: u64) -> KVEntry {
     type_flags: KV_TYPE_CHUNK,
     hash: make_hash(hash_byte),
     offset,
-  }
+    total_length: 64,
+        }
 }
 
 fn make_entry_with_type(hash_byte: u8, offset: u64, type_flags: u8) -> KVEntry {
@@ -25,7 +26,8 @@ fn make_entry_with_type(hash_byte: u8, offset: u64, type_flags: u8) -> KVEntry {
     type_flags,
     hash: make_hash(hash_byte),
     offset,
-  }
+    total_length: 64,
+        }
 }
 
 fn make_blake3_hash(data: &[u8]) -> Vec<u8> {
@@ -211,7 +213,8 @@ fn test_nvt_accelerated_lookup() {
       type_flags: KV_TYPE_CHUNK,
       hash,
       offset: index as u64 * 1000,
-    });
+      total_length: 64,
+        });
   }
 
   // Verify all 100 entries can be found via NVT-accelerated lookup
@@ -277,7 +280,8 @@ fn test_rebuild_nvt() {
       type_flags: KV_TYPE_CHUNK,
       hash,
       offset: index as u64 * 100,
-    });
+      total_length: 64,
+        });
   }
 
   // Force rebuild
@@ -310,7 +314,8 @@ fn test_bulk_insert_1000_entries() {
       type_flags: KV_TYPE_CHUNK,
       hash,
       offset: index as u64 * 512,
-    });
+      total_length: 64,
+        });
   }
 
   assert_eq!(store.len(), 1000);
@@ -355,7 +360,8 @@ fn test_pending_flag() {
     type_flags: KV_TYPE_CHUNK | KV_FLAG_PENDING,
     hash: make_hash(0xAA),
     offset: 100,
-  });
+    total_length: 64,
+        });
 
   let found = store.get(&make_hash(0xAA)).unwrap();
   assert!(found.is_pending());
@@ -370,7 +376,8 @@ fn test_deleted_flag() {
     type_flags: KV_TYPE_FILE_RECORD | KV_FLAG_DELETED,
     hash: make_hash(0xBB),
     offset: 200,
-  });
+    total_length: 64,
+        });
 
   let found = store.get(&make_hash(0xBB)).unwrap();
   assert!(found.is_deleted());
@@ -386,7 +393,8 @@ fn test_insert_duplicate_hash_updates() {
     type_flags: KV_TYPE_CHUNK,
     hash: make_hash(0xAA),
     offset: 100,
-  });
+    total_length: 64,
+        });
   assert_eq!(store.len(), 1);
 
   // Insert same hash with different offset — should update, not add
@@ -394,7 +402,8 @@ fn test_insert_duplicate_hash_updates() {
     type_flags: KV_TYPE_FILE_RECORD,
     hash: make_hash(0xAA),
     offset: 999,
-  });
+    total_length: 64,
+        });
   assert_eq!(store.len(), 1, "duplicate insert should update, not add");
 
   let found = store.get(&make_hash(0xAA)).unwrap();
@@ -454,7 +463,8 @@ fn test_update_flags_preserves_type() {
     type_flags: KV_TYPE_SNAPSHOT,
     hash: make_hash(0xCC),
     offset: 300,
-  });
+    total_length: 64,
+        });
 
   store.update_flags(&make_hash(0xCC), KV_FLAG_PENDING | KV_FLAG_DELETED);
   let found = store.get(&make_hash(0xCC)).unwrap();

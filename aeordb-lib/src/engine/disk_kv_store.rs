@@ -66,6 +66,12 @@ pub struct DiskKVStore {
     pub needs_expansion: Option<usize>,
     /// Transaction nesting depth. When > 0, flush() skips clearing the hot tail.
     pub transaction_depth: u32,
+    /// Current snapshot of the void_manager state, included in every hot tail
+    /// flush. The engine syncs this from its VoidManager whenever voids change
+    /// (GC sweep, void consumption, etc.). Hot tail load on startup populates
+    /// this from disk; runtime register/consume operations on void_manager
+    /// also update this field via the engine.
+    pub pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
 }
 
 impl DiskKVStore {
@@ -135,6 +141,7 @@ impl DiskKVStore {
             needs_rebuild: false,
             needs_expansion: None,
             transaction_depth: 0,
+            pending_voids: Vec::new(),
         })
     }
 
@@ -256,6 +263,7 @@ impl DiskKVStore {
             needs_rebuild: detected_page_corruption,
             needs_expansion: None,
             transaction_depth: 0,
+            pending_voids: Vec::new(),
         })
     }
 
@@ -488,7 +496,11 @@ impl DiskKVStore {
                         hot_tail_offset = self.hot_tail_offset,
                         "flush: writing overflow entries to hot tail (resize blocked)"
                     );
-                    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+                    let payload = hot_tail::HotTailPayload {
+                        writes: all_hot,
+                        voids: self.pending_voids.clone(),
+                    };
+                    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
                     self.db_file.set_len(end)?; // Truncate stale trailing data
                     self.db_file.sync_data()?;
                 }
@@ -512,9 +524,15 @@ impl DiskKVStore {
             // on-disk hot tail still has the OLD entries while hot_buffer
             // has been cleared — recovery would later load stale entries
             // pointing at WAL offsets that have since been overwritten.
-            hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &[], hash_length)
+            // Even when all KV writes flushed to pages, we keep the void
+            // snapshot in the hot tail so void state survives.
+            let payload = hot_tail::HotTailPayload {
+                writes: Vec::new(),
+                voids: self.pending_voids.clone(),
+            };
+            hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)
                 .map_err(|e| EngineError::IoError(std::io::Error::other(format!(
-                    "Failed to write empty hot tail after page flush: {}", e
+                    "Failed to write hot tail after page flush: {}", e
                 ))))?;
         }
 
@@ -597,18 +615,37 @@ impl DiskKVStore {
     }
 
     pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) {
+        // Resolve each hash from the in-memory snapshot (or current write_buffer)
+        // instead of paying a disk seek per hash. The published ReadSnapshot
+        // holds every committed bucket page in RAM, so this is O(1) lookup
+        // versus O(disk_read) for the previous `self.get(hash)` path.
+        let snapshot = self.snapshot.load();
         for hash in hashes {
-            if let Some(mut entry) = self.get(hash) {
-                entry.type_flags |= KV_FLAG_DELETED;
-                self.write_buffer.insert(hash.clone(), entry);
-                self.entry_count = self.entry_count.saturating_sub(1);
-            }
-            if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-                if let Err(e) = self.flush() {
-                    tracing::warn!("Flush failed during mark_deleted_batch: {}", e);
-                }
-            }
+            let mut entry = if let Some(buffered) = self.write_buffer.get(hash) {
+                if buffered.is_deleted() { continue; }
+                buffered.clone()
+            } else if let Some(snap_entry) = snapshot.get_raw(hash) {
+                if snap_entry.is_deleted() { continue; }
+                snap_entry
+            } else {
+                continue; // unknown hash — nothing to mark
+            };
+            entry.type_flags |= KV_FLAG_DELETED;
+            self.write_buffer.insert(hash.clone(), entry);
+            self.entry_count = self.entry_count.saturating_sub(1);
         }
+        drop(snapshot);
+
+        // **Deferred flush.** The DELETED-flag updates live only in the in-memory
+        // write_buffer + the next published ReadSnapshot. We do NOT flush them
+        // to disk bucket pages here, because the bulk DeletionRecord written to
+        // the WAL just before this call IS the durable record. On crash, the
+        // rebuilder replays that record and re-applies the deletions.
+        //
+        // The buffered flags will be flushed eventually — either when the
+        // write_buffer hits WRITE_BUFFER_THRESHOLD during normal writes, or
+        // on clean shutdown. This amortizes the bucket-page-rewrite cost
+        // across subsequent writes instead of stalling the GC caller.
         self.publish_buffer_only();
     }
 
@@ -883,6 +920,32 @@ impl DiskKVStore {
     // Hot tail (replaces hot file)
     // ========================================================================
 
+    /// Replace the snapshot of voids to include on the next hot tail flush.
+    /// Called by the engine whenever VoidManager state changes (GC sweep,
+    /// void consumption during writes, etc.).
+    pub fn set_pending_voids(&mut self, voids: Vec<crate::engine::hot_tail::VoidRecord>) {
+        self.pending_voids = voids;
+    }
+
+    /// Force a hot tail flush even if hot_buffer is below threshold. Used by
+    /// the engine after operations that change void state but don't touch
+    /// the KV write_buffer (e.g., GC sweep that only registers voids).
+    pub fn force_flush_hot_buffer(&mut self) -> EngineResult<()> {
+        if !self.hot_tail_enabled {
+            return Ok(());
+        }
+        let hash_length = self.hash_algo.hash_length();
+        let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+        let payload = hot_tail::HotTailPayload {
+            writes: all_hot,
+            voids: self.pending_voids.clone(),
+        };
+        let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
+        self.db_file.set_len(end)?;
+        self.db_file.sync_data()?;
+        Ok(())
+    }
+
     /// Flush the hot buffer to the hot tail at the end of the database file.
     pub fn flush_hot_buffer(&mut self) -> EngineResult<()> {
         if self.hot_buffer.is_empty() || !self.hot_tail_enabled {
@@ -895,7 +958,14 @@ impl DiskKVStore {
         // everything in the write buffer (these haven't been flushed to pages yet)
         let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
 
-        let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &all_hot, hash_length)?;
+        // Include the current void snapshot — the engine keeps `pending_voids`
+        // in sync with VoidManager state via `set_pending_voids` whenever the
+        // void set changes (GC sweep, void consumption, etc.).
+        let payload = hot_tail::HotTailPayload {
+          writes: all_hot,
+          voids: self.pending_voids.clone(),
+        };
+        let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
         self.db_file.set_len(end)?; // Truncate stale trailing data
         self.db_file.sync_data()?;
         self.hot_buffer.clear();

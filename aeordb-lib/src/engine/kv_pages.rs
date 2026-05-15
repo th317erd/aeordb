@@ -15,9 +15,9 @@ pub const PAGE_HEADER_SIZE: usize = 4 + 4 + 2;
 
 /// Compute the byte size of one bucket page for a given hash length.
 /// Layout: magic(u32) + crc32(u32) + entry_count(u16) +
-///         MAX_ENTRIES_PER_PAGE * (hash + type_flags + offset)
+///         MAX_ENTRIES_PER_PAGE * (hash + type_flags(1) + offset(8) + total_length(4))
 pub fn page_size(hash_length: usize) -> usize {
-    PAGE_HEADER_SIZE + MAX_ENTRIES_PER_PAGE * (hash_length + 1 + 8)
+    PAGE_HEADER_SIZE + MAX_ENTRIES_PER_PAGE * (hash_length + 1 + 8 + 4)
 }
 
 /// A freshly-zeroed page (all bytes zero, including magic) is the "empty"
@@ -54,7 +54,7 @@ pub fn serialize_page(entries: &[KVEntry], hash_length: usize) -> Vec<u8> {
     // entry_count
     buffer[8..10].copy_from_slice(&(count as u16).to_le_bytes());
 
-    let entry_size = hash_length + 1 + 8;
+    let entry_size = hash_length + 1 + 8 + 4;
     for (i, entry) in entries.iter().take(count).enumerate() {
         let offset = PAGE_HEADER_SIZE + i * entry_size;
         let hash_len = entry.hash.len().min(hash_length);
@@ -62,6 +62,8 @@ pub fn serialize_page(entries: &[KVEntry], hash_length: usize) -> Vec<u8> {
         buffer[offset + hash_length] = entry.type_flags;
         buffer[offset + hash_length + 1..offset + hash_length + 9]
             .copy_from_slice(&entry.offset.to_le_bytes());
+        buffer[offset + hash_length + 9..offset + hash_length + 13]
+            .copy_from_slice(&entry.total_length.to_le_bytes());
     }
 
     // Compute CRC32 over the full page with crc32 field zeroed.
@@ -128,7 +130,7 @@ pub fn deserialize_page(data: &[u8], hash_length: usize) -> EngineResult<Vec<KVE
         });
     }
 
-    let entry_size = hash_length + 1 + 8;
+    let entry_size = hash_length + 1 + 8 + 4;
     let required = PAGE_HEADER_SIZE + count * entry_size;
     if data.len() < required {
         return Err(EngineError::CorruptEntry {
@@ -150,10 +152,16 @@ pub fn deserialize_page(data: &[u8], hash_length: usize) -> EngineResult<Vec<KVE
                 .try_into()
                 .unwrap(),
         );
+        let total_length = u32::from_le_bytes(
+            data[offset + hash_length + 9..offset + hash_length + 13]
+                .try_into()
+                .unwrap(),
+        );
         entries.push(KVEntry {
             type_flags,
             hash,
             offset: file_offset,
+            total_length,
         });
     }
 

@@ -1,44 +1,48 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::entry_header::EntryHeader;
 
-/// Minimum useful void size in bytes.
-///
-/// A void must be large enough to hold at least the smallest possible entry:
-/// fixed_header(31) + hash(N) + key(0) + value(0).
-/// For BLAKE3_256 (32-byte hash): 31 + 32 = 63 bytes.
-///
-/// We use 63 as the default since BLAKE3_256 is the current default algorithm.
-/// Any remainder smaller than this after splitting a void is abandoned (not tracked).
-pub const MINIMUM_VOID_SIZE: u32 = 63;
+/// Smallest void that can still hold a real entry (header + zero-length key+value).
+/// Provided for callers that want to filter for "useful" voids; the VoidManager
+/// itself tracks ALL voids regardless of size — small voids are still useful
+/// for diagnostics, fragmentation analysis, and future coalescing logic.
+pub const MINIMUM_USEFUL_VOID_SIZE: u32 = 63;
 
 /// Tracks reusable free space (voids) in the data file.
 ///
-/// Voids are created when entries are relocated (e.g., during KV block growth)
-/// or when entries are logically deleted. The VoidManager maintains an in-memory
-/// index of void locations organized by size for best-fit allocation.
+/// Two parallel indexes keep operations cheap regardless of access pattern:
+///   * `by_offset` — `offset → size`. O(log N) dedup on register, ordered
+///     iteration (used for gap-scan reconciliation and metrics).
+///   * `by_size` — `size → set of offsets`. O(log N) best-fit lookup for
+///     writers asking "give me a void of at least N bytes."
 ///
-/// NOTE: The voids_by_size BTreeMap grows without bound as new void sizes
-/// are registered. With diverse entry sizes, this can accumulate many unique
-/// keys. Consider bucketing void sizes into size classes (powers of 2) or
-/// adding a maximum tracked void count with eviction.
+/// Voids of every size are tracked, including those too small to hold an
+/// entry. The engine's allocator filters by `MINIMUM_USEFUL_VOID_SIZE` at
+/// query time; tracking everything lets us report fragmentation accurately
+/// in metrics and reason about coalescing later.
+///
+/// VoidManager state is purely in-memory. It is rebuilt at startup from the
+/// hot tail (clean) or by gap-scanning the rebuilt KV (dirty).
+#[derive(Debug)]
 pub struct VoidManager {
-  /// Maps void size to a list of file offsets where voids of that size exist.
-  voids_by_size: BTreeMap<u32, Vec<u64>>,
+  by_offset: BTreeMap<u64, u32>,
+  by_size: BTreeMap<u32, BTreeSet<u64>>,
   hash_algo: HashAlgorithm,
 }
 
 impl VoidManager {
   pub fn new(hash_algo: HashAlgorithm) -> Self {
     VoidManager {
-      voids_by_size: BTreeMap::new(),
+      by_offset: BTreeMap::new(),
+      by_size: BTreeMap::new(),
       hash_algo,
     }
   }
 
   /// Compute the deterministic hash for a void of the given size.
-  /// Uses the domain-prefixed format: BLAKE3("::aeordb:void:{size}")
+  /// Retained for backward-compatibility with any callers expecting the
+  /// "::aeordb:void:{size}" key convention from the original on-disk format.
   pub fn void_hash(size: u32) -> Vec<u8> {
     let input = format!("::aeordb:void:{}", size);
     let hash = blake3::hash(input.as_bytes());
@@ -46,81 +50,103 @@ impl VoidManager {
   }
 
   /// Register a void at the given offset with the given size.
-  pub fn register_void(&mut self, size: u32, offset: u64) {
-    if size < self.minimum_void_size() {
-      return;
+  ///
+  /// **Tracks all sizes** (no MINIMUM_VOID_SIZE filter). Use
+  /// [`find_void`] which can be called with the minimum useful size to skip
+  /// voids too small to hold an entry.
+  ///
+  /// **Deduplicates on the offset key.** Registering the same offset twice
+  /// is a no-op as long as the size matches. Re-registering an offset with a
+  /// different size updates the entry — used when voids merge or split.
+  pub fn register_void(&mut self, offset: u64, size: u32) {
+    if let Some(&existing_size) = self.by_offset.get(&offset) {
+      if existing_size == size {
+        return; // exact duplicate
+      }
+      // Different size at same offset — remove the old size-index entry.
+      if let Some(set) = self.by_size.get_mut(&existing_size) {
+        set.remove(&offset);
+        if set.is_empty() {
+          self.by_size.remove(&existing_size);
+        }
+      }
     }
-    self.voids_by_size
-      .entry(size)
-      .or_default()
-      .push(offset);
+    self.by_offset.insert(offset, size);
+    self.by_size.entry(size).or_default().insert(offset);
   }
 
-  /// Find the smallest void that can fit `needed_size` bytes.
-  ///
-  /// Returns `Some((offset, actual_size))` if a suitable void is found.
-  /// The void is removed from tracking. If the void is larger than needed
-  /// and the remainder is >= minimum void size, the remainder is registered
-  /// as a new, smaller void.
+  /// Find the smallest void that can fit `needed_size` bytes, remove it
+  /// from the manager, and return `(offset, actual_size)`. If the void is
+  /// larger than needed and the remainder is at least `min_useful_size`,
+  /// the remainder is re-registered as a smaller void.
   pub fn find_void(&mut self, needed_size: u32) -> Option<(u64, u32)> {
-    // Find the smallest size >= needed_size using BTreeMap range
-    let matching_size = self.voids_by_size
+    let matching_size = self.by_size
       .range(needed_size..)
       .find(|(_, offsets)| !offsets.is_empty())
       .map(|(&size, _)| size)?;
 
-    let offsets = self.voids_by_size.get_mut(&matching_size)?;
-    let offset = offsets.pop()?;
-
-    // Clean up empty size buckets
-    if offsets.is_empty() {
-      self.voids_by_size.remove(&matching_size);
+    let set = self.by_size.get_mut(&matching_size)?;
+    let &offset = set.iter().next()?;
+    set.remove(&offset);
+    if set.is_empty() {
+      self.by_size.remove(&matching_size);
     }
+    self.by_offset.remove(&offset);
 
-    // If the void is larger than needed, split the remainder
+    // Split remainder into a smaller void if it can hold a real entry.
     let remainder = matching_size - needed_size;
-    let min_size = self.minimum_void_size();
-    if remainder >= min_size {
+    if remainder >= self.minimum_useful_void_size() {
       let remainder_offset = offset + needed_size as u64;
-      self.register_void(remainder, remainder_offset);
+      self.register_void(remainder_offset, remainder);
     }
 
     Some((offset, matching_size))
   }
 
-  /// Remove a specific void by size and offset.
-  pub fn remove_void(&mut self, size: u32, offset: u64) {
-    if let Some(offsets) = self.voids_by_size.get_mut(&size) {
-      if let Some(position) = offsets.iter().position(|&stored_offset| stored_offset == offset) {
-        offsets.remove(position);
-      }
-      if offsets.is_empty() {
-        self.voids_by_size.remove(&size);
+  /// Remove a specific void by offset. Returns the size that was removed
+  /// (if any) for callers that want to confirm what was removed.
+  pub fn remove_void(&mut self, offset: u64) -> Option<u32> {
+    let size = self.by_offset.remove(&offset)?;
+    if let Some(set) = self.by_size.get_mut(&size) {
+      set.remove(&offset);
+      if set.is_empty() {
+        self.by_size.remove(&size);
       }
     }
+    Some(size)
   }
 
-  /// Total bytes of free space across all tracked voids.
+  /// Total bytes of free space across all tracked voids (all sizes).
   pub fn total_void_space(&self) -> u64 {
-    self.voids_by_size
-      .iter()
-      .map(|(&size, offsets)| size as u64 * offsets.len() as u64)
-      .sum()
+    self.by_offset.values().map(|&size| size as u64).sum()
   }
 
   /// Total number of tracked voids.
   pub fn void_count(&self) -> usize {
-    self.voids_by_size
-      .values()
-      .map(|offsets| offsets.len())
-      .sum()
+    self.by_offset.len()
   }
 
-  /// The minimum void size for the configured hash algorithm.
-  /// This is the smallest possible entry: fixed_header + hash + 0 key + 0 value.
-  pub fn minimum_void_size(&self) -> u32 {
-    // 0,0 lengths can never fail the bounds check, so unwrap is safe.
+  /// Iterate voids in offset order: `(offset, size)`. Used by the hot tail
+  /// flush and by metrics reporting.
+  pub fn iter(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+    self.by_offset.iter().map(|(&o, &s)| (o, s))
+  }
+
+  /// Smallest entry that could be written into a void of this size: the
+  /// fixed entry header + the hash, with zero-byte key+value. Below this
+  /// size, a void cannot hold any real entry — but it's still tracked.
+  pub fn minimum_useful_void_size(&self) -> u32 {
     EntryHeader::compute_total_length(self.hash_algo, 0, 0)
       .expect("min void size with zero lengths cannot fail bounds")
+  }
+
+  /// Replace the current void set with the supplied (offset, size) pairs.
+  /// Used by startup recovery (hot tail load, gap-scan) to bulk-populate.
+  pub fn replace_all(&mut self, voids: impl IntoIterator<Item = (u64, u32)>) {
+    self.by_offset.clear();
+    self.by_size.clear();
+    for (offset, size) in voids {
+      self.register_void(offset, size);
+    }
   }
 }

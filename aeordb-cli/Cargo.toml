@@ -17,6 +17,10 @@ path = "src/bin/crash-soak-worker.rs"
 name = "soak-worker"
 path = "src/bin/soak-worker.rs"
 
+[[bin]]
+name = "gc-bench"
+path = "src/bin/gc-bench.rs"
+
 [dependencies]
 aeordb = { path = "../aeordb-lib" }
 axum = "0.8"

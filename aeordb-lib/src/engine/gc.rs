@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use crate::engine::btree::{BTreeNode, is_btree_format};
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
 use crate::engine::engine_event::{EVENT_GC_COMPLETED, EVENT_GC_STARTED};
-use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
@@ -40,6 +39,8 @@ pub struct GcResult {
 pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   let mut live: HashSet<Vec<u8>> = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
+  let mark_start = std::time::Instant::now();
 
   // Gather all merkle roots and walk them BFS with offset-sorted I/O.
   // The walk visits each unique hash once across all roots (visited-set
@@ -60,7 +61,16 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
     roots.push((fork.root_hash.clone(), "/".to_string()));
   }
 
+  if timing {
+    eprintln!("[gc-timing] mark: {} roots ({} snapshots + {} forks + HEAD)",
+      roots.len(), snapshots.len(), forks.len());
+  }
+
+  let bfs_start = std::time::Instant::now();
   walk_versions_bfs(engine, roots, hash_length, &mut live)?;
+  if timing {
+    eprintln!("[gc-timing] mark.bfs: {:?} (live={})", bfs_start.elapsed(), live.len());
+  }
 
   // Mark snapshot and fork KV key hashes as live
   for snapshot in &snapshots {
@@ -73,20 +83,32 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
 
   // Mark system table entries as live
+  let sys_start = std::time::Instant::now();
   mark_system_entries(engine, hash_length, &mut live)?;
+  if timing { eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed()); }
 
   // Mark task queue entries as live -- task records use deterministic hashes
   // ("::aeordb:task:{id}") that are NOT in the directory tree, so
   // mark_system_entries does not cover them.
+  let task_start = std::time::Instant::now();
   mark_task_entries(engine, &mut live)?;
+  if timing { eprintln!("[gc-timing] mark.tasks: {:?}", task_start.elapsed()); }
 
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
+  let del_start = std::time::Instant::now();
   let all_entries = engine.iter_kv_entries()?;
+  let mut deletion_count = 0usize;
   for entry in &all_entries {
     if entry.entry_type() == KV_TYPE_DELETION {
       live.insert(entry.hash.clone());
+      deletion_count += 1;
     }
+  }
+  if timing {
+    eprintln!("[gc-timing] mark.deletion-pass: {:?} (kv_entries={}, deletions={})",
+      del_start.elapsed(), all_entries.len(), deletion_count);
+    eprintln!("[gc-timing] mark TOTAL: {:?} (live={})", mark_start.elapsed(), live.len());
   }
 
   Ok(live)
@@ -110,12 +132,21 @@ fn walk_versions_bfs(
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
   let algo = engine.hash_algo();
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let mut frontier = roots;
+  let mut level = 0u32;
+  let mut total_reads = 0u64;
+  let mut total_leaves_skipped = 0u64;
 
   while !frontier.is_empty() {
+    let frontier_size = frontier.len();
     // Stage 1: dedup, mark path-keys for directories, fold in leaf-only entries.
     // Survivors need a disk read; collect them with their KV offset.
     let mut to_read: Vec<(Vec<u8>, String, u64)> = Vec::with_capacity(frontier.len());
+    let mut visited_dups = 0u64;
+    let mut leaves_skipped = 0u64;
+    let mut not_in_kv = 0u64;
+    let dedup_start = std::time::Instant::now();
     for (hash, path) in frontier.drain(..) {
       if !live.insert(hash.clone()) {
         // Already visited content hash — still mark the path-key for this
@@ -123,6 +154,7 @@ fn walk_versions_bfs(
         // multiple paths.
         let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
         live.insert(path_key);
+        visited_dups += 1;
         continue;
       }
       // In-memory KV lookup tells us the type and offset without disk I/O.
@@ -131,22 +163,28 @@ fn walk_versions_bfs(
           let t = kv.entry_type();
           if t == KV_TYPE_CHUNK {
             // Leaf — already in `live`, nothing more to do.
+            leaves_skipped += 1;
             continue;
           }
           to_read.push((hash, path, kv.offset));
         }
         None => {
-          // Unknown to current KV (may be a hash from a deleted snapshot
-          // that hasn't been swept yet). Skip — `get_entry_including_deleted`
-          // can't help if it's not in the index either.
+          not_in_kv += 1;
         }
       }
     }
+    let dedup_elapsed = dedup_start.elapsed();
+    total_leaves_skipped += leaves_skipped;
 
     // Stage 2: sort by WAL offset so reads are sequential.
+    let sort_start = std::time::Instant::now();
     to_read.sort_by_key(|(_, _, offset)| *offset);
+    let sort_elapsed = sort_start.elapsed();
 
     // Stage 3: read each entry in offset order; emit children to next frontier.
+    let read_start = std::time::Instant::now();
+    let read_count = to_read.len();
+    total_reads += read_count as u64;
     let mut next_frontier: Vec<(Vec<u8>, String)> = Vec::new();
     for (hash, path, _offset) in to_read {
       let entry = match engine.get_entry_including_deleted(&hash)? {
@@ -225,7 +263,25 @@ fn walk_versions_bfs(
       }
     }
 
+    let read_elapsed = read_start.elapsed();
+
+    if timing {
+      eprintln!(
+        "[gc-timing]   level {}: frontier={} → dedup {:?} (dups={} leaves_skip={} miss={}) → sort {:?} → read {} entries in {:?} → next={}",
+        level, frontier_size, dedup_elapsed, visited_dups, leaves_skipped, not_in_kv,
+        sort_elapsed, read_count, read_elapsed, next_frontier.len(),
+      );
+    }
+
     frontier = next_frontier;
+    level += 1;
+  }
+
+  if timing {
+    eprintln!(
+      "[gc-timing]   bfs summary: {} levels, {} entries read from disk, {} leaves skipped",
+      level, total_reads, total_leaves_skipped,
+    );
   }
 
   Ok(())
@@ -376,22 +432,6 @@ fn mark_task_entries(
   Ok(())
 }
 
-/// Minimum DeletionRecord entry size for the given engine's hash algorithm.
-fn min_deletion_size(engine: &StorageEngine) -> u32 {
-  // DeletionRecord with path="gc", reason="gc":
-  // value = u16(2) + "gc"(2) + i64(8) + u16(2) + "gc"(2) = 16 bytes
-  // key = hash_length bytes (computed hash)
-  let hash_length = engine.hash_algo().hash_length();
-  EntryHeader::compute_total_length(engine.hash_algo(), hash_length, 16)
-    .expect("small fixed sizes cannot exceed length bounds")
-}
-
-/// Minimum void entry size.
-fn min_void_size(engine: &StorageEngine) -> u32 {
-  EntryHeader::compute_total_length(engine.hash_algo(), 0, 0)
-    .expect("zero lengths cannot exceed bounds")
-}
-
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.
 /// Uses nosync writes for batch performance — one sync at the end.
 ///
@@ -418,9 +458,7 @@ pub fn gc_sweep(
   live: &HashSet<Vec<u8>>,
   dry_run: bool,
 ) -> EngineResult<(usize, u64)> {
-  let min_del = min_deletion_size(engine);
-  let min_void = min_void_size(engine);
-
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let all_entries = engine.iter_kv_entries()?;
 
   // First pass: identify garbage entries and compute sizes.
@@ -450,52 +488,72 @@ pub fn gc_sweep(
     }
   }
 
-  // Free the full entry list before the sweep loop
   drop(all_entries);
 
-  // Second pass (non-dry-run): re-verify each candidate against the current KV
-  // state before overwriting. A concurrent write between mark and sweep could
-  // have made an entry live (new offset for the same hash = re-created entry).
-  // Uses per-entry get_kv_entry() lookups instead of loading all entries into
-  // a HashMap to avoid doubling memory usage.
-  let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
-
-  if !dry_run && !garbage_candidates.is_empty() {
-    for (hash, offset, entry_size) in &garbage_candidates {
-      // Re-verify: if the entry no longer exists or now points to a different
-      // offset, a concurrent write occurred — skip this entry.
-      match engine.get_kv_entry(hash) {
-        Some(fresh_entry) if fresh_entry.offset == *offset => {
-          // Still garbage at the same offset — safe to sweep
-        }
-        _ => {
-          // Entry was re-written or deleted since mark — skip
-          garbage_count -= 1;
-          reclaimed_bytes -= *entry_size as u64;
-          continue;
-        }
-      }
-
-      // Best-effort in-place overwrite (nosync — batch all writes)
-      if *entry_size >= min_del {
-        let written = engine.write_deletion_at_nosync(*offset, "gc")?;
-        let remaining = *entry_size - written;
-        if remaining >= min_void {
-          let void_offset = *offset + written as u64;
-          engine.write_void_at_nosync(void_offset, remaining)?;
-        }
-      }
-
-      garbage_hashes.push(hash.clone());
-    }
+  if dry_run || garbage_candidates.is_empty() {
+    return Ok((garbage_count, reclaimed_bytes));
   }
 
-  if !dry_run && !garbage_hashes.is_empty() {
-    // One sync for all in-place overwrites
-    engine.sync_writer()?;
+  // Re-verify each candidate against the current KV state. A concurrent
+  // write between mark and sweep could have re-created an entry at a new
+  // offset (same hash, different WAL position); we must NOT delete those.
+  let reverify_start = std::time::Instant::now();
+  let mut verified_hashes: Vec<Vec<u8>> = Vec::with_capacity(garbage_candidates.len());
+  let mut freed_regions: Vec<(u64, u32)> = Vec::with_capacity(garbage_candidates.len());
+  for (hash, offset, entry_size) in &garbage_candidates {
+    match engine.get_kv_entry(hash) {
+      Some(fresh) if fresh.offset == *offset => {
+        verified_hashes.push(hash.clone());
+        freed_regions.push((*offset, *entry_size));
+      }
+      _ => {
+        // Re-created since mark — skip and rollback the size accounting.
+        garbage_count -= 1;
+        reclaimed_bytes -= *entry_size as u64;
+      }
+    }
+  }
+  let reverify_elapsed = reverify_start.elapsed();
 
-    // Batch remove from KV
-    engine.remove_kv_entries_batch(&garbage_hashes)?;
+  // Drop the verified hashes from the live KV index. All in-memory; no WAL
+  // writes from sweep itself — the durability of these deletions comes from
+  // the hot tail flush that follows (which carries the void snapshot, and
+  // by the void offsets implies the entries at those offsets are gone).
+  let kv_remove_start = std::time::Instant::now();
+  if !verified_hashes.is_empty() {
+    engine.remove_kv_entries_batch(&verified_hashes)?;
+  }
+  let kv_remove_elapsed = kv_remove_start.elapsed();
+
+  // Register the freed regions with VoidManager (in-memory). On the next
+  // hot tail flush these get mirrored to disk as VoidRecords.
+  let void_register_start = std::time::Instant::now();
+  if !freed_regions.is_empty() {
+    if let Ok(mut vm) = engine.void_manager.write() {
+      for (offset, size) in &freed_regions {
+        vm.register_void(*offset, *size);
+      }
+    }
+  }
+  let void_register_elapsed = void_register_start.elapsed();
+
+  // Sync void state into the kv_writer's pending_voids and force a hot tail
+  // flush so the new void set is durable. One sequential write at the WAL
+  // tail; one fsync. Fast on slow disks.
+  let flush_start = std::time::Instant::now();
+  engine.sync_voids_to_kv_writer();
+  if let Err(e) = engine.force_hot_tail_flush() {
+    tracing::warn!("Hot tail flush after GC sweep failed: {}", e);
+  }
+  let flush_elapsed = flush_start.elapsed();
+
+  if timing {
+    eprintln!("[gc-timing]   sweep.reverify: {:?} (kept {} of {})",
+      reverify_elapsed, verified_hashes.len(), garbage_candidates.len());
+    eprintln!("[gc-timing]   sweep.kv_remove: {:?}", kv_remove_elapsed);
+    eprintln!("[gc-timing]   sweep.void_register: {:?} ({} voids)",
+      void_register_elapsed, freed_regions.len());
+    eprintln!("[gc-timing]   sweep.hot_tail_flush: {:?}", flush_elapsed);
   }
 
   Ok((garbage_count, reclaimed_bytes))
@@ -572,6 +630,8 @@ pub fn run_gc(
     // Apply user-configured retention to non-engine snapshots before the
     // mark phase. Snapshots deleted here have their orphaned data swept in
     // this same GC cycle.
+    let prune_start = std::time::Instant::now();
+    let _gc_timing = std::env::var("AEORDB_GC_TIMING").is_ok();
     match crate::engine::lifecycle_config::prune_expired_snapshots(engine, ctx) {
       Ok(result) if result.pruned_count > 0 => {
         tracing::info!(
@@ -583,6 +643,7 @@ pub fn run_gc(
       Ok(_) => {}
       Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
     }
+    if _gc_timing { eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed()); }
   }
 
   let snapshot_count = vm.list_snapshots()?.len();
@@ -611,7 +672,12 @@ pub fn run_gc(
 
   // The RAII guard above calls end_gc_recheck on scope exit so failure paths
   // don't leave recheck recording on indefinitely.
+  let sweep_start = std::time::Instant::now();
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
+  if std::env::var("AEORDB_GC_TIMING").is_ok() {
+    eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})",
+      sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
+  }
 
   // Reconcile counters from authoritative KV state after sweep
   if !dry_run {
@@ -707,5 +773,6 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
     bytes_read_total: current.bytes_read_total,
     chunks_deduped_total: current.chunks_deduped_total,
     write_buffer_depth: current.write_buffer_depth,
+    void_count: current.void_count,
   })
 }
