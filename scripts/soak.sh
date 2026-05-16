@@ -42,6 +42,11 @@ PMAP_INTERVAL_SECS=1800   # every 30 minutes
 # the loop's PID so the caller can kill it on shutdown.
 start_pmap_recorder() {
   local target_pid="$1"
+  # The bg subshell must NOT inherit stdout — if it does, the surrounding
+  # `pmap_pid=$(start_pmap_recorder ...)` command substitution will block
+  # forever waiting for the pipe to EOF, because the bg subshell keeps
+  # the pipe's write end open for the duration of its sleep loop. Redirect
+  # the subshell's stdout to /dev/null and stderr to the pmap log itself.
   (
     local slept=0
     while kill -0 "$target_pid" 2>/dev/null; do
@@ -56,7 +61,7 @@ start_pmap_recorder() {
       sleep 2  # short slices so we notice worker exit quickly
       slept=$((slept + 2))
     done
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
   echo $!
 }
 
