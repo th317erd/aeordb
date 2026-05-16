@@ -2652,6 +2652,105 @@ mod engine_file_stream_tests {
   }
 
   #[test]
+  fn dirty_recovery_preserves_writer_offset_past_recovered_entries() {
+    use std::fs::OpenOptions;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("dirty.aeordb");
+    let path_str = path.to_str().unwrap();
+
+    // Phase 1: clean session — write entries, then drop with shutdown.
+    let post_clean_hot_tail: u64;
+    {
+      let engine = StorageEngine::create(path_str).unwrap();
+      let ops = DirectoryOps::new(&engine);
+      let ctx = RequestContext::system();
+      for i in 0..20 {
+        let p = format!("/f{i:02}.txt");
+        let v = format!("value-{i}").into_bytes();
+        ops.store_file_buffered(&ctx, &p, &v, Some("text/plain")).unwrap();
+      }
+      // Force a clean flush of everything so the on-disk header is current.
+      engine.shutdown().unwrap();
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      post_clean_hot_tail = h.hot_tail_offset;
+    }
+
+    // Phase 2: simulate crash mid-flush. Rewrite the active header with
+    // a rolled-back hot_tail_offset, and zero the hot tail bytes there.
+    // (We use one of the earlier entry offsets — every entry has a header
+    // smaller than the hot tail, so reading at that offset will fail the
+    // hot tail magic check and trigger dirty recovery.)
+    let rolled_back_offset = {
+      let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+      let (mut header, active) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      // Pick a target inside the WAL — kv_block_offset + kv_block_length
+      // is the start of the WAL. We use that, which definitely has an
+      // entry header at it (not a hot tail), so the hot tail load will fail.
+      let target = header.kv_block_offset + header.kv_block_length;
+      header.hot_tail_offset = target;
+      crate::engine::file_header::write_header_to_inactive_slot(&mut f, &mut header, active).unwrap();
+      f.sync_data().unwrap();
+      target
+    };
+    assert!(rolled_back_offset < post_clean_hot_tail,
+      "rolled-back offset {} must be earlier than post-shutdown {}",
+      rolled_back_offset, post_clean_hot_tail);
+
+    // Phase 3: open the engine (triggers dirty recovery), then drop it
+    // cleanly so the on-disk header reflects post-recovery state. Read
+    // the header back: hot_tail_offset must be >= the true WAL end.
+    {
+      let _engine = StorageEngine::open(path_str).unwrap();
+      // drop here flushes + writes header
+    }
+    let recovered_hot_tail = {
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      h.hot_tail_offset
+    };
+    assert!(recovered_hot_tail >= post_clean_hot_tail,
+      "post-recovery hot_tail_offset {} should be >= true WAL end {}",
+      recovered_hot_tail, post_clean_hot_tail);
+
+    // Phase 4: open again, write a NEW entry, drop. The new entry must
+    // land at-or-past recovered_hot_tail — otherwise the append landed
+    // at rolled_back_offset and overwrote recovered data. Check by
+    // re-reading header.
+    {
+      let engine = StorageEngine::open(path_str).unwrap();
+      let ops = DirectoryOps::new(&engine);
+      let ctx = RequestContext::system();
+      ops.store_file_buffered(&ctx, "/post-recovery.txt", b"new", None).unwrap();
+    }
+    let post_new_write_hot_tail = {
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      h.hot_tail_offset
+    };
+    assert!(post_new_write_hot_tail > recovered_hot_tail,
+      "after a post-recovery write, hot_tail_offset {} must be > recovered {}",
+      post_new_write_hot_tail, recovered_hot_tail);
+
+    // Phase 5: reopen, confirm /post-recovery.txt is present and intact.
+    let engine = StorageEngine::open(path_str).unwrap();
+    let ops = DirectoryOps::new(&engine);
+
+    // Phase 5: all previously-stored files should still be readable, AND
+    // the post-recovery write must be intact (not overwritten by anything).
+    for i in 0..20 {
+      let p = format!("/f{i:02}.txt");
+      let stream = ops.read_file_streaming(&p).expect("recovered file should be readable");
+      let bytes = stream.collect_to_vec().expect("read should succeed");
+      assert_eq!(bytes, format!("value-{i}").into_bytes(), "recovered file {} content", p);
+    }
+    let post_stream = ops.read_file_streaming("/post-recovery.txt").expect("post-recovery file readable");
+    let post_bytes = post_stream.collect_to_vec().expect("read should succeed");
+    assert_eq!(post_bytes, b"new");
+  }
+
+  #[test]
   fn size_hint_decrements_with_progress() {
     let (engine, _temp) = create_test_engine();
     let ctx = RequestContext::system();

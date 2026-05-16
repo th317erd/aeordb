@@ -1654,12 +1654,27 @@ impl StorageEngine {
     let hash_length = hash_algo.hash_length();
     let psize = crate::engine::kv_pages::page_size(hash_length);
 
-    // Determine KV block position, size, and stage.
-    // hot_tail_offset = end of WAL = writer.current_offset()
+    // Determine the true end of the WAL after dirty recovery. We CANNOT
+    // trust `writer.current_offset()` here: on a dirty open, it was seeded
+    // from the stale on-disk `header.hot_tail_offset`, which is updated
+    // only every 100 ms by the hot tail flush timer. Any entry written
+    // between the last flush and the crash sits PAST that offset and was
+    // just discovered by `scan_entries_dirty_recovery`. If we set
+    // hot_tail_offset = writer.current_offset(), header lies about where
+    // valid data ends and the next append clobbers the dirty-recovered
+    // entries — leaving the KV pointing at offsets whose data has been
+    // overwritten (stale KV pattern observed in S2 14-crash soak).
+    //
+    // The real end of the WAL is one byte past the last byte of the
+    // furthest-out entry the scanner returned.
+    let dirty_max_end: u64 = entries.iter()
+      .map(|(_, _, offset, _, total_length)| offset + *total_length as u64)
+      .max()
+      .unwrap_or(0);
     let wal_end = {
       let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      writer.current_offset()
+      writer.current_offset().max(dirty_max_end)
     };
 
     let (kv_offset, block_size, hot_offset, rebuild_stage) = if kv_block_offset > 0 {
@@ -1748,6 +1763,10 @@ impl StorageEngine {
 
     // Update the file header with the current hot_tail_offset so the
     // hot tail entries (overflow from the KV page capacity) are found on reopen.
+    // ALSO update the writer's in-memory current_offset to match — otherwise
+    // the next append starts at the stale pre-crash hot_tail_offset and
+    // overwrites the dirty-recovered entries the rebuild just installed
+    // into the KV (the "462 stale entries after 14 SIGKILLs" S2 pattern).
     {
       let mut writer = self.writer.write()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
@@ -1760,6 +1779,7 @@ impl StorageEngine {
       header.hot_tail_offset = wal_end;
       header.entry_count = count as u64;
       header.kv_block_stage = final_stage as u8;
+      writer.set_offset(wal_end);
       tracing::debug!(
         kv_block_offset = header.kv_block_offset,
         kv_block_length = header.kv_block_length,
