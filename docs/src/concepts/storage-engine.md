@@ -117,14 +117,23 @@ Each directory gets a new content hash because one of its children changed. This
 
 ## Void Management
 
-When garbage collection reclaims an entry, the space becomes a Void -- a marker for reclaimable space. Voids are tracked by size using deterministic hash keys:
+When garbage collection reclaims an entry, the bytes the entry occupied become a **void** -- a region of the WAL marked as reclaimable. Voids are tracked entirely in memory by the `VoidManager`, which keeps two parallel indexes:
 
 ```
-Key:   BLAKE3("::aeordb:void:262144")
-Value: [list of file offsets where 262144-byte voids exist]
+by_offset:  BTreeMap<u64, u32>            // offset → size, ordered iteration
+by_size:    BTreeMap<u32, BTreeSet<u64>>  // size → set of offsets, best-fit lookup
 ```
 
-When a new entry needs to be written, the engine checks for a void of sufficient size before appending to the end of the file. If a void is larger than needed, it is split: the entry occupies the front, and a smaller void is created for the remainder (if the remainder is at least 63 bytes -- the minimum entry header size).
+Voids are **never** written into the WAL as their own records. They live in memory while the process runs and are persisted by riding along inside the [hot tail](#hot-tail) on every periodic flush, so the next clean startup restores the void set without scanning the file. On a dirty startup (hot tail unreadable), voids are re-derived via a **gap scan** of the rebuilt KV: any byte range not covered by a live KV entry between `kv_block_end` and the WAL tail is registered as a void.
+
+When a new entry needs to be written, the engine calls `VoidManager::find_void(needed)` before appending to the tail. If a void of sufficient size exists, the entry is written **in-place** at that void's offset; otherwise the entry appends. If the chosen void is larger than the entry, the remainder is re-registered as a smaller void (when it is at least 63 bytes -- the minimum useful void size for BLAKE3-256: 31-byte fixed header + 32-byte hash + 0-byte key + 0-byte value).
+
+Two size floors govern void tracking:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `MINIMUM_VOID_SIZE` | 1 byte | Below this, voids are discarded entirely -- treated as alignment noise |
+| `MINIMUM_USEFUL_VOID_SIZE` | 63 bytes | Below this, voids are tracked (for metrics and fragmentation visibility) but never returned by `find_void` -- no real entry would fit |
 
 ## Compression
 
@@ -202,23 +211,37 @@ If the process crashes between steps 2 and 5, the original WAL data is intact an
 
 ## Hot Tail
 
-The hot tail is a small journal at the end of the file. It stores any KV entries that exist in memory but haven't been flushed to the bucket pages yet.
+The hot tail is a small, versioned journal at the end of the file. It carries two kinds of transient state that would otherwise be lost on crash:
+
+1. **Pending KV writes** — entries that exist in the in-memory write buffer but haven't been flushed to bucket pages yet.
+2. **Void snapshot** — the current `VoidManager` state, so the next clean startup restores reclaimable-space tracking without rescanning the WAL.
 
 ```
-[Hot Tail Header — 13 bytes]
-  magic:        [u8; 5] = AE 01 7D B1 0C
-  entry_count:  u32     (number of entries below)
-  count_crc32:  u32     (CRC32 of the entry_count bytes)
+[Header — 21 bytes]
+  magic:           [u8; 5] = AE 01 7D B1 0D
+  format_version:  u8                 (top-level layout version; bumped on section changes)
+  write_count:     u32                (number of write records below)
+  void_count:      u32                (number of void records below)
+  header_crc32:    u32                (CRC32 of the preceding 14 bytes)
 
-[Entries — 41 bytes each, for BLAKE3]
-  hash:         [u8; 32]
+[Write records — 1 + hash_length + 13 bytes each (42 for BLAKE3-256)]
+  version:      u8        (per-record layout version; bumped without a full format bump)
+  hash:         [u8; hash_length]
   type_flags:   u8
-  offset:       u64       (WAL position of the actual entry)
+  offset:       u64                   (WAL position of the actual entry)
+  total_length: u32                   (on-disk length of the entry)
+
+[Void records — 13 bytes each]
+  version:      u8
+  offset:       u64                   (start of the reclaimable region)
+  size:         u32                   (length of the region)
 ```
 
-The hot tail is the durability boundary for the KV. Periodic flushes write the hot tail; on the next startup, those entries reload into the in-memory write buffer before any reads happen.
+The hot tail is the durability boundary for both the KV and the void set. Periodic flushes (every 100 ms or whenever the write buffer hits its threshold) rewrite the hot tail in-place at `header.hot_tail_offset`. On the next clean startup the header is parsed, the write records reload into the write buffer, and the void records repopulate the `VoidManager` -- all before any read serves traffic.
 
-If the hot tail's CRC fails or the magic doesn't match, the engine logs a warning and triggers a **dirty startup**: a full WAL scan rebuilds the KV from scratch. Same behavior if the hot tail offset in the header points past the actual file boundary. No data is lost — the WAL is the source of truth, the hot tail is just a fast-path index.
+If the hot tail's header CRC fails, the magic doesn't match, or the recorded offset points past the file boundary, the engine logs a warning and triggers a **dirty startup**: a full WAL scan (via `scan_entries_dirty_recovery`) rebuilds the KV from scratch and `recover_voids_via_gap_scan` re-derives the void set from gaps in the rebuilt KV. No data is lost -- the WAL is the source of truth; the hot tail is a fast-path index plus a void snapshot.
+
+A magic-byte version bump is enough on its own to invalidate older hot tails: the next open with newer code sees a magic mismatch, falls into dirty startup, and rebuilds correctly. That makes the format safely evolvable without a migration tool.
 
 ## fsync Strategy
 
@@ -240,7 +263,7 @@ The recovery hierarchy, from least to most damage:
 | Nothing | Read HEAD from KV store, load directory index, ready |
 | One file-header slot torn | Read the other slot (highest valid sequence + CRC wins) |
 | One KV bucket page corrupted | Per-bucket rebuild from WAL, bounded work |
-| Hot tail torn | Dirty startup — full WAL scan rebuilds the KV from scratch |
+| Hot tail torn | Dirty startup — full WAL scan rebuilds the KV from scratch, then `recover_voids_via_gap_scan` re-derives the void set from gaps in the rebuilt KV |
 | KV store only | Entry-by-entry scan, rebuild KV store, load latest directory index |
 | Directory index only | Scan FileRecords + DeletionRecords, reconstruct from paths + timestamps |
 | KV store + directory | Full entry scan, rebuild KV, reconstruct directory |
