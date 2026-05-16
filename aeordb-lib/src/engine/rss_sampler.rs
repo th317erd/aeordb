@@ -1,8 +1,13 @@
-//! Lightweight RSS / VmHWM sampler for diagnosing GC memory peaks.
+//! Lightweight RSS / VmHWM sampler for diagnosing memory peaks.
 //!
-//! Wraps a phase of work with a background thread that polls
-//! `/proc/self/status` at a configurable cadence. Reports baseline RSS,
-//! peak RSS observed during the phase, end RSS, and the VmHWM delta.
+//! Wraps a phase of work with a background thread that polls process
+//! resident-set-size at a configurable cadence. Reports baseline RSS,
+//! peak RSS observed during the phase, end RSS, and the HWM delta.
+//!
+//! Cross-platform: Linux reads `/proc/self/status` (VmRSS, VmHWM, etc.).
+//! macOS calls Mach `task_info(MACH_TASK_BASIC_INFO)` for resident_size and
+//! resident_size_max. All values are reported in kB to match the Linux
+//! `/proc` semantics.
 //!
 //! Gated on `AEORDB_GC_MEM_PROFILE` so production builds pay nothing.
 
@@ -11,28 +16,112 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Read `VmRSS:` (resident set size, in kB) from `/proc/self/status`.
-/// Returns 0 if the file is missing or unparseable (e.g. on non-Linux).
-pub fn read_rss_kb() -> u64 { read_proc_status_field("VmRSS:") }
+/// Current resident set size in kB. 0 if unavailable.
+pub fn read_rss_kb() -> u64 { read_process_memory().resident_kb }
 
-/// Read `VmHWM:` (peak RSS ever observed, in kB).
-pub fn read_hwm_kb() -> u64 { read_proc_status_field("VmHWM:") }
+/// Peak resident set size observed by the kernel for this process, in kB.
+/// 0 if unavailable. Monotonic-non-decreasing for the life of the process.
+pub fn read_hwm_kb() -> u64 { read_process_memory().peak_resident_kb }
 
-fn read_proc_status_field(name: &str) -> u64 {
-  let Ok(s) = std::fs::read_to_string("/proc/self/status") else { return 0; };
+/// Aggregate process memory stats. Values in kB to match Linux `/proc` units.
+/// Fields the host platform doesn't expose are 0.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ProcessMemory {
+  pub resident_kb: u64,      // current RSS  (Linux VmRSS / macOS resident_size)
+  pub peak_resident_kb: u64, // peak  RSS  (Linux VmHWM / macOS resident_size_max)
+  pub virtual_kb: u64,       // virtual size (Linux VmSize / macOS virtual_size)
+  pub data_kb: u64,          // heap+data segment (Linux VmData; 0 on macOS)
+}
+
+pub fn read_process_memory() -> ProcessMemory {
+  #[cfg(target_os = "linux")]
+  { read_linux_proc_status() }
+  #[cfg(target_os = "macos")]
+  { read_macos_task_info().unwrap_or_default() }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  { ProcessMemory::default() }
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_proc_status() -> ProcessMemory {
+  let Ok(s) = std::fs::read_to_string("/proc/self/status") else {
+    return ProcessMemory::default();
+  };
+  let mut out = ProcessMemory::default();
+  let parse = |line: &str, prefix: &str| -> Option<u64> {
+    line
+      .strip_prefix(prefix)?
+      .trim()
+      .trim_end_matches(" kB")
+      .split_ascii_whitespace()
+      .next()?
+      .parse()
+      .ok()
+  };
   for line in s.lines() {
-    if let Some(rest) = line.strip_prefix(name) {
-      // Format is `VmRSS:    12345 kB`; we want the integer.
-      return rest
-        .trim()
-        .trim_end_matches(" kB")
-        .split_ascii_whitespace()
-        .next()
-        .and_then(|n| n.parse::<u64>().ok())
-        .unwrap_or(0);
-    }
+    if let Some(v) = parse(line, "VmRSS:")  { out.resident_kb = v; }
+    if let Some(v) = parse(line, "VmHWM:")  { out.peak_resident_kb = v; }
+    if let Some(v) = parse(line, "VmSize:") { out.virtual_kb = v; }
+    if let Some(v) = parse(line, "VmData:") { out.data_kb = v; }
   }
-  0
+  out
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_task_info() -> Option<ProcessMemory> {
+  // mach_task_basic_info from <mach/task_info.h>. We declare the struct
+  // and the syscalls ourselves to avoid pulling in a Mach FFI crate just
+  // for this one call. Values come back in bytes; we divide to match the
+  // Linux /proc kB convention.
+  use std::mem::size_of;
+
+  #[repr(C)]
+  struct TimeValue { seconds: i32, microseconds: i32 }
+  #[repr(C)]
+  struct MachTaskBasicInfo {
+    virtual_size: u64,
+    resident_size: u64,
+    resident_size_max: u64,
+    user_time: TimeValue,
+    system_time: TimeValue,
+    policy: i32,
+    suspend_count: i32,
+  }
+
+  const MACH_TASK_BASIC_INFO: u32 = 20;
+  const KERN_SUCCESS: i32 = 0;
+
+  extern "C" {
+    fn mach_task_self() -> u32;
+    fn task_info(
+      task: u32,
+      flavor: u32,
+      info_out: *mut i32,
+      count: *mut u32,
+    ) -> i32;
+  }
+
+  let mut info: MachTaskBasicInfo = unsafe { std::mem::zeroed() };
+  let mut count: u32 = (size_of::<MachTaskBasicInfo>() / size_of::<i32>()) as u32;
+  let result = unsafe {
+    task_info(
+      mach_task_self(),
+      MACH_TASK_BASIC_INFO,
+      &mut info as *mut MachTaskBasicInfo as *mut i32,
+      &mut count,
+    )
+  };
+  if result != KERN_SUCCESS {
+    return None;
+  }
+  Some(ProcessMemory {
+    resident_kb: info.resident_size / 1024,
+    peak_resident_kb: info.resident_size_max / 1024,
+    virtual_kb: info.virtual_size / 1024,
+    // macOS doesn't expose heap-vs-data the way Linux does via VmData.
+    // Leave 0 here; the wide_rss.tsv consumer treats it as "unavailable".
+    data_kb: 0,
+  })
 }
 
 /// Returns true when `AEORDB_GC_MEM_PROFILE` is set (any non-empty value).
@@ -133,18 +222,33 @@ mod tests {
   use super::*;
 
   #[test]
-  fn read_rss_returns_nonzero_on_linux() {
-    if cfg!(target_os = "linux") {
+  fn read_rss_returns_nonzero_on_supported_platforms() {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
       let rss = read_rss_kb();
-      assert!(rss > 0, "expected nonzero VmRSS on Linux, got {rss}");
+      assert!(rss > 0, "expected nonzero RSS, got {rss}");
     }
   }
 
   #[test]
-  fn read_hwm_returns_nonzero_on_linux() {
-    if cfg!(target_os = "linux") {
+  fn read_hwm_returns_nonzero_on_supported_platforms() {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
       let hwm = read_hwm_kb();
-      assert!(hwm > 0, "expected nonzero VmHWM on Linux, got {hwm}");
+      assert!(hwm > 0, "expected nonzero peak RSS, got {hwm}");
+    }
+  }
+
+  #[test]
+  fn read_process_memory_is_internally_consistent() {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) { return; }
+    let m = read_process_memory();
+    // HWM is monotonic upper bound on RSS, so HWM >= RSS always.
+    assert!(m.peak_resident_kb >= m.resident_kb,
+      "peak RSS {} should be >= current RSS {}", m.peak_resident_kb, m.resident_kb);
+    // Virtual size is always >= resident size (you can have unmapped pages
+    // in your address space but you can't have resident bytes outside it).
+    if m.virtual_kb > 0 {
+      assert!(m.virtual_kb >= m.resident_kb,
+        "virtual {} should be >= resident {}", m.virtual_kb, m.resident_kb);
     }
   }
 

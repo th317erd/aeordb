@@ -552,27 +552,26 @@ struct MemoryStats {
 }
 
 fn read_self_memory_stats() -> Option<MemoryStats> {
-  // /proc/self/status carries VmRSS/VmData/VmSize/VmHWM in kB. Distinguish:
-  //   VmRSS  — resident set size right now
-  //   VmHWM  — peak RSS ever (monotonic; useful for trend detection)
-  //   VmData — heap + data segment (where leaks show up)
-  //   VmSize — total virtual address space (mapped, not necessarily resident)
-  let status = std::fs::read_to_string("/proc/self/status").ok()?;
-  let mut stats = MemoryStats::default();
-  for line in status.lines() {
-    let parse_kb = |prefix: &str| -> Option<u64> {
-      line.strip_prefix(prefix)?.split_whitespace().next()?.parse().ok()
-    };
-    if let Some(v) = parse_kb("VmRSS:")  { stats.rss_kb = v; }
-    if let Some(v) = parse_kb("VmData:") { stats.data_kb = v; }
-    if let Some(v) = parse_kb("VmSize:") { stats.size_kb = v; }
-    if let Some(v) = parse_kb("VmHWM:")  { stats.hwm_kb = v; }
-  }
-  Some(stats)
+  // Cross-platform process memory via the engine's rss_sampler. The
+  // sampler reads /proc/self/status on Linux and Mach task_info on macOS;
+  // both report bytes the kernel attributes to the current process. Values
+  // it can't observe (VmData on macOS) come back as 0.
+  let m = aeordb::engine::rss_sampler::read_process_memory();
+  Some(MemoryStats {
+    rss_kb:  m.resident_kb,
+    data_kb: m.data_kb,
+    size_kb: m.virtual_kb,
+    hwm_kb:  m.peak_resident_kb,
+  })
 }
 
 fn count_fds() -> Option<usize> {
-  std::fs::read_dir("/proc/self/fd").ok().map(|iter| iter.count())
+  // /proc/self/fd on Linux, /dev/fd on macOS — both yield one dirent per
+  // open file descriptor in the current process. /dev/fd actually works on
+  // Linux too (it's a /proc/self/fd symlink there) but we keep the explicit
+  // branch so the intent is obvious.
+  let path = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+  std::fs::read_dir(path).ok().map(|iter| iter.count())
 }
 
 // ---------------------------------------------------------------------------

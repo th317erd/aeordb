@@ -37,9 +37,18 @@ WORKER_LOG="$LOG_DIR/soak.worker.log"
 PMAP_LOG="$LOG_DIR/soak.pmap.log"
 PMAP_INTERVAL_SECS=1800   # every 30 minutes
 
-# Spawn a background loop that takes a pmap snapshot of $1 every
-# $PMAP_INTERVAL_SECS, writing to $PMAP_LOG with a timestamp header. Returns
-# the loop's PID so the caller can kill it on shutdown.
+# Pick the right address-space dump tool for the host OS.
+#   Linux:  pmap -x       (pages + permissions + RSS columns)
+#   macOS:  vmmap         (regions + sizes; no -x flag exists)
+# Both write a roughly-equivalent VMA listing to stdout.
+case "$(uname -s)" in
+  Darwin) PMAP_BIN="vmmap"; PMAP_ARGS=() ;;
+  *)      PMAP_BIN="pmap";  PMAP_ARGS=("-x") ;;
+esac
+
+# Spawn a background loop that takes an address-space snapshot of $1
+# every $PMAP_INTERVAL_SECS, writing to $PMAP_LOG with a timestamp header.
+# Returns the loop's PID so the caller can kill it on shutdown.
 start_pmap_recorder() {
   local target_pid="$1"
   # The bg subshell must NOT inherit stdout — if it does, the surrounding
@@ -52,8 +61,8 @@ start_pmap_recorder() {
     while kill -0 "$target_pid" 2>/dev/null; do
       if [ "$slept" -ge "$PMAP_INTERVAL_SECS" ] || [ "$slept" -eq 0 ]; then
         {
-          echo "===== $(date -Iseconds) pmap pid=$target_pid ====="
-          pmap -x "$target_pid" 2>/dev/null || echo "(pmap failed)"
+          echo "===== $(date -Iseconds) $PMAP_BIN pid=$target_pid ====="
+          "$PMAP_BIN" "${PMAP_ARGS[@]}" "$target_pid" 2>/dev/null || echo "($PMAP_BIN failed)"
           echo
         } >> "$PMAP_LOG"
         slept=0
