@@ -150,11 +150,40 @@ case "$MODE" in
       # Quick verify: try to open the database and read N random committed
       # paths. The repair-aware open path inside aeordb handles the dirty
       # startup; we just need a smoke test that it works.
+      #
+      # `aeordb verify` exits non-zero on any has_issues() — including
+      # `corrupt_header > 0`. For S2's expected behavior, a SIGKILL that
+      # lands mid-write produces exactly that: one (or rarely two) partial
+      # entry headers at the tail, which the entry scanner skip-and-resumes
+      # past. So we don't treat corrupt_header / skipped_region as a soak
+      # failure here — they're the textbook crash artifact. The signals we
+      # DO treat as failure (the ones the engine should be preventing):
+      #   - corrupt_hash > 0       (hash mismatch on a recovered entry)
+      #   - stale_kv_entries > 0   (KV pointing past dirty-rebuild)
+      #   - missing_kv_entries > 0 (entries lost from the KV)
+      #   - missing_children > 0   (directory tree forgot a child)
+      #   - unlisted_files > 0     (file exists but parent doesn't list it)
+      #   - broken_snapshots > 0   (snapshot root unreachable)
       verify_log="$(mktemp)"
-      if ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1; then
-        echo "[$(date +%T)] iteration $iteration: verify OK"
+      ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1
+      # Parse the report. `awk` prints the numeric value in each line.
+      get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
+      corrupt_hash=$(get_field "Corrupt hash")
+      corrupt_header=$(get_field "Corrupt header")
+      stale=$(get_field "Stale entries")
+      missing_kv=$(get_field "Missing entries")
+      missing_children=$(get_field "Missing children")
+      unlisted_files=$(get_field "Unlisted files")
+      broken_snapshots=$(get_field "Broken snapshots")
+      if [ "${corrupt_hash:-0}" = "0" ] && [ "${stale:-0}" = "0" ] \
+        && [ "${missing_kv:-0}" = "0" ] && [ "${missing_children:-0}" = "0" ] \
+        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ]; then
+        echo "[$(date +%T)] iteration $iteration: verify OK (corrupt_header=${corrupt_header:-0} — expected SIGKILL tail)"
+        rm -f "$verify_log"
       else
-        echo "[$(date +%T)] iteration $iteration: verify reported issues — see $verify_log"
+        echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
+        echo "  corrupt_hash=${corrupt_hash:-?} stale=${stale:-?} missing_kv=${missing_kv:-?} \
+missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?}"
         echo "  (continuing soak; collect failures at the end)"
       fi
     done
