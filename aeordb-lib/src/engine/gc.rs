@@ -322,6 +322,14 @@ fn collect_btree_children(
 }
 
 /// Mark system table entries as live.
+///
+/// System data (`/.aeordb-system/...`, `/.aeordb-config/...`) lives outside
+/// the user-visible tree, so `walk_versions_bfs` never sees it. We walk it
+/// here with the same path-aware logic so we mark every key the engine
+/// might use to reach an entry — identity, path, and content — not just
+/// the merkle hash. Missing any of those silently breaks `JsonStore.get`
+/// after the next sweep, which is how every api-key / user / group
+/// disappeared on the prior GC run.
 fn mark_system_entries(
   engine: &StorageEngine,
   hash_length: usize,
@@ -331,32 +339,8 @@ fn mark_system_entries(
 
   for prefix in &system_prefixes {
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
-    // System dirs may be deleted at HEAD but snapshot-referenced.
-    if let Some((header, _key, value)) = engine.get_entry_including_deleted(&dir_hash)? {
-      live.insert(dir_hash);
-      // Follow hard link if value is a content-hash pointer.
-      let dir_value = if value.len() == hash_length {
-        live.insert(value.clone());
-        match engine.get_entry_including_deleted(&value)? {
-          Some((_h, _k, v)) => v,
-          None => continue,
-        }
-      } else {
-        value
-      };
-      if !dir_value.is_empty() {
-        if is_btree_format(&dir_value) {
-          let children = collect_btree_children(engine, &dir_value, hash_length, live)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        } else {
-          let children = deserialize_child_entries(&dir_value, hash_length, header.entry_version)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        }
-      }
+    if engine.get_entry_including_deleted(&dir_hash)?.is_some() {
+      mark_entry_recursive(engine, &dir_hash, prefix, hash_length, live)?;
     }
   }
 
@@ -364,13 +348,29 @@ fn mark_system_entries(
 }
 
 /// Generic recursive mark for entries reachable from system tables.
+///
+/// Mirrors the per-type handling in [`walk_versions_bfs`]:
+/// - DirectoryIndex: mark `dir:{path}` path-key + follow content-hash hard
+///   link + recurse children with the child path.
+/// - FileRecord: mark `file:{path}` path-key + content-key + chunk hashes.
+/// - Symlink: mark `symlink:{path}` path-key + content-key.
+///
+/// `path` is the absolute path of the entry being marked (e.g.
+/// `"/.aeordb-system/api-keys/abc"`). We need it because directories and
+/// symlinks don't carry their own path in the stored value, and files use
+/// `file_path_hash(path)` rather than the identity/content hash for path
+/// lookups.
 fn mark_entry_recursive(
   engine: &StorageEngine,
   hash: &[u8],
+  path: &str,
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
+  let debug = std::env::var("AEORDB_GC_DEBUG_SYSTEM").is_ok();
+
   if !live.insert(hash.to_vec()) {
+    if debug { eprintln!("[gc-rec]   hash={} path={:?} already-live, skip", hex::encode(&hash[..8.min(hash.len())]), path); }
     return Ok(());
   }
 
@@ -378,24 +378,49 @@ fn mark_entry_recursive(
   // entries that are deleted at HEAD but still needed.
   let entry = match engine.get_entry_including_deleted(hash)? {
     Some(entry) => entry,
-    None => return Ok(()),
+    None => {
+      if debug { eprintln!("[gc-rec]   hash={} path={:?} NOT-FOUND", hex::encode(&hash[..8.min(hash.len())]), path); }
+      return Ok(());
+    }
   };
 
   let (header, _key, value) = entry;
+  let algo = engine.hash_algo();
+
+  // Follow hard link: if value is exactly a content hash, dereference and
+  // mark the content entry too, then use its payload as the working value.
+  let value = if value.len() == hash_length {
+    live.insert(value.clone());
+    match engine.get_entry_including_deleted(&value)? {
+      Some((_h, _k, v)) => v,
+      None => return Ok(()),
+    }
+  } else {
+    value
+  };
+
+  if debug { eprintln!("[gc-rec]   hash={} path={:?} type={:?} value_len={}", hex::encode(&hash[..8.min(hash.len())]), path, header.entry_type, value.len()); }
+
   match header.entry_type {
     EntryType::DirectoryIndex => {
-      if !value.is_empty() {
-        if is_btree_format(&value) {
-          let children = collect_btree_children(engine, &value, hash_length, live)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
+      // Path-key the engine uses for `list_directory` / `read_file` lookups.
+      let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+      live.insert(path_key);
+
+      if value.is_empty() { return Ok(()); }
+
+      let children = if is_btree_format(&value) {
+        collect_btree_children(engine, &value, hash_length, live)?
+      } else {
+        deserialize_child_entries(&value, hash_length, header.entry_version)?
+      };
+      for child in &children {
+        let child_path = if path == "/" {
+          format!("/{}", child.name)
         } else {
-          let children = deserialize_child_entries(&value, hash_length, header.entry_version)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        }
+          format!("{}/{}", path, child.name)
+        };
+        mark_entry_recursive(engine, &child.hash, &child_path, hash_length, live)?;
       }
     }
     EntryType::FileRecord => {
@@ -403,9 +428,18 @@ fn mark_entry_recursive(
       for chunk_hash in &file_record.chunk_hashes {
         live.insert(chunk_hash.clone());
       }
+      // Match walk_versions_bfs: mark the path-key (mutable index used for
+      // reads) and the content-key (immutable content-addressed entry).
+      let file_path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+      live.insert(file_path_key);
+      let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+      live.insert(content_key);
     }
     EntryType::Symlink => {
-      // Symlinks are leaf entries — already marked by the insert above
+      let path_key = symlink_path_hash(path, &algo)?;
+      live.insert(path_key);
+      let content_key = symlink_content_hash(&value, &algo)?;
+      live.insert(content_key);
     }
     _ => {}
   }
@@ -674,7 +708,14 @@ pub fn run_gc(
       }
       let hash_length = engine.hash_algo().hash_length();
       for hash in pending {
-        mark_entry_recursive(engine, &hash, hash_length, &mut live)?;
+        // Path is unknown for recheck entries — the writer recorded raw hashes
+        // only. Every key it wrote (identity, file-path, content) is in the
+        // recheck set independently, so they each get marked when their hash
+        // shows up in this loop. The empty path means path-derived keys
+        // (dir:{path}, file:{path}) computed inside the recursion are wrong,
+        // but harmless: the live set is "do not sweep" — extra hashes in it
+        // never match a real entry and are simply ignored.
+        mark_entry_recursive(engine, &hash, "", hash_length, &mut live)?;
       }
     }
     drain_mem.finish();
