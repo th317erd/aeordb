@@ -1001,7 +1001,7 @@ AeorDB supports sending email notifications (e.g., when files are shared via `PO
 
 ### GET /system/email-config
 
-Retrieve the current email configuration. Sensitive fields (passwords, client secrets, refresh tokens) are masked as `"••••••••"` in the response.
+Retrieve the current email configuration. Sensitive fields (passwords, client secrets, refresh tokens) are masked as `"--------"` in the response, and a `"configured": true` field is added.
 
 **Auth:** Root only.
 
@@ -1013,10 +1013,11 @@ Retrieve the current email configuration. Sensitive fields (passwords, client se
   "host": "smtp.example.com",
   "port": 587,
   "username": "noreply@example.com",
-  "password": "••••••••",
+  "password": "--------",
   "from_address": "noreply@example.com",
   "from_name": "AeorDB",
-  "tls": true
+  "tls": "starttls",
+  "configured": true
 }
 ```
 
@@ -1039,7 +1040,7 @@ Save email configuration. Supports two provider types: SMTP and OAuth.
   "password": "secret",
   "from_address": "noreply@example.com",
   "from_name": "AeorDB",
-  "tls": true
+  "tls": "starttls"
 }
 ```
 
@@ -1051,8 +1052,8 @@ Save email configuration. Supports two provider types: SMTP and OAuth.
 | `username` | string | Yes | SMTP username |
 | `password` | string | Yes | SMTP password |
 | `from_address` | string | Yes | Sender email address |
-| `from_name` | string | No | Sender display name |
-| `tls` | boolean | No | Enable TLS (default: true) |
+| `from_name` | string | No | Sender display name (default: `"AeorDB"`) |
+| `tls` | string | No | TLS mode: `"starttls"` (port 587, default), `"tls"` (implicit TLS, port 465), or `"none"` (cleartext) |
 
 **OAuth Configuration:**
 
