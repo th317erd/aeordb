@@ -277,11 +277,17 @@ pub async fn auth_token(
   State(state): State<AppState>,
   Json(payload): Json<AuthTokenRequest>,
 ) -> Response {
+  // User-facing wording is intentionally vague: bad format, unknown key, and
+  // wrong secret all return the same message at the same status. Telling an
+  // attacker which side failed lets them enumerate valid key prefixes.
+  // Server-side observability is preserved via the metrics counter labels.
+  const INVALID_KEY_MESSAGE: &str = "That API key didn't work. Please double-check it and try again.";
+
   let (key_id_prefix, _full_key) = match parse_api_key(&payload.api_key) {
     Ok(parsed) => parsed,
     Err(_) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-      return ErrorResponse::new("Invalid API key: the key format is not recognized. Keys use the format 'aeor_<key_id>_<secret>'".to_string())
+      return ErrorResponse::new(INVALID_KEY_MESSAGE.to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
@@ -309,14 +315,14 @@ pub async fn auth_token(
     Ok(Some(record)) => record,
     Ok(None) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "not_found").increment(1);
-      return ErrorResponse::new("Invalid API key: no key found matching the provided key ID prefix".to_string())
+      return ErrorResponse::new(INVALID_KEY_MESSAGE.to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
     Err(error) => {
       tracing::error!("Failed to look up API key: {}", error);
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "error").increment(1);
-      return ErrorResponse::new("An unexpected error occurred while looking up the API key. If this persists, check GET /system/health for system status".to_string())
+      return ErrorResponse::new("Something went wrong on our end. Please try again in a moment.".to_string())
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
@@ -324,7 +330,7 @@ pub async fn auth_token(
 
   if record.is_revoked {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "revoked").increment(1);
-    return ErrorResponse::new("Invalid API key: this key has been revoked".to_string())
+    return ErrorResponse::new("This API key has been revoked. Please contact an administrator for a new one.".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -333,7 +339,7 @@ pub async fn auth_token(
     Ok(valid) => valid,
     Err(_) => {
       metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-      return ErrorResponse::new("Invalid API key: key verification failed".to_string())
+      return ErrorResponse::new(INVALID_KEY_MESSAGE.to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
@@ -341,7 +347,7 @@ pub async fn auth_token(
 
   if !key_valid {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "invalid_key").increment(1);
-    return ErrorResponse::new("Invalid API key: the secret does not match. Check that you are using the full key string".to_string())
+    return ErrorResponse::new(INVALID_KEY_MESSAGE.to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
@@ -350,7 +356,7 @@ pub async fn auth_token(
   let now_millis = chrono::Utc::now().timestamp_millis();
   if record.expires_at <= now_millis {
     metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "expired").increment(1);
-    return ErrorResponse::new("API key expired. Create a new key via POST /auth/api-keys".to_string())
+    return ErrorResponse::new("This API key has expired. Please create a new one.".to_string())
       .with_status(StatusCode::UNAUTHORIZED)
       .into_response();
   }
