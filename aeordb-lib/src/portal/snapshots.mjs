@@ -9,12 +9,50 @@ class AeorSnapshotsPage extends AeorAdminPage {
   constructor() {
     super();
     this._newestName = null;
+    this._eventSource = null;
   }
 
   // ── Subclass contract ───────────────────────────────────────────────
 
   get title() { return 'Snapshots'; }
   get showCreateButton() { return false; }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._connectSSE();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._eventSource) {
+      this._eventSource.close();
+      this._eventSource = null;
+    }
+  }
+
+  _connectSSE() {
+    if (!window.AUTH || !window.AUTH.token) return;
+    const url = '/system/events?events=versions_created,versions_deleted,versions_restored'
+      + '&token=' + encodeURIComponent(window.AUTH.token);
+    try {
+      this._eventSource = new EventSource(url);
+      const refresh = () => { this._loadItems().catch(() => {}); };
+      this._eventSource.addEventListener('versions_created',  refresh);
+      this._eventSource.addEventListener('versions_deleted',  refresh);
+      this._eventSource.addEventListener('versions_restored', refresh);
+      this._eventSource.onerror = () => {
+        // Drop the stream on error so the browser will retry only via reload.
+        // _loadItems still works manually; we don't want a flapping SSE to
+        // hammer the server.
+        if (this._eventSource) {
+          this._eventSource.close();
+          this._eventSource = null;
+        }
+      };
+    } catch (_) {
+      // EventSource unsupported — page falls back to manual reload as before
+    }
+  }
 
   async fetchItems() {
     const response = await window.api('/versions/snapshots');
