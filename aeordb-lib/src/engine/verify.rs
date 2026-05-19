@@ -48,6 +48,15 @@ pub struct VerifyReport {
     pub stale_kv_entries: u64,
     pub missing_kv_entries: u64,
 
+    /// Directories whose `dir:{path}` entry hard-links to a content hash
+    /// that's been swept by GC. The directory is reachable through its
+    /// parent's ChildEntry but a direct `list_directory` would fail
+    /// without the runtime recovery fallback in `read_directory_data`.
+    /// Repair rewrites the path-key to point at the merkle-canonical
+    /// content hash. Known root cause: `snapshot_restore` and
+    /// `fork_promote` move HEAD without rewriting dir_key entries.
+    pub stale_dir_path_keys: Vec<String>,
+
     // Snapshot integrity
     pub snapshots_checked: u64,
     pub broken_snapshots: Vec<String>, // snapshot names with broken tree references
@@ -85,6 +94,7 @@ impl VerifyReport {
             kv_entries: 0,
             stale_kv_entries: 0,
             missing_kv_entries: 0,
+            stale_dir_path_keys: Vec::new(),
             snapshots_checked: 0,
             broken_snapshots: Vec::new(),
             repairs: Vec::new(),
@@ -99,6 +109,7 @@ impl VerifyReport {
             || self.stale_kv_entries > 0
             || self.missing_kv_entries > 0
             || !self.broken_snapshots.is_empty()
+            || !self.stale_dir_path_keys.is_empty()
     }
 }
 
@@ -171,6 +182,32 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
                 report.repairs.push(format!("Directory tree rebuild failed: {}", e));
             }
         }
+    }
+
+    // Repair 4: Rewrite stale dir_key entries to point at the canonical
+    // merkle-reachable content. Known cause: `snapshot_restore` and
+    // `fork_promote` move HEAD without rewriting dir_keys; subsequent GC
+    // sweeps the orphan content. Files under these dirs are unaffected;
+    // only `list_directory` is broken. The runtime fallback in
+    // `read_directory_data` masks the symptom, but this repair removes
+    // it permanently and removes the warning-log churn.
+    if !report.stale_dir_path_keys.is_empty() {
+        let ops = DirectoryOps::new(engine);
+        let mut repaired = 0usize;
+        let mut failed = 0usize;
+        // Clone to avoid borrow conflicts when we mutate report.repairs.
+        let paths: Vec<String> = report.stale_dir_path_keys.clone();
+        for path in &paths {
+            match ops.repair_stale_dir_key(path) {
+                Ok(true) => repaired += 1,
+                Ok(false) => {}
+                Err(_) => failed += 1,
+            }
+        }
+        report.repairs.push(format!(
+            "Stale dir_keys rewritten: {} fixed, {} unfixable",
+            repaired, failed,
+        ));
     }
 
     // Persist repairs to disk
@@ -306,6 +343,19 @@ fn check_directory_recursive(
     }
 
     report.directories_checked += 1;
+
+    // Detect stale dir_key (hard-link target dead, recoverable via parent
+    // walk). `recover_directory_data_if_stale` returns Some only when the
+    // path-key entry is a hard-link AND its target is missing from LIVE
+    // AND we can reach the canonical content via HEAD's merkle walk.
+    {
+        let algo = engine.hash_algo();
+        if let Ok(dir_key) = crate::engine::directory_ops::directory_path_hash(path, &algo) {
+            if let Ok(Some(_)) = ops.recover_directory_data_if_stale(path, &dir_key) {
+                report.stale_dir_path_keys.push(path.to_string());
+            }
+        }
+    }
 
     match ops.list_directory(path) {
         Ok(children) => {

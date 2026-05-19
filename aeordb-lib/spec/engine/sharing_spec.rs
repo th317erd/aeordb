@@ -1409,6 +1409,179 @@ async fn list_shares_allows_own_subtree() {
         "list_shares must work on paths the caller has access to");
 }
 
+#[tokio::test]
+async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
+    use aeordb::engine::{gc as gc_mod, VersionManager};
+
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    // Build initial state.
+    for path in ["/A/B/file_v1_a.txt", "/A/B/file_v1_b.txt"] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(&format!("/files{}", path))
+            .header("content-type", "text/plain")
+            .header("authorization", &auth)
+            .body(Body::from("v1"))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // Snapshot the initial state.
+    let ctx = aeordb::engine::RequestContext::system();
+    let vm = VersionManager::new(&engine);
+    vm.create_snapshot(&ctx, "snap-initial", std::collections::HashMap::new()).unwrap();
+    let snap_root_hash = vm.get_head_hash().unwrap();
+
+    // Mutate /A/B so its content_hash diverges from what the snapshot has.
+    for path in ["/A/B/file_v2.txt"] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(&format!("/files{}", path))
+            .header("content-type", "text/plain")
+            .header("authorization", &auth)
+            .body(Body::from("v2"))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    let post_mutation_head = vm.get_head_hash().unwrap();
+    assert_ne!(post_mutation_head, snap_root_hash,
+        "HEAD should have advanced after mutation");
+
+    // Restore the snapshot — moves HEAD back but does NOT rewrite dir_keys.
+    vm.restore_snapshot(&ctx, "snap-initial").unwrap();
+    let post_restore_head = vm.get_head_hash().unwrap();
+    assert_eq!(post_restore_head, snap_root_hash,
+        "HEAD should match the restored snapshot");
+
+    drop(app);
+
+    // Run GC. The post-mutation content of /A/B is no longer reachable from
+    // HEAD (we restored to before that mutation) and there's only one
+    // snapshot — which is the restored state, not the mutated state. The
+    // post-mutation content gets swept; the dir_key for /A/B is preserved
+    // (path-key marking) but its hard-link target is now dead.
+    let gc_engine = engine.clone();
+    let gc_ctx = aeordb::engine::RequestContext::system();
+    let gc_result = tokio::task::spawn_blocking(move || {
+        gc_mod::run_gc(&gc_engine, &gc_ctx, false)
+    }).await.unwrap();
+    assert!(gc_result.is_ok());
+
+    // Direct GET on /A/B should still work — via runtime recovery fallback.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/A/B/")
+        .header("authorization", &auth)
+        .body(Body::empty()).unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK,
+        "GET on stale-dir_key directory must succeed via runtime recovery");
+    let listing = body_json(resp.into_body()).await;
+    let names: Vec<String> = listing["items"].as_array().unwrap()
+        .iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.contains(&"file_v1_a.txt".to_string()));
+    assert!(names.contains(&"file_v1_b.txt".to_string()));
+    assert!(!names.contains(&"file_v2.txt".to_string()),
+        "Restored snapshot should not show post-mutation file");
+
+    // verify --repair should detect and fix the stale dir_key.
+    let report = aeordb::engine::verify::verify(&engine, "<test>");
+    assert!(report.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
+        "verify must detect the stale dir_key. Found: {:?}", report.stale_dir_path_keys);
+
+    let ops = aeordb::engine::DirectoryOps::new(&engine);
+    let repaired = ops.repair_stale_dir_key("/A/B").unwrap();
+    assert!(repaired, "repair_stale_dir_key must rewrite the dir_key");
+
+    // After repair, verify should report no stale dir_keys for /A/B.
+    let report_after = aeordb::engine::verify::verify(&engine, "<test>");
+    assert!(!report_after.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
+        "After repair, /A/B must no longer be in stale_dir_path_keys");
+}
+
+#[tokio::test]
+async fn directory_listing_with_space_in_name_repro() {
+    use aeordb::engine::gc as gc_mod;
+
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth = root_bearer_token(&jwt_manager);
+
+    // Put multiple files at a path with a space in the directory name,
+    // matching the live-DB shape (17 files under /Pictures/Family/Aeolus/Coloring pages/).
+    for i in 0..5 {
+        let put = Request::builder()
+            .method("PUT")
+            .uri(&format!("/files/A/Coloring%20pages/file{}.txt", i))
+            .header("content-type", "text/plain")
+            .header("authorization", &auth)
+            .body(Body::from(format!("content {}", i)))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(put).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // Force GC to run, mimicking the live-DB conditions.
+    eprintln!("Running GC...");
+    let gc_ctx = aeordb::engine::RequestContext::system();
+    let gc_result = tokio::task::spawn_blocking({
+        let engine = engine.clone();
+        move || gc_mod::run_gc(&engine, &gc_ctx, false)
+    }).await.unwrap();
+    eprintln!("GC result: {:?}", gc_result.is_ok());
+    assert!(gc_result.is_ok());
+
+    // Now reproduce the user's bug: parent listing works, child file works,
+    // direct directory listing 404s.
+    let put = Request::builder()
+        .method("PUT")
+        .uri("/files/A/Coloring%20pages/test.txt")
+        .header("content-type", "text/plain")
+        .header("authorization", &auth)
+        .body(Body::from("hello"))
+        .unwrap();
+    let resp = app.oneshot(put).await.unwrap();
+    eprintln!("PUT status: {}", resp.status());
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Parent listing should show "Coloring pages" (decoded) as a child.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/A/")
+        .header("authorization", &auth)
+        .body(Body::empty()).unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    let parent = body_json(resp.into_body()).await;
+    eprintln!("Parent listing items: {}", serde_json::to_string_pretty(&parent["items"]).unwrap());
+
+    // GET the directory itself via %20-encoded URL.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/A/Coloring%20pages/")
+        .header("authorization", &auth)
+        .body(Body::empty()).unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    let status_enc = resp.status();
+    let body_enc = body_json(resp.into_body()).await;
+    eprintln!("GET /A/Coloring%%20pages/ -> {}: {}", status_enc, body_enc);
+
+    // GET file under the dir via %20.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/A/Coloring%20pages/test.txt")
+        .header("authorization", &auth)
+        .body(Body::empty()).unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    let status_file = resp.status();
+    eprintln!("GET /A/Coloring%%20pages/test.txt -> {}", status_file);
+
+    assert_eq!(status_file, StatusCode::OK, "file fetch must work");
+    assert_eq!(status_enc, StatusCode::OK, "dir listing with %20 must work");
+}
+
 #[test]
 fn resolver_accessible_child_names_returns_navigable_segments() {
     let (engine, _temp_dir) = test_engine();

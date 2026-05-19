@@ -1012,7 +1012,18 @@ impl<'a> DirectoryOps<'a> {
         );
       }
     }
-    match self.read_directory_data(&dir_key) {
+    // Defensive fallback: if dir_key's hard-link target is dead (a known
+    // failure mode after `snapshot_restore` + GC, where HEAD moves but
+    // dir_keys aren't rewritten), recover by resolving the directory via
+    // the parent's ChildEntry.hash — that's the authoritative current
+    // reference. Logs a warning so the corruption stays observable.
+    let recovered = self.recover_directory_data_if_stale(&normalized, &dir_key)?;
+    let read_result = if let Some(pair) = recovered {
+      Ok(Some(pair))
+    } else {
+      self.read_directory_data(&dir_key)
+    };
+    match read_result {
       Ok(Some((header, value))) => {
         if normalized == "/" {
           tracing::debug!(
@@ -1738,6 +1749,177 @@ impl<'a> DirectoryOps<'a> {
   /// Hard link detection: if the value at dir_key is exactly hash_length bytes,
   /// it's a hard link (content hash pointer). Follow it to get the actual data.
   /// Backward compatible: values >hash_length are inline data (pre-optimization).
+  /// Walk HEAD's tree from root down to `path`, returning the canonical
+  /// content hash for the directory at `path` (the merkle-authoritative
+  /// reference, as opposed to whatever the local `dir_key` currently
+  /// hard-links to). Returns None if `path` is not reachable from HEAD.
+  /// Used by `verify --repair` to permanently fix stale dir_keys.
+  pub(crate) fn canonical_directory_content_hash(
+    &self,
+    path: &str,
+  ) -> EngineResult<Option<Vec<u8>>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+    let head_hash = self.engine.head_hash()?;
+    if head_hash.is_empty() || head_hash.iter().all(|&b| b == 0) {
+      return Ok(None);
+    }
+    let normalized = normalize_path(path);
+    if normalized == "/" {
+      return Ok(Some(head_hash));
+    }
+    let segments: Vec<&str> = normalized.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut current_content_hash = head_hash;
+    for segment in &segments {
+      let content = match self.engine.get_entry(&current_content_hash)? {
+        Some((_h, _k, v)) => v,
+        None => return Ok(None),
+      };
+      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
+      } else if content.is_empty() {
+        return Ok(None);
+      } else {
+        deserialize_child_entries(&content, hash_length, 0)?
+      };
+      let child = match children.iter().find(|c| c.name == *segment) {
+        Some(c) => c,
+        None => return Ok(None),
+      };
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        return Ok(None);
+      }
+      current_content_hash = child.hash.clone();
+    }
+    Ok(Some(current_content_hash))
+  }
+
+  /// Repair a stale dir_key by rewriting it to hard-link the canonical
+  /// content hash from HEAD's merkle walk. Handles both dead-target
+  /// (post-GC) and diverged-target (alive but != HEAD) scenarios.
+  /// Returns Ok(true) if a write happened, Ok(false) otherwise.
+  pub fn repair_stale_dir_key(&self, path: &str) -> EngineResult<bool> {
+    let algo = self.engine.hash_algo();
+    let dir_key = directory_path_hash(path, &algo)?;
+    // Skip if dir_key isn't a hard-link entry at all.
+    let raw = match self.engine.get_entry(&dir_key)? {
+      Some(e) => e,
+      None => return Ok(false),
+    };
+    if raw.2.len() != algo.hash_length() {
+      return Ok(false);
+    }
+    let canonical = match self.canonical_directory_content_hash(path)? {
+      Some(h) => h,
+      None => return Ok(false),
+    };
+    // Already pointing at HEAD's canonical — nothing to do.
+    if canonical == raw.2 {
+      return Ok(false);
+    }
+    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &canonical)?;
+    tracing::info!(
+      path = %path,
+      stale_target = %hex::encode(&raw.2),
+      canonical_target = %hex::encode(&canonical),
+      "Repaired stale dir_key hard-link"
+    );
+    Ok(true)
+  }
+
+  /// If `dir_key` is a hard-link whose target is either dead OR diverged
+  /// from HEAD's canonical content reference, try to recover by walking
+  /// HEAD's tree from root down to `path`. Returns the recovered
+  /// directory content if recovery succeeds, None otherwise (no recovery
+  /// needed, or recovery impossible).
+  ///
+  /// Known failure mode: `snapshot_restore` and `fork_promote` move HEAD
+  /// without rewriting dir_keys. After those operations, live dir_keys
+  /// can point at content hashes that are either (a) swept by GC if no
+  /// snapshot still references them, or (b) STILL alive but no longer
+  /// match HEAD's canonical view. Both cases cause `list_directory` to
+  /// return stale or no data; both are repaired here.
+  pub(crate) fn recover_directory_data_if_stale(
+    &self,
+    path: &str,
+    dir_key: &[u8],
+  ) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+
+    // Step 1: is this even a hard-link entry? If the value is the actual
+    // content, no recovery possible from us — fall through.
+    let entry = match self.engine.get_entry(dir_key)? {
+      Some(e) => e,
+      None => return Ok(None),
+    };
+    let value = &entry.2;
+    if value.len() != hash_length {
+      return Ok(None);
+    }
+
+    // Step 3: walk from HEAD root down to `path`, using ChildEntry.hash at
+    // each level — that's the merkle-authoritative reference.
+    let head_hash = self.engine.head_hash()?;
+    if head_hash.is_empty() || head_hash.iter().all(|&b| b == 0) {
+      return Ok(None);
+    }
+
+    let normalized = normalize_path(path);
+    let segments: Vec<&str> = normalized.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+
+    let mut current_content_hash = head_hash;
+    for segment in &segments {
+      let content = match self.engine.get_entry(&current_content_hash)? {
+        Some((_h, _k, v)) => v,
+        None => return Ok(None), // tree-level break — can't recover
+      };
+      // Parse children
+      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
+      } else if content.is_empty() {
+        return Ok(None);
+      } else {
+        deserialize_child_entries(&content, hash_length, 0)?
+      };
+
+      // Find ChildEntry by name
+      let child = match children.iter().find(|c| c.name == *segment) {
+        Some(c) => c,
+        None => return Ok(None),
+      };
+      // Only follow if it's a directory
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        return Ok(None);
+      }
+      current_content_hash = child.hash.clone();
+    }
+
+    // If dir_key's hard-link target matches HEAD's canonical, nothing to
+    // recover — caller falls through to the normal read path.
+    if value.as_slice() == current_content_hash.as_slice() {
+      return Ok(None);
+    }
+
+    // Step 4: read the canonical content. If alive, return it as the
+    // recovered value. This handles BOTH:
+    //   (a) dir_key target was swept by GC — only canonical is alive.
+    //   (b) dir_key target is still alive (preserved by a snapshot) but
+    //       no longer matches HEAD — listing would return stale data
+    //       compared to the current HEAD view.
+    let recovered = self.engine.get_entry(&current_content_hash)?;
+    if let Some((header, _k, v)) = recovered {
+      tracing::warn!(
+        path = %normalized,
+        stale_target = %hex::encode(value),
+        canonical_target = %hex::encode(&current_content_hash),
+        "Directory path-key diverged from HEAD; serving canonical content. \
+         Run `aeordb verify --repair` to permanently fix the stale dir_key."
+      );
+      return Ok(Some((header, v)));
+    }
+
+    Ok(None)
+  }
+
   pub(crate) fn read_directory_data(&self, dir_key: &[u8]) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
     let hash_length = self.engine.hash_algo().hash_length();
 

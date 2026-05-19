@@ -197,6 +197,9 @@ enum Commands {
   Probe {
     #[arg(short = 'D', long)]
     database: String,
+    /// Probe a specific path: prints dir-path-key + file-path-key presence.
+    #[arg(long)]
+    path: Option<String>,
   },
 }
 
@@ -341,8 +344,8 @@ async fn main() {
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);
     }
-    Commands::Probe { database } => {
-      commands::probe::run(&database);
+    Commands::Probe { database, path } => {
+      commands::probe::run(&database, path.as_deref());
     }
   }
 }

@@ -249,6 +249,18 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
     }
     println!();
 
+    if !report.stale_dir_path_keys.is_empty() {
+        println!("Stale dir_key entries ({} found — typically caused by snapshot_restore + GC):",
+            report.stale_dir_path_keys.len());
+        for p in report.stale_dir_path_keys.iter().take(10) {
+            println!("  - {}", p);
+        }
+        if report.stale_dir_path_keys.len() > 10 {
+            println!("  ... and {} more", report.stale_dir_path_keys.len() - 10);
+        }
+        println!();
+    }
+
     if !report.repairs.is_empty() {
         println!("Repairs:");
         for r in &report.repairs {

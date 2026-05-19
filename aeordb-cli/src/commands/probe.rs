@@ -1,10 +1,94 @@
 // Diagnostic helper: list /.aeordb-system/ contents in a database file.
-pub fn run(path: &str) {
+pub fn run(path: &str, probe_path: Option<&str>) {
     let engine = match aeordb::engine::StorageEngine::open(path) {
         Ok(e) => e,
         Err(e) => { eprintln!("Open failed: {}", e); std::process::exit(1); }
     };
     let ops = aeordb::engine::DirectoryOps::new(&engine);
+
+    if let Some(p) = probe_path {
+        let algo = engine.hash_algo();
+        let normalized = aeordb::engine::path_utils::normalize_path(p);
+        println!("=== Probe path: {} ===", p);
+        println!("Normalized:    {}", normalized);
+        let dir_key = aeordb::engine::directory_path_hash(&normalized, &algo).unwrap();
+        let file_key = aeordb::engine::file_path_hash(&normalized, &algo).unwrap();
+        let dir_present = engine.has_entry(&dir_key).unwrap_or(false);
+        let file_present = engine.has_entry(&file_key).unwrap_or(false);
+        println!("dir:{} → hash {} → {}",  normalized, hex::encode(&dir_key), if dir_present { "PRESENT" } else { "MISSING" });
+        println!("file:{} → hash {} → {}", normalized, hex::encode(&file_key), if file_present { "PRESENT" } else { "MISSING" });
+
+        if dir_present {
+            if let Ok(Some((header, _key, value))) = engine.get_entry_including_deleted(&dir_key) {
+                println!("Dir entry (incl deleted): flags={:#x}, type={:?}, value len={}", header.flags, header.entry_type, value.len());
+                if value.len() == algo.hash_length() {
+                    println!("  hard-link → {}", hex::encode(&value));
+                    if let Ok(Some((_h, _k, real))) = engine.get_entry_including_deleted(&value) {
+                        println!("  target len: {}", real.len());
+                    } else {
+                        println!("  target MISSING (dangling hard-link)");
+                    }
+                }
+            }
+            // Now try the non-deleted variant — this is what list_directory uses.
+            match engine.get_entry(&dir_key) {
+                Ok(Some((header, _k, value))) => {
+                    println!("Dir entry (LIVE): flags={:#x}, type={:?}, value len={}", header.flags, header.entry_type, value.len());
+                    if value.len() == algo.hash_length() {
+                        println!("  hard-link → {}", hex::encode(&value));
+                        match engine.get_entry(&value) {
+                            Ok(Some((_h, _k, real))) => println!("  target LIVE len: {}", real.len()),
+                            Ok(None) => println!("  target MISSING from LIVE (would 404 in list_directory)"),
+                            Err(e) => println!("  target lookup error: {}", e),
+                        }
+                    }
+                }
+                Ok(None) => println!("Dir entry NOT LIVE (marked deleted?) — list_directory will 404"),
+                Err(e) => println!("Dir entry lookup error: {}", e),
+            }
+        }
+
+        // Also try probing the parent's listing to see how the child appears
+        if let Some(parent) = aeordb::engine::path_utils::parent_path(&normalized) {
+            println!("--- Parent listing of {} ---", parent);
+            match ops.list_directory(&parent) {
+                Ok(entries) => {
+                    let name = aeordb::engine::path_utils::file_name(&normalized).unwrap_or("");
+                    for e in &entries {
+                        if e.name == name {
+                            println!("  ChildEntry: name={} type={} hash={}", e.name, e.entry_type, hex::encode(&e.hash));
+                            // Check if the ChildEntry.hash itself is live and content-addressable
+                            let child_hash = e.hash.clone();
+                            match engine.get_entry(&child_hash) {
+                                Ok(Some((h, _k, v))) => println!("    ChildEntry.hash LIVE: flags={:#x}, len={}", h.flags, v.len()),
+                                Ok(None) => println!("    ChildEntry.hash NOT LIVE"),
+                                Err(e) => println!("    ChildEntry.hash error: {}", e),
+                            }
+                            match engine.get_entry_including_deleted(&child_hash) {
+                                Ok(Some((h, _k, v))) => println!("    ChildEntry.hash incl-deleted: flags={:#x}, len={}", h.flags, v.len()),
+                                Ok(None) => println!("    ChildEntry.hash NOT FOUND in incl-deleted either"),
+                                Err(e) => println!("    ChildEntry.hash incl-del error: {}", e),
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("  ERROR: {}", e),
+            }
+        }
+        // List snapshots via raw KV scan (the /.aeordb-system/snapshots
+        // dir_key may itself be desynced, so prefer entries_by_type).
+        println!("--- Raw snapshot KV records ---");
+        match engine.entries_by_type(aeordb::engine::KV_TYPE_SNAPSHOT) {
+            Ok(entries) => {
+                println!("  count: {}", entries.len());
+                for (key, value) in entries.iter().take(5) {
+                    println!("    snapshot hash={} ({}b)", hex::encode(&key[..8.min(key.len())]), value.len());
+                }
+            }
+            Err(e) => println!("  ERROR: {}", e),
+        }
+        return;
+    }
 
     println!("--- /.aeordb-system/ ---");
     match ops.list_directory("/.aeordb-system") {
