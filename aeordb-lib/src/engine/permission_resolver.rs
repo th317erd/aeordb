@@ -76,6 +76,36 @@ impl<'a> PermissionResolver<'a> {
     Ok(false)
   }
 
+  /// Like `check_direct_permission`, but tolerant of the trailing-slash
+  /// convention: a path like `/A/B` is treated as a possible directory
+  /// AND a possible file, returning true if either form grants the
+  /// operation. Use this when a handler receives a user-supplied path
+  /// whose type (file vs directory) isn't pre-determined — e.g.
+  /// `/files/copy`, `/files/download`, `/files/mkdir`. The resolver's
+  /// `path_levels` only walks the trailing segment as a directory when
+  /// the input ends with `/`, so without this helper a request for the
+  /// real directory `/A/B` would silently miss any grants stored at
+  /// `/A/B/.aeordb-permissions`.
+  pub fn check_path_permission(
+    &self,
+    user_id: &Uuid,
+    path: &str,
+    operation: CrudlifyOp,
+  ) -> EngineResult<bool> {
+    if self.check_direct_permission(user_id, path, operation)? {
+      return Ok(true);
+    }
+    // Try the directory form. If the input already ended with '/', this
+    // is a no-op; otherwise it gives `path_levels` one more directory
+    // to walk so a grant stored at `path` itself is visible.
+    let dir_form = if path.ends_with('/') {
+      return Ok(false);
+    } else {
+      format!("{}/", path)
+    };
+    self.check_direct_permission(user_id, &dir_form, operation)
+  }
+
   /// Like `check_permission`, but does NOT apply the ancestor-navigation
   /// softening. Returns true only if the user has a direct grant at or
   /// above `path`. Use this when you specifically need to distinguish

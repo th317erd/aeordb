@@ -279,6 +279,34 @@ pub async fn list_shares(
             .with_status(StatusCode::FORBIDDEN).into_response();
     }
     let normalized = normalize_path(&query.path);
+
+    // Require the caller to have at least Read access on the queried path
+    // (or be root). Without this, a non-root user could probe arbitrary
+    // paths to enumerate who else has been granted access — leaking
+    // both path existence AND usernames of other grantees. 404 (not 403)
+    // so the response shape doesn't reveal existence on its own.
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return ErrorResponse::new("Invalid user identity")
+                .with_status(StatusCode::FORBIDDEN).into_response();
+        }
+    };
+    if !crate::engine::user::is_root(&user_id) {
+        use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+        let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+        let allowed = resolver
+            .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+            .unwrap_or(false)
+            || resolver
+                .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+                .unwrap_or(false);
+        if !allowed {
+            return ErrorResponse::new(format!("Not found: {}", normalized))
+                .with_status(StatusCode::NOT_FOUND).into_response();
+        }
+    }
+
     let ops = DirectoryOps::new(&state.engine);
 
     // Determine perm_dir: if path is a file, look at parent

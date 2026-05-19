@@ -1183,6 +1183,232 @@ fn resolver_check_direct_permission_does_not_grant_ancestor_navigation() {
     assert!(!resolver.check_permission(&user_id, "/A/", CrudlifyOp::Update).unwrap());
 }
 
+// ---------------------------------------------------------------------------
+// Cross-endpoint leak regressions — handlers that bypass the path-aware
+// permission middleware must enforce their own user-level filtering.
+// ---------------------------------------------------------------------------
+
+/// Set up a non-root user "wyatt"-style scenario:
+///   /Pictures/Family/Harlo/{photo.jpg, photo2.jpg}  — granted r+l
+///   /Pictures/Family/Aeolus/secret.jpg              — NOT granted
+///   /Documents/private.pdf                          — NOT granted
+/// Returns (app-factory closure, jwt_manager, engine, temp_dir, user_id,
+/// user_auth string).
+async fn setup_user_with_share() -> (
+    Arc<JwtManager>,
+    Arc<StorageEngine>,
+    tempfile::TempDir,
+    Uuid,
+    String,
+) {
+    let (app, jwt_manager, engine, temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    let upload = |path: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "text/plain")
+            .header("authorization", &auth_root)
+            .body(Body::from("payload"))
+            .unwrap()
+    };
+    for path in [
+        "/files/Pictures/Family/Harlo/photo.jpg",
+        "/files/Pictures/Family/Harlo/photo2.jpg",
+        "/files/Pictures/Family/Aeolus/secret.jpg",
+        "/files/Documents/private.pdf",
+    ] {
+        let resp = rebuild_app(&jwt_manager, &engine)
+            .oneshot(upload(path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    drop(app);
+
+    let user_id = create_test_user(&engine, "harlo_viewer");
+    share_directory_with_user(&engine, "/Pictures/Family/Harlo", &user_id, ".r..l...", None);
+
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+    (jwt_manager, engine, temp_dir, user_id, auth)
+}
+
+#[tokio::test]
+async fn download_zip_rejects_paths_outside_user_grant() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    // Try to download a directory the user has no grant on.
+    let body = serde_json::json!({ "paths": ["/Documents"] });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/download")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+        "download_zip must 404 paths the user has no grant on");
+}
+
+#[tokio::test]
+async fn download_zip_allows_paths_within_user_grant() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    let body = serde_json::json!({ "paths": ["/Pictures/Family/Harlo"] });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/download")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK,
+        "download_zip must succeed for paths within the grant");
+}
+
+#[tokio::test]
+async fn mkdir_rejects_outside_user_grant() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    let body = serde_json::json!({ "path": "/Documents/sneaky" });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/mkdir")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN,
+        "mkdir must reject paths the user lacks Create perm on");
+}
+
+#[tokio::test]
+async fn copy_files_rejects_unauthorized_source() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    // User cannot read /Pictures/Family/Aeolus/secret.jpg.
+    let body = serde_json::json!({
+        "paths": ["/Pictures/Family/Aeolus/secret.jpg"],
+        "destination": "/Pictures/Family/Harlo",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/copy")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+        "copy_files must 404 unauthorized sources");
+}
+
+#[tokio::test]
+async fn copy_files_rejects_unauthorized_destination() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    // User cannot write into /Documents.
+    let body = serde_json::json!({
+        "paths": ["/Pictures/Family/Harlo/photo.jpg"],
+        "destination": "/Documents",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/copy")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN,
+        "copy_files must reject unauthorized destinations");
+}
+
+#[tokio::test]
+async fn restore_deleted_file_requires_delete_permission() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    // Try to restore a path the user has no Delete perm on (and that
+    // likely isn't even deleted — handler must 404 before reaching ops).
+    let body = serde_json::json!({ "path": "/Documents/private.pdf" });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/restore")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+        "restore_deleted_file must 404 paths the user lacks Delete on");
+}
+
+#[tokio::test]
+async fn file_history_blocks_unauthorized_paths() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/versions/history/Documents/private.pdf")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+        "file_history must 404 paths the user has no Read on");
+}
+
+#[tokio::test]
+async fn file_history_allows_authorized_paths() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/versions/history/Pictures/Family/Harlo/photo.jpg")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK,
+        "file_history must succeed for paths the user can Read");
+}
+
+#[tokio::test]
+async fn list_shares_blocks_enumeration_of_unauthorized_paths() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    // The user must NOT be able to learn who's been granted access to
+    // /Documents/private.pdf (which they have no Read on).
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/shares?path=/Documents/private.pdf")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+        "list_shares must 404 paths the caller can't read");
+}
+
+#[tokio::test]
+async fn list_shares_allows_own_subtree() {
+    let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/shares?path=/Pictures/Family/Harlo")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK,
+        "list_shares must work on paths the caller has access to");
+}
+
 #[test]
 fn resolver_accessible_child_names_returns_navigable_segments() {
     let (engine, _temp_dir) = test_engine();

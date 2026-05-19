@@ -246,6 +246,38 @@ pub async fn mkdir(
       .into_response();
   }
 
+  // User/group permission check: /files/mkdir is exempt from path-aware
+  // middleware, so without this every authenticated user could create
+  // directories anywhere. Required: Create on the parent directory.
+  // Share keys (claims.sub starts with "share:") fall back to their own
+  // key-rule enforcement upstream and don't carry user permissions; we
+  // refuse them here.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot create directories")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
+    if !is_root(&user_id) {
+      use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+      let parent = crate::engine::path_utils::parent_path(&normalized)
+        .unwrap_or_else(|| "/".to_string());
+      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+      let allowed = resolver
+        .check_path_permission(&user_id, &parent, CrudlifyOp::Create)
+        .unwrap_or(false);
+      if !allowed {
+        return ErrorResponse::new("Permission denied")
+          .with_status(StatusCode::FORBIDDEN)
+          .into_response();
+      }
+    }
+  } else {
+    return ErrorResponse::new("Invalid user identity")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
   let engine = state.engine.clone();
@@ -1244,6 +1276,35 @@ pub async fn restore_deleted_file(
     return ErrorResponse::new(format!("Not found: {}", path))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
+  }
+
+  // User/group permission check: /files/restore is exempt from path-aware
+  // middleware. Restoring a file is an inverse Delete operation — require
+  // the 'd' (Delete) permission on the path, matching list_deleted_files.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot restore deleted files")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let allowed = resolver
+      .check_path_permission(&user_id, &path, CrudlifyOp::Delete)
+      .unwrap_or(false);
+    if !allowed {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
   }
 
   let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -2306,6 +2367,52 @@ pub async fn copy_files(
     return ErrorResponse::new("Not found")
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
+  }
+
+  // User/group permission check: /files/copy is exempt from path-aware
+  // middleware, so without this every authenticated user could copy any
+  // file to any location. Required: Read on each source AND Create on
+  // the destination directory.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot copy files")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    // Source check first so a 404 on an unauthorized source isn't masked
+    // by a 403 on an unauthorized destination.
+    for raw_path in &payload.paths {
+      let normalized = crate::engine::path_utils::normalize_path(raw_path);
+      let read_allowed = resolver
+        .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+        .unwrap_or(false)
+        || resolver
+          .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+          .unwrap_or(false);
+      if !read_allowed {
+        return ErrorResponse::new(format!("Not found: {}", raw_path))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+    }
+    let create_allowed = resolver
+      .check_path_permission(&user_id, &dest_normalized, CrudlifyOp::Create)
+      .unwrap_or(false);
+    if !create_allowed {
+      return ErrorResponse::new("Permission denied")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
+    }
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());

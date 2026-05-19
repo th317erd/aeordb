@@ -41,7 +41,7 @@ pub struct HistoryQuery {
 /// The response is ordered newest-first.
 pub async fn file_history(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     Path(path): Path<String>,
     AxumQuery(query): AxumQuery<HistoryQuery>,
 ) -> Response {
@@ -51,6 +51,36 @@ pub async fn file_history(
     if is_system_path(&path) {
         return ErrorResponse::new(format!("Not found: {}", path))
             .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+    }
+
+    // User/group permission check: /versions/history/* is exempt from
+    // path-aware middleware. Without this, a non-root user could fetch
+    // the full snapshot-by-snapshot history (content hashes, sizes, types)
+    // of any file in the database. Require Read on the path; 404 on
+    // denial so callers can't enumerate.
+    if claims.sub.starts_with("share:") {
+        return ErrorResponse::new(format!("Not found: /{}", path))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+    }
+    if let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) {
+        if !crate::engine::user::is_root(&user_id) {
+            use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+            let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+            let absolute = if path.starts_with('/') { path.clone() } else { format!("/{}", path) };
+            let allowed = resolver
+                .check_path_permission(&user_id, &absolute, CrudlifyOp::Read)
+                .unwrap_or(false);
+            if !allowed {
+                return ErrorResponse::new(format!("Not found: /{}", path))
+                    .with_status(StatusCode::NOT_FOUND)
+                    .into_response();
+            }
+        }
+    } else {
+        return ErrorResponse::new("Invalid user identity")
+            .with_status(StatusCode::FORBIDDEN)
             .into_response();
     }
 

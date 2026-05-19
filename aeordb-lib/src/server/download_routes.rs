@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::io::Write;
+use uuid::Uuid;
 
 use super::responses::ErrorResponse;
 use super::state::AppState;
@@ -14,6 +15,8 @@ use crate::auth::TokenClaims;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::entry_type::EntryType;
 use crate::engine::path_utils::normalize_path;
+use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct DownloadRequest {
@@ -23,7 +26,7 @@ pub struct DownloadRequest {
 /// POST /files/download — bundle requested paths into a ZIP archive.
 pub async fn download_zip(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
     active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
     Json(body): Json<DownloadRequest>,
 ) -> Response {
@@ -53,6 +56,33 @@ pub async fn download_zip(
                 return ErrorResponse::new(format!("Not found: {}", raw_path))
                     .with_status(StatusCode::NOT_FOUND)
                     .into_response();
+            }
+        }
+    }
+
+    // User/group permission check: every requested path must be readable
+    // by the calling user. Path-aware middleware exempts /files/download,
+    // so without this, a non-root user with no API-key rules could ZIP up
+    // any path in the database. 404 (not 403) so callers can't enumerate
+    // existence by probing.
+    if !claims.sub.starts_with("share:") {
+        if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
+            if !is_root(&user_id) {
+                let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+                for raw_path in &body.paths {
+                    let normalized = normalize_path(raw_path);
+                    let allowed = resolver
+                        .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+                        .unwrap_or(false)
+                        || resolver
+                            .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+                            .unwrap_or(false);
+                    if !allowed {
+                        return ErrorResponse::new(format!("Not found: {}", raw_path))
+                            .with_status(StatusCode::NOT_FOUND)
+                            .into_response();
+                    }
+                }
             }
         }
     }

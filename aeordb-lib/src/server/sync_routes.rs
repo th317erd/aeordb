@@ -266,6 +266,56 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
     changes.symlinks_deleted.retain(|e| path_allowed_by_key_rules(&e.path, rules));
 }
 
+/// Drop every entry the user can't directly Read. Used for non-peer
+/// callers so /sync/diff never leaks paths outside the user's grants.
+/// Without this, a user with only directory-level shares (and no API
+/// key rules) would receive the full path list — a metadata leak even
+/// though GET /files/{path} would correctly 403 on the content.
+///
+/// Also unconditionally drops `/.aeordb-system/` and `/.aeordb-config/`
+/// entries: those are engine-internal and must never reach a user's
+/// filesystem, regardless of permissions.
+fn filter_changes_by_user_permissions(
+    changes: &mut SyncChanges,
+    user_id_str: &str,
+    state: &AppState,
+) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+
+    // Root short-circuits in the resolver, but we want belt-and-suspenders:
+    // root callers never reach this path (Peer/RootUser handled separately).
+    let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
+        // Token has a malformed sub — drop everything rather than leak.
+        changes.files_added.clear();
+        changes.files_modified.clear();
+        changes.files_deleted.clear();
+        changes.symlinks_added.clear();
+        changes.symlinks_modified.clear();
+        changes.symlinks_deleted.clear();
+        return;
+    };
+
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let is_allowed = |path: &str| -> bool {
+        if crate::engine::directory_ops::is_system_path(path) {
+            return false;
+        }
+        if crate::engine::directory_ops::is_internal_path(path) {
+            return false;
+        }
+        resolver
+            .check_direct_permission(&user_id, path, CrudlifyOp::Read)
+            .unwrap_or(false)
+    };
+
+    changes.files_added.retain(|e| is_allowed(&e.path));
+    changes.files_modified.retain(|e| is_allowed(&e.path));
+    changes.files_deleted.retain(|e| is_allowed(&e.path));
+    changes.symlinks_added.retain(|e| is_allowed(&e.path));
+    changes.symlinks_modified.retain(|e| is_allowed(&e.path));
+    changes.symlinks_deleted.retain(|e| is_allowed(&e.path));
+}
+
 /// Build a full sync response (no since_root_hash -- everything is "added").
 /// When `include_system` is false, entries under /.aeordb-system/ are excluded.
 fn build_full_sync_response(
@@ -538,6 +588,15 @@ pub async fn sync_diff(
 
     // Apply API key rule filtering for scoped users.
     filter_changes_by_key_rules(&mut changes, caller.key_rules());
+
+    // Apply user/group permission filtering. Without this, a non-root
+    // user with no API key rules but with directory shares would receive
+    // metadata for the entire database — a path/size/hash leak even
+    // though GET /files/{path} correctly 403s the content. Peers and
+    // root admin sync skip this branch.
+    if let SyncCaller::ScopedUser { user_id, .. } = &caller {
+        filter_changes_by_user_permissions(&mut changes, user_id, &state);
+    }
 
     // H4: Rebuild chunk hashes from the FILTERED changes so scoped users
     // don't receive chunk hashes for files they can't access.

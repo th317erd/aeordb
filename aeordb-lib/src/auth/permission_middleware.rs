@@ -60,6 +60,7 @@ pub async fn permission_middleware(
     && request_path != "/files/search"
     && request_path != "/files/download"
     && request_path != "/files/mkdir"
+    && request_path != "/files/copy"
     && request_path != "/files/share"
     && request_path != "/files/shares"
     && request_path != "/files/share-link"
