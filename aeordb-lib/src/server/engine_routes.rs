@@ -69,6 +69,7 @@ fn evict_caches_for_path(state: &AppState, path: &str) {
         let parent = crate::engine::path_utils::parent_path(&normalized)
             .unwrap_or_else(|| "/".to_string());
         state.engine.permissions_cache.evict(&parent);
+        state.engine.grants_index_cache.evict_all();
     }
 
     if normalized.ends_with("/.aeordb-config/indexes.json") {
@@ -548,10 +549,38 @@ fn build_directory_listing(
 ///
 /// Returns `Err(Response)` if the user identity is invalid; otherwise mutates
 /// the listing in place and returns `Ok(())`.
+/// Filter a result set down to entries the user can directly Read.
+/// Used by recursive listings, query results, and search results when the
+/// caller reached the request path via ancestor navigation: a simple
+/// allowed-children intersection is insufficient because each child may
+/// itself have only partial grants (e.g. a file-pattern share). Per-entry
+/// resolver walks correctly honor inheritance and file-pattern matching.
+fn filter_results_by_direct_read(
+  results: &mut Vec<serde_json::Value>,
+  user_id_str: &str,
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  group_cache: &std::sync::Arc<crate::engine::cache::Cache<crate::engine::cache_loaders::GroupLoader>>,
+) {
+  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+
+  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
+    return;
+  };
+  if crate::engine::is_root(&user_id) {
+    return;
+  }
+  let resolver = PermissionResolver::new(engine, group_cache);
+  results.retain(|entry| {
+    let Some(path) = entry["path"].as_str() else { return false; };
+    resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
+  });
+}
+
 fn apply_listing_filters(
   listing: &mut Vec<serde_json::Value>,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   _user_id_str: &str,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
 ) -> Result<(), Response> {
   if let Some(rules) = key_rules {
     if !rules.is_empty() {
@@ -565,6 +594,16 @@ fn apply_listing_filters(
     let path = entry["path"].as_str().unwrap_or("");
     !path.starts_with("/.aeordb-")
   });
+
+  // Ancestor-navigation filter: when the user reached this directory by
+  // virtue of having a grant somewhere below, only show the children that
+  // either ARE the grant target or are next-segment ancestors of one.
+  if let Some(filter) = filtered_listing {
+    listing.retain(|entry| {
+      let name = entry["name"].as_str().unwrap_or("");
+      filter.allowed_children.contains(name)
+    });
+  }
 
   Ok(())
 }
@@ -593,9 +632,20 @@ fn attach_effective_permissions(
     // Skip items that already have effective_permissions (set by key rules filter)
     if entry.get("effective_permissions").is_some() { continue; }
 
-    let path = match entry["path"].as_str() {
+    let raw_path = match entry["path"].as_str() {
       Some(p) => p.to_string(),
       None => continue,
+    };
+    // Directories need a trailing slash so path_levels walks INTO them and
+    // reads their .aeordb-permissions — otherwise a directory's own grants
+    // are silently ignored when it appears as a listing entry.
+    let is_directory = entry["entry_type"].as_u64()
+      .map(|t| t == crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() as u64)
+      .unwrap_or(false);
+    let path = if is_directory && !raw_path.ends_with('/') {
+      format!("{}/", raw_path)
+    } else {
+      raw_path
     };
 
     let mut flags = ['-'; 8];
@@ -619,6 +669,7 @@ fn handle_symlink_resolution(
   symlink_target: &str,
   user_id_str: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
   limit: Option<usize>,
   offset: Option<usize>,
 ) -> Response {
@@ -674,7 +725,7 @@ fn handle_symlink_resolution(
       match directory_ops.list_directory(&dir_path) {
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
-          match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+          match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
             Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
             Err(response) => response,
           }
@@ -784,6 +835,8 @@ fn handle_recursive_listing(
   version_query: &EngineGetQuery,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   user_id_str: &str,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
+  state: Option<&AppState>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -819,8 +872,15 @@ fn handle_recursive_listing(
         })
         .collect();
 
-      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref()),
+      match apply_listing_filters(&mut listing, key_rules, user_id_str, None) {
+        Ok(()) => {
+          if filtered_listing.is_some() {
+            if let Some(st) = state {
+              filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache);
+            }
+          }
+          paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref())
+        }
         Err(response) => response,
       }
     }
@@ -855,6 +915,7 @@ fn handle_directory_listing(
   user_id_str: &str,
   pagination: ListingPagination<'_>,
   state: Option<&AppState>,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
 ) -> Response {
   let ListingPagination { limit, offset, sort, order } = pagination;
   let directory_ops = DirectoryOps::new(engine);
@@ -862,7 +923,7 @@ fn handle_directory_listing(
   match directory_ops.list_directory(path) {
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
-      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+      match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
         Ok(()) => {
           // Attach effective_permissions for non-root users
           if let Some(st) = state {
@@ -899,15 +960,17 @@ pub async fn engine_get_root(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
+  filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  engine_get(State(state), Extension(claims), active_key_rules, Path("/".to_string()), AxumQuery(version_query)).await
+  engine_get(State(state), Extension(claims), active_key_rules, filtered_listing, Path("/".to_string()), AxumQuery(version_query)).await
 }
 
 pub async fn engine_get(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
+  filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
@@ -934,6 +997,8 @@ pub async fn engine_get(
   // Extract key rules slice for helpers (avoids passing axum Extension around)
   let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> =
     active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  let filter_ref: Option<&crate::auth::permission_middleware::FilteredListing> =
+    filtered_listing.as_ref().map(|Extension(f)| f);
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
@@ -952,7 +1017,7 @@ pub async fn engine_get(
 
     return handle_symlink_resolution(
       &state.engine, &path, &symlink_record.target, &claims.sub, key_rules,
-      version_query.limit, version_query.offset,
+      filter_ref, version_query.limit, version_query.offset,
     );
   }
 
@@ -976,6 +1041,7 @@ pub async fn engine_get(
   if version_query.depth.is_some() || version_query.glob.is_some() {
     return handle_recursive_listing(
       &state.engine, &path, &version_query, key_rules, &claims.sub,
+      filter_ref, Some(&state),
     );
   }
 
@@ -992,6 +1058,7 @@ pub async fn engine_get(
       order: version_query.order.as_deref(),
     },
     Some(&state),
+    filter_ref,
   )
 }
 
@@ -1835,7 +1902,7 @@ fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::Hash
 /// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total? }
 pub async fn query_endpoint(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
@@ -1994,7 +2061,7 @@ pub async fn query_endpoint(
         .collect();
 
       // Filter query results by API key rules — denied paths are silently omitted
-      let response_items = if let Some(Extension(ref rules)) = active_key_rules {
+      let mut response_items = if let Some(Extension(ref rules)) = active_key_rules {
         if !rules.0.is_empty() {
           let mut items = response_items;
           items.retain(|item| {
@@ -2016,6 +2083,17 @@ pub async fn query_endpoint(
       } else {
         response_items
       };
+
+      // Filter query results by user/group permissions. Query is exempt from
+      // path-level middleware, so authorization happens here: a user only
+      // sees files they have direct Read on (grants + grant inheritance).
+      // Root short-circuits; share keys are handled by the key_rules branch
+      // above.
+      if !claims.sub.starts_with("share:") {
+        filter_results_by_direct_read(
+          &mut response_items, &claims.sub, &state.engine, &state.group_cache,
+        );
+      }
 
       let mut response = serde_json::json!({
         "items": response_items,
@@ -2288,7 +2366,7 @@ pub struct GlobalSearchRequest {
 
 pub async fn global_search_endpoint(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<GlobalSearchRequest>,
 ) -> Response {
   if payload.query.is_none() && payload.where_clause.is_none() {
@@ -2330,7 +2408,7 @@ pub async fn global_search_endpoint(
     offset,
   ) {
     Ok(results) => {
-      let items: Vec<serde_json::Value> = results.results.iter().map(|r| {
+      let mut items: Vec<serde_json::Value> = results.results.iter().map(|r| {
         serde_json::json!({
           "path": r.path,
           "score": r.score,
@@ -2342,6 +2420,15 @@ pub async fn global_search_endpoint(
           "updated_at": r.updated_at,
         })
       }).collect();
+
+      // Filter search results by user/group permissions. Search is exempt
+      // from path-level middleware, so authorization happens here: a user
+      // only sees files they have direct Read on (grants + inheritance).
+      if !claims.sub.starts_with("share:") {
+        filter_results_by_direct_read(
+          &mut items, &claims.sub, &state.engine, &state.group_cache,
+        );
+      }
 
       let mut response = serde_json::json!({
         "results": items,

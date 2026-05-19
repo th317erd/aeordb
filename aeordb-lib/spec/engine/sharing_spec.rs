@@ -851,3 +851,361 @@ async fn list_shares_empty_returns_empty_array() {
     let shares = json["shares"].as_array().unwrap();
     assert_eq!(shares.len(), 0, "Unshared file should have no shares");
 }
+
+// ---------------------------------------------------------------------------
+// Ancestor-navigation listing tests — users with deep shares can walk down
+// from the root via GET /files/{ancestor}/ instead of being forced to use
+// /files/shared-with-me.
+// ---------------------------------------------------------------------------
+
+/// Share a file (or directory) by attaching a user-group permission link to
+/// the directory's `.aeordb-permissions`. Path_pattern is set when sharing
+/// a single file.
+fn share_directory_with_user(
+    engine: &StorageEngine,
+    dir_path: &str,
+    user_id: &Uuid,
+    allow: &str,
+    pattern: Option<&str>,
+) {
+    let group = format!("user:{}", user_id);
+    let link = match pattern {
+        Some(p) => member_link_with_pattern(&group, allow, "........", p),
+        None => member_link(&group, allow, "........"),
+    };
+    let perms = PathPermissions { links: vec![link] };
+    write_permissions(engine, dir_path, &perms);
+}
+
+async fn get_items(app: axum::Router, uri: &str, auth: &str) -> serde_json::Value {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("authorization", auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {} should succeed for user with descendant grants", uri);
+    body_json(resp.into_body()).await
+}
+
+fn item_names(listing: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = listing["items"].as_array().unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn user_with_deep_share_can_walk_root_to_target() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    // Build /Pictures/Family/Harlo with a file inside, plus a sibling
+    // directory /Pictures/Vacation the user must NOT see.
+    let upload = |path: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "text/plain")
+            .header("authorization", &auth_root)
+            .body(Body::from("payload"))
+            .unwrap()
+    };
+    for path in [
+        "/files/Pictures/Family/Harlo/photo.jpg",
+        "/files/Pictures/Vacation/beach.jpg",
+        "/files/Documents/private.pdf",
+    ] {
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(upload(path)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    drop(app);
+
+    // Share /Pictures/Family/Harlo with a non-root user.
+    let user_id = create_test_user(&engine, "harlo_viewer");
+    share_directory_with_user(&engine, "/Pictures/Family/Harlo", &user_id, ".r..l...", None);
+
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    // GET / — user should see only Pictures, not Documents.
+    let root = get_items(rebuild_app(&jwt_manager, &engine), "/files/", &auth).await;
+    assert_eq!(item_names(&root), vec!["Pictures".to_string()],
+        "Root listing should expose only the ancestor of the share");
+
+    // GET /Pictures — only Family, not Vacation.
+    let pics = get_items(rebuild_app(&jwt_manager, &engine), "/files/Pictures/", &auth).await;
+    assert_eq!(item_names(&pics), vec!["Family".to_string()],
+        "/Pictures listing should expose only Family, not Vacation");
+
+    // GET /Pictures/Family — only Harlo.
+    let fam = get_items(rebuild_app(&jwt_manager, &engine), "/files/Pictures/Family/", &auth).await;
+    assert_eq!(item_names(&fam), vec!["Harlo".to_string()]);
+
+    // GET /Pictures/Family/Harlo — full direct listing (the shared dir).
+    // The .aeordb-permissions metadata file is exposed by the listing
+    // endpoint today (not scrubbed); just assert photo.jpg is present.
+    let harlo = get_items(rebuild_app(&jwt_manager, &engine), "/files/Pictures/Family/Harlo/", &auth).await;
+    let names = item_names(&harlo);
+    assert!(names.contains(&"photo.jpg".to_string()),
+        "Shared-directory listing must include the actual content");
+}
+
+#[tokio::test]
+async fn file_pattern_share_visible_in_parent_listing() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    for path in [
+        "/files/Documents/tax-2025.pdf",
+        "/files/Documents/secret.pdf",
+    ] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "application/pdf")
+            .header("authorization", &auth_root)
+            .body(Body::from("data"))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    drop(app);
+
+    let user_id = create_test_user(&engine, "tax_recipient");
+    share_directory_with_user(&engine, "/Documents", &user_id, ".r......", Some("tax-2025.pdf"));
+
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    // Listing of /Documents should show only the shared filename, not
+    // sibling secret.pdf.
+    let docs = get_items(rebuild_app(&jwt_manager, &engine), "/files/Documents/", &auth).await;
+    assert_eq!(item_names(&docs), vec!["tax-2025.pdf".to_string()],
+        "Only the file-pattern-shared filename should be visible");
+
+    // Root listing should still expose /Documents as a navigable ancestor.
+    let root = get_items(rebuild_app(&jwt_manager, &engine), "/files/", &auth).await;
+    assert_eq!(item_names(&root), vec!["Documents".to_string()]);
+}
+
+#[tokio::test]
+async fn user_without_any_grants_still_403s_on_root() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    let upload = Request::builder()
+        .method("PUT")
+        .uri("/files/Pictures/photo.jpg")
+        .header("content-type", "image/jpeg")
+        .header("authorization", &auth_root)
+        .body(Body::from("data"))
+        .unwrap();
+    let resp = app.oneshot(upload).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let user_id = create_test_user(&engine, "no_shares");
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN,
+        "User with no grants anywhere must not be able to list root");
+}
+
+#[tokio::test]
+async fn recursive_listing_under_ancestor_navigation_only_returns_granted_files() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    for path in [
+        "/files/A/B/inside.txt",
+        "/files/A/B/deeper/photo.jpg",
+        "/files/A/C/sibling.txt",
+        "/files/A/secret.txt",
+    ] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "text/plain")
+            .header("authorization", &auth_root)
+            .body(Body::from("x"))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    drop(app);
+
+    let user_id = create_test_user(&engine, "deep_share_user");
+    share_directory_with_user(&engine, "/A/B", &user_id, ".r..l...", None);
+
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    // Recursive listing of /A — should yield only files under /A/B, not
+    // /A/C or /A/secret.txt.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/A/?depth=-1")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let listing = body_json(resp.into_body()).await;
+    let paths: Vec<String> = listing["items"].as_array().unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap_or("").to_string())
+        .collect();
+    for path in &paths {
+        assert!(path.starts_with("/A/B/"),
+            "Recursive listing leaked path outside grant: {}", path);
+    }
+    assert!(paths.contains(&"/A/B/inside.txt".to_string()));
+    assert!(paths.contains(&"/A/B/deeper/photo.jpg".to_string()));
+}
+
+#[tokio::test]
+async fn grants_index_invalidates_after_share_change() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    let upload = Request::builder()
+        .method("PUT")
+        .uri("/files/NewShare/file.txt")
+        .header("content-type", "text/plain")
+        .header("authorization", &auth_root)
+        .body(Body::from("data"))
+        .unwrap();
+    let resp = app.oneshot(upload).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let user_id = create_test_user(&engine, "late_grantee");
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    // Before sharing: 403 on /files/.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/files/")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Grant access via the share endpoint (which goes through the proper
+    // cache-invalidation path).
+    let share_body = serde_json::json!({
+        "paths": ["/NewShare"],
+        "users": [user_id.to_string()],
+        "permissions": ".r..l..."
+    });
+    let share_req = Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth_root)
+        .body(Body::from(serde_json::to_vec(&share_body).unwrap()))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(share_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // After sharing: root listing now exposes /NewShare.
+    let root = get_items(rebuild_app(&jwt_manager, &engine), "/files/", &auth).await;
+    assert_eq!(item_names(&root), vec!["NewShare".to_string()],
+        "Newly-granted share must be visible without server restart");
+}
+
+#[tokio::test]
+async fn root_user_listing_is_unaffected_by_grants() {
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    for path in ["/files/A/x.txt", "/files/B/y.txt"] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "text/plain")
+            .header("authorization", &auth_root)
+            .body(Body::from("x"))
+            .unwrap();
+        let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    drop(app);
+
+    // Add a grant on /A — root must still see both A and B.
+    let user_id = create_test_user(&engine, "any_user");
+    share_directory_with_user(&engine, "/A", &user_id, ".r..l...", None);
+
+    let root = get_items(rebuild_app(&jwt_manager, &engine), "/files/", &auth_root).await;
+    let names = item_names(&root);
+    assert!(names.contains(&"A".to_string()));
+    assert!(names.contains(&"B".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Resolver helper unit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolver_check_direct_permission_does_not_grant_ancestor_navigation() {
+    let (engine, _temp_dir) = test_engine();
+    let user_id = create_test_user(&engine, "direct_check_user");
+    let group_cache = std::sync::Arc::new(Cache::new(GroupLoader));
+    let resolver = PermissionResolver::new(&engine, &group_cache);
+
+    let group = format!("user:{}", user_id);
+    let perms = PathPermissions { links: vec![member_link(&group, ".r..l...", "........")] };
+    write_permissions(&engine, "/A/B", &perms);
+    engine.permissions_cache.evict_all();
+    engine.grants_index_cache.evict_all();
+
+    // Directory paths use trailing slash so path_levels treats them as
+    // directory hierarchies (the resolver only walks directory levels).
+    // Direct check: ancestors are NOT granted.
+    assert!(!resolver.check_direct_permission(&user_id, "/", CrudlifyOp::List).unwrap());
+    assert!(!resolver.check_direct_permission(&user_id, "/A/", CrudlifyOp::List).unwrap());
+    // But the target itself IS.
+    assert!(resolver.check_direct_permission(&user_id, "/A/B/", CrudlifyOp::List).unwrap());
+
+    // Softened check: ancestors get implicit r+l.
+    assert!(resolver.check_permission(&user_id, "/", CrudlifyOp::List).unwrap());
+    assert!(resolver.check_permission(&user_id, "/A/", CrudlifyOp::List).unwrap());
+    assert!(resolver.check_permission(&user_id, "/A/", CrudlifyOp::Read).unwrap());
+    // But non-Read/List ops on ancestors stay denied.
+    assert!(!resolver.check_permission(&user_id, "/A/", CrudlifyOp::Update).unwrap());
+}
+
+#[test]
+fn resolver_accessible_child_names_returns_navigable_segments() {
+    let (engine, _temp_dir) = test_engine();
+    let user_id = create_test_user(&engine, "child_names_user");
+    let group_cache = std::sync::Arc::new(Cache::new(GroupLoader));
+    let resolver = PermissionResolver::new(&engine, &group_cache);
+
+    let group = format!("user:{}", user_id);
+    write_permissions(&engine, "/A/B/C", &PathPermissions {
+        links: vec![member_link(&group, ".r..l...", "........")],
+    });
+    write_permissions(&engine, "/D", &PathPermissions {
+        links: vec![member_link_with_pattern(&group, ".r......", "........", "report.pdf")],
+    });
+    engine.permissions_cache.evict_all();
+    engine.grants_index_cache.evict_all();
+
+    let mut root_children = resolver.accessible_child_names(&user_id, "/").unwrap();
+    root_children.sort();
+    assert_eq!(root_children, vec!["A".to_string(), "D".to_string()]);
+
+    assert_eq!(resolver.accessible_child_names(&user_id, "/A").unwrap(), vec!["B".to_string()]);
+    assert_eq!(resolver.accessible_child_names(&user_id, "/A/B").unwrap(), vec!["C".to_string()]);
+    assert_eq!(resolver.accessible_child_names(&user_id, "/D").unwrap(), vec!["report.pdf".to_string()]);
+    assert!(resolver.accessible_child_names(&user_id, "/E").unwrap().is_empty());
+}

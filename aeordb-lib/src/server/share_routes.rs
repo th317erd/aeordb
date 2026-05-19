@@ -221,6 +221,7 @@ pub async fn share(
 
         // Evict cache for this directory
         state.engine.permissions_cache.evict(&perm_dir);
+        state.engine.grants_index_cache.evict_all();
 
         shared_count += 1;
         shared_paths.push(normalized);
@@ -433,6 +434,7 @@ pub async fn unshare(
 
     // Evict cache
     state.engine.permissions_cache.evict(&perm_dir);
+    state.engine.grants_index_cache.evict_all();
 
     Json(serde_json::json!({
         "revoked": true,

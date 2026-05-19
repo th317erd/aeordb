@@ -19,6 +19,18 @@ use crate::server::state::AppState;
 #[derive(Clone, Debug)]
 pub struct ActiveKeyRules(pub Vec<KeyRule>);
 
+/// Extension type attached when a user reached a directory via ancestor
+/// navigation rather than a direct list grant — i.e. they have a share
+/// somewhere below but no list permission on this path. Listing handlers
+/// must filter children to `allowed_children` so callers see only the
+/// names that lead to or contain their grants.
+#[derive(Clone, Debug)]
+pub struct FilteredListing {
+  /// Immediate child names of the requested path that the user can either
+  /// access directly or must traverse to reach a deeper grant.
+  pub allowed_children: std::collections::HashSet<String>,
+}
+
 /// Special file names that map to Configure or Deploy operations.
 const CONFIGURE_FILES: &[&str] = &[".aeordb-config", ".aeordb-permissions"];
 const DEPLOY_FILES: &[&str] = &[".aeordb-functions"];
@@ -287,41 +299,53 @@ pub async fn permission_middleware(
     &state.group_cache,
   );
 
-  match resolver.check_permission(&user_id.unwrap(), engine_path, operation) {
-    Ok(true) => next.run(request).await,
-    Ok(false) => {
-      tracing::warn!(
-        user_id = %user_id.unwrap(),
-        path = %engine_path,
-        operation = ?operation,
-        "Permission denied"
-      );
-      (
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse {
-          error: "Permission denied".to_string(),
-          code: None,
-        }),
-      )
-        .into_response()
-    }
+  let user_uuid = user_id.unwrap();
+
+  // Direct check first: did the user receive an explicit grant for this op?
+  let direct = match resolver.check_direct_permission(&user_uuid, engine_path, operation) {
+    Ok(v) => v,
     Err(error) => {
-      tracing::error!(
-        user_id = %user_id.unwrap(),
-        path = %engine_path,
-        "Permission check failed: {}",
-        error
-      );
-      (
+      tracing::error!(user_id = %user_uuid, path = %engine_path, "Permission check failed: {}", error);
+      return (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-          error: "Permission check failed".to_string(),
-          code: None,
-        }),
-      )
-        .into_response()
+        Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }),
+      ).into_response();
+    }
+  };
+
+  if direct {
+    return next.run(request).await;
+  }
+
+  // Ancestor navigation: a user with a grant at /A/B/C can Read/List its
+  // ancestors so the file browser can walk down to it. Other ops stay
+  // strictly 403.
+  if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List) {
+    let has_descendant = resolver.has_descendant_grants(&user_uuid, engine_path).unwrap_or(false);
+    if has_descendant {
+      let children = resolver
+        .accessible_child_names(&user_uuid, engine_path)
+        .unwrap_or_default();
+      let allowed_children: std::collections::HashSet<String> = children.into_iter().collect();
+      request.extensions_mut().insert(FilteredListing { allowed_children });
+      return next.run(request).await;
     }
   }
+
+  tracing::warn!(
+    user_id = %user_uuid,
+    path = %engine_path,
+    operation = ?operation,
+    "Permission denied"
+  );
+  (
+    StatusCode::FORBIDDEN,
+    Json(ErrorResponse {
+      error: "Permission denied".to_string(),
+      code: None,
+    }),
+  )
+    .into_response()
 }
 
 /// Map an HTTP method and path to a CrudlifyOp.

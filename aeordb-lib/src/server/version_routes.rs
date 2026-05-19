@@ -164,6 +164,7 @@ pub async fn snapshot_restore(
     Ok(()) => {
       state.engine.permissions_cache.evict_all();
       state.engine.index_config_cache.evict_all();
+      state.engine.grants_index_cache.evict_all();
       state.group_cache.evict_all();
       state.api_key_cache.evict_all();
       state.engine.clear_dir_content_cache();
