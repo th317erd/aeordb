@@ -1,7 +1,19 @@
 'use strict';
 
 import { AeorAdminPage } from '/shared/components/aeor-admin-page.js';
-import { escapeHtml } from '/shared/utils.js';
+import { elements } from '/aeor/elements.js';
+
+const { div, span, label, input } = elements;
+
+/** Build a DocumentFragment from a list of ElementDefinition nodes. */
+function fragment(doc, ...defs) {
+  const frag = doc.createDocumentFragment();
+  for (const d of defs) {
+    if (d == null) continue;
+    frag.appendChild(d.build(doc));
+  }
+  return frag;
+}
 
 class AeorUsersPage extends AeorAdminPage {
 
@@ -23,18 +35,23 @@ class AeorUsersPage extends AeorAdminPage {
   }
 
   renderCard(item) {
-    return `
-      <div class="admin-card-header">
-        <div class="admin-card-title">
-          ${escapeHtml(item.username)}
-          <span class="badge ${item.is_active ? 'badge-active' : 'badge-inactive'}">
-            ${item.is_active ? 'Active' : 'Inactive'}
-          </span>
-        </div>
-      </div>
-      <div class="admin-card-meta">${escapeHtml(item.email || '')}</div>
-      <div class="admin-card-meta">Created ${item.created_at ? new Date(item.created_at).toLocaleDateString() : '\u2014'}</div>
-    `;
+    const created = item.created_at
+      ? new Date(item.created_at).toLocaleDateString()
+      : '—';
+    const statusClass = item.is_active ? 'badge badge-active' : 'badge badge-inactive';
+    const statusLabel = item.is_active ? 'Active' : 'Inactive';
+
+    return fragment(document,
+      div.class('admin-card-header')(
+        div.class('admin-card-title')(
+          item.username || '',
+          ' ',
+          span.class(statusClass)(statusLabel),
+        ),
+      ),
+      div.class('admin-card-meta')(item.email || ''),
+      div.class('admin-card-meta')(`Created ${created}`),
+    );
   }
 
   matchesSearch(item, query) {
@@ -49,8 +66,16 @@ class AeorUsersPage extends AeorAdminPage {
 
   getActionButtons(selectedItems) {
     const count = selectedItems.length;
-    const label = count === 1 ? 'Deactivate' : `Deactivate ${count}`;
-    return `<aeor-confirm-button class="confirm-button-danger admin-deactivate-btn" label="${label}" confirmed-text="Deactivated!" duration="1000"></aeor-confirm-button>`;
+    const labelText = count === 1 ? 'Deactivate' : `Deactivate ${count}`;
+    const confirmBtn = elements['aeor-confirm-button'];
+
+    return fragment(document,
+      confirmBtn
+        .class('confirm-button-danger admin-deactivate-btn')
+        .label(labelText)
+        .confirmedText('Deactivated!')
+        .duration('1000')(),
+    );
   }
 
   _bindActionBarEvents(bar, selectedItems) {
@@ -82,16 +107,16 @@ class AeorUsersPage extends AeorAdminPage {
   // ── Create modal ────────────────────────────────────────────────────
 
   renderCreateForm() {
-    return `
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-username">Username</label>
-        <input class="form-input" id="create-username" type="text" required>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-email">Email</label>
-        <input class="form-input" id="create-email" type="text" required>
-      </div>
-    `;
+    return fragment(document,
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-username')('Username'),
+        input.class('form-input').id('create-username').type('text').required(true)(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-email')('Email'),
+        input.class('form-input').id('create-email').type('text').required(true)(),
+      ),
+    );
   }
 
   async submitCreate(modal) {
@@ -119,27 +144,43 @@ class AeorUsersPage extends AeorAdminPage {
 
   renderEditForm(items) {
     const user = items[0];
-    const isActive = user.is_active ? 'checked' : '';
+    const usernameInput = input
+      .class('form-input')
+      .id('edit-username')
+      .type('text')
+      .value(user.username || '')
+      .required(true);
 
-    return `
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="edit-username">Username</label>
-        <input class="form-input" id="edit-username" type="text" value="${escapeHtml(user.username || '')}" required>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="edit-email">Email</label>
-        <input class="form-input" id="edit-email" type="text" value="${escapeHtml(user.email || '')}" required>
-      </div>
-      <div class="modal-field-group">
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" id="edit-active" ${isActive}>
-            <span class="toggle-track"></span>
-          </label>
-          <span class="modal-field-label toggle-label">Active</span>
-        </div>
-      </div>
-    `;
+    const emailInput = input
+      .class('form-input')
+      .id('edit-email')
+      .type('text')
+      .value(user.email || '')
+      .required(true);
+
+    const activeInput = user.is_active
+      ? input.type('checkbox').id('edit-active').checked(true)
+      : input.type('checkbox').id('edit-active');
+
+    return fragment(document,
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('edit-username')('Username'),
+        usernameInput(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('edit-email')('Email'),
+        emailInput(),
+      ),
+      div.class('modal-field-group')(
+        div.class('toggle-wrap')(
+          label.class('toggle')(
+            activeInput(),
+            span.class('toggle-track')(),
+          ),
+          span.class('modal-field-label toggle-label')('Active'),
+        ),
+      ),
+    );
   }
 
   async submitEdit(items, modal) {

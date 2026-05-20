@@ -1,8 +1,30 @@
 'use strict';
 
 import { AeorAdminPage } from '/shared/components/aeor-admin-page.js';
-import { escapeHtml } from '/shared/utils.js';
+import { elements } from '/aeor/elements.js';
 import '/shared/components/aeor-snapshot-card.js';
+
+const { label, input, button } = elements;
+const aeorSnapshotCard = elements['aeor-snapshot-card'];
+const aeorConfirmButton = elements['aeor-confirm-button'];
+
+const ROOT_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+/** Build a DocumentFragment from a list of ElementDefinition nodes. */
+function fragment(doc, ...defs) {
+  const frag = doc.createDocumentFragment();
+  for (const d of defs) {
+    if (d == null) continue;
+    frag.appendChild(d.build(doc));
+  }
+  return frag;
+}
+
+function isRoot() {
+  return window.AUTH
+    && window.AUTH.currentUserId
+    && window.AUTH.currentUserId() === ROOT_USER_ID;
+}
 
 class AeorSnapshotsPage extends AeorAdminPage {
 
@@ -83,9 +105,7 @@ class AeorSnapshotsPage extends AeorAdminPage {
 
   shouldShowEditButton(items) {
     // Renaming a snapshot is admin-only — non-root cannot edit.
-    const isRoot = window.AUTH && window.AUTH.currentUserId
-      && window.AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
-    return isRoot && items.length === 1;
+    return isRoot() && items.length === 1;
   }
 
   // ── Card rendering ──────────────────────────────────────────────────
@@ -95,14 +115,19 @@ class AeorSnapshotsPage extends AeorAdminPage {
     const age = item.created_at ? this._timeAgo(item.created_at) : '';
     const created = item.created_at ? 'Created ' + new Date(item.created_at).toLocaleString() : '';
 
-    return `<aeor-snapshot-card
-      name="${this._escAttr(item.name || '')}"
-      snapshot-id="${this._escAttr(item.id || '')}"
-      date="${this._escAttr(created)}"
-      ${isCurrent ? 'current' : ''}
-      ${!isCurrent ? `badge="${this._escAttr(age)}"` : ''}
-      truncate-id
-    ></aeor-snapshot-card>`;
+    let card = aeorSnapshotCard
+      .name(item.name || '')
+      .snapshotId(item.id || '')
+      .date(created)
+      .truncateId(true);
+
+    if (isCurrent) {
+      card = card.current(true);
+    } else {
+      card = card.badge(age);
+    }
+
+    return fragment(document, card());
   }
 
   updateCardSelection(cardEl, isSelected) {
@@ -118,19 +143,26 @@ class AeorSnapshotsPage extends AeorAdminPage {
 
   getActionButtons(selectedItems) {
     // Only root can restore/delete snapshots — these are db-wide operations.
-    const isRoot = window.AUTH && window.AUTH.currentUserId
-      && window.AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
-    if (!isRoot) return '';
+    if (!isRoot()) return fragment(document);
 
     if (selectedItems.length === 1) {
-      return `
-        <button class="secondary small admin-restore-btn">Restore</button>
-        <aeor-confirm-button class="admin-delete-btn confirm-button-danger" label="Delete" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>
-      `;
+      return fragment(document,
+        button.class('secondary small admin-restore-btn')('Restore'),
+        aeorConfirmButton
+          .class('admin-delete-btn confirm-button-danger')
+          .label('Delete')
+          .confirmedText('Deleted!')
+          .duration('1000')(),
+      );
     }
-    return `
-      <aeor-confirm-button class="admin-delete-btn confirm-button-danger" label="Delete ${selectedItems.length} Snapshots" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>
-    `;
+
+    return fragment(document,
+      aeorConfirmButton
+        .class('admin-delete-btn confirm-button-danger')
+        .label(`Delete ${selectedItems.length} Snapshots`)
+        .confirmedText('Deleted!')
+        .duration('1000')(),
+    );
   }
 
   _bindActionBarEvents(bar, selectedItems) {
@@ -183,10 +215,10 @@ class AeorSnapshotsPage extends AeorAdminPage {
   // ── Edit modal ──────────────────────────────────────────────────────
 
   renderEditForm(items) {
-    return `
-      <label class="form-label">Name</label>
-      <input class="form-input" type="text" name="name" value="${this._escAttr(items[0].name || '')}">
-    `;
+    return fragment(document,
+      label.class('form-label')('Name'),
+      input.class('form-input').type('text').name('name').value(items[0].name || '')(),
+    );
   }
 
   async submitEdit(items, modal) {

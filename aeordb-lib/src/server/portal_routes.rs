@@ -45,6 +45,43 @@ const PORTAL_SHARED_SNAPSHOT_CARD_JS: &str = include_str!("../portal/shared/comp
 const PORTAL_SHARED_ADMIN_PAGE_JS: &str = include_str!("../portal/shared/components/aeor-admin-page.js");
 const PORTAL_SHARED_KEYS_PAGE_JS: &str = include_str!("../portal/shared/components/aeor-keys-page.js");
 
+// Universal `aeor-web-components` (symlinked into portal/aeor/ at build time).
+// The migrated DB-shared components import from `/aeor/...`, so the portal must
+// serve these alongside `/shared/...`. See engine-task-portal-universal-aeor-route-2026-05-19.md.
+const PORTAL_AEOR_ELEMENTS_JS:        &str = include_str!("../portal/aeor/elements.js");
+const PORTAL_AEOR_QUERY_JS:           &str = include_str!("../portal/aeor/query.js");
+const PORTAL_AEOR_REACTIVE_STATE_JS:  &str = include_str!("../portal/aeor/reactive-state.js");
+const PORTAL_AEOR_CONFIRM_JS:         &str = include_str!("../portal/aeor/confirm.js");
+const PORTAL_AEOR_UTILS_JS:           &str = include_str!("../portal/aeor/utils.js");
+
+const PORTAL_AEOR_CHECKBOX_JS:        &str = include_str!("../portal/aeor/components/aeor-checkbox.js");
+const PORTAL_AEOR_CHECKBOX_CSS:       &str = include_str!("../portal/aeor/components/aeor-checkbox.css");
+const PORTAL_AEOR_CONFIRM_BUTTON_JS:  &str = include_str!("../portal/aeor/components/aeor-confirm-button.js");
+const PORTAL_AEOR_CONFIRM_BUTTON_CSS: &str = include_str!("../portal/aeor/components/aeor-confirm-button.css");
+const PORTAL_AEOR_CONFIRM_DIALOG_CSS: &str = include_str!("../portal/aeor/components/aeor-confirm-dialog.css");
+const PORTAL_AEOR_DISCLOSURE_JS:      &str = include_str!("../portal/aeor/components/aeor-disclosure.js");
+const PORTAL_AEOR_DISCLOSURE_CSS:     &str = include_str!("../portal/aeor/components/aeor-disclosure.css");
+const PORTAL_AEOR_INFO_BOX_JS:        &str = include_str!("../portal/aeor/components/aeor-info-box.js");
+const PORTAL_AEOR_INFO_BOX_CSS:       &str = include_str!("../portal/aeor/components/aeor-info-box.css");
+const PORTAL_AEOR_INPUT_JS:           &str = include_str!("../portal/aeor/components/aeor-input.js");
+const PORTAL_AEOR_INPUT_CSS:          &str = include_str!("../portal/aeor/components/aeor-input.css");
+const PORTAL_AEOR_MODAL_JS:           &str = include_str!("../portal/aeor/components/aeor-modal.js");
+const PORTAL_AEOR_MODAL_CSS:          &str = include_str!("../portal/aeor/components/aeor-modal.css");
+const PORTAL_AEOR_PROMPT_JS:          &str = include_str!("../portal/aeor/components/aeor-prompt.js");
+const PORTAL_AEOR_PROMPT_CSS:         &str = include_str!("../portal/aeor/components/aeor-prompt.css");
+const PORTAL_AEOR_SELECT_JS:          &str = include_str!("../portal/aeor/components/aeor-select.js");
+const PORTAL_AEOR_SELECT_CSS:         &str = include_str!("../portal/aeor/components/aeor-select.css");
+const PORTAL_AEOR_SPLIT_BUTTON_JS:    &str = include_str!("../portal/aeor/components/aeor-split-button.js");
+const PORTAL_AEOR_SPLIT_BUTTON_CSS:   &str = include_str!("../portal/aeor/components/aeor-split-button.css");
+const PORTAL_AEOR_TAB_VIEW_JS:        &str = include_str!("../portal/aeor/components/aeor-tab-view.js");
+const PORTAL_AEOR_TAB_VIEW_CSS:       &str = include_str!("../portal/aeor/components/aeor-tab-view.css");
+const PORTAL_AEOR_TOAST_JS:           &str = include_str!("../portal/aeor/components/aeor-toast.js");
+const PORTAL_AEOR_TOAST_CSS:          &str = include_str!("../portal/aeor/components/aeor-toast.css");
+
+const PORTAL_AEOR_TOKENS_CSS:         &str = include_str!("../portal/aeor/styles/tokens.css");
+const PORTAL_AEOR_GLOBALS_CSS:        &str = include_str!("../portal/aeor/styles/globals.css");
+const PORTAL_AEOR_COMPONENTS_CSS:     &str = include_str!("../portal/aeor/styles/components.css");
+
 /// Serve the main portal HTML page.
 pub async fn portal_index() -> Html<&'static str> {
     Html(PORTAL_HTML)
@@ -105,6 +142,116 @@ pub async fn portal_shared_asset(
     };
 
     (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+}
+
+/// Serve universal `aeor-web-components` assets (symlinked into portal/aeor/
+/// at build time). Lookup by relative path under `/aeor/`. Migrated DB-shared
+/// components import these via `/aeor/elements.js`, `/aeor/components/*`,
+/// `/aeor/styles/*`. See engine-task-portal-universal-aeor-route-2026-05-19.md
+/// for context.
+///
+/// In dev builds, on a cache miss we also fall back to reading the file from
+/// disk via the symlink so we can hot-edit `aeor-web-components` without
+/// rebuilding the engine. Release builds serve only the baked-in content.
+pub async fn portal_aeor_asset(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let (content, content_type) = match path.as_str() {
+        // Core
+        "elements.js"           => (PORTAL_AEOR_ELEMENTS_JS,        "application/javascript; charset=utf-8"),
+        "query.js"              => (PORTAL_AEOR_QUERY_JS,           "application/javascript; charset=utf-8"),
+        "reactive-state.js"     => (PORTAL_AEOR_REACTIVE_STATE_JS,  "application/javascript; charset=utf-8"),
+        "confirm.js"            => (PORTAL_AEOR_CONFIRM_JS,         "application/javascript; charset=utf-8"),
+        "utils.js"              => (PORTAL_AEOR_UTILS_JS,           "application/javascript; charset=utf-8"),
+
+        // Components — JS
+        "components/aeor-checkbox.js"       => (PORTAL_AEOR_CHECKBOX_JS,       "application/javascript; charset=utf-8"),
+        "components/aeor-confirm-button.js" => (PORTAL_AEOR_CONFIRM_BUTTON_JS, "application/javascript; charset=utf-8"),
+        "components/aeor-disclosure.js"     => (PORTAL_AEOR_DISCLOSURE_JS,     "application/javascript; charset=utf-8"),
+        "components/aeor-info-box.js"       => (PORTAL_AEOR_INFO_BOX_JS,       "application/javascript; charset=utf-8"),
+        "components/aeor-input.js"          => (PORTAL_AEOR_INPUT_JS,          "application/javascript; charset=utf-8"),
+        "components/aeor-modal.js"          => (PORTAL_AEOR_MODAL_JS,          "application/javascript; charset=utf-8"),
+        "components/aeor-prompt.js"         => (PORTAL_AEOR_PROMPT_JS,         "application/javascript; charset=utf-8"),
+        "components/aeor-select.js"         => (PORTAL_AEOR_SELECT_JS,         "application/javascript; charset=utf-8"),
+        "components/aeor-split-button.js"   => (PORTAL_AEOR_SPLIT_BUTTON_JS,   "application/javascript; charset=utf-8"),
+        "components/aeor-tab-view.js"       => (PORTAL_AEOR_TAB_VIEW_JS,       "application/javascript; charset=utf-8"),
+        "components/aeor-toast.js"          => (PORTAL_AEOR_TOAST_JS,          "application/javascript; charset=utf-8"),
+
+        // Components — CSS
+        "components/aeor-checkbox.css"       => (PORTAL_AEOR_CHECKBOX_CSS,       "text/css; charset=utf-8"),
+        "components/aeor-confirm-button.css" => (PORTAL_AEOR_CONFIRM_BUTTON_CSS, "text/css; charset=utf-8"),
+        "components/aeor-confirm-dialog.css" => (PORTAL_AEOR_CONFIRM_DIALOG_CSS, "text/css; charset=utf-8"),
+        "components/aeor-disclosure.css"     => (PORTAL_AEOR_DISCLOSURE_CSS,     "text/css; charset=utf-8"),
+        "components/aeor-info-box.css"       => (PORTAL_AEOR_INFO_BOX_CSS,       "text/css; charset=utf-8"),
+        "components/aeor-input.css"          => (PORTAL_AEOR_INPUT_CSS,          "text/css; charset=utf-8"),
+        "components/aeor-modal.css"          => (PORTAL_AEOR_MODAL_CSS,          "text/css; charset=utf-8"),
+        "components/aeor-prompt.css"         => (PORTAL_AEOR_PROMPT_CSS,         "text/css; charset=utf-8"),
+        "components/aeor-select.css"         => (PORTAL_AEOR_SELECT_CSS,         "text/css; charset=utf-8"),
+        "components/aeor-split-button.css"   => (PORTAL_AEOR_SPLIT_BUTTON_CSS,   "text/css; charset=utf-8"),
+        "components/aeor-tab-view.css"       => (PORTAL_AEOR_TAB_VIEW_CSS,       "text/css; charset=utf-8"),
+        "components/aeor-toast.css"          => (PORTAL_AEOR_TOAST_CSS,          "text/css; charset=utf-8"),
+
+        // Shared styles
+        "styles/tokens.css"     => (PORTAL_AEOR_TOKENS_CSS,     "text/css; charset=utf-8"),
+        "styles/globals.css"    => (PORTAL_AEOR_GLOBALS_CSS,    "text/css; charset=utf-8"),
+        "styles/components.css" => (PORTAL_AEOR_COMPONENTS_CSS, "text/css; charset=utf-8"),
+
+        _ => {
+            // Dev-mode disk fallback: read straight off the symlinked
+            // aeor-web-components checkout so we can hot-edit during
+            // development without rebuilding. Release builds skip this
+            // and 404 unknown paths.
+            #[cfg(debug_assertions)]
+            {
+                if let Some(body) = read_aeor_from_disk(&path) {
+                    let ct = guess_content_type(&path);
+                    return (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body).into_response();
+                }
+            }
+            return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response();
+        }
+    };
+
+    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+}
+
+/// Dev-only: read a file from the on-disk `aeor-web-components` symlink so
+/// the engine doesn't need a rebuild for every component edit during
+/// development. Guarded against path-traversal by rejecting `..` segments
+/// and absolute paths.
+#[cfg(debug_assertions)]
+fn read_aeor_from_disk(path: &str) -> Option<String> {
+    if path.contains("..") || path.starts_with('/') {
+        return None;
+    }
+    // The directory `aeordb-lib/src/portal/aeor` is a symlink to the
+    // aeor-web-components checkout — same layout as `portal/shared`.
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/portal/aeor");
+    let full = base.join(path);
+    // Re-verify after join: the resolved path must still live under base.
+    let canonical_base = std::fs::canonicalize(&base).ok()?;
+    let canonical_full = std::fs::canonicalize(&full).ok()?;
+    if !canonical_full.starts_with(&canonical_base) {
+        return None;
+    }
+    std::fs::read_to_string(&canonical_full).ok()
+}
+
+#[cfg(debug_assertions)]
+fn guess_content_type(path: &str) -> &'static str {
+    if path.ends_with(".js") || path.ends_with(".mjs") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 // ── Enhanced stats response types ───────────────────────────────────────────

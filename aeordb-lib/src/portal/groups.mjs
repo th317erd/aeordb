@@ -1,8 +1,37 @@
 'use strict';
 
 import { AeorAdminPage } from '/shared/components/aeor-admin-page.js';
-import { escapeHtml } from '/shared/utils.js';
+import { elements } from '/aeor/elements.js';
 import '/shared/components/aeor-crudlify.js';
+
+const { div, label, input, select, option } = elements;
+const aeorCrudlify = elements['aeor-crudlify'];
+const aeorConfirmButton = elements['aeor-confirm-button'];
+
+const QUERY_FIELDS = ['tags', 'user_id', 'is_active', 'created_at', 'updated_at'];
+const QUERY_OPERATORS = [
+  'has', 'has_any', 'has_all', 'eq', 'neq',
+  'contains', 'starts_with', 'in', 'lt', 'gt',
+];
+
+/** Build a DocumentFragment from a list of ElementDefinition nodes. */
+function fragment(doc, ...defs) {
+  const frag = doc.createDocumentFragment();
+  for (const d of defs) {
+    if (d == null) continue;
+    frag.appendChild(d.build(doc));
+  }
+  return frag;
+}
+
+/** Build a <select> populated with the given options. */
+function selectField(id, values, selected) {
+  const opts = values.map((value) => {
+    const opt = option.value(value)(value);
+    return value === selected ? opt.selected(true) : opt;
+  });
+  return select.class('form-input').id(id)(...opts);
+}
 
 class AeorGroupsPage extends AeorAdminPage {
 
@@ -59,26 +88,37 @@ class AeorGroupsPage extends AeorAdminPage {
   // ── Card rendering ──────────────────────────────────────────────────
 
   renderCard(item) {
-    return `
-      <div class="admin-card-header">
-        <div class="admin-card-title">${escapeHtml(item._displayName || item.name)}</div>
-      </div>
-      <div class="admin-card-meta">
-        Allow: ${escapeHtml(item.default_allow || '--------')} &middot;
-        Deny: ${escapeHtml(item.default_deny || '--------')}
-      </div>
-      <div class="admin-card-meta">
-        Query: ${escapeHtml(item.query_field || '')} ${escapeHtml(item.query_operator || '')} ${escapeHtml(item.query_value || '')}
-      </div>
-    `;
+    const allowFlags = item.default_allow || '--------';
+    const denyFlags = item.default_deny || '--------';
+    const qf = item.query_field || '';
+    const qo = item.query_operator || '';
+    const qv = item.query_value || '';
+
+    return fragment(document,
+      div.class('admin-card-header')(
+        div.class('admin-card-title')(item._displayName || item.name || ''),
+      ),
+      div.class('admin-card-meta')(
+        `Allow: ${allowFlags} · Deny: ${denyFlags}`,
+      ),
+      div.class('admin-card-meta')(
+        `Query: ${qf} ${qo} ${qv}`,
+      ),
+    );
   }
 
   // ── Action bar ──────────────────────────────────────────────────────
 
   getActionButtons(selectedItems) {
     const count = selectedItems.length;
-    const label = count === 1 ? 'Delete' : `Delete ${count} Groups`;
-    return `<aeor-confirm-button class="confirm-button-danger admin-delete-btn" label="${label}" confirmed-text="Deleted!" duration="1000"></aeor-confirm-button>`;
+    const labelText = count === 1 ? 'Delete' : `Delete ${count} Groups`;
+    return fragment(document,
+      aeorConfirmButton
+        .class('confirm-button-danger admin-delete-btn')
+        .label(labelText)
+        .confirmedText('Deleted!')
+        .duration('1000')(),
+    );
   }
 
   _bindActionBarEvents(bar, selectedItems) {
@@ -110,49 +150,32 @@ class AeorGroupsPage extends AeorAdminPage {
   // ── Create modal ────────────────────────────────────────────────────
 
   renderCreateForm() {
-    return `
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-name">Group Name</label>
-        <input class="form-input" id="create-name" type="text" required>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label">Default Allow</label>
-        <aeor-crudlify id="create-allow" value="-r------"></aeor-crudlify>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label">Default Deny</label>
-        <aeor-crudlify id="create-deny" value="--------"></aeor-crudlify>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-query-field">Query Field</label>
-        <select class="form-input" id="create-query-field">
-          <option value="tags" selected>tags</option>
-          <option value="user_id">user_id</option>
-          <option value="is_active">is_active</option>
-          <option value="created_at">created_at</option>
-          <option value="updated_at">updated_at</option>
-        </select>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-query-operator">Query Operator</label>
-        <select class="form-input" id="create-query-operator">
-          <option value="has" selected>has</option>
-          <option value="has_any">has_any</option>
-          <option value="has_all">has_all</option>
-          <option value="eq">eq</option>
-          <option value="neq">neq</option>
-          <option value="contains">contains</option>
-          <option value="starts_with">starts_with</option>
-          <option value="in">in</option>
-          <option value="lt">lt</option>
-          <option value="gt">gt</option>
-        </select>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="create-query-value">Query Value</label>
-        <input class="form-input" id="create-query-value" type="text" placeholder="e.g. engineering">
-      </div>
-    `;
+    return fragment(document,
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-name')('Group Name'),
+        input.class('form-input').id('create-name').type('text').required(true)(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label')('Default Allow'),
+        aeorCrudlify.id('create-allow').value('-r------')(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label')('Default Deny'),
+        aeorCrudlify.id('create-deny').value('--------')(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-query-field')('Query Field'),
+        selectField('create-query-field', QUERY_FIELDS, 'tags'),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-query-operator')('Query Operator'),
+        selectField('create-query-operator', QUERY_OPERATORS, 'has'),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('create-query-value')('Query Value'),
+        input.class('form-input').id('create-query-value').type('text').placeholder('e.g. engineering')(),
+      ),
+    );
   }
 
   async submitCreate(modal) {
@@ -185,66 +208,49 @@ class AeorGroupsPage extends AeorAdminPage {
   renderEditForm(items) {
     if (items.length === 1) {
       const group = items[0];
-      return `
-        <div class="modal-field-group">
-          <label class="modal-field-label" for="edit-name">Group Name</label>
-          <input class="form-input" id="edit-name" type="text" value="${escapeHtml(group.name || '')}" required>
-        </div>
-        <div class="modal-field-group">
-          <label class="modal-field-label">Default Allow</label>
-          <aeor-crudlify id="edit-allow" value="${escapeHtml(group.default_allow || '--------')}"></aeor-crudlify>
-        </div>
-        <div class="modal-field-group">
-          <label class="modal-field-label">Default Deny</label>
-          <aeor-crudlify id="edit-deny" value="${escapeHtml(group.default_deny || '--------')}"></aeor-crudlify>
-        </div>
-        <div class="modal-field-group">
-          <label class="modal-field-label" for="edit-query-field">Query Field</label>
-          <select class="form-input" id="edit-query-field">
-            <option value="tags" ${group.query_field === 'tags' ? 'selected' : ''}>tags</option>
-            <option value="user_id" ${group.query_field === 'user_id' ? 'selected' : ''}>user_id</option>
-            <option value="is_active" ${group.query_field === 'is_active' ? 'selected' : ''}>is_active</option>
-            <option value="created_at" ${group.query_field === 'created_at' ? 'selected' : ''}>created_at</option>
-            <option value="updated_at" ${group.query_field === 'updated_at' ? 'selected' : ''}>updated_at</option>
-          </select>
-        </div>
-        <div class="modal-field-group">
-          <label class="modal-field-label" for="edit-query-operator">Query Operator</label>
-          <select class="form-input" id="edit-query-operator">
-            <option value="has" ${group.query_operator === 'has' ? 'selected' : ''}>has</option>
-            <option value="has_any" ${group.query_operator === 'has_any' ? 'selected' : ''}>has_any</option>
-            <option value="has_all" ${group.query_operator === 'has_all' ? 'selected' : ''}>has_all</option>
-            <option value="eq" ${group.query_operator === 'eq' ? 'selected' : ''}>eq</option>
-            <option value="neq" ${group.query_operator === 'neq' ? 'selected' : ''}>neq</option>
-            <option value="contains" ${group.query_operator === 'contains' ? 'selected' : ''}>contains</option>
-            <option value="starts_with" ${group.query_operator === 'starts_with' ? 'selected' : ''}>starts_with</option>
-            <option value="in" ${group.query_operator === 'in' ? 'selected' : ''}>in</option>
-            <option value="lt" ${group.query_operator === 'lt' ? 'selected' : ''}>lt</option>
-            <option value="gt" ${group.query_operator === 'gt' ? 'selected' : ''}>gt</option>
-          </select>
-        </div>
-        <div class="modal-field-group">
-          <label class="modal-field-label" for="edit-query-value">Query Value</label>
-          <input class="form-input" id="edit-query-value" type="text" value="${escapeHtml(group.query_value || '')}">
-        </div>
-      `;
+      return fragment(document,
+        div.class('modal-field-group')(
+          label.class('modal-field-label').for('edit-name')('Group Name'),
+          input.class('form-input').id('edit-name').type('text').value(group.name || '').required(true)(),
+        ),
+        div.class('modal-field-group')(
+          label.class('modal-field-label')('Default Allow'),
+          aeorCrudlify.id('edit-allow').value(group.default_allow || '--------')(),
+        ),
+        div.class('modal-field-group')(
+          label.class('modal-field-label')('Default Deny'),
+          aeorCrudlify.id('edit-deny').value(group.default_deny || '--------')(),
+        ),
+        div.class('modal-field-group')(
+          label.class('modal-field-label').for('edit-query-field')('Query Field'),
+          selectField('edit-query-field', QUERY_FIELDS, group.query_field),
+        ),
+        div.class('modal-field-group')(
+          label.class('modal-field-label').for('edit-query-operator')('Query Operator'),
+          selectField('edit-query-operator', QUERY_OPERATORS, group.query_operator),
+        ),
+        div.class('modal-field-group')(
+          label.class('modal-field-label').for('edit-query-value')('Query Value'),
+          input.class('form-input').id('edit-query-value').type('text').value(group.query_value || '')(),
+        ),
+      );
     }
 
     // Multi-edit: only allow/deny are editable, query fields hidden
-    return `
-      <div class="modal-field-group">
-        <label class="modal-field-label" for="edit-name">Group Name</label>
-        <input class="form-input" id="edit-name" type="text" value="(multiple)" disabled>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label">Default Allow</label>
-        <aeor-crudlify id="edit-allow" value="--------"></aeor-crudlify>
-      </div>
-      <div class="modal-field-group">
-        <label class="modal-field-label">Default Deny</label>
-        <aeor-crudlify id="edit-deny" value="--------"></aeor-crudlify>
-      </div>
-    `;
+    return fragment(document,
+      div.class('modal-field-group')(
+        label.class('modal-field-label').for('edit-name')('Group Name'),
+        input.class('form-input').id('edit-name').type('text').value('(multiple)').disabled(true)(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label')('Default Allow'),
+        aeorCrudlify.id('edit-allow').value('--------')(),
+      ),
+      div.class('modal-field-group')(
+        label.class('modal-field-label')('Default Deny'),
+        aeorCrudlify.id('edit-deny').value('--------')(),
+      ),
+    );
   }
 
   async submitEdit(items, modal) {

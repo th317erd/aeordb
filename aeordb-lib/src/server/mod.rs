@@ -546,6 +546,7 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/snapshots.mjs", get(portal_routes::portal_asset))
     .route("/settings.mjs", get(portal_routes::portal_asset))
     .route("/shared/{*path}", get(portal_routes::portal_shared_asset))
+    .route("/aeor/{*path}", get(portal_routes::portal_aeor_asset))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
