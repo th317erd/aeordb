@@ -44,6 +44,49 @@ use state::AppState;
 
 pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_config, parse_cors_origins};
 
+/// Spawn a 100ms timer that calls `engine.try_flush_hot_buffer()` on every
+/// tick. Without this, KV writes accumulate in `write_buffer` / `hot_buffer`
+/// until a 512-entry threshold or `shutdown()`. For low-traffic workloads
+/// neither fires before the process is SIGTERM'd, so every restart is a
+/// dirty startup and the WAL scanner gives up at the first uncovered
+/// offset — losing the last few writes on every restart.
+///
+/// Holds a `Weak<StorageEngine>` so the timer doesn't keep the engine
+/// alive past its caller's lifetime. Exits when:
+///   - The engine is dropped (upgrade returns None), OR
+///   - The optional `cancel` token is triggered.
+///
+/// Silently no-ops if called outside a tokio runtime context (e.g. from
+/// `#[test]` constructors that don't spin up tokio). Callers that need
+/// the timer in those environments should call it from within a
+/// `Runtime::block_on`.
+pub fn spawn_hot_buffer_flush_timer(
+  engine: Arc<StorageEngine>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+) {
+  if tokio::runtime::Handle::try_current().is_err() {
+    // No runtime — silently skip. Callers that genuinely need the timer
+    // (servers / long-running tasks) always run inside tokio::main.
+    return;
+  }
+  let weak = Arc::downgrade(&engine);
+  drop(engine);
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+      interval.tick().await;
+      if let Some(ref c) = cancel {
+        if c.is_cancelled() { break; }
+      }
+      match weak.upgrade() {
+        Some(engine) => engine.try_flush_hot_buffer(),
+        None => break, // Engine dropped — exit cleanly.
+      }
+    }
+  });
+}
+
 
 // NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
@@ -83,6 +126,8 @@ pub fn create_app_with_auth_mode_and_cancel(
   cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
   let engine = create_engine_with_hot_dir(engine_path, hot_dir);
+  spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
+
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
     AuthMode::Disabled => (Arc::new(NoAuthProvider::new()), None),

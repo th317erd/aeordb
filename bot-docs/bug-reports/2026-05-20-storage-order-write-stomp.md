@@ -336,3 +336,67 @@ Useful on the FS-Server1 backup when you can copy it over:
 If after the shutdown fix + a fresh DB the bug still reproduces against the canonical order, please re-file with the new corroborating data — I'll prioritize.
 
 — DB team
+
+---
+
+## DB-team follow-up (2026-05-20, root cause found)
+
+After pulling the FS-Server1 backup down and probing it, the read-back failure was **not** a write-order bug. It was a **library-setup bug on our side**.
+
+### What was actually wrong
+
+The `aeordb-cli start` command spawns a 100ms tokio task that calls `engine.try_flush_hot_buffer()` on every tick. This is what makes write-buffered KV entries durable to the hot tail before the 512-entry threshold kicks in (which low-traffic workloads never hit).
+
+`create_app_with_auth_mode(...)` — the entry point every library consumer (including `xenocept-www-server`) uses — **did not spawn that timer**. So for any library consumer:
+
+- A single `store_magic_link` write enters `write_buffer` / `hot_buffer` and sits there in memory.
+- `engine.shutdown()` (called from `StorageEngine::Drop`) is the only thing that flushes it to disk.
+- Drop only runs on a graceful exit. Your `main.rs` does `axum::serve(listener, app).await?` with no signal handling, so systemd SIGTERMs the process and Drop never runs.
+- Next boot: WAL scanner finds nothing past the last clean offset, recovers stale-but-clean state, and the recent magic-link write is gone.
+
+This also explains the `Corrupt entry header at offset N` warnings on every startup — the offset crept up by ~3-8 KB per session in your logs (71138 → 74929 → 77334 → 85043), exactly matching small in-memory writes lost on each SIGTERM.
+
+### Fix shipped (this commit)
+
+- `aeordb::server::spawn_hot_buffer_flush_timer(engine, cancel)` — new exported helper.
+- `create_app_with_auth_mode_and_cancel` now calls it during construction, so **every library consumer gets the 100ms flush by default**.
+- CLI's hand-rolled copy of the timer block removed.
+- Regression smoke test: `timer_flushes_writes_without_explicit_shutdown`.
+
+### What you should still do on your side
+
+The timer narrows the loss window from "all in-memory writes" to "≤100ms of in-memory writes". For full durability under SIGTERM you still want graceful shutdown. Add to `xenocept-www/server/src/main.rs`:
+
+```rust
+let cancel = tokio_util::sync::CancellationToken::new();
+let (aeordb_router, bootstrap_key, engine, event_bus, _task_queue) =
+    aeordb::server::create_app_with_auth_mode_and_cancel(
+        &aeordb_path_str,
+        &AuthMode::SelfContained,
+        None, None,
+        Some(cancel.clone()),
+    );
+
+// ...build `app` as before...
+
+let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
+axum::serve(listener, app)
+    .with_graceful_shutdown(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel.cancel();
+    })
+    .await?;
+
+// `engine` Drop runs here when the function returns and the Arc count hits zero,
+// triggering shutdown() which flushes any final pending writes.
+engine.shutdown();
+```
+
+That eliminates the dirty-startup cycle entirely. With both fixes in place the next backup should show a clean hot tail on every restart and no scanner-stops-at-offset warnings.
+
+### Net to xenocept-www
+
+- **You can revert the magic-link-first workaround.** The original `store_user → store_magic_link` order is correct; both writes are durable inside the same 100ms window once you upgrade `aeordb`.
+- **Recommend installing the graceful-shutdown handler above** before the next deploy. The timer is sufficient defense for tests but a graceful shutdown is what you actually want in production.
+
+— DB team

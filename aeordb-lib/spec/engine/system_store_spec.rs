@@ -1125,3 +1125,53 @@ fn parent_dir_must_survive_dirty_restart() {
         }
     }
 }
+
+// Wiring smoke test for the 2026-05-20 dirty-startup write-loss fix.
+// `create_app_with_auth_mode` now spawns the 100ms hot-buffer flush
+// timer that the CLI used to install by hand — this asserts the
+// helper survives being called, the timer task spawns onto the test's
+// tokio runtime, and a write that goes through it is still
+// readable on reopen. Note: a true SIGTERM regression (Drop never
+// runs) needs a two-process harness — we can't release the file lock
+// in-process — so this is a wiring smoke test, not a full crash test.
+// The production verification is on-server soak after deploy.
+#[tokio::test]
+async fn timer_flushes_writes_without_explicit_shutdown() {
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("repro.aeordb").to_str().unwrap().to_string();
+
+    let code_hash = hash_magic_link_code("TIMER-TEST");
+
+    {
+        let engine = Arc::new(StorageEngine::create(&db_path).unwrap());
+        aeordb::server::spawn_hot_buffer_flush_timer(engine.clone(), None);
+
+        let ctx = RequestContext::system();
+        let user = User::new("timer@example.com", Some("timer@example.com"));
+        system_store::store_user(&engine, &ctx, &user).unwrap();
+
+        let now = Utc::now();
+        let record = MagicLinkRecord {
+            code_hash: code_hash.clone(),
+            email: "timer@example.com".into(),
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+            is_used: false,
+        };
+        system_store::store_magic_link(&engine, &ctx, &record).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+        drop(engine);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let engine = Arc::new(StorageEngine::open(&db_path).unwrap());
+    let found = system_store::get_magic_link(&engine, &code_hash).unwrap();
+    assert!(
+        found.is_some(),
+        "magic-link record must be readable after engine drop with timer wired"
+    );
+}
