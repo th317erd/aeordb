@@ -6,6 +6,62 @@ pub fn run(path: &str, probe_path: Option<&str>) {
     };
     let ops = aeordb::engine::DirectoryOps::new(&engine);
 
+    if probe_path == Some("--list-files") {
+        // Enumerate every FileRecord — try a couple of entry_version
+        // settings so we cover whichever the DB was written with.
+        use aeordb::engine::file_record::FileRecord;
+        let hash_length = engine.hash_algo().hash_length();
+        let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+        println!("FileRecord entries: {}", entries.len());
+        let mut seen_paths = std::collections::HashSet::new();
+        for (hash, value) in &entries {
+            // Read entry header to get correct entry_version.
+            let entry = match engine.get_entry_including_deleted(hash) {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let version = entry.0.entry_version;
+            match FileRecord::deserialize(value, hash_length, version) {
+                Ok(record) => {
+                    if seen_paths.insert(record.path.clone()) {
+                        println!("  {} ({}B)", record.path, record.total_size);
+                    }
+                }
+                Err(e) => {
+                    println!("  [deser err: {} hash={} version={}]", e, hex::encode(&hash[..8.min(hash.len())]), version);
+                }
+            }
+        }
+        return;
+    }
+
+    if probe_path == Some("--wal-dump") {
+        // Dump every DirectoryIndex entry — hash, length, first bytes
+        // so we can see what /.aeordb-system content looks like across
+        // its multiple versions.
+        let algo = engine.hash_algo();
+        let aeordb_system_dir_key = aeordb::engine::directory_path_hash("/.aeordb-system", &algo).unwrap();
+        println!("/.aeordb-system dir_key = {}", hex::encode(&aeordb_system_dir_key));
+
+        let dir_entries = engine.entries_by_type(aeordb::engine::KV_TYPE_DIRECTORY).unwrap_or_default();
+        println!("DirectoryIndex entries (live KV): {}", dir_entries.len());
+        for (hash, value) in &dir_entries {
+            let hl = if value.len() == algo.hash_length() {
+                format!(" hard-link → {}", hex::encode(&value[..8.min(value.len())]))
+            } else {
+                String::new()
+            };
+            let is_aeordb_sys = hash == &aeordb_system_dir_key;
+            println!("  {} len={}{}{}",
+                hex::encode(&hash[..8.min(hash.len())]),
+                value.len(),
+                hl,
+                if is_aeordb_sys { "  ← /.aeordb-system dir_key" } else { "" },
+            );
+        }
+        return;
+    }
+
     if let Some(p) = probe_path {
         let algo = engine.hash_algo();
         let normalized = aeordb::engine::path_utils::normalize_path(p);
