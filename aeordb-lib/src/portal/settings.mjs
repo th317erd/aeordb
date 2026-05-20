@@ -1,8 +1,8 @@
 'use strict';
 
 import { escapeHtml, flashButton } from '/shared/utils.js';
-import '/shared/components/aeor-info-box.js';
-import '/shared/components/aeor-tab-view.js';
+import '/aeor/components/aeor-info-box.js';
+import '/aeor/components/aeor-tab-view.js';
 
 class AeorSettings extends HTMLElement {
   constructor() {
