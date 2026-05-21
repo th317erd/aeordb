@@ -1471,7 +1471,17 @@ async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
     }).await.unwrap();
     assert!(gc_result.is_ok());
 
-    // Direct GET on /A/B should still work — via runtime recovery fallback.
+    // Before any list, verify directly via the recovery probe — confirms
+    // we did set up the bug pattern (stale dir_key present).
+    let report_pre_list = aeordb::engine::verify::verify(&engine, "<test>");
+    assert!(report_pre_list.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
+        "test setup must produce a stale dir_key for /A/B. Found: {:?}",
+        report_pre_list.stale_dir_path_keys);
+
+    // Direct GET on /A/B should still work — via runtime recovery fallback —
+    // AND, post-P1 fix, must also persistently heal the dir_key (and any
+    // stale ancestors along the chain) so subsequent verifies see no
+    // staleness without needing a manual `--repair` pass.
     let req = Request::builder()
         .method("GET")
         .uri("/files/A/B/")
@@ -1488,19 +1498,16 @@ async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
     assert!(!names.contains(&"file_v2.txt".to_string()),
         "Restored snapshot should not show post-mutation file");
 
-    // verify --repair should detect and fix the stale dir_key.
-    let report = aeordb::engine::verify::verify(&engine, "<test>");
-    assert!(report.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
-        "verify must detect the stale dir_key. Found: {:?}", report.stale_dir_path_keys);
-
-    let ops = aeordb::engine::DirectoryOps::new(&engine);
-    let repaired = ops.repair_stale_dir_key("/A/B").unwrap();
-    assert!(repaired, "repair_stale_dir_key must rewrite the dir_key");
-
-    // After repair, verify should report no stale dir_keys for /A/B.
+    // After the listing, the online heal must have rewritten the dir_key
+    // for /A/B and (if applicable) its ancestors. No `verify --repair`
+    // pass needed.
     let report_after = aeordb::engine::verify::verify(&engine, "<test>");
-    assert!(!report_after.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
-        "After repair, /A/B must no longer be in stale_dir_path_keys");
+    assert!(
+        !report_after.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
+        "list_directory must auto-heal the stale dir_key for /A/B. \
+         Still stale: {:?}",
+        report_after.stale_dir_path_keys,
+    );
 }
 
 #[tokio::test]

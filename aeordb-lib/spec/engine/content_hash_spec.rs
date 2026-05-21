@@ -595,3 +595,85 @@ fn test_content_hash_entry_immutable() {
   let (_h, _k, data_1_after) = entry.unwrap();
   assert_eq!(data_1, data_1_after, "old content hash entry data must not change");
 }
+
+// ─── 26. List_directory heals stale dir_key ancestors after snapshot restore ─
+
+/// Regression for the 2026-05-20 overnight S2 soak finding (P1).
+///
+/// After `snapshot_restore` moves HEAD, dir_key hard-links can be stale
+/// relative to HEAD's canonical content. Commit 1bdda9c's read-path
+/// recovery serves canonical content but did not persist the heal for
+/// ancestor dir_keys — only the leaf path being queried got fixed (via
+/// subsequent writes to it), so ancestors like `/`, `/Documents`,
+/// `/Documents/sub` accumulated stale dir_key entries indefinitely.
+///
+/// This test reproduces that exact pattern and asserts the heal now
+/// propagates up the chain when ANY descendant is read.
+#[test]
+fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
+  use aeordb::engine::directory_path_hash;
+
+  let ctx = RequestContext::system();
+  let (engine, _temp) = setup();
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+  let algo = engine.hash_algo();
+
+  // Build a 4-deep directory chain with files at each level, then snapshot.
+  ops.store_file_buffered(&ctx, "/a/file.txt", b"a-file", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/file.txt", b"ab-file", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/file.txt", b"abc-file", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/d/file.txt", b"abcd-file", None).unwrap();
+
+  vm.create_snapshot(&ctx, "before", HashMap::new()).unwrap();
+
+  // Move HEAD forward by writing to a DIFFERENT subtree, then restore.
+  // The restore moves HEAD back; the dir_keys for /, /a, /a/b, /a/b/c
+  // still hard-link the post-write content hashes, which now diverge
+  // from the restored canonical chain.
+  ops.store_file_buffered(&ctx, "/other/path/x.txt", b"distractor", None).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/d/different.txt", b"distractor2", None).unwrap();
+  vm.restore_snapshot(&ctx, "before").unwrap();
+
+  // Capture pre-heal dir_key hard-links for /, /a, /a/b, /a/b/c, /a/b/c/d.
+  // Each should be a hash_length hard-link entry.
+  let hash_length = algo.hash_length();
+  let paths = ["/", "/a", "/a/b", "/a/b/c", "/a/b/c/d"];
+  let mut pre_heal: Vec<Vec<u8>> = Vec::new();
+  let mut stale_count = 0;
+  for p in &paths {
+    let key = directory_path_hash(p, &algo).unwrap();
+    let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist");
+    pre_heal.push(v.clone());
+    // Compare against canonical for that path.
+    let canonical = ops.canonical_directory_content_hash(p).unwrap()
+      .expect("canonical must be reachable from HEAD");
+    if v.len() == hash_length && v != canonical {
+      stale_count += 1;
+    }
+  }
+
+  // We need at least one stale ancestor for this test to be meaningful.
+  assert!(
+    stale_count >= 1,
+    "expected at least one stale ancestor dir_key after restore; got 0 (test setup didn't reproduce the bug)"
+  );
+
+  // Now trigger the heal by listing the DEEPEST descendant. The new
+  // ancestor-walk heal should fix /, /a, /a/b, /a/b/c, /a/b/c/d in one shot.
+  let _ = ops.list_directory("/a/b/c/d").unwrap();
+
+  // Every dir_key along the chain must now point at canonical.
+  for p in &paths {
+    let key = directory_path_hash(p, &algo).unwrap();
+    let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist post-heal");
+    if v.len() == hash_length {
+      let canonical = ops.canonical_directory_content_hash(p).unwrap()
+        .expect("canonical reachable post-heal");
+      assert_eq!(
+        v, canonical,
+        "ancestor {} dir_key must point at canonical after list_directory heal", p
+      );
+    }
+  }
+}

@@ -121,11 +121,13 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
     report.file_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     report.hash_algorithm = format!("{:?}", engine.hash_algo());
 
-    // Phase 1: Scan all entries from the append log
-    scan_entries(engine, &mut report);
+    // Phase 1: Scan all entries from the append log. Also collects the
+    // unique-hash count so check_kv_index doesn't need a second WAL pass.
+    let unique_hashes = scan_entries(engine, &mut report);
 
-    // Phase 2: Check KV index consistency
-    check_kv_index(engine, &mut report);
+    // Phase 2: Check KV index consistency — uses the unique_hashes count
+    // from Phase 1 (no WAL re-scan).
+    check_kv_index(engine, &mut report, unique_hashes);
 
     // Phase 3: Check directory consistency
     check_directories(engine, &mut report);
@@ -225,15 +227,23 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
     report
 }
 
-fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
+/// Scan the WAL, accumulating per-type counts, integrity counts, and
+/// the set of unique hash keys seen. Returns the unique-hash count so
+/// `check_kv_index` can compare against the live KV snapshot without
+/// re-scanning. Previous behavior was two full WAL passes (one here,
+/// one in check_kv_index); on a dirty-startup verify against a fat DB
+/// that doubled wall-clock time for no new information.
+fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> u64 {
     use crate::engine::errors::EngineError;
 
     // Use the writer to scan entries — reporting mode yields errors
     // for corrupt entries instead of silently skipping them.
     let writer = match engine.writer_read_lock() {
         Ok(w) => w,
-        Err(_) => return,
+        Err(_) => return 0,
     };
+
+    let mut unique_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
     if let Ok(mut scanner) = writer.scan_entries_reporting() {
         for result in scanner.by_ref() {
@@ -241,6 +251,7 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
                 Ok(scanned) => {
                     report.total_entries += 1;
                     report.valid_entries += 1;
+                    unique_hashes.insert(scanned.key);
 
                     match scanned.header.entry_type {
                         EntryType::Chunk => {
@@ -284,37 +295,15 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
     }
 
     report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
+    unique_hashes.len() as u64
 }
 
-fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
+fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport, unique_hashes: u64) {
     // Count KV entries from snapshot
     let snapshot = engine.kv_snapshot.load();
     if let Ok(entries) = snapshot.iter_all() {
         report.kv_entries = entries.len() as u64;
     }
-
-    // Count unique hashes from the WAL scan (not total entries, since
-    // duplicate hashes are expected — e.g., file records stored at both
-    // content hash and identity hash, or entries updated in place).
-    let unique_hashes = {
-        let writer = match engine.writer_read_lock() {
-            Ok(w) => w,
-            Err(_) => {
-                report.missing_kv_entries = report.valid_entries.saturating_sub(report.kv_entries);
-                return;
-            }
-        };
-        match writer.scan_entries() {
-            Ok(scanner) => {
-                let mut seen = std::collections::HashSet::new();
-                for scanned in scanner.flatten() {
-                    seen.insert(scanned.key);
-                }
-                seen.len() as u64
-            }
-            Err(_) => report.valid_entries,
-        }
-    };
 
     if report.kv_entries < unique_hashes {
         report.missing_kv_entries = unique_hashes - report.kv_entries;
