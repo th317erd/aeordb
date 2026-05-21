@@ -867,3 +867,76 @@ async fn test_empty_query_string() {
   // Should not error — either 200 with empty or 200 with results
   assert_eq!(status, StatusCode::OK, "empty query string should not cause an error");
 }
+
+// ===========================================================================
+// Per-directory cap regression (2026-05-20 xenocept-client report)
+// ===========================================================================
+
+/// Per-directory search must not be silently capped at DEFAULT_QUERY_LIMIT.
+///
+/// Regression for the 2026-05-20 xenocept-client report: `broad_search` built
+/// per-directory queries with `limit: None`, which QueryEngine::execute then
+/// rewrote to `DEFAULT_QUERY_LIMIT = 20`. Any single-directory corpus larger
+/// than 20 documents lost everything past the first 20 score-sorted hits,
+/// even though the outer `global_search` paginator was asked for more.
+#[tokio::test]
+async fn test_per_directory_cap_is_lifted() {
+  use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  // One directory, trigram + string index on `name`. 50 documents that all
+  // share the trigram fingerprint of the word "xenocept" — exactly the
+  // pattern that broke in production.
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig {
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+      IndexFieldConfig {
+        name: "name".to_string(),
+        index_type: "trigram".to_string(),
+        source: None,
+        min: None,
+        max: None,
+      },
+    ],
+  };
+  store_index_config(&engine, "/sessions", &config);
+
+  const N: usize = 50;
+  for i in 0..N {
+    let path = format!("/sessions/session-{:03}.json", i);
+    let json = format!(r#"{{"name":"xenocept session {}","idx":{}}}"#, i, i);
+    ops.store_file_with_indexing(&ctx, &path, json.as_bytes(), Some("application/json")).unwrap();
+  }
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  // Ask for a generous outer limit so the only possible cause of a short
+  // response is the per-directory inner cap we're regressing against.
+  let (status, json) = search_request(app, &auth, serde_json::json!({
+    "query": "xenocept",
+    "limit": 500
+  })).await;
+
+  assert_eq!(status, StatusCode::OK);
+  let results = json["results"].as_array().expect("results array");
+  assert_eq!(
+    results.len(),
+    N,
+    "all {N} matching sessions must appear; got {} — per-directory cap regressed",
+    results.len(),
+  );
+}
