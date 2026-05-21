@@ -92,7 +92,7 @@ fn setup_with_trigram_config(
         r#"{{"parser":"plaintext-parser","indexes":[{{"name":"{}","source":{},"type":"trigram"}}]}}"#,
         field_name, source
     );
-    ops.store_file(&ctx,
+    ops.store_file_buffered(&ctx,
         "/docs/.aeordb-config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
@@ -423,7 +423,7 @@ fn test_no_parsed_cache_created() {
     .expect("store text file");
 
     // Verify .parsed/ cache was NOT created
-    let parsed = ops.read_file("/docs/.parsed/hello.txt.json");
+    let parsed = ops.read_file_buffered("/docs/.parsed/hello.txt.json");
     assert!(
         parsed.is_err(),
         ".parsed/ cache should NOT exist — values are stored in the index now"
@@ -443,7 +443,7 @@ fn test_json_file_fuzzy_still_works() {
 
     // Config with trigram index but NO parser (expects JSON data)
     let config = r#"{"indexes":[{"name":"name","type":"trigram"}]}"#;
-    ops.store_file(&ctx,
+    ops.store_file_buffered(&ctx,
         "/docs/.aeordb-config/indexes.json",
         config.as_bytes(),
         Some("application/json"),
@@ -549,11 +549,11 @@ fn test_multiple_files_values_independent() {
 
     // Verify no .parsed/ cache was created
     assert!(
-        ops.read_file("/docs/.parsed/alpha.txt.json").is_err(),
+        ops.read_file_buffered("/docs/.parsed/alpha.txt.json").is_err(),
         ".parsed/ should not exist for alpha"
     );
     assert!(
-        ops.read_file("/docs/.parsed/beta.txt.json").is_err(),
+        ops.read_file_buffered("/docs/.parsed/beta.txt.json").is_err(),
         ".parsed/ should not exist for beta"
     );
 }

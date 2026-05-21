@@ -18,7 +18,7 @@ fn test_system_clock_returns_reasonable_time() {
 
     // And reasonably close to chrono's view of "now" (within 50 ms).
     let chrono_now = chrono::Utc::now().timestamp_millis() as u64;
-    let drift = if chrono_now > now { chrono_now - now } else { now - chrono_now };
+    let drift = chrono_now.abs_diff(now);
     assert!(drift < 50, "SystemClock should be within 50ms of chrono::Utc::now()");
 }
 

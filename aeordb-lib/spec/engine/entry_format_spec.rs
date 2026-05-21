@@ -21,7 +21,7 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
   let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)
     .expect("Failed to compute hash");
   let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -88,11 +88,7 @@ fn test_entry_header_hash_verification_passes() {
     key_length: key.len() as u32,
     value_length: value.len() as u32,
     timestamp: 1700000000000,
-    total_length: EntryHeader::compute_total_length(
-      hash_algo,
-      key.len() as u32,
-      value.len() as u32,
-    ),
+    total_length: EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap(),
     hash,
   };
 
@@ -118,11 +114,7 @@ fn test_entry_header_hash_verification_fails_on_tamper() {
     key_length: key.len() as u32,
     value_length: value.len() as u32,
     timestamp: 1700000000000,
-    total_length: EntryHeader::compute_total_length(
-      hash_algo,
-      key.len() as u32,
-      value.len() as u32,
-    ),
+    total_length: EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap(),
     hash,
   };
 
@@ -240,7 +232,7 @@ fn test_entry_header_total_length_correct() {
   let key_length: u32 = 16;
   let value_length: u32 = 128;
 
-  let total = EntryHeader::compute_total_length(hash_algo, key_length, value_length);
+  let total = EntryHeader::compute_total_length(hash_algo, key_length as usize, value_length as usize).unwrap();
   // 31 (fixed) + 32 (blake3 hash) + 16 (key) + 128 (value) = 207
   let expected = 31 + 32 + 16 + 128;
   assert_eq!(total, expected);
@@ -255,7 +247,7 @@ fn test_void_entry_format() {
   let hash = EntryHeader::compute_hash(EntryType::Void, key, &value, hash_algo)
     .expect("Failed to compute hash");
   let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -294,8 +286,8 @@ fn test_different_hash_algorithms_produce_different_lengths() {
   assert_eq!(HashAlgorithm::Sha512.hash_length(), 64);
 
   // Total length differs when hash length differs
-  let total_blake3 = EntryHeader::compute_total_length(HashAlgorithm::Blake3_256, 10, 10);
-  let total_sha512 = EntryHeader::compute_total_length(HashAlgorithm::Sha512, 10, 10);
+  let total_blake3 = EntryHeader::compute_total_length(HashAlgorithm::Blake3_256, 10, 10).unwrap();
+  let total_sha512 = EntryHeader::compute_total_length(HashAlgorithm::Sha512, 10, 10).unwrap();
   assert_ne!(total_blake3, total_sha512);
   // sha512 total should be 32 bytes larger (64 - 32)
   assert_eq!(total_sha512 - total_blake3, 32);
@@ -323,7 +315,7 @@ fn test_entry_header_deserialize_version_zero_is_valid() {
   let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)
     .expect("Failed to compute hash");
   let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: 0,

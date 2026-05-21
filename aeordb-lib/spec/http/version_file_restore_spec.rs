@@ -65,13 +65,13 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, None).unwrap();
+    ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 fn store_file_with_type(engine: &StorageEngine, path: &str, content: &[u8], content_type: &str) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, Some(content_type)).unwrap();
+    ops.store_file_buffered(&ctx, path, content, Some(content_type)).unwrap();
 }
 
 fn create_snapshot(engine: &StorageEngine, name: &str) {
@@ -82,7 +82,7 @@ fn create_snapshot(engine: &StorageEngine, name: &str) {
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ async fn test_restore_creates_auto_snapshot() {
 
     let json = body_json(response.into_body()).await;
     let auto_snap_name = json["auto_snapshot"].as_str().unwrap();
-    assert!(auto_snap_name.starts_with("pre-restore-"), "auto snapshot name should start with 'pre-restore-', got: {}", auto_snap_name);
+    assert!(auto_snap_name.starts_with("auto-pre-restore"), "auto snapshot name should start with 'pre-restore-', got: {}", auto_snap_name);
 
     // Verify the auto snapshot exists in list
     let vm = VersionManager::new(&engine);
@@ -343,7 +343,7 @@ async fn test_restore_response_shape() {
     assert_eq!(json["restored"], true);
     assert_eq!(json["path"], "shape.txt");
     assert!(json["auto_snapshot"].is_string(), "auto_snapshot should be a string");
-    assert!(json["auto_snapshot"].as_str().unwrap().starts_with("pre-restore-"));
+    assert!(json["auto_snapshot"].as_str().unwrap().starts_with("auto-pre-restore"));
     assert_eq!(json["size"], 11); // "hello world" is 11 bytes
     assert_eq!(json["from_snapshot"], "snap1");
 

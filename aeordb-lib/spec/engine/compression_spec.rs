@@ -212,7 +212,7 @@ fn test_store_file_with_compression() {
     CompressionAlgorithm::Zstd,
   ).unwrap();
 
-  let read_back = ops.read_file("/compressed.txt").unwrap();
+  let read_back = ops.read_file_buffered("/compressed.txt").unwrap();
   assert_eq!(read_back, data_bytes);
 }
 
@@ -229,7 +229,7 @@ fn test_hash_is_on_uncompressed_data() {
   let data_bytes = data.as_bytes();
 
   // Store uncompressed first
-  ops.store_file(&ctx, "/uncompressed.txt", data_bytes, Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/uncompressed.txt", data_bytes, Some("text/plain")).unwrap();
   let meta_uncompressed = ops.get_metadata("/uncompressed.txt").unwrap().unwrap();
 
   // Store compressed version at a different path
@@ -277,7 +277,7 @@ fn test_mixed_compressed_and_uncompressed() {
 
   // Store uncompressed
   let data_a = b"File A: uncompressed content that is reasonably sized.";
-  ops.store_file(&ctx, "/file_a.txt", data_a, Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/file_a.txt", data_a, Some("text/plain")).unwrap();
 
   // Store compressed
   let data_b = "File B: compressed content. ".repeat(100);
@@ -291,12 +291,12 @@ fn test_mixed_compressed_and_uncompressed() {
 
   // Store another uncompressed
   let data_c = b"File C: also uncompressed.";
-  ops.store_file(&ctx, "/file_c.txt", data_c, None).unwrap();
+  ops.store_file_buffered(&ctx, "/file_c.txt", data_c, None).unwrap();
 
   // Read all back
-  assert_eq!(ops.read_file("/file_a.txt").unwrap(), data_a);
-  assert_eq!(ops.read_file("/file_b.txt").unwrap(), data_b_bytes);
-  assert_eq!(ops.read_file("/file_c.txt").unwrap(), data_c);
+  assert_eq!(ops.read_file_buffered("/file_a.txt").unwrap(), data_a);
+  assert_eq!(ops.read_file_buffered("/file_b.txt").unwrap(), data_b_bytes);
+  assert_eq!(ops.read_file_buffered("/file_c.txt").unwrap(), data_c);
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn test_store_empty_file_with_compression() {
     CompressionAlgorithm::Zstd,
   ).unwrap();
 
-  let read_back = ops.read_file("/empty.txt").unwrap();
+  let read_back = ops.read_file_buffered("/empty.txt").unwrap();
   assert!(read_back.is_empty());
 }
 
@@ -334,7 +334,7 @@ fn test_store_large_file_with_compression_multiple_chunks() {
     CompressionAlgorithm::Zstd,
   ).unwrap();
 
-  let read_back = ops.read_file("/large.bin").unwrap();
+  let read_back = ops.read_file_buffered("/large.bin").unwrap();
   assert_eq!(read_back, data);
 
   let metadata = ops.get_metadata("/large.bin").unwrap().unwrap();
@@ -364,7 +364,7 @@ fn test_overwrite_compressed_file() {
     CompressionAlgorithm::Zstd,
   ).unwrap();
 
-  let read_back = ops.read_file("/versioned.txt").unwrap();
+  let read_back = ops.read_file_buffered("/versioned.txt").unwrap();
   assert_eq!(read_back, data_v2.as_bytes());
 }
 
@@ -377,7 +377,7 @@ fn test_compression_with_indexing_via_config() {
 
   // Store a config that enables zstd compression
   let config_json = r#"{"compression":"zstd","indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file(&ctx,
+  ops.store_file_buffered(&ctx,
     "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -392,7 +392,7 @@ fn test_compression_with_indexing_via_config() {
   ).unwrap();
 
   // Read back and verify
-  let read_back = ops.read_file("/data/record.json").unwrap();
+  let read_back = ops.read_file_buffered("/data/record.json").unwrap();
   assert_eq!(read_back, data.as_bytes());
 }
 
@@ -405,7 +405,7 @@ fn test_compression_config_skips_small_data() {
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file(&ctx,
+  ops.store_file_buffered(&ctx,
     "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -419,7 +419,7 @@ fn test_compression_config_skips_small_data() {
     Some("application/json"),
   ).unwrap();
 
-  let read_back = ops.read_file("/data/small.json").unwrap();
+  let read_back = ops.read_file_buffered("/data/small.json").unwrap();
   assert_eq!(read_back, small_data.as_bytes());
 }
 
@@ -432,7 +432,7 @@ fn test_compression_config_skips_images() {
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file(&ctx,
+  ops.store_file_buffered(&ctx,
     "/images/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -446,7 +446,7 @@ fn test_compression_config_skips_images() {
     Some("image/jpeg"),
   ).unwrap();
 
-  let read_back = ops.read_file("/images/photo.jpg").unwrap();
+  let read_back = ops.read_file_buffered("/images/photo.jpg").unwrap();
   assert_eq!(read_back, jpeg_data);
 }
 
@@ -478,7 +478,7 @@ fn test_reopen_engine_reads_compressed_entries() {
     let ops = DirectoryOps::new(&engine);
 
     let data = "Persistent compressed data. ".repeat(100);
-    let read_back = ops.read_file("/persistent.txt").unwrap();
+    let read_back = ops.read_file_buffered("/persistent.txt").unwrap();
     assert_eq!(read_back, data.as_bytes());
   }
 }
@@ -492,7 +492,7 @@ fn test_no_compression_config_means_no_compression() {
 
   // Config WITHOUT compression field
   let config_json = r#"{"indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file(&ctx,
+  ops.store_file_buffered(&ctx,
     "/data/.aeordb-config/indexes.json",
     config_json.as_bytes(),
     Some("application/json"),
@@ -506,6 +506,6 @@ fn test_no_compression_config_means_no_compression() {
   ).unwrap();
 
   // Should still read back fine (stored uncompressed)
-  let read_back = ops.read_file("/data/record.json").unwrap();
+  let read_back = ops.read_file_buffered("/data/record.json").unwrap();
   assert_eq!(read_back, data.as_bytes());
 }

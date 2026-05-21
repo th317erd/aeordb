@@ -42,7 +42,7 @@ pub fn store_conflict(
     });
 
     let meta_json = serde_json::to_vec_pretty(&meta).unwrap_or_default();
-    ops.store_file(
+    ops.store_file_buffered(
         ctx,
         &format!("{}/.meta", base_path),
         &meta_json,
@@ -75,7 +75,7 @@ pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Va
 
     for entry in &entries {
         if entry.name == ".meta" {
-            if let Ok(data) = ops.read_file(&entry.path) {
+            if let Ok(data) = ops.read_file_buffered(&entry.path) {
                 if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&data) {
                     conflicts.push(meta);
                 }
@@ -94,7 +94,7 @@ pub fn get_conflict(
     let ops = DirectoryOps::new(engine);
     let meta_path = format!("/.conflicts{}/.meta", path);
 
-    match ops.read_file(&meta_path) {
+    match ops.read_file_buffered(&meta_path) {
         Ok(data) => {
             let meta = serde_json::from_slice(&data)
                 .map_err(|e| EngineError::JsonParseError(e.to_string()))?;
@@ -120,7 +120,7 @@ pub fn resolve_conflict(
 
     // Read the conflict metadata
     let meta_path = format!("/.conflicts{}/.meta", path);
-    let meta_data = ops.read_file(&meta_path)?;
+    let meta_data = ops.read_file_buffered(&meta_path)?;
     let meta: serde_json::Value = serde_json::from_slice(&meta_data)
         .map_err(|e| EngineError::JsonParseError(e.to_string()))?;
 
@@ -163,7 +163,7 @@ pub fn resolve_conflict(
         }
 
         // Write the chosen version to the real path
-        ops.store_file(ctx, path, &data, file_record.content_type.as_deref())?;
+        ops.store_file_buffered(ctx, path, &data, file_record.content_type.as_deref())?;
     }
 
     // Clean up conflict entry
@@ -185,7 +185,7 @@ pub fn dismiss_conflict(
     let meta_path = format!("/.conflicts{}/.meta", path);
 
     // Verify the conflict exists before dismissing
-    match ops.read_file(&meta_path) {
+    match ops.read_file_buffered(&meta_path) {
         Ok(_) => {}
         Err(EngineError::NotFound(_)) => {
             return Err(EngineError::NotFound(format!(

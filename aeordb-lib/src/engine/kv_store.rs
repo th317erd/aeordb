@@ -24,6 +24,10 @@ pub struct KVEntry {
   pub type_flags: u8,
   pub hash: Vec<u8>,
   pub offset: u64,
+  /// Total on-disk length of this entry (header + key + value, in bytes).
+  /// Required by VoidManager gap-scan recovery and by writers that consume
+  /// voids of a known size.
+  pub total_length: u32,
 }
 
 impl KVEntry {
@@ -229,7 +233,8 @@ impl KVStore {
   pub fn serialize(&self) -> Vec<u8> {
     let hash_length = self.hash_algo.hash_length();
     // version(1) + hash_algo(2) + entry_count(8) + entries + nvt_data
-    let entry_size = 1 + hash_length + 8; // type_flags(1) + hash + offset(8)
+    // Per-entry: type_flags(1) + hash + offset(8) + total_length(4)
+    let entry_size = 1 + hash_length + 8 + 4;
     let entries_size = self.entries.len() * entry_size;
     let nvt_data = self.nvt.serialize();
 
@@ -244,6 +249,7 @@ impl KVStore {
       buffer.push(entry.type_flags);
       buffer.extend_from_slice(&entry.hash);
       buffer.extend_from_slice(&entry.offset.to_le_bytes());
+      buffer.extend_from_slice(&entry.total_length.to_le_bytes());
     }
 
     // Append NVT length then NVT data
@@ -279,7 +285,7 @@ impl KVStore {
     ]) as usize;
 
     let hash_length = hash_algo.hash_length();
-    let entry_size = 1 + hash_length + 8;
+    let entry_size = 1 + hash_length + 8 + 4;
     let entries_end = 11 + entry_count * entry_size;
 
     if data.len() < entries_end + 4 {
@@ -314,10 +320,16 @@ impl KVStore {
       ]);
       cursor += 8;
 
+      let total_length = u32::from_le_bytes([
+        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+      ]);
+      cursor += 4;
+
       entries.push(KVEntry {
         type_flags,
         hash,
         offset,
+        total_length,
       });
     }
 

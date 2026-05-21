@@ -139,8 +139,8 @@ fn merge_files(
             (Some((local_hash, local_record)), false, Some((remote_hash, remote_record)), false) => {
                 resolve_file_conflict(
                     path,
-                    local_hash, local_record, local_added.is_some(),
-                    remote_hash, remote_record, remote_added.is_some(),
+                    ConflictSide { hash: local_hash, record: local_record, is_add: local_added.is_some() },
+                    ConflictSide { hash: remote_hash, record: remote_record, is_add: remote_added.is_some() },
                     operations,
                     conflicts,
                 );
@@ -174,21 +174,29 @@ fn merge_files(
     }
 }
 
+/// One side of a file conflict (local or remote): the file's current hash,
+/// its record, and whether this side considers it a new addition. Bundling
+/// these into a single arg keeps `resolve_file_conflict` readable.
+struct ConflictSide<'a> {
+    hash: &'a Vec<u8>,
+    record: &'a FileRecord,
+    is_add: bool,
+}
+
 /// Resolve a conflict where both sides changed the same file path with
 /// different content. Uses Last-Writer-Wins (LWW) ordering:
 /// highest `(updated_at, node_id)` wins. The comparison is deterministic
 /// regardless of which side is called "local" vs "remote".
 fn resolve_file_conflict(
     path: &str,
-    local_hash: &Vec<u8>,
-    local_record: &FileRecord,
-    local_is_add: bool,
-    remote_hash: &Vec<u8>,
-    remote_record: &FileRecord,
-    remote_is_add: bool,
+    local: ConflictSide<'_>,
+    remote: ConflictSide<'_>,
     operations: &mut Vec<MergeOp>,
     conflicts: &mut Vec<ConflictEntry>,
 ) {
+    let ConflictSide { hash: local_hash, record: local_record, is_add: local_is_add } = local;
+    let ConflictSide { hash: remote_hash, record: remote_record, is_add: remote_is_add } = remote;
+
     // H10: Compare as i64 directly — casting to u64 inverts ordering for
     // negative timestamps (pre-epoch or clock errors).
     let local_time = local_record.updated_at;

@@ -20,6 +20,12 @@ pub struct VersionTree {
   pub symlinks: HashMap<String, (Vec<u8>, SymlinkRecord)>,
 }
 
+impl Default for VersionTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionTree {
   pub fn new() -> Self {
     VersionTree {
@@ -46,6 +52,91 @@ pub fn walk_version_tree(
   let hash_length = engine.hash_algo().hash_length();
   walk_directory(engine, root_hash, "/", hash_length, &mut tree, &mut visited)?;
   Ok(tree)
+}
+
+/// Walk a subtree rooted at a given path. Used for collecting system data
+/// (/.aeordb-system/) which is not reachable from the user-visible HEAD tree
+/// because system paths are not propagated to root.
+///
+/// Adds entries into the provided tree.
+pub fn walk_subtree(
+  engine: &StorageEngine,
+  start_path: &str,
+  start_dir_hash: &[u8],
+  tree: &mut VersionTree,
+) -> EngineResult<()> {
+  let mut visited = HashSet::new();
+  let hash_length = engine.hash_algo().hash_length();
+  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut visited)
+}
+
+/// Augment `tree` with `/.aeordb-system/{users,groups,snapshots,config}` and
+/// `/.aeordb-config` subtrees plus the single-file `email-config.json`.
+///
+/// This is what replication peers use to merge system data into a tree the
+/// diff is computed from. `walk_version_tree(HEAD)` deliberately does NOT
+/// include system paths; this function fills the gap.
+///
+/// Credential subdirectories (`api-keys`, `refresh-tokens`, `magic-links`)
+/// are excluded — they're tied to the issuing node's identity and must not
+/// replicate.
+pub fn augment_with_system_subtrees(
+  engine: &crate::engine::StorageEngine,
+  tree: &mut VersionTree,
+) {
+  use crate::engine::directory_ops::{directory_path_hash, file_path_hash};
+  use crate::engine::file_record::FileRecord;
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+
+  let system_dirs = [
+    "/.aeordb-system/users",
+    "/.aeordb-system/groups",
+    "/.aeordb-system/snapshots",
+    "/.aeordb-system/config",
+    "/.aeordb-config",
+  ];
+  let system_single_files: &[&str] = &["/.aeordb-system/email-config.json"];
+
+  for sys_path in &system_dirs {
+    let key = match directory_path_hash(sys_path, &algo) {
+      Ok(k) => k,
+      Err(_) => continue,
+    };
+    let raw_value = match engine.get_entry_including_deleted(&key) {
+      Ok(Some((_h, _k, value))) => value,
+      _ => continue,
+    };
+    let sys_dir_hash = if raw_value.len() == hash_length {
+      raw_value
+    } else {
+      match algo.compute_hash(&raw_value) {
+        Ok(h) => h,
+        Err(_) => continue,
+      }
+    };
+    tree.directories.insert(sys_path.to_string(), (sys_dir_hash.clone(), Vec::new()));
+    let _ = walk_subtree(engine, sys_path, &sys_dir_hash, tree);
+  }
+
+  for file_path in system_single_files {
+    let key = match file_path_hash(file_path, &algo) {
+      Ok(k) => k,
+      Err(_) => continue,
+    };
+    let (record, content_hash) = match engine.get_entry_including_deleted(&key) {
+      Ok(Some((header, _key, raw))) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
+        Ok(record) => {
+          let serialized = match record.serialize(hash_length) { Ok(s) => s, Err(_) => continue };
+          match algo.compute_hash(&serialized) { Ok(h) => (record, h), Err(_) => continue }
+        }
+        Err(_) => continue,
+      },
+      _ => continue,
+    };
+    tree.files.insert(file_path.to_string(), (content_hash, record));
+  }
 }
 
 /// Recursively walk a directory and its children.

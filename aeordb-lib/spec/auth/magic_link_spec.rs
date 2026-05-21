@@ -145,7 +145,7 @@ async fn test_magic_link_code_stored_hashed() {
     code_hash: code_hash.clone(),
     email: "stored@example.com".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_used: false,
   }).unwrap();
 
@@ -178,7 +178,7 @@ async fn test_verify_valid_code_returns_jwt() {
     code_hash: code_hash.clone(),
     email: "valid@example.com".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_used: false,
   }).unwrap();
 
@@ -208,7 +208,7 @@ async fn test_verify_expired_code_returns_401() {
     code_hash: code_hash.clone(),
     email: "expired@example.com".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_used: false,
   }).unwrap();
 
@@ -234,7 +234,7 @@ async fn test_verify_used_code_returns_401() {
     code_hash: code_hash.clone(),
     email: "used@example.com".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_used: false,
   }).unwrap();
   system_store::mark_magic_link_used(&engine, &ctx, &code_hash).unwrap();
@@ -278,7 +278,7 @@ async fn test_verify_code_is_single_use() {
     code_hash: code_hash.clone(),
     email: "single-use@example.com".to_string(),
     created_at: chrono::Utc::now(),
-    expires_at: expires_at,
+    expires_at,
     is_used: false,
   }).unwrap();
 

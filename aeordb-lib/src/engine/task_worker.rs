@@ -55,14 +55,16 @@ pub fn spawn_task_worker(
             let engine_clone = engine.clone();
             let plugin_manager_clone = plugin_manager.clone();
             let event_bus_clone = event_bus.clone();
+            let cancel_clone = cancel.clone();
 
             // Use spawn_blocking since engine work is CPU-bound.
             let result = tokio::task::spawn_blocking(move || {
-                process_next_task_internal(
+                process_next_task_internal_with_cancel(
                     &queue_clone,
                     &engine_clone,
                     &plugin_manager_clone,
                     &event_bus_clone,
+                    &cancel_clone,
                 )
             })
             .await;
@@ -103,14 +105,18 @@ pub fn process_next_task(
     plugin_manager: &PluginManager,
     event_bus: &EventBus,
 ) -> EngineResult<bool> {
-    process_next_task_internal(queue, engine, plugin_manager, event_bus)
+    // Tests + sync callers without a cancel token get a dummy "never-cancelled"
+    // token. Production goes through process_next_task_internal_with_cancel.
+    let dummy_cancel = tokio_util::sync::CancellationToken::new();
+    process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel)
 }
 
-fn process_next_task_internal(
+fn process_next_task_internal_with_cancel(
     queue: &TaskQueue,
     engine: &StorageEngine,
     plugin_manager: &PluginManager,
     event_bus: &EventBus,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<bool> {
     // H18: dequeue_next atomically finds the oldest pending task and marks
     // it Running under a lock, preventing double-dequeue.
@@ -133,9 +139,10 @@ fn process_next_task_internal(
 
     // Execute based on task type.
     let result = match task.task_type.as_str() {
-        "reindex" => execute_reindex(queue, &task, engine, plugin_manager),
+        "reindex" => execute_reindex(queue, &task, engine, plugin_manager, cancel),
         "gc" => execute_gc(queue, &task, engine),
         "backup" => execute_backup(&task, engine),
+        "cleanup" => execute_cleanup(&task, engine, event_bus),
         unknown => Err(format!("unknown task type: {}", unknown)),
     };
 
@@ -181,6 +188,7 @@ fn execute_reindex(
     task: &TaskRecord,
     engine: &StorageEngine,
     plugin_manager: &PluginManager,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<String, String> {
     let path = task
         .args
@@ -196,7 +204,7 @@ fn execute_reindex(
     } else {
         format!("{}/.aeordb-config/indexes.json", path)
     };
-    let config_data = ops.read_file(&config_path)
+    let config_data = ops.read_file_buffered(&config_path)
         .map_err(|e| format!("cannot read index config at {}: {}", config_path, e))?;
     let config = crate::engine::index_config::PathIndexConfig::deserialize(&config_data)
         .map_err(|e| format!("cannot parse index config at {}: {}", config_path, e))?;
@@ -256,7 +264,7 @@ fn execute_reindex(
 
         for file_path in batch {
             // Read file content.
-            let data = match ops.read_file(file_path) {
+            let data = match ops.read_file_buffered(file_path) {
                 Ok(data) => data,
                 Err(_) => {
                     consecutive_failures += 1;
@@ -327,8 +335,10 @@ fn execute_reindex(
             },
         );
 
-        // Check for cancellation after each batch.
-        if queue.is_cancelled(&task.id) {
+        // Check for per-task or shutdown cancellation after each batch. The
+        // outer cancel covers graceful shutdown — without polling it here the
+        // worker can't exit during a long reindex.
+        if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
             return Err("cancelled".to_string());
         }
     }
@@ -402,8 +412,9 @@ fn execute_backup(
     let output_path = std::path::Path::new(backup_dir).join(&filename);
     let output_path_string = output_path.to_string_lossy().to_string();
 
-    // Run the export.
-    let result = backup::export_snapshot(engine, snapshot_name, &output_path_string)
+    // Run the export. Scheduled backups don't include system data —
+    // they're for user data history, not credential rotation.
+    let result = backup::export_snapshot(engine, snapshot_name, &output_path_string, false)
         .map_err(|error| format!("backup export failed: {}", error))?;
 
     // Enforce retention policy if configured.
@@ -425,6 +436,22 @@ fn execute_backup(
         result.chunks_written,
         result.files_written,
         result.directories_written,
+    ))
+}
+
+/// Execute a cleanup task: remove expired refresh tokens and used/expired
+/// magic links from the system store. Intended to run on a default hourly cron.
+fn execute_cleanup(
+    _task: &TaskRecord,
+    engine: &StorageEngine,
+    _event_bus: &EventBus,
+) -> Result<String, String> {
+    let ctx = RequestContext::system();
+    let (tokens, links) = crate::engine::system_store::cleanup_expired_tokens(engine, &ctx)
+        .map_err(|error| format!("cleanup failed: {}", error))?;
+    Ok(format!(
+        "cleaned {} tokens and {} magic links",
+        tokens, links
     ))
 }
 
@@ -480,7 +507,7 @@ fn compute_eta(
     let average_batch_ms = total_batch_ms / batch_times.len() as u128;
     let remaining_files = total_count - indexed_count;
     let remaining_batches =
-        (remaining_files + REINDEX_BATCH_SIZE - 1) / REINDEX_BATCH_SIZE;
+        remaining_files.div_ceil(REINDEX_BATCH_SIZE);
     let eta_ms = average_batch_ms * remaining_batches as u128;
 
     Some(eta_ms as i64)

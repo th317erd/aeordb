@@ -7,46 +7,68 @@
 Start a node normally. It operates as a standalone database:
 
 ```bash
-aeordb start -D data.aeordb --auth self
+aeordb start -D nodeA.aeordb --auth self
 ```
 
-### Adding Peers
+Save the root API key it prints — you'll use it as the join token for new nodes.
 
-Add peers at startup or at runtime:
+### Joining a Cluster
+
+A new node joins by calling `/sync/join` on an existing member. This fetches the cluster's JWT signing key (so tokens validate cluster-wide) and registers both nodes as peers of each other.
 
 ```bash
-# At startup
-aeordb start -D data.aeordb --peers "node2:6830,node3:6830"
+aeordb start -D nodeB.aeordb --auth self \
+  --port 6841 \
+  --join http://nodeA:6830 \
+  --join-token "$NODE_A_ROOT_KEY"
+```
+
+After join, node B:
+
+- Adopts node A's JWT signing key (persisted in `/.aeordb-system/config/jwt_signing_key`)
+- Adds node A as a peer (persisted)
+- Is automatically added as a peer on node A
+
+The flag is one-shot: subsequent restarts of node B do not need `--join`.
+
+### Adding Peers Manually
+
+For nodes already in a cluster (sharing the same signing key), peers can be added without rejoining:
+
+```bash
+# At startup — comma-separated peer URLs, idempotent
+aeordb start -D data.aeordb --peers "http://nodeC:6830,http://nodeD:6830"
 
 # At runtime
 curl -X POST http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"address": "https://node2:6830", "label": "US West"}'
+  -d '{"address": "https://nodeC:6830", "label": "US West"}'
 ```
 
 ### Authentication
 
-All `/sync/*` endpoints require JWT authentication. Nodes use root JWT tokens (nil UUID) for peer-to-peer sync. The `.system/` namespace is never exposed through the HTTP file APIs (`/files/`, `/links/`, `/blobs/`) -- not even to root users. Instead, the sync system transfers `.system/` data internally through the `/sync/diff` and `/sync/chunks` endpoints when the caller is authenticated as a root JWT user (handled automatically via the `SyncCaller::RootUser` mechanism). Operators do not need to manage `.system/` data manually.
+All `/sync/*` endpoints require JWT authentication. Nodes mint short-lived root JWTs (nil UUID `sub`) internally when calling each other's `/sync/diff` and `/sync/chunks` endpoints. This works because every node in the cluster shares the same Ed25519 signing key (distributed by `/sync/join`).
+
+The `.system/` namespace is never exposed through the HTTP file APIs (`/files/`, `/links/`, `/blobs/`) — not even to root users. Instead, the sync system transfers `.system/` data internally through `/sync/diff` and `/sync/chunks` when the caller is authenticated as root. Operators do not need to manage `.system/` data manually.
 
 ### TLS
 
-Inter-node communication uses TLS by default:
-
-- `--cluster-tls=true` (default) — require TLS
-- `--cluster-tls=false` — allow plaintext (private networks)
-- `--cluster-tls-cert` / `--cluster-tls-key` — custom certificates (self-signed supported)
+The server listener can be terminated with TLS using `--tls-cert` and `--tls-key`. There is no separate "cluster TLS" toggle — peer URLs use whichever scheme you configure (`http://` or `https://`). For production, use `https://` peer addresses with valid certificates, or place nodes behind a private network.
 
 ## Monitoring
 
 ### Cluster Status
 
 ```bash
-curl http://localhost:6830/sync/ \
+# This node's view of the cluster
+curl http://localhost:6830/sync/status \
+  -H "Authorization: Bearer $TOKEN"
+
+# Peer list with sync state and last-sync timestamps
+curl http://localhost:6830/sync/peers \
   -H "Authorization: Bearer $TOKEN"
 ```
-
-Returns: node ID, peer count, peer list with connection states.
 
 ### Connection States
 
@@ -177,10 +199,10 @@ The clock hasn't settled. Possible causes:
 
 ### Sync not happening
 
-- Check peer is in Active state: `GET /sync/`
-- Verify JWT tokens are valid and use the same signing key on both nodes
+- Check peer is in Active state: `GET /sync/peers`
+- Verify the signing key is shared. If you started a node without `--join`, its JWTs won't validate on the other nodes — re-join via `/sync/join` or copy `/.aeordb-system/config/jwt_signing_key` manually
 - Verify network connectivity between nodes
-- Trigger manual sync: `POST /sync/trigger`
+- Trigger manual sync: `POST /sync/trigger` — the response includes per-peer success/failure with error messages
 
 ### Data inconsistency after sync
 

@@ -21,11 +21,11 @@ fn setup_engine_with_files() -> (Arc<StorageEngine>, TempDir) {
     let (engine, temp) = create_temp_engine_for_tests();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg"))
+    ops.store_file_buffered(&ctx, "/images/photo.jpg", b"fake jpg data", Some("image/jpeg"))
         .unwrap();
 
     (engine, temp)
@@ -33,7 +33,7 @@ fn setup_engine_with_files() -> (Arc<StorageEngine>, TempDir) {
 
 fn export_to_path(engine: &StorageEngine, path: &str) -> ExportResult {
     let head = engine.head_hash().unwrap();
-    export_version(engine, &head, path).unwrap()
+    export_version(engine, &head, path, false).unwrap()
 }
 
 // ─── 1. test_import_full_export ─────────────────────────────────────────
@@ -48,7 +48,7 @@ fn test_import_full_export() {
     let (target, _target_temp) = create_temp_engine_for_tests();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, false).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, false, false).unwrap();
 
     assert_eq!(result.backup_type, 1);
     assert!(result.files_imported >= 3, "expected at least 3 files imported, got {}", result.files_imported);
@@ -67,7 +67,7 @@ fn test_import_preserves_content() {
 
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    import_backup(&ctx, &target, &export_path, false, true).unwrap();
+    import_backup(&ctx, &target, &export_path, false, true, false).unwrap();
 
     // After import+promote, we should be able to read the files via tree walking
     let target_head = target.head_hash().unwrap();
@@ -91,7 +91,7 @@ fn test_import_does_not_promote_head() {
     let original_head = target.head_hash().unwrap();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, false).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, false, false).unwrap();
 
     assert!(!result.head_promoted, "HEAD should NOT be promoted");
     let current_head = target.head_hash().unwrap();
@@ -114,7 +114,7 @@ fn test_import_with_promote() {
     let (target, _target_temp) = create_temp_engine_for_tests();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, true).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, true, false).unwrap();
 
     assert!(result.head_promoted, "HEAD should be promoted");
     let current_head = target.head_hash().unwrap();
@@ -141,7 +141,7 @@ fn test_import_patch_matching_base() {
     target.update_head(&bogus).unwrap();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &patch_path, false, true).unwrap();
+    let result = import_backup(&ctx, &target, &patch_path, false, true, false).unwrap();
     assert_eq!(result.backup_type, 2);
     assert!(result.head_promoted);
     assert_eq!(target.head_hash().unwrap(), head);
@@ -164,7 +164,7 @@ fn test_import_patch_wrong_base() {
     target.update_head(&different_hash).unwrap();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &patch_path, false, false);
+    let result = import_backup(&ctx, &target, &patch_path, false, false, false);
     assert!(result.is_err(), "should fail when target HEAD doesn't match patch base");
 
     let err_msg = format!("{}", result.unwrap_err());
@@ -192,7 +192,7 @@ fn test_import_patch_wrong_base_force() {
     target.update_head(&different_hash).unwrap();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &patch_path, true, false);
+    let result = import_backup(&ctx, &target, &patch_path, true, false, false);
     assert!(result.is_ok(), "should succeed with force=true, got: {:?}", result.err());
 }
 
@@ -204,13 +204,13 @@ fn test_import_patch_applies_deletions() {
     // Create two engines to simulate diff with deletions
     let (engine_a, _temp_a) = create_temp_engine_for_tests();
     let ops_a = DirectoryOps::new(&engine_a);
-    ops_a.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
-    ops_a.store_file(&ctx, "/remove.txt", b"remove me", Some("text/plain")).unwrap();
+    ops_a.store_file_buffered(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_a.store_file_buffered(&ctx, "/remove.txt", b"remove me", Some("text/plain")).unwrap();
     let tree_a = walk_version_tree(&engine_a, &engine_a.head_hash().unwrap()).unwrap();
 
     let (engine_b, _temp_b) = create_temp_engine_for_tests();
     let ops_b = DirectoryOps::new(&engine_b);
-    ops_b.store_file(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+    ops_b.store_file_buffered(&ctx, "/keep.txt", b"keep", Some("text/plain")).unwrap();
     let tree_b = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
 
     let diff = aeordb::engine::tree_walker::diff_trees(&tree_a, &tree_b);
@@ -278,7 +278,7 @@ fn test_import_chunk_dedup() {
 
     // Import into source itself (which already has the chunks)
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &source, &export_path, false, false).unwrap();
+    let result = import_backup(&ctx, &source, &export_path, false, false, false).unwrap();
 
     assert_eq!(
         result.chunks_imported, 0,
@@ -297,7 +297,7 @@ fn test_round_trip_export_import() {
     // Import into fresh target with promote
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    let import_result = import_backup(&ctx, &target, &export_path, false, true).unwrap();
+    let import_result = import_backup(&ctx, &target, &export_path, false, true, false).unwrap();
 
     assert!(import_result.head_promoted);
 
@@ -332,7 +332,7 @@ fn test_import_nonexistent_file() {
     let (target, _target_temp) = create_temp_engine_for_tests();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, "/nonexistent/path/backup.aeordb", false, false);
+    let result = import_backup(&ctx, &target, "/nonexistent/path/backup.aeordb", false, false, false);
     assert!(result.is_err(), "should fail for nonexistent backup file");
 }
 
@@ -346,7 +346,7 @@ fn test_import_full_export_type_1() {
 
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, false).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, false, false).unwrap();
 
     // Full export should not attempt deletion processing
     assert_eq!(result.deletions_applied, 0);
@@ -364,7 +364,7 @@ fn test_import_empty_export() {
 
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, true).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, true, false).unwrap();
 
     assert_eq!(result.files_imported, 0);
     assert_eq!(result.chunks_imported, 0);
@@ -382,7 +382,7 @@ fn test_import_version_hash_in_result() {
 
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    let import_result = import_backup(&ctx, &target, &export_path, false, false).unwrap();
+    let import_result = import_backup(&ctx, &target, &export_path, false, false, false).unwrap();
 
     assert_eq!(
         import_result.version_hash, export_result.version_hash,
@@ -400,10 +400,10 @@ fn test_import_full_export_skips_base_check() {
 
     // Target has a totally different HEAD, but full exports don't check base
     let (target, _target_temp) = create_temp_engine_for_tests();
-    target.update_head(&vec![0xFF; 32]).unwrap();
+    target.update_head(&[0xFF; 32]).unwrap();
 
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, false);
+    let result = import_backup(&ctx, &target, &export_path, false, false, false);
     assert!(
         result.is_ok(),
         "full export import should not check base version, got: {:?}",
@@ -421,7 +421,7 @@ fn test_import_entries_total_count() {
 
     let (target, _target_temp) = create_temp_engine_for_tests();
     let ctx = RequestContext::system();
-    let result = import_backup(&ctx, &target, &export_path, false, false).unwrap();
+    let result = import_backup(&ctx, &target, &export_path, false, false, false).unwrap();
 
     // entries_imported should equal sum of chunks + files + dirs + deletions
     assert_eq!(

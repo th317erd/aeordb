@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{
   Extension,
   body::Body,
@@ -12,7 +10,7 @@ use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 
 use uuid::Uuid;
-use super::responses::{EngineFileResponse, ErrorResponse, ForkResponse, SnapshotResponse};
+use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
@@ -22,7 +20,7 @@ use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::compression::{CompressionAlgorithm, decompress};
 use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
-use crate::engine::errors::EngineError;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
@@ -71,6 +69,7 @@ fn evict_caches_for_path(state: &AppState, path: &str) {
         let parent = crate::engine::path_utils::parent_path(&normalized)
             .unwrap_or_else(|| "/".to_string());
         state.engine.permissions_cache.evict(&parent);
+        state.engine.grants_index_cache.evict_all();
     }
 
     if normalized.ends_with("/.aeordb-config/indexes.json") {
@@ -115,33 +114,45 @@ pub struct EngineGetQuery {
 fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
     entries.retain_mut(|entry| {
         let path = entry["path"].as_str().unwrap_or("").to_string();
-        // Check ancestor path first — items on the path to a scoped target
-        // must be visible for directory tree navigation, regardless of the
-        // deny-all fallback rule that would otherwise hide them.
-        if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
-            // Items on the ancestor path get read+list only for navigation.
-            // Items that directly match a rule get that rule's permissions.
-            let effective = match match_rules(rules, &path) {
-                Some(rule) if rule.glob != "**" => rule.permitted.clone(),
-                _ => "-r--l---".to_string(),
-            };
-            if let Some(obj) = entry.as_object_mut() {
-                obj.insert("effective_permissions".to_string(), serde_json::Value::String(effective));
-            }
-            return true;
-        }
+
+        // Order of precedence:
+        // 1. If the item matches an explicit rule (not the catch-all `**`),
+        //    that rule decides: drop unless the rule grants the operation.
+        //    This is the case that the old code got wrong — it would route
+        //    "denied" matches into the shared-path branch and keep them.
+        // 2. Otherwise, if the item is an ANCESTOR of any rule's target
+        //    (e.g. `/foo/` when the rule is on `/foo/bar/*`), allow it for
+        //    navigation only with `-r--l---` perms.
+        // 3. Otherwise, drop.
         match match_rules(rules, &path) {
-            Some(rule) => {
+            Some(rule) if rule.glob != "**" => {
                 if check_operation_permitted(&rule.permitted, operation) {
                     if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("effective_permissions".to_string(), serde_json::Value::String(rule.permitted.clone()));
+                        obj.insert(
+                            "effective_permissions".to_string(),
+                            serde_json::Value::String(rule.permitted.clone()),
+                        );
                     }
                     true
                 } else {
                     false
                 }
             }
-            None => false,
+            _ => {
+                // No explicit rule (or only the catch-all matched). Allow
+                // navigation if this is an ancestor of a scoped target.
+                if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "effective_permissions".to_string(),
+                            serde_json::Value::String("-r--l---".to_string()),
+                        );
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
         }
     });
 }
@@ -235,20 +246,61 @@ pub async fn mkdir(
       .into_response();
   }
 
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
-
-  match ops.create_directory(&ctx, &normalized) {
-    Ok(()) => {
-      (StatusCode::CREATED, Json(serde_json::json!({
-        "path": normalized,
-        "entry_type": 3,
-        "created": true,
-      }))).into_response()
+  // User/group permission check: /files/mkdir is exempt from path-aware
+  // middleware, so without this every authenticated user could create
+  // directories anywhere. Required: Create on the parent directory.
+  // Share keys (claims.sub starts with "share:") fall back to their own
+  // key-rule enforcement upstream and don't carry user permissions; we
+  // refuse them here.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot create directories")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
+    if !is_root(&user_id) {
+      use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+      let parent = crate::engine::path_utils::parent_path(&normalized)
+        .unwrap_or_else(|| "/".to_string());
+      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+      let allowed = resolver
+        .check_path_permission(&user_id, &parent, CrudlifyOp::Create)
+        .unwrap_or(false);
+      if !allowed {
+        return ErrorResponse::new("Permission denied")
+          .with_status(StatusCode::FORBIDDEN)
+          .into_response();
+      }
     }
-    Err(error) => {
+  } else {
+    return ErrorResponse::new("Invalid user identity")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+
+  let engine = state.engine.clone();
+  let normalized_for_blocking = normalized.clone();
+  let result = tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine);
+    ops.create_directory(&ctx, &normalized_for_blocking)
+  })
+  .await;
+
+  match result {
+    Ok(Ok(())) => (StatusCode::CREATED, Json(serde_json::json!({
+      "path": normalized,
+      "entry_type": 3,
+      "created": true,
+    }))).into_response(),
+    Ok(Err(error)) => {
       tracing::error!("Failed to create directory '{}': {}", normalized, error);
-      ErrorResponse::new(format!("Failed to create directory: {}", error))
+      engine_error_response("Failed to create directory", &error)
+    }
+    Err(join_error) => {
+      tracing::error!("create_directory task panicked: {}", join_error);
+      ErrorResponse::new("Failed to create directory: internal task error")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -342,19 +394,40 @@ pub async fn engine_store_file(
 
   let content_type = headers
     .get("content-type")
-    .and_then(|value| value.to_str().ok());
+    .and_then(|value| value.to_str().ok())
+    .map(|s| s.to_string());
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
-  let file_record = match directory_ops.finalize_file(
-    &ctx, &path, chunk_hashes, total_size, content_type, &first_bytes,
-  ) {
-    Ok(record) => record,
-    Err(error) => {
+  // Move the fsync-heavy finalize off the async runtime so we don't block other
+  // requests sharing this worker thread while we wait for disk.
+  let engine_for_blocking = state.engine.clone();
+  let path_for_blocking = path.clone();
+  let ctx_for_blocking = ctx.clone();
+  let first_bytes_owned = first_bytes;
+  let chunk_hashes_owned = chunk_hashes;
+  let file_record = match tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine_for_blocking);
+    ops.finalize_file(
+      &ctx_for_blocking,
+      &path_for_blocking,
+      chunk_hashes_owned,
+      total_size,
+      content_type.as_deref(),
+      &first_bytes_owned,
+    )
+  })
+  .await
+  {
+    Ok(Ok(record)) => record,
+    Ok(Err(error)) => {
       tracing::error!("Engine: failed to store file at '{}': {}", path, error);
-      let status = engine_error_status(&error);
-      return ErrorResponse::new(sanitize_engine_error("Failed to store file", &error))
-        .with_status(status)
+      return engine_error_response("Failed to store file", &error);
+    }
+    Err(join_error) => {
+      tracing::error!("Engine: finalize_file task panicked: {}", join_error);
+      return ErrorResponse::new("Failed to store file: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
   };
@@ -418,8 +491,9 @@ fn build_file_streaming_response(
   file_record: &FileRecord,
   symlink_target: Option<&str>,
 ) -> Response {
-  let file_stream = match EngineFileStream::from_chunk_hashes(
-    file_record.chunk_hashes.clone(), engine,
+  let file_stream = match EngineFileStream::from_chunk_hashes_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(engine),
   ) {
     Ok(s) => s,
     Err(error) => {
@@ -438,7 +512,7 @@ fn build_file_streaming_response(
 
   let body = Body::from_stream(chunk_stream);
 
-  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let safe_path = file_record.path.replace(['\n', '\r'], "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
     .header("X-AeorDB-Path", safe_path)
@@ -448,7 +522,7 @@ fn build_file_streaming_response(
 
   if let Some(target) = symlink_target {
     response_builder = response_builder
-      .header("X-AeorDB-Link-Target", target.replace('\n', "").replace('\r', ""));
+      .header("X-AeorDB-Link-Target", target.replace(['\n', '\r'], ""));
   }
 
   if let Some(ref content_type) = file_record.content_type {
@@ -507,10 +581,38 @@ fn build_directory_listing(
 ///
 /// Returns `Err(Response)` if the user identity is invalid; otherwise mutates
 /// the listing in place and returns `Ok(())`.
+/// Filter a result set down to entries the user can directly Read.
+/// Used by recursive listings, query results, and search results when the
+/// caller reached the request path via ancestor navigation: a simple
+/// allowed-children intersection is insufficient because each child may
+/// itself have only partial grants (e.g. a file-pattern share). Per-entry
+/// resolver walks correctly honor inheritance and file-pattern matching.
+fn filter_results_by_direct_read(
+  results: &mut Vec<serde_json::Value>,
+  user_id_str: &str,
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  group_cache: &std::sync::Arc<crate::engine::cache::Cache<crate::engine::cache_loaders::GroupLoader>>,
+) {
+  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+
+  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
+    return;
+  };
+  if crate::engine::is_root(&user_id) {
+    return;
+  }
+  let resolver = PermissionResolver::new(engine, group_cache);
+  results.retain(|entry| {
+    let Some(path) = entry["path"].as_str() else { return false; };
+    resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
+  });
+}
+
 fn apply_listing_filters(
   listing: &mut Vec<serde_json::Value>,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   _user_id_str: &str,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
 ) -> Result<(), Response> {
   if let Some(rules) = key_rules {
     if !rules.is_empty() {
@@ -524,6 +626,16 @@ fn apply_listing_filters(
     let path = entry["path"].as_str().unwrap_or("");
     !path.starts_with("/.aeordb-")
   });
+
+  // Ancestor-navigation filter: when the user reached this directory by
+  // virtue of having a grant somewhere below, only show the children that
+  // either ARE the grant target or are next-segment ancestors of one.
+  if let Some(filter) = filtered_listing {
+    listing.retain(|entry| {
+      let name = entry["name"].as_str().unwrap_or("");
+      filter.allowed_children.contains(name)
+    });
+  }
 
   Ok(())
 }
@@ -552,9 +664,20 @@ fn attach_effective_permissions(
     // Skip items that already have effective_permissions (set by key rules filter)
     if entry.get("effective_permissions").is_some() { continue; }
 
-    let path = match entry["path"].as_str() {
+    let raw_path = match entry["path"].as_str() {
       Some(p) => p.to_string(),
       None => continue,
+    };
+    // Directories need a trailing slash so path_levels walks INTO them and
+    // reads their .aeordb-permissions — otherwise a directory's own grants
+    // are silently ignored when it appears as a listing entry.
+    let is_directory = entry["entry_type"].as_u64()
+      .map(|t| t == crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() as u64)
+      .unwrap_or(false);
+    let path = if is_directory && !raw_path.ends_with('/') {
+      format!("{}/", raw_path)
+    } else {
+      raw_path
     };
 
     let mut flags = ['-'; 8];
@@ -578,6 +701,7 @@ fn handle_symlink_resolution(
   symlink_target: &str,
   user_id_str: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
   limit: Option<usize>,
   offset: Option<usize>,
 ) -> Response {
@@ -633,7 +757,7 @@ fn handle_symlink_resolution(
       match directory_ops.list_directory(&dir_path) {
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
-          match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+          match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
             Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
             Err(response) => response,
           }
@@ -692,8 +816,14 @@ fn handle_file_response(
     }
   };
 
-  // Use read_file_streaming for direct file reads (reads via path, not chunk hashes)
-  let file_stream = match directory_ops.read_file_streaming(path) {
+  // Build a 'static stream so axum's Body::from_stream is satisfied. The
+  // EngineFileStream now owns an Arc<StorageEngine> rather than borrowing
+  // from `directory_ops`. We pass the chunk_hashes from the file_record we
+  // just fetched — same as what read_file_streaming would have used.
+  let file_stream = match crate::engine::directory_ops::EngineFileStream::from_chunk_hashes_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(engine),
+  ) {
     Ok(s) => s,
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}': {}", path, error);
@@ -711,7 +841,7 @@ fn handle_file_response(
 
   let body = Body::from_stream(chunk_stream);
 
-  let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+  let safe_path = file_record.path.replace(['\n', '\r'], "");
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
     .header("X-AeorDB-Path", safe_path)
@@ -737,6 +867,8 @@ fn handle_recursive_listing(
   version_query: &EngineGetQuery,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   user_id_str: &str,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
+  state: Option<&AppState>,
 ) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
@@ -772,8 +904,15 @@ fn handle_recursive_listing(
         })
         .collect();
 
-      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
-        Ok(()) => paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref()),
+      match apply_listing_filters(&mut listing, key_rules, user_id_str, None) {
+        Ok(()) => {
+          if filtered_listing.is_some() {
+            if let Some(st) = state {
+              filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache);
+            }
+          }
+          paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref())
+        }
         Err(response) => response,
       }
     }
@@ -791,24 +930,32 @@ fn handle_recursive_listing(
   }
 }
 
+/// Pagination + sort options for a directory listing. Bundled to keep the
+/// downstream signatures short — these always travel together.
+struct ListingPagination<'a> {
+  limit: Option<usize>,
+  offset: Option<usize>,
+  sort: Option<&'a str>,
+  order: Option<&'a str>,
+}
+
 /// Handle default (flat) directory listing without depth/glob parameters.
 fn handle_directory_listing(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   path: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   user_id_str: &str,
-  limit: Option<usize>,
-  offset: Option<usize>,
-  sort: Option<&str>,
-  order: Option<&str>,
+  pagination: ListingPagination<'_>,
   state: Option<&AppState>,
+  filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
 ) -> Response {
+  let ListingPagination { limit, offset, sort, order } = pagination;
   let directory_ops = DirectoryOps::new(engine);
 
   match directory_ops.list_directory(path) {
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
-      match apply_listing_filters(&mut listing, key_rules, user_id_str) {
+      match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
         Ok(()) => {
           // Attach effective_permissions for non-root users
           if let Some(st) = state {
@@ -845,15 +992,17 @@ pub async fn engine_get_root(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
+  filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  engine_get(State(state), Extension(claims), active_key_rules, Path("/".to_string()), AxumQuery(version_query)).await
+  engine_get(State(state), Extension(claims), active_key_rules, filtered_listing, Path("/".to_string()), AxumQuery(version_query)).await
 }
 
 pub async fn engine_get(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
+  filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
@@ -880,6 +1029,8 @@ pub async fn engine_get(
   // Extract key rules slice for helpers (avoids passing axum Extension around)
   let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> =
     active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  let filter_ref: Option<&crate::auth::permission_middleware::FilteredListing> =
+    filtered_listing.as_ref().map(|Extension(f)| f);
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
@@ -898,7 +1049,7 @@ pub async fn engine_get(
 
     return handle_symlink_resolution(
       &state.engine, &path, &symlink_record.target, &claims.sub, key_rules,
-      version_query.limit, version_query.offset,
+      filter_ref, version_query.limit, version_query.offset,
     );
   }
 
@@ -922,11 +1073,25 @@ pub async fn engine_get(
   if version_query.depth.is_some() || version_query.glob.is_some() {
     return handle_recursive_listing(
       &state.engine, &path, &version_query, key_rules, &claims.sub,
+      filter_ref, Some(&state),
     );
   }
 
   // Default flat directory listing
-  handle_directory_listing(&state.engine, &path, key_rules, &claims.sub, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref(), Some(&state))
+  handle_directory_listing(
+    &state.engine,
+    &path,
+    key_rules,
+    &claims.sub,
+    ListingPagination {
+      limit: version_query.limit,
+      offset: version_query.offset,
+      sort: version_query.sort.as_deref(),
+      order: version_query.order.as_deref(),
+    },
+    Some(&state),
+    filter_ref,
+  )
 }
 
 
@@ -983,8 +1148,9 @@ async fn engine_get_at_version(
 
   // Stream the file content from historical chunks (include deleted —
   // chunks may have been marked deleted after the snapshot was taken)
-  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted(
-    file_record.chunk_hashes.clone(), &state.engine,
+  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted_owned(
+    file_record.chunk_hashes.clone(),
+    std::sync::Arc::clone(&state.engine),
   ) {
     Ok(stream) => stream,
     Err(error) => {
@@ -1005,7 +1171,7 @@ async fn engine_get_at_version(
 
   let mut response_builder = axum::http::Response::builder()
     .status(StatusCode::OK)
-    .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+    .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
     .header("X-AeorDB-Size", file_record.total_size.to_string())
     .header("X-AeorDB-Created", file_record.created_at.to_string())
     .header("X-AeorDB-Updated", file_record.updated_at.to_string());
@@ -1036,64 +1202,53 @@ pub async fn engine_delete_file(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let directory_ops = DirectoryOps::new(&state.engine);
+  let engine = state.engine.clone();
+  let path_for_blocking = path.clone();
 
-  // Check if it's a symlink first
-  if directory_ops.get_symlink(&path).ok().flatten().is_some() {
-    return match directory_ops.delete_symlink(&ctx, &path) {
-      Ok(()) => {
-        (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "symlink" })))
-          .into_response()
+  // Dispatch + delete all happen on a blocking thread. The kind ("symlink" /
+  // "file" / "directory") flows back to the response. Cache eviction stays on
+  // the async side since it touches Arc'd state.
+  let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
+    let ops = DirectoryOps::new(&engine);
+    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+      ops.delete_symlink(&ctx, &path_for_blocking)?;
+      return Ok("symlink");
+    }
+    match ops.delete_file(&ctx, &path_for_blocking) {
+      Ok(()) => Ok("file"),
+      Err(EngineError::NotFound(_)) => {
+        ops.delete_directory(&ctx, &path_for_blocking)?;
+        Ok("directory")
       }
-      Err(error) => {
-        tracing::error!("Engine: failed to delete symlink '{}': {}", path, error);
-        ErrorResponse::new(format!("Failed to delete symlink '{}'. If this persists, check GET /system/health for system status", path))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-      }
-    };
-  }
+      Err(other) => Err(other),
+    }
+  })
+  .await;
 
-  match directory_ops.delete_file(&ctx, &path) {
-    Ok(()) => {
+  match result {
+    Ok(Ok(kind)) => {
       evict_caches_for_path(&state, &path);
-      // Queue index cleanup in background (debounced, batched)
-      state.index_cleanup.queue(path.clone());
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "deleted": true, "path": path })),
-      )
+      if kind == "file" {
+        state.index_cleanup.queue(path.clone());
+      }
+      let mut body = serde_json::json!({ "deleted": true, "path": path });
+      if kind != "file" {
+        body["entry_type"] = serde_json::json!(kind);
+      }
+      (StatusCode::OK, Json(body)).into_response()
+    }
+    Ok(Err(EngineError::NotFound(_))) => {
+      ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
         .into_response()
     }
-    Err(EngineError::NotFound(_)) => {
-      // File not found — try as an empty directory
-      match directory_ops.delete_directory(&ctx, &path) {
-        Ok(()) => {
-          evict_caches_for_path(&state, &path);
-          (StatusCode::OK, Json(serde_json::json!({ "deleted": true, "path": path, "entry_type": "directory" })))
-            .into_response()
-        }
-        Err(EngineError::NotFound(_)) => {
-          ErrorResponse::new(format!("Not found: {}", path))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response()
-        }
-        Err(EngineError::InvalidInput(msg)) => {
-          ErrorResponse::new(msg)
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response()
-        }
-        Err(error) => {
-          tracing::error!("Engine: failed to delete directory '{}': {}", path, error);
-          ErrorResponse::new(format!("Failed to delete: {}", error))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response()
-        }
-      }
+    Ok(Err(error)) => {
+      tracing::error!("Engine: failed to delete '{}': {}", path, error);
+      engine_error_response("Failed to delete", &error)
     }
-    Err(error) => {
-      tracing::error!("Engine: failed to delete file '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to delete file '{}'. If this persists, check GET /system/health for system status", path))
+    Err(join_error) => {
+      tracing::error!("delete task panicked: {}", join_error);
+      ErrorResponse::new("Failed to delete: internal task error")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
@@ -1121,6 +1276,35 @@ pub async fn restore_deleted_file(
     return ErrorResponse::new(format!("Not found: {}", path))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
+  }
+
+  // User/group permission check: /files/restore is exempt from path-aware
+  // middleware. Restoring a file is an inverse Delete operation — require
+  // the 'd' (Delete) permission on the path, matching list_deleted_files.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot restore deleted files")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let allowed = resolver
+      .check_path_permission(&user_id, &path, CrudlifyOp::Delete)
+      .unwrap_or(false);
+    if !allowed {
+      return ErrorResponse::new(format!("Not found: {}", path))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
   }
 
   let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -1230,8 +1414,8 @@ pub async fn engine_head(
     return axum::http::Response::builder()
       .status(StatusCode::OK)
       .header("X-AeorDB-Type", "symlink")
-      .header("X-AeorDB-Link-Target", symlink_record.target.replace('\n', "").replace('\r', ""))
-      .header("X-AeorDB-Path", path.replace('\n', "").replace('\r', ""))
+      .header("X-AeorDB-Link-Target", symlink_record.target.replace(['\n', '\r'], ""))
+      .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
       .header("X-AeorDB-Created", symlink_record.created_at.to_string())
       .header("X-AeorDB-Updated", symlink_record.updated_at.to_string())
       .body(Body::empty())
@@ -1240,7 +1424,7 @@ pub async fn engine_head(
 
   match directory_ops.get_metadata(&path) {
     Ok(Some(file_record)) => {
-      let safe_path = file_record.path.replace('\n', "").replace('\r', "");
+      let safe_path = file_record.path.replace(['\n', '\r'], "");
       let mut response_builder = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("X-AeorDB-Type", "file")
@@ -1261,7 +1445,7 @@ pub async fn engine_head(
       // Check if it is a directory
       match directory_ops.list_directory(&path) {
         Ok(_) => {
-          let safe_path = path.replace('\n', "").replace('\r', "");
+          let safe_path = path.replace(['\n', '\r'], "");
           axum::http::Response::builder()
             .status(StatusCode::OK)
             .header("X-AeorDB-Type", "directory")
@@ -1289,13 +1473,18 @@ pub async fn engine_head(
 /// For Chunks: returns raw decompressed chunk data.
 /// For DirectoryIndex: returns the raw directory data.
 /// Other types: returns raw bytes.
+///
+/// Scoped-key enforcement: a key with rules (ActiveKeyRules extension) can
+/// only fetch FileRecords whose path is permitted with 'r' by the rules.
+/// Other entry types (raw chunks, directory indexes) are denied for scoped
+/// keys because there's no path to check — a chunk hash can be shared by
+/// many files. Root and unscoped keys retain full access.
 pub async fn engine_get_by_hash(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
+  active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   Path(hex_hash): Path<String>,
 ) -> Response {
-  // Any authenticated user can fetch by hash. System-flagged entries
-  // return 404 (system hashes use a separate domain, can't be guessed).
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
@@ -1328,6 +1517,45 @@ pub async fn engine_get_by_hash(
       .into_response();
   }
 
+  // Scoped-key check. ActiveKeyRules is only inserted by the permission
+  // middleware when the key is scoped (rules non-empty). Root keys and
+  // unscoped keys skip this entirely.
+  if let Some(Extension(rules)) = active_key_rules.as_ref() {
+    use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
+    match header.entry_type {
+      EntryType::FileRecord => {
+        let algo = state.engine.hash_algo();
+        let hash_length = algo.hash_length();
+        let path = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
+          Ok(r) => r.path,
+          Err(_) => {
+            return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+              .with_status(StatusCode::NOT_FOUND)
+              .into_response();
+          }
+        };
+        let allowed = match match_rules(&rules.0, &path) {
+          Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
+          None => false,
+        };
+        if !allowed {
+          // Use 404 (not 403) so scoped keys cannot enumerate forbidden
+          // paths by probing hashes.
+          return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+            .with_status(StatusCode::NOT_FOUND)
+            .into_response();
+        }
+      }
+      // For raw chunks and other non-path entries, we can't tie the hash
+      // back to a path the scoped key is permitted to access. Deny.
+      _ => {
+        return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+    }
+  }
+
   match header.entry_type {
     EntryType::FileRecord => {
       // Deserialize the FileRecord and stream its chunk data, just like engine_get.
@@ -1344,7 +1572,10 @@ pub async fn engine_get_by_hash(
         }
       };
 
-      let file_stream = match EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, &state.engine) {
+      let file_stream = match EngineFileStream::from_chunk_hashes_owned(
+        file_record.chunk_hashes,
+        std::sync::Arc::clone(&state.engine),
+      ) {
         Ok(s) => s,
         Err(e) => {
           tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
@@ -1428,433 +1659,8 @@ pub async fn engine_get_by_hash(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot routes
-// ---------------------------------------------------------------------------
+// Snapshot + fork handlers moved to `server::version_routes`.
 
-#[derive(Debug, Deserialize)]
-pub struct CreateSnapshotRequest {
-  pub name: String,
-  #[serde(default)]
-  pub metadata: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RestoreSnapshotRequest {
-  /// Snapshot ID (hex root hash) — authoritative identifier.
-  pub id: Option<String>,
-  /// Snapshot name — fallback for backward compatibility.
-  pub name: Option<String>,
-}
-
-/// POST /version/snapshot -- create a named snapshot of the current HEAD.
-pub async fn snapshot_create(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Json(payload): Json<CreateSnapshotRequest>,
-) -> Response {
-  // Manual snapshot throttle: 1 per 60 seconds (own lane, doesn't
-  // interfere with auto-snapshots from delete/restore operations)
-  {
-    use std::sync::atomic::Ordering;
-    let now = chrono::Utc::now().timestamp_millis();
-    let last = state.engine.last_manual_snapshot.load(Ordering::Relaxed);
-    let elapsed = now - last;
-    if elapsed < 60_000 && last > 0 {
-      let remaining = (60_000 - elapsed) / 1000;
-      return ErrorResponse::new(format!(
-        "Snapshot rate limited. Try again in {} seconds.", remaining
-      ))
-        .with_status(StatusCode::TOO_MANY_REQUESTS)
-        .into_response();
-    }
-    // CAS to claim the slot
-    let _ = state.engine.last_manual_snapshot
-      .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed);
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.create_snapshot(&ctx, &payload.name, payload.metadata) {
-    Ok(snapshot_info) => {
-      // If the returned snapshot has a different name than requested,
-      // it was deduplicated (HEAD unchanged since that snapshot).
-      let is_duplicate = snapshot_info.name != payload.name;
-      let status = if is_duplicate { StatusCode::OK } else { StatusCode::CREATED };
-      let mut response_body = serde_json::to_value(SnapshotResponse::from(&snapshot_info))
-        .unwrap_or_default();
-      if is_duplicate {
-        response_body["duplicate"] = serde_json::json!(true);
-        // Don't consume the rate limit slot for no-ops
-        state.engine.last_manual_snapshot.store(0, std::sync::atomic::Ordering::Relaxed);
-      }
-      (status, Json(response_body)).into_response()
-    }
-    Err(EngineError::AlreadyExists(message)) => {
-      ErrorResponse::new(message)
-        .with_status(StatusCode::CONFLICT)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to create snapshot: {}", error);
-      ErrorResponse::new(format!("Failed to create snapshot: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// GET /version/snapshots -- list all snapshots.
-pub async fn snapshot_list(
-  State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
-) -> Response {
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.list_snapshots() {
-    Ok(snapshots) => {
-      let listing: Vec<SnapshotResponse> = snapshots
-        .iter()
-        .map(SnapshotResponse::from)
-        .collect();
-      (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to list snapshots: {}", error);
-      ErrorResponse::new(format!("Failed to list snapshots: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// POST /version/restore -- restore a named snapshot (requires root).
-pub async fn snapshot_restore(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Json(payload): Json<RestoreSnapshotRequest>,
-) -> Response {
-  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
-    }
-  };
-  if !is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can restore snapshots"
-    }))).into_response();
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  // Resolve snapshot: id takes precedence over name
-  let identifier = payload.id.as_deref()
-    .or(payload.name.as_deref())
-    .unwrap_or("");
-
-  let snapshot = match version_manager.resolve_snapshot(identifier) {
-    Ok(s) => s,
-    Err(_) => {
-      return ErrorResponse::new(format!("Snapshot not found: '{}'. Use GET /versions/snapshots to list available snapshots", identifier))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-  };
-
-  match version_manager.restore_snapshot(&ctx, &snapshot.name) {
-    Ok(()) => {
-      state.engine.permissions_cache.evict_all();
-      state.engine.index_config_cache.evict_all();
-      state.group_cache.evict_all();
-      state.api_key_cache.evict_all();
-      state.engine.clear_dir_content_cache();
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name })),
-      )
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to restore snapshot '{}': {}", snapshot.name, error);
-      ErrorResponse::new(format!("Failed to restore snapshot: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// DELETE /version/snapshot/:id_or_name -- delete a snapshot (requires root).
-/// Accepts either a snapshot ID (hex root hash) or name.
-pub async fn snapshot_delete(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(id_or_name): Path<String>,
-) -> Response {
-  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
-    }
-  };
-  if !is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can delete snapshots"
-    }))).into_response();
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  let snapshot = match version_manager.resolve_snapshot(&id_or_name) {
-    Ok(s) => s,
-    Err(_) => {
-      return ErrorResponse::new(format!("Snapshot not found: '{}'", id_or_name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-  };
-
-  let snap_id = snapshot.id();
-  let snap_name = snapshot.name.clone();
-  match version_manager.delete_snapshot(&ctx, &snap_name) {
-    Ok(()) => {
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "deleted": true, "id": snap_id, "name": snap_name })),
-      )
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to delete snapshot '{}': {}", snap_name, error);
-      ErrorResponse::new(format!("Failed to delete snapshot: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// PATCH /versions/snapshots/{name} -- rename a snapshot (requires root).
-pub async fn snapshot_rename(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(id_or_name): Path<String>,
-  Json(payload): Json<serde_json::Value>,
-) -> Response {
-  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
-    }
-  };
-  if !is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can rename snapshots"
-    }))).into_response();
-  }
-
-  let new_name = match payload.get("name").and_then(|v| v.as_str()) {
-    Some(name) if !name.is_empty() => name,
-    _ => {
-      return ErrorResponse::new("Missing or empty 'name' field")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
-  };
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  let snapshot = match version_manager.resolve_snapshot(&id_or_name) {
-    Ok(s) => s,
-    Err(_) => {
-      return ErrorResponse::new(format!("Snapshot not found: '{}'", id_or_name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
-    }
-  };
-
-  match version_manager.rename_snapshot(&ctx, &snapshot.name, new_name) {
-    Ok(_) => {
-      (StatusCode::OK, Json(serde_json::json!({
-        "renamed": true,
-        "from": snapshot.name,
-        "to": new_name,
-      }))).into_response()
-    }
-    Err(EngineError::AlreadyExists(msg)) => {
-      ErrorResponse::new(msg)
-        .with_status(StatusCode::CONFLICT)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Failed to rename snapshot '{}': {}", snapshot.name, error);
-      ErrorResponse::new(format!("Failed to rename snapshot: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Fork routes
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct CreateForkRequest {
-  pub name: String,
-  pub base: Option<String>,
-}
-
-/// POST /version/fork -- create a named fork.
-pub async fn fork_create(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Json(payload): Json<CreateForkRequest>,
-) -> Response {
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.create_fork(&ctx, &payload.name, payload.base.as_deref()) {
-    Ok(fork_info) => {
-      let response_body = ForkResponse::from(&fork_info);
-      (StatusCode::CREATED, Json(response_body)).into_response()
-    }
-    Err(EngineError::AlreadyExists(message)) => {
-      ErrorResponse::new(message)
-        .with_status(StatusCode::CONFLICT)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to create fork: {}", error);
-      ErrorResponse::new(format!("Failed to create fork: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// GET /version/forks -- list all active forks.
-pub async fn fork_list(
-  State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
-) -> Response {
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.list_forks() {
-    Ok(forks) => {
-      let listing: Vec<ForkResponse> = forks
-        .iter()
-        .map(ForkResponse::from)
-        .collect();
-      (StatusCode::OK, Json(serde_json::json!({"items": listing}))).into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to list forks: {}", error);
-      ErrorResponse::new(format!("Failed to list forks: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// POST /version/fork/:name/promote -- promote a fork to HEAD (requires root).
-pub async fn fork_promote(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(name): Path<String>,
-) -> Response {
-  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
-    }
-  };
-  if !is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can promote forks"
-    }))).into_response();
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.promote_fork(&ctx, &name) {
-    Ok(()) => {
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "promoted": true, "name": name })),
-      )
-        .into_response()
-    }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Fork not found: '{}'. Use GET /versions/forks to list active forks", name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to promote fork '{}': {}", name, error);
-      ErrorResponse::new(format!("Failed to promote fork: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
-
-/// DELETE /version/fork/:name -- abandon a fork (requires root).
-pub async fn fork_abandon(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(name): Path<String>,
-) -> Response {
-  let user_id = match uuid::Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
-    }
-  };
-  if !is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can abandon forks"
-    }))).into_response();
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let version_manager = VersionManager::new(&state.engine);
-
-  match version_manager.abandon_fork(&ctx, &name) {
-    Ok(()) => {
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({ "abandoned": true, "name": name })),
-      )
-        .into_response()
-    }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Fork not found: '{}'. Use GET /versions/forks to list active forks", name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to abandon fork '{}': {}", name, error);
-      ErrorResponse::new(format!("Failed to abandon fork: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Query endpoint
@@ -2157,7 +1963,7 @@ fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::Hash
 /// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total? }
 pub async fn query_endpoint(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
@@ -2316,7 +2122,7 @@ pub async fn query_endpoint(
         .collect();
 
       // Filter query results by API key rules — denied paths are silently omitted
-      let response_items = if let Some(Extension(ref rules)) = active_key_rules {
+      let mut response_items = if let Some(Extension(ref rules)) = active_key_rules {
         if !rules.0.is_empty() {
           let mut items = response_items;
           items.retain(|item| {
@@ -2338,6 +2144,17 @@ pub async fn query_endpoint(
       } else {
         response_items
       };
+
+      // Filter query results by user/group permissions. Query is exempt from
+      // path-level middleware, so authorization happens here: a user only
+      // sees files they have direct Read on (grants + grant inheritance).
+      // Root short-circuits; share keys are handled by the key_rules branch
+      // above.
+      if !claims.sub.starts_with("share:") {
+        filter_results_by_direct_read(
+          &mut response_items, &claims.sub, &state.engine, &state.group_cache,
+        );
+      }
 
       let mut response = serde_json::json!({
         "items": response_items,
@@ -2446,35 +2263,24 @@ pub async fn engine_rename(
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
+  let engine = state.engine.clone();
+  let path_for_blocking = path.clone();
+  let destination_owned = destination.to_string();
 
-  // Try symlink first, then file
-  if ops.get_symlink(&path).ok().flatten().is_some() {
-    return match ops.rename_symlink(&ctx, &path, destination) {
-      Ok(_record) => {
-        evict_caches_for_path(&state, &path);
-        evict_caches_for_path(&state, destination);
-        let from_normalized = crate::engine::path_utils::normalize_path(&path);
-        let to_normalized = crate::engine::path_utils::normalize_path(destination);
-        (StatusCode::OK, Json(serde_json::json!({
-          "from": from_normalized,
-          "to": to_normalized,
-          "entry_type": "symlink",
-        }))).into_response()
-      }
-      Err(ref error) => {
-        let status = engine_error_status(error);
-        let message = sanitize_engine_error("Rename failed", error);
-        tracing::error!("Engine: failed to rename symlink '{}': {}", path, error);
-        ErrorResponse::new(message)
-          .with_status(status)
-          .into_response()
-      }
-    };
-  }
+  let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
+    let ops = DirectoryOps::new(&engine);
+    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+      ops.rename_symlink(&ctx, &path_for_blocking, &destination_owned)?;
+      Ok("symlink")
+    } else {
+      ops.rename_file(&ctx, &path_for_blocking, &destination_owned)?;
+      Ok("file")
+    }
+  })
+  .await;
 
-  match ops.rename_file(&ctx, &path, destination) {
-    Ok(_record) => {
+  match result {
+    Ok(Ok(kind)) => {
       evict_caches_for_path(&state, &path);
       evict_caches_for_path(&state, destination);
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
@@ -2482,15 +2288,18 @@ pub async fn engine_rename(
       (StatusCode::OK, Json(serde_json::json!({
         "from": from_normalized,
         "to": to_normalized,
-        "entry_type": "file",
-      }))).into_response()
+        "entry_type": kind,
+      })))
+        .into_response()
     }
-    Err(ref error) => {
-      let status = engine_error_status(error);
-      let message = sanitize_engine_error("Rename failed", error);
-      tracing::error!("Engine: failed to rename file '{}': {}", path, error);
-      ErrorResponse::new(message)
-        .with_status(status)
+    Ok(Err(error)) => {
+      tracing::error!("Engine: failed to rename '{}': {}", path, error);
+      engine_error_response("Rename failed", &error)
+    }
+    Err(join_error) => {
+      tracing::error!("rename task panicked: {}", join_error);
+      ErrorResponse::new("Rename failed: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response()
     }
   }
@@ -2534,26 +2343,8 @@ pub async fn repair_kv(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn engine_error_status(error: &EngineError) -> StatusCode {
-  match error {
-    EngineError::NotFound(_) => StatusCode::NOT_FOUND,
-    EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
-    EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-    _ => StatusCode::INTERNAL_SERVER_ERROR,
-  }
-}
-
-/// L12: Return a safe error message for client responses.
-/// Passes through user-facing validation messages (InvalidInput, NotFound,
-/// AlreadyExists) but suppresses internal details for all other error variants.
-fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
-  match error {
-    EngineError::InvalidInput(msg) => format!("{}: {}", prefix, msg),
-    EngineError::NotFound(msg) => format!("{}: {}", prefix, msg),
-    EngineError::AlreadyExists(msg) => format!("{}: {}", prefix, msg),
-    _ => prefix.to_string(),
-  }
-}
+// engine_error_status / sanitize_engine_error live in server::responses now;
+// import them at the top of this file. Keep this section header for navigation.
 
 // ---------------------------------------------------------------------------
 // POST /files/copy — copy one or more files/directories to a destination
@@ -2578,22 +2369,85 @@ pub async fn copy_files(
       .into_response();
   }
 
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  let ops = DirectoryOps::new(&state.engine);
-  let mut copied = Vec::new();
-  let mut errors = Vec::new();
-
-  for path in &payload.paths {
-    let from_normalized = crate::engine::path_utils::normalize_path(path);
-    let name = crate::engine::path_utils::file_name(&from_normalized)
-      .unwrap_or("").to_string();
-    let to_path = format!("{}/{}", dest_normalized.trim_end_matches('/'), name);
-
-    match ops.copy_path(&ctx, &from_normalized, &to_path) {
-      Ok(paths) => copied.extend(paths),
-      Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
+  // User/group permission check: /files/copy is exempt from path-aware
+  // middleware, so without this every authenticated user could copy any
+  // file to any location. Required: Read on each source AND Create on
+  // the destination directory.
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Share keys cannot copy files")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
+    }
+  };
+  if !is_root(&user_id) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    // Source check first so a 404 on an unauthorized source isn't masked
+    // by a 403 on an unauthorized destination.
+    for raw_path in &payload.paths {
+      let normalized = crate::engine::path_utils::normalize_path(raw_path);
+      let read_allowed = resolver
+        .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+        .unwrap_or(false)
+        || resolver
+          .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+          .unwrap_or(false);
+      if !read_allowed {
+        return ErrorResponse::new(format!("Not found: {}", raw_path))
+          .with_status(StatusCode::NOT_FOUND)
+          .into_response();
+      }
+    }
+    let create_allowed = resolver
+      .check_path_permission(&user_id, &dest_normalized, CrudlifyOp::Create)
+      .unwrap_or(false);
+    if !create_allowed {
+      return ErrorResponse::new("Permission denied")
+        .with_status(StatusCode::FORBIDDEN)
+        .into_response();
     }
   }
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let engine = state.engine.clone();
+  let paths = payload.paths.clone();
+  let dest_for_blocking = dest_normalized.clone();
+
+  // All copies run sequentially on a blocking thread; errors are collected
+  // per-source rather than aborting on the first failure (matches prior behavior).
+  let (copied, errors) = match tokio::task::spawn_blocking(move || {
+    let ops = DirectoryOps::new(&engine);
+    let mut copied = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for path in &paths {
+      let from_normalized = crate::engine::path_utils::normalize_path(path);
+      let name = crate::engine::path_utils::file_name(&from_normalized)
+        .unwrap_or("").to_string();
+      let to_path = format!("{}/{}", dest_for_blocking.trim_end_matches('/'), name);
+      match ops.copy_path(&ctx, &from_normalized, &to_path) {
+        Ok(paths) => copied.extend(paths),
+        Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
+      }
+    }
+    (copied, errors)
+  })
+  .await
+  {
+    Ok(pair) => pair,
+    Err(join_error) => {
+      tracing::error!("copy task panicked: {}", join_error);
+      return ErrorResponse::new("Copy failed: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
 
   let mut response = serde_json::json!({ "copied": copied });
   if !errors.is_empty() {
@@ -2619,7 +2473,7 @@ pub struct GlobalSearchRequest {
 
 pub async fn global_search_endpoint(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<GlobalSearchRequest>,
 ) -> Response {
   if payload.query.is_none() && payload.where_clause.is_none() {
@@ -2661,7 +2515,7 @@ pub async fn global_search_endpoint(
     offset,
   ) {
     Ok(results) => {
-      let items: Vec<serde_json::Value> = results.results.iter().map(|r| {
+      let mut items: Vec<serde_json::Value> = results.results.iter().map(|r| {
         serde_json::json!({
           "path": r.path,
           "score": r.score,
@@ -2673,6 +2527,15 @@ pub async fn global_search_endpoint(
           "updated_at": r.updated_at,
         })
       }).collect();
+
+      // Filter search results by user/group permissions. Search is exempt
+      // from path-level middleware, so authorization happens here: a user
+      // only sees files they have direct Read on (grants + inheritance).
+      if !claims.sub.starts_with("share:") {
+        filter_results_by_direct_read(
+          &mut items, &claims.sub, &state.engine, &state.group_cache,
+        );
+      }
 
       let mut response = serde_json::json!({
         "results": items,

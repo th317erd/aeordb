@@ -72,6 +72,27 @@ enum Commands {
     /// Write chunk size in bytes (default: 262144 = 256 KiB)
     #[arg(long)]
     chunk_size: Option<usize>,
+    /// Comma-separated list of peer URLs to register at startup
+    /// (e.g. "http://node2:6830,http://node3:6830").
+    /// Peers are persisted; this flag is idempotent.
+    #[arg(long)]
+    peers: Option<String>,
+    /// Join an existing cluster: URL of any existing cluster member.
+    /// Combined with --join-token, the new node fetches the cluster's
+    /// JWT signing key (so JWTs validate cluster-wide) and registers
+    /// the joined node as a peer.
+    #[arg(long)]
+    join: Option<String>,
+    /// Root API key (or bearer token) of an existing cluster member,
+    /// used to authorize the join request. Required with --join.
+    #[arg(long)]
+    join_token: Option<String>,
+    /// URL that other nodes should use to reach this node (e.g.
+    /// "https://node-b.internal:6841"). If omitted, --join falls back to
+    /// http://localhost:PORT, which is unreachable from any other host.
+    /// Required for multi-host clusters.
+    #[arg(long)]
+    advertise_url: Option<String>,
   },
   /// Run stress tests against a running instance
   Stress(StressArgs),
@@ -98,6 +119,10 @@ enum Commands {
     /// Version hash to export (alternative to snapshot name)
     #[arg(long)]
     hash: Option<String>,
+    /// Root API key for full backup mode (includes system data and all snapshots).
+    /// Can also be set via AEORDB_ROOT_KEY env var.
+    #[arg(long)]
+    root_key: Option<String>,
   },
   /// Create a patch .aeordb containing only the changeset between two versions
   Diff {
@@ -128,6 +153,10 @@ enum Commands {
     /// Promote imported version to HEAD after import
     #[arg(long)]
     promote: bool,
+    /// Root API key for the target database. Required when importing system
+    /// data (users, groups, keys). Can also be set via AEORDB_ROOT_KEY env var.
+    #[arg(long)]
+    root_key: Option<String>,
   },
   /// Promote a version hash to HEAD
   Promote {
@@ -163,6 +192,15 @@ enum Commands {
     #[arg(long)]
     dry_run: bool,
   },
+  /// Probe a database file: list /.aeordb-system/ contents (diagnostic).
+  #[command(hide = true)]
+  Probe {
+    #[arg(short = 'D', long)]
+    database: String,
+    /// Probe a specific path: prints dir-path-key + file-path-key presence.
+    #[arg(long)]
+    path: Option<String>,
+  },
 }
 
 #[tokio::main]
@@ -183,6 +221,10 @@ async fn main() {
       tls_key,
       jwt_expiry,
       chunk_size,
+      peers,
+      join,
+      join_token,
+      advertise_url,
     } => {
       // Load config file if specified; otherwise use all-None defaults.
       let file_config = match config {
@@ -245,19 +287,35 @@ async fn main() {
         .or(file_config.storage.chunk_size)
         .unwrap_or(262144);
 
-      commands::start::run(
-        merged_port,
-        &merged_host,
-        &merged_database,
-        &merged_log_format,
-        merged_auth.as_deref(),
-        merged_hot_dir.as_deref(),
-        merged_cors.as_deref(),
-        merged_tls_cert.as_deref(),
-        merged_tls_key.as_deref(),
-        merged_jwt_expiry,
-        merged_chunk_size,
-      ).await;
+      // Parse --peers into a Vec<String>.
+      let peer_list: Vec<String> = peers
+        .as_deref()
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+      // Validate --join requires --join-token.
+      if join.is_some() && join_token.is_none() {
+        eprintln!("Error: --join requires --join-token (the existing cluster's root API key).");
+        std::process::exit(1);
+      }
+
+      commands::start::run(commands::start::StartConfig {
+        port: merged_port,
+        host: &merged_host,
+        database: &merged_database,
+        log_format: &merged_log_format,
+        auth_flag: merged_auth.as_deref(),
+        hot_dir_arg: merged_hot_dir.as_deref(),
+        cors_flag: merged_cors.as_deref(),
+        tls_cert: merged_tls_cert.as_deref(),
+        tls_key: merged_tls_key.as_deref(),
+        jwt_expiry: merged_jwt_expiry,
+        chunk_size: merged_chunk_size,
+        peers: peer_list,
+        join_url: join.as_deref(),
+        join_token: join_token.as_deref(),
+        advertise_url: advertise_url.as_deref(),
+      }).await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {
@@ -268,14 +326,14 @@ async fn main() {
     Commands::EmergencyReset { database, force } => {
       commands::emergency_reset::run(&database, force);
     }
-    Commands::Export { database, output, snapshot, hash } => {
-      commands::export::run(&database, &output, snapshot.as_deref(), hash.as_deref());
+    Commands::Export { database, output, snapshot, hash, root_key } => {
+      commands::export::run(&database, &output, snapshot.as_deref(), hash.as_deref(), root_key.as_deref());
     }
     Commands::Diff { database, output, from, to } => {
       commands::diff::run(&database, &output, &from, to.as_deref());
     }
-    Commands::Import { database, file, force, promote } => {
-      commands::import_cmd::run(&database, &file, force, promote);
+    Commands::Import { database, file, force, promote, root_key } => {
+      commands::import_cmd::run(&database, &file, force, promote, root_key.as_deref());
     }
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);
@@ -285,6 +343,9 @@ async fn main() {
     }
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);
+    }
+    Commands::Probe { database, path } => {
+      commands::probe::run(&database, path.as_deref());
     }
   }
 }

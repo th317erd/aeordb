@@ -66,6 +66,10 @@ pub struct SyncEngine {
     /// Per-peer sync lock to prevent concurrent syncs with the same peer.
     /// Presence in the set = locked. Absence = unlocked.
     sync_locks: Arc<Mutex<HashSet<u64>>>,
+    /// Mints root-level JWTs for peer-to-peer sync HTTP requests. The whole
+    /// cluster shares the same signing key (via /sync/join), so a JWT
+    /// signed here is accepted by any peer.
+    jwt_manager: Option<Arc<crate::auth::JwtManager>>,
 }
 
 /// RAII guard that removes a peer ID from the sync lock set on drop.
@@ -77,19 +81,28 @@ struct SyncLockGuard {
 
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
-        // Use try_lock to avoid blocking in a panic unwind.
-        // If the mutex is already held (shouldn't happen in normal flow),
-        // spawn a task to clean up asynchronously.
+        // Use try_lock to clean up synchronously when possible. The previous
+        // fallback that spawned an async task from Drop was unsafe during
+        // runtime shutdown — `tokio::spawn` panics when there is no reactor
+        // (e.g. a `#[tokio::test]` panic, or shutdown after the runtime
+        // begins to wind down). The spawn-fail leaked the peer's slot in
+        // `sync_locks` forever; the peer could never sync again until restart.
+        //
+        // Today we rely on the surrounding code to release the lock before
+        // any await (see `sync_with_peer`), so try_lock should always
+        // succeed. If it ever fails, we log loudly and accept the leak for
+        // this peer instead of risking a panic in Drop. This is recoverable
+        // (a restart fixes it); a panic in Drop is not.
         if let Ok(mut locks) = self.locks.try_lock() {
             locks.remove(&self.peer_id);
         } else {
-            // Fallback: schedule cleanup. This handles the rare case where
-            // drop runs while another task holds the mutex.
-            let locks = Arc::clone(&self.locks);
-            let peer_id = self.peer_id;
-            tokio::spawn(async move {
-                locks.lock().await.remove(&peer_id);
-            });
+            tracing::error!(
+                peer_id = self.peer_id,
+                "SyncLockGuard::drop could not acquire sync_locks via try_lock — \
+                 the slot will not be cleaned up. This is recoverable on next \
+                 server restart but indicates a logic bug: SyncLockGuard was \
+                 held across an await on the locks mutex."
+            );
         }
     }
 }
@@ -107,7 +120,37 @@ impl SyncEngine {
             clock_tracker,
             config,
             sync_locks: Arc::new(Mutex::new(HashSet::new())),
+            jwt_manager: None,
         }
+    }
+
+    /// Provide the JwtManager so peer-to-peer HTTP requests carry an
+    /// Authorization header. Without this, /sync/diff calls receive a
+    /// 401 from the peer.
+    pub fn with_jwt_manager(mut self, jwt: Arc<crate::auth::JwtManager>) -> Self {
+        self.jwt_manager = Some(jwt);
+        self
+    }
+
+    /// Mint a short-lived root JWT for outbound sync requests.
+    ///
+    /// The token carries `scope: "sync"`. The auth middleware will reject
+    /// this token on any path that isn't `/sync/*`, so a leaked sync token
+    /// cannot be used to call file or admin APIs even though it has root
+    /// `sub`. (The whole cluster shares the signing key, so without this
+    /// scope a leaked token would grant full takeover anywhere.)
+    fn mint_sync_token(&self) -> Option<String> {
+        let jwt = self.jwt_manager.as_ref()?;
+        let claims = crate::auth::TokenClaims {
+            sub: crate::engine::ROOT_USER_ID.to_string(),
+            iss: "aeordb".to_string(),
+            iat: chrono::Utc::now().timestamp(),
+            exp: chrono::Utc::now().timestamp() + 300, // 5 minutes
+            scope: Some("sync".to_string()),
+            permissions: None,
+            key_id: None,
+        };
+        jwt.create_token(&claims).ok()
     }
 
     /// Run a single sync cycle with a specific peer.
@@ -298,7 +341,7 @@ impl SyncEngine {
         }
 
         // Also transfer file records that we might need
-        for (_path, (file_hash, _record)) in &remote_tree.files {
+        for (file_hash, _record) in remote_tree.files.values() {
             let has_locally = self.engine.has_entry(file_hash)
                 .map_err(|e| format!("Failed to check local file record: {}", e))?;
 
@@ -344,16 +387,17 @@ impl SyncEngine {
     /// Inactive peers are silently skipped.
     pub async fn sync_all_peers(&self) -> Vec<(u64, Result<SyncCycleResult, String>)> {
         let peers = self.peer_manager.all_peers();
-        let mut results = Vec::new();
 
-        for peer in peers {
+        let futures = peers.into_iter().filter_map(|peer| {
             if peer.state == ConnectionState::Active {
-                let result = self.sync_with_peer(peer.node_id).await;
-                results.push((peer.node_id, result));
+                let node_id = peer.node_id;
+                Some(async move { (node_id, self.sync_with_peer(node_id).await) })
+            } else {
+                None
             }
-        }
+        });
 
-        results
+        futures_util::future::join_all(futures).await
     }
 
     /// Get a reference to the underlying engine.
@@ -420,8 +464,12 @@ impl SyncEngine {
             diff_body["paths"] = serde_json::json!(paths);
         }
 
-        let response = client
-            .post(format!("{}/sync/diff", peer.address))
+        let sync_token = self.mint_sync_token();
+        let mut req = client.post(format!("{}/sync/diff", peer.address));
+        if let Some(ref tok) = sync_token {
+            req = req.bearer_auth(tok);
+        }
+        let response = req
             .json(&diff_body)
             .send().await
             .map_err(|e| format!("Failed to contact peer {}: {}", peer.node_id, e))?;
@@ -447,22 +495,28 @@ impl SyncEngine {
             .any(|k| {
                 changes[k]
                     .as_array()
-                    .map_or(false, |a| !a.is_empty())
+                    .is_some_and(|a| !a.is_empty())
             });
         let has_symlink_changes = ["symlinks_added", "symlinks_modified", "symlinks_deleted"]
             .iter()
             .any(|k| {
                 changes[k]
                     .as_array()
-                    .map_or(false, |a| !a.is_empty())
+                    .is_some_and(|a| !a.is_empty())
             });
 
         if !has_file_changes && !has_symlink_changes {
             // No remote changes — update sync state and return
+            let peer_root_bytes = hex::decode(&peer_root_hex).map_err(|e| {
+                format!(
+                    "Peer {} returned unparseable root hash '{}': {}",
+                    peer.node_id, peer_root_hex, e
+                )
+            })?;
             self.save_sync_state_hex(peer.node_id, &peer_root_hex);
             self.peer_manager.update_sync_state(
                 peer.node_id,
-                hex::decode(&peer_root_hex).unwrap_or_default(),
+                peer_root_bytes,
                 chrono::Utc::now().timestamp_millis() as u64,
             );
             return Ok(SyncCycleResult {
@@ -483,8 +537,11 @@ impl SyncEngine {
             .unwrap_or_default();
 
         if !chunk_hashes.is_empty() {
-            let chunks_resp = client
-                .post(format!("{}/sync/chunks", peer.address))
+            let mut chunks_req = client.post(format!("{}/sync/chunks", peer.address));
+            if let Some(ref tok) = sync_token {
+                chunks_req = chunks_req.bearer_auth(tok);
+            }
+            let chunks_resp = chunks_req
                 .json(&serde_json::json!({ "hashes": chunk_hashes }))
                 .send().await
                 .map_err(|e| format!("Failed to fetch chunks from peer {}: {}", peer.node_id, e))?;
@@ -577,7 +634,7 @@ impl SyncEngine {
 
                     if all_chunks_available {
                         let content_type = entry["content_type"].as_str();
-                        let _ = ops.store_file(&ctx, path, &file_data, content_type);
+                        let _ = ops.store_file_buffered(&ctx, path, &file_data, content_type);
                         operations_count += 1;
                     }
                 }
@@ -621,10 +678,16 @@ impl SyncEngine {
         }
 
         // Update sync state
+        let peer_root_bytes = hex::decode(&peer_root_hex).map_err(|e| {
+            format!(
+                "Peer {} returned unparseable root hash '{}': {}",
+                peer.node_id, peer_root_hex, e
+            )
+        })?;
         self.save_sync_state_hex(peer.node_id, &peer_root_hex);
         self.peer_manager.update_sync_state(
             peer.node_id,
-            hex::decode(&peer_root_hex).unwrap_or_default(),
+            peer_root_bytes,
             chrono::Utc::now().timestamp_millis() as u64,
         );
 

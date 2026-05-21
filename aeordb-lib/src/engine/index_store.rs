@@ -668,7 +668,7 @@ impl<'a> IndexManager<'a> {
     let old_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
 
-    match ops.read_file(&old_path) {
+    match ops.read_file_buffered(&old_path) {
       Ok(data) => {
         let hash_length = self.engine.hash_algo().hash_length();
         let index = FieldIndex::deserialize(&data, hash_length)?;
@@ -682,7 +682,7 @@ impl<'a> IndexManager<'a> {
     let indexes = self.list_indexes(path)?;
     for index_name in &indexes {
       if index_name.starts_with(&format!("{}.", field_name)) {
-        let strategy = index_name.splitn(2, '.').nth(1).unwrap_or("string");
+        let strategy = index_name.split_once('.').map(|x| x.1).unwrap_or("string");
         return self.load_index_by_strategy(path, field_name, strategy);
       }
     }
@@ -695,7 +695,7 @@ impl<'a> IndexManager<'a> {
     let index_path = Self::index_file_path(path, field_name, strategy);
     let ops = DirectoryOps::new(self.engine);
 
-    match ops.read_file(&index_path) {
+    match ops.read_file_buffered(&index_path) {
       Ok(data) => {
         let hash_length = self.engine.hash_algo().hash_length();
         let index = FieldIndex::deserialize(&data, hash_length)?;
@@ -714,7 +714,7 @@ impl<'a> IndexManager<'a> {
     let data = index.serialize(hash_length);
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(self.engine);
-    ops.store_file(&ctx, &index_path, &data, Some("application/octet-stream"))?;
+    ops.store_file_buffered(&ctx, &index_path, &data, Some("application/octet-stream"))?;
     Ok(())
   }
 
@@ -834,7 +834,7 @@ impl<'a> IndexManager<'a> {
       if is_match {
         // Determine strategy from the name
         let strategy = if index_name.contains('.') {
-          index_name.splitn(2, '.').nth(1).unwrap_or("string")
+          index_name.split_once('.').map(|x| x.1).unwrap_or("string")
         } else {
           "string" // old format
         };

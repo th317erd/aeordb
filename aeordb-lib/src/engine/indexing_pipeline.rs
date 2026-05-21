@@ -181,7 +181,7 @@ impl<'a> IndexingPipeline<'a> {
     } else {
       // Not JSON: try native parser for metadata extraction (images, audio, etc.)
       let native_result = crate::engine::native_parsers::parse_native(
-        data, ct, &filename, path, data.len() as u64,
+        data, ct, filename, path, data.len() as u64,
       );
 
       if let Some(result) = native_result {
@@ -426,7 +426,7 @@ impl<'a> IndexingPipeline<'a> {
     })?;
 
     let memory_limit = config.parser_memory_limit.as_deref()
-      .map(|s| Self::parse_memory_limit(s))
+      .map(Self::parse_memory_limit)
       .unwrap_or(256 * 1024 * 1024); // 256MB default
 
     let envelope = Self::build_parser_envelope(data, path, content_type);
@@ -482,7 +482,7 @@ impl<'a> IndexingPipeline<'a> {
     }
 
     let ops = DirectoryOps::new(self.engine);
-    match ops.read_file("/.aeordb-config/parsers.json") {
+    match ops.read_file_buffered("/.aeordb-config/parsers.json") {
       Ok(data) => {
         let text = std::str::from_utf8(&data).ok()?;
         let registry: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -539,11 +539,11 @@ impl<'a> IndexingPipeline<'a> {
     let entry = format!("{} WARN  {}\n", timestamp, message);
 
     let ops = DirectoryOps::new(self.engine);
-    let existing = ops.read_file(&log_path).unwrap_or_default();
+    let existing = ops.read_file_buffered(&log_path).unwrap_or_default();
     let mut combined = existing;
     combined.extend_from_slice(entry.as_bytes());
 
     let ctx = RequestContext::system();
-    let _ = ops.store_file(&ctx, &log_path, &combined, Some("text/plain"));
+    let _ = ops.store_file_buffered(&ctx, &log_path, &combined, Some("text/plain"));
   }
 }

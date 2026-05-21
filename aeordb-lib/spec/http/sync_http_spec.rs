@@ -53,7 +53,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn store_test_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some("application/octet-stream"))
+    ops.store_file_buffered(&ctx, path, data, Some("application/octet-stream"))
         .expect("store file");
 }
 
@@ -107,7 +107,7 @@ async fn test_sync_diff_full() {
     // All files as "added"
     let added = json["changes"]["files_added"].as_array().unwrap();
     let user_added: Vec<_> = added.iter()
-        .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system"))
+        .filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.aeordb-system"))
         .collect();
     assert_eq!(user_added.len(), 2);
     // Sorted by path
@@ -320,7 +320,7 @@ async fn test_sync_diff_empty_database() {
 
     // Filter out /.aeordb-system/ entries
     let added: Vec<_> = json["changes"]["files_added"].as_array().unwrap()
-        .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.system")).collect();
+        .iter().filter(|e| !e["path"].as_str().unwrap_or("").starts_with("/.aeordb-system")).collect();
     assert!(added.is_empty(), "No user files should be added on empty db");
     assert!(json["changes"]["files_modified"].as_array().unwrap().is_empty());
     assert!(json["changes"]["files_deleted"].as_array().unwrap().is_empty());
@@ -684,4 +684,167 @@ async fn test_sync_routes_are_public_with_jwt_check() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ===========================================================================
+// POST /sync/diff — scoped user must not leak paths outside their shares
+//
+// Regression for the metadata leak where /sync/diff returned every path in
+// the database because the only permission gate was API key rules. A user
+// with no key rules but with directory shares could enumerate the entire
+// tree via diff (paths, sizes, hashes) even though GET /files/{path}
+// correctly 403'd the content.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_sync_diff_filters_to_user_grants() {
+    use aeordb::engine::{system_store, user::User, PathPermissions, permissions::PermissionLink};
+
+    let (app, jwt_manager, engine, _tmp) = test_app();
+
+    // Populate the DB with content the test user must NOT see plus a
+    // shared subtree the test user IS granted access to.
+    store_test_file(&engine, "/Pictures/Family/Harlo/photo.jpg", b"harlo-1");
+    store_test_file(&engine, "/Pictures/Family/Harlo/photo2.jpg", b"harlo-2");
+    store_test_file(&engine, "/Pictures/Family/Aeolus/secret.jpg", b"aeolus-secret");
+    store_test_file(&engine, "/Pictures/Family/Jessica/private.jpg", b"jessica-private");
+    store_test_file(&engine, "/Pictures/Vacation/beach.jpg", b"beach");
+    store_test_file(&engine, "/Documents/private.pdf", b"private-doc");
+
+    // Create the test user (auto-creates the `user:<uuid>` group).
+    let ctx = RequestContext::system();
+    let user = User::new("share_recipient", None);
+    let user_id = user.user_id;
+    system_store::store_user(&engine, &ctx, &user).unwrap();
+
+    // Grant read+list on /Pictures/Family/Harlo only.
+    let user_group = format!("user:{}", user_id);
+    let perms = PathPermissions {
+        links: vec![PermissionLink {
+            group: user_group,
+            allow: ".r..l...".to_string(),
+            deny: "........".to_string(),
+            others_allow: None,
+            others_deny: None,
+            path_pattern: None,
+        }],
+    };
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(
+        &ctx,
+        "/Pictures/Family/Harlo/.aeordb-permissions",
+        &perms.serialize(),
+        Some("application/json"),
+    )
+    .unwrap();
+
+    // Mint a JWT for the non-root user.
+    let now = Utc::now().timestamp();
+    let claims = TokenClaims {
+        sub: user_id.to_string(),
+        iss: "aeordb".to_string(),
+        iat: now,
+        exp: now + DEFAULT_EXPIRY_SECONDS,
+        scope: None,
+        permissions: None,
+        key_id: None,
+    };
+    let user_token = jwt_manager.create_token(&claims).unwrap();
+    let user_auth = format!("Bearer {}", user_token);
+
+    // Diff as that user.
+    let response = app
+        .oneshot(
+            Request::post("/sync/diff")
+                .header("content-type", "application/json")
+                .header("authorization", &user_auth)
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response.into_body()).await;
+    let added = json["changes"]["files_added"].as_array().unwrap();
+    let leaked: Vec<&str> = added
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .filter(|p| !p.starts_with("/Pictures/Family/Harlo/"))
+        .collect();
+
+    assert!(
+        leaked.is_empty(),
+        "/sync/diff leaked paths outside the user's grant: {:?}",
+        leaked
+    );
+
+    // The Harlo subtree (minus the .aeordb-permissions metadata file,
+    // which is filtered by is_internal_path) should still be present.
+    let harlo_paths: Vec<&str> = added
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .filter(|p| p.starts_with("/Pictures/Family/Harlo/"))
+        .collect();
+    assert!(harlo_paths.contains(&"/Pictures/Family/Harlo/photo.jpg"));
+    assert!(harlo_paths.contains(&"/Pictures/Family/Harlo/photo2.jpg"));
+
+    // chunk_hashes_needed must also be limited to the granted subtree's
+    // chunks — verify by counting against what root sees.
+    let user_chunks: Vec<&str> = json["chunk_hashes_needed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    // Root sees everything; chunk count should be strictly larger.
+    let root_auth = bearer_token(&jwt_manager);
+    let root_response = test_app_for_chunks_count(&engine, &jwt_manager, &root_auth).await;
+    let root_chunks_count = root_response;
+    assert!(
+        user_chunks.len() < root_chunks_count,
+        "user chunk_hashes_needed ({}) must be strictly less than root's ({}) — the chunk list must be rebuilt from filtered files",
+        user_chunks.len(),
+        root_chunks_count,
+    );
+}
+
+/// Helper: call /sync/diff with the given auth and return the
+/// chunk_hashes_needed count. Used to compare user vs root.
+async fn test_app_for_chunks_count(
+    engine: &Arc<StorageEngine>,
+    jwt_manager: &Arc<JwtManager>,
+    auth: &str,
+) -> usize {
+    let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+    let rate_limiter = Arc::new(RateLimiter::default_config());
+    let auth_provider: Arc<dyn aeordb::auth::AuthProvider> =
+        Arc::new(FileAuthProvider::new(engine.clone()));
+    let app = create_app_with_all(
+        auth_provider,
+        jwt_manager.clone(),
+        plugin_manager,
+        rate_limiter,
+        make_prometheus_handle(),
+        engine.clone(),
+        Arc::new(EventBus::new()),
+        CorsState { default_origins: None, rules: vec![] },
+    );
+    let response = app
+        .oneshot(
+            Request::post("/sync/diff")
+                .header("content-type", "application/json")
+                .header("authorization", auth)
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response.into_body()).await;
+    json["chunk_hashes_needed"].as_array().unwrap().len()
 }

@@ -188,8 +188,12 @@ fn test_file_record_timestamps_millis() {
     header.updated_at
   );
 
-  // Read the entry back and check its timestamp
-  let (_entry_header, _key, _value) = writer.read_entry_at(256).unwrap();
+  // Read the entry back and check its timestamp. v3 layout: data starts at
+  // HEADER_REGION_SIZE (= FILE_HEADER_SIZE * 2 = 512), not the single
+  // 256-byte slot offset.
+  let (_entry_header, _key, _value) = writer
+    .read_entry_at(aeordb::engine::file_header::HEADER_REGION_SIZE as u64)
+    .unwrap();
   assert!(
     _entry_header.timestamp > 1_000_000_000_000,
     "entry timestamp should be in milliseconds, got: {}",

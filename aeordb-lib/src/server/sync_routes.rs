@@ -78,10 +78,23 @@ pub struct SyncChunksRequest {
 // ---------------------------------------------------------------------------
 
 /// Describes who is calling the sync endpoint and what access they have.
+///
+/// The distinction between `Peer` and `RootUser` matters for system-data
+/// inclusion. A **replication peer** (another cluster node) calls sync
+/// internally with a JWT minted by `SyncEngine::mint_sync_token`, which
+/// has `sub: ROOT_USER_ID` AND `scope: "sync"`. Those calls MUST receive
+/// `/.aeordb-system/` entries — that's how users, groups, refresh tokens,
+/// etc. propagate across the cluster. Anyone else (root admin running
+/// curl, scoped users) does **not** get system data through /sync — they
+/// should use a backup with `--root-key` or path-based APIs.
 pub enum SyncCaller {
-    /// Root JWT (nil UUID) -- full access including /.aeordb-system/.
+    /// Replication peer: `sub: ROOT_USER_ID` + `scope: "sync"`. Full
+    /// access INCLUDING `/.aeordb-system/` and `/.aeordb-config/`.
+    Peer,
+    /// Root JWT (nil UUID), no sync scope — admin tool, not a peer.
+    /// `/.aeordb-system/` filtered out (use backup instead).
     RootUser,
-    /// Non-root JWT -- /.aeordb-system/ filtered out, API key rules applied.
+    /// Non-root JWT — `/.aeordb-system/` filtered out, API key rules applied.
     ScopedUser {
         // TODO: Use for per-user sync audit logging and rate limiting.
         #[allow(dead_code)]
@@ -92,8 +105,9 @@ pub enum SyncCaller {
 
 impl SyncCaller {
     /// Whether this caller should see /.aeordb-system/ entries.
+    /// Only peer replicas include system data; admin root users do NOT.
     fn include_system(&self) -> bool {
-        matches!(self, SyncCaller::RootUser)
+        matches!(self, SyncCaller::Peer)
     }
 
     /// API key rules for path-level filtering (empty = no restrictions).
@@ -111,9 +125,10 @@ fn determine_sync_caller(
     headers: &HeaderMap,
     state: &AppState,
 ) -> Result<SyncCaller, Response> {
-    // 0. If auth is disabled (dev mode), treat as root.
+    // 0. If auth is disabled (dev mode), treat as a peer so dev sync flows
+    //    see system data — matches the pre-auth-disabled behavior.
     if !state.auth_provider.is_enabled() {
-        return Ok(SyncCaller::RootUser);
+        return Ok(SyncCaller::Peer);
     }
 
     // 1. Try JWT Bearer token.
@@ -141,6 +156,14 @@ fn determine_sync_caller(
         })?;
 
         if crate::engine::user::is_root(&user_id) {
+            // A root JWT with `scope: "sync"` is a replication peer
+            // (minted by SyncEngine::mint_sync_token); it MUST receive
+            // system data. A root JWT without that scope is an admin tool
+            // and must NOT receive system data through sync — use a
+            // root-key backup for that purpose.
+            if claims.scope.as_deref() == Some("sync") {
+                return Ok(SyncCaller::Peer);
+            }
             return Ok(SyncCaller::RootUser);
         }
 
@@ -196,7 +219,7 @@ fn file_record_to_sync_entry(path: &str, hash: &[u8], record: &FileRecord) -> Sy
         hash: hex::encode(hash),
         size: record.total_size,
         content_type: record.content_type.clone(),
-        chunk_hashes: record.chunk_hashes.iter().map(|h| hex::encode(h)).collect(),
+        chunk_hashes: record.chunk_hashes.iter().map(hex::encode).collect(),
     }
 }
 
@@ -241,6 +264,56 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
     changes.symlinks_added.retain(|e| path_allowed_by_key_rules(&e.path, rules));
     changes.symlinks_modified.retain(|e| path_allowed_by_key_rules(&e.path, rules));
     changes.symlinks_deleted.retain(|e| path_allowed_by_key_rules(&e.path, rules));
+}
+
+/// Drop every entry the user can't directly Read. Used for non-peer
+/// callers so /sync/diff never leaks paths outside the user's grants.
+/// Without this, a user with only directory-level shares (and no API
+/// key rules) would receive the full path list — a metadata leak even
+/// though GET /files/{path} would correctly 403 on the content.
+///
+/// Also unconditionally drops `/.aeordb-system/` and `/.aeordb-config/`
+/// entries: those are engine-internal and must never reach a user's
+/// filesystem, regardless of permissions.
+fn filter_changes_by_user_permissions(
+    changes: &mut SyncChanges,
+    user_id_str: &str,
+    state: &AppState,
+) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+
+    // Root short-circuits in the resolver, but we want belt-and-suspenders:
+    // root callers never reach this path (Peer/RootUser handled separately).
+    let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
+        // Token has a malformed sub — drop everything rather than leak.
+        changes.files_added.clear();
+        changes.files_modified.clear();
+        changes.files_deleted.clear();
+        changes.symlinks_added.clear();
+        changes.symlinks_modified.clear();
+        changes.symlinks_deleted.clear();
+        return;
+    };
+
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let is_allowed = |path: &str| -> bool {
+        if crate::engine::directory_ops::is_system_path(path) {
+            return false;
+        }
+        if crate::engine::directory_ops::is_internal_path(path) {
+            return false;
+        }
+        resolver
+            .check_direct_permission(&user_id, path, CrudlifyOp::Read)
+            .unwrap_or(false)
+    };
+
+    changes.files_added.retain(|e| is_allowed(&e.path));
+    changes.files_modified.retain(|e| is_allowed(&e.path));
+    changes.files_deleted.retain(|e| is_allowed(&e.path));
+    changes.symlinks_added.retain(|e| is_allowed(&e.path));
+    changes.symlinks_modified.retain(|e| is_allowed(&e.path));
+    changes.symlinks_deleted.retain(|e| is_allowed(&e.path));
 }
 
 /// Build a full sync response (no since_root_hash -- everything is "added").
@@ -465,7 +538,7 @@ pub async fn sync_diff(
             }
         };
 
-        let base_tree = match walk_version_tree(&state.engine, &since_hash) {
+        let mut base_tree = match walk_version_tree(&state.engine, &since_hash) {
             Ok(t) => t,
             Err(e) => {
                 return ErrorResponse::new(format!("Failed to walk base tree: {}", e))
@@ -474,7 +547,7 @@ pub async fn sync_diff(
             }
         };
 
-        let current_tree = match walk_version_tree(&state.engine, &head_hash) {
+        let mut current_tree = match walk_version_tree(&state.engine, &head_hash) {
             Ok(t) => t,
             Err(e) => {
                 return ErrorResponse::new(format!("Failed to walk current tree: {}", e))
@@ -483,10 +556,23 @@ pub async fn sync_diff(
             }
         };
 
+        // For replication peers, system subtrees aren't reachable from the
+        // user-visible HEAD tree (by design — see tree_walker docs). Walk
+        // current state into the current_tree only; base_tree intentionally
+        // does NOT include system data, so the diff treats every system
+        // file as "added" — the receiving peer dedupes by content hash. We
+        // can't accurately reconstruct system state at the historical
+        // `since_root_hash` because system data isn't versioned along
+        // with HEAD.
+        let _ = &mut base_tree; // keep the binding even when we don't augment it
+        if include_system {
+            crate::engine::tree_walker::augment_with_system_subtrees(&state.engine, &mut current_tree);
+        }
+
         let diff = diff_trees(&base_tree, &current_tree);
         build_sync_response_from_diff(&diff, &current_tree, &payload.paths, include_system)
     } else {
-        let tree = match walk_version_tree(&state.engine, &head_hash) {
+        let mut tree = match walk_version_tree(&state.engine, &head_hash) {
             Ok(t) => t,
             Err(e) => {
                 return ErrorResponse::new(format!("Failed to walk tree: {}", e))
@@ -494,11 +580,23 @@ pub async fn sync_diff(
                     .into_response()
             }
         };
+        if include_system {
+            crate::engine::tree_walker::augment_with_system_subtrees(&state.engine, &mut tree);
+        }
         build_full_sync_response(&tree, &payload.paths, include_system)
     };
 
     // Apply API key rule filtering for scoped users.
     filter_changes_by_key_rules(&mut changes, caller.key_rules());
+
+    // Apply user/group permission filtering. Without this, a non-root
+    // user with no API key rules but with directory shares would receive
+    // metadata for the entire database — a path/size/hash leak even
+    // though GET /files/{path} correctly 403s the content. Peers and
+    // root admin sync skip this branch.
+    if let SyncCaller::ScopedUser { user_id, .. } = &caller {
+        filter_changes_by_user_permissions(&mut changes, user_id, &state);
+    }
 
     // H4: Rebuild chunk hashes from the FILTERED changes so scoped users
     // don't receive chunk hashes for files they can't access.
@@ -522,14 +620,23 @@ pub async fn sync_diff(
 }
 
 /// POST /sync/chunks -- batch chunk transfer.
+///
+/// Caps both the number of hashes (10,000) and the total response payload
+/// (512 MB) to bound peer memory usage. A worker hitting either limit returns
+/// 413 Payload Too Large; the caller should split the request and retry.
+const SYNC_CHUNKS_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+const SYNC_CHUNKS_MAX_HASHES: usize = 10_000;
+
 pub async fn sync_chunks(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<SyncChunksRequest>,
 ) -> Response {
-    // M3: Cap the number of chunk hashes to prevent abuse.
-    if payload.hashes.len() > 10_000 {
-        return ErrorResponse::new("Too many chunk hashes (max 10000). Split the request into multiple batches")
+    if payload.hashes.len() > SYNC_CHUNKS_MAX_HASHES {
+        return ErrorResponse::new(format!(
+            "Too many chunk hashes (max {}). Split the request into multiple batches",
+            SYNC_CHUNKS_MAX_HASHES
+        ))
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
     }
@@ -541,7 +648,27 @@ pub async fn sync_chunks(
 
     let filter_system = !caller.include_system();
 
+    // Scoped-key enforcement: a key with rules (non-empty key_rules) could
+    // exfiltrate chunks outside its scope by guessing hashes, because
+    // /sync/chunks identifies content by hash and provides no path
+    // context. Refuse explicitly. Non-root callers WITHOUT rules (regular
+    // client sync) are still allowed — they only see non-system chunks
+    // via the `filter_system` gate below.
+    if let SyncCaller::ScopedUser { key_rules, .. } = &caller {
+        if !key_rules.is_empty() {
+            return ErrorResponse::new(
+                "Scoped API keys (with path rules) cannot use /sync/chunks. \
+                 Use /files/{path} for path-aware content access."
+            )
+                .with_status(StatusCode::FORBIDDEN)
+                .into_response();
+        }
+    }
+
     let mut chunks: Vec<serde_json::Value> = Vec::new();
+    // Track accumulated payload size so we don't OOM building a 3.4 GB JSON
+    // response from a worst-case 10k * 256 KB request. base64 expands 4/3.
+    let mut accumulated_payload: usize = 0;
 
     for hex_hash in &payload.hashes {
         let hash = match hex::decode(hex_hash) {
@@ -563,6 +690,23 @@ pub async fn sync_chunks(
             } else {
                 value
             };
+
+            // Project base64-encoded size + JSON overhead. Bail before pushing.
+            let projected = data.len().saturating_mul(4) / 3 + hex_hash.len() + 64;
+            if accumulated_payload.saturating_add(projected) > SYNC_CHUNKS_MAX_RESPONSE_BYTES {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Response would exceed {} bytes; split the request into smaller batches",
+                            SYNC_CHUNKS_MAX_RESPONSE_BYTES
+                        ),
+                        "chunks_so_far": chunks.len(),
+                    })),
+                )
+                    .into_response();
+            }
+            accumulated_payload += projected;
 
             chunks.push(serde_json::json!({
                 "hash": hex_hash,

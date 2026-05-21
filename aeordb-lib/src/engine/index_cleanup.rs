@@ -12,7 +12,6 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::index_store::IndexManager;
 use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::path_utils::{normalize_path, parent_path};
@@ -87,7 +86,6 @@ async fn cleanup_loop(mut rx: mpsc::UnboundedReceiver<String>, engine: Arc<Stora
 }
 
 fn process_batch(engine: &StorageEngine, paths: &[String]) {
-    let directory_ops = DirectoryOps::new(engine);
     let index_manager = IndexManager::new(engine);
     let algo = engine.hash_algo();
 

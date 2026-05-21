@@ -43,7 +43,12 @@ impl<'a> PermissionResolver<'a> {
   /// 1. Root (nil UUID) always gets access.
   /// 2. Walk from "/" to the target path, evaluating .permissions at each level.
   /// 3. At each level: allow adds permissions, deny removes them. Deny wins at same level.
-  /// 4. Return the final state for the requested operation.
+  /// 4. For Read/List on a directory: if the direct walk denies but the user
+  ///    has any grant in a descendant subtree, return true so the user can
+  ///    navigate down to the share. This is the symmetric equivalent of
+  ///    `is_ancestor_of_any_rule` for API key rules — directories on the
+  ///    path to a grant are implicitly navigable.
+  /// 5. Return the final state for the requested operation.
   pub fn check_permission(
     &self,
     user_id: &Uuid,
@@ -54,6 +59,77 @@ impl<'a> PermissionResolver<'a> {
     if is_root(user_id) {
       return Ok(true);
     }
+
+    let direct = self.check_direct_permission(user_id, path, operation)?;
+    if direct {
+      return Ok(true);
+    }
+
+    // Allow ancestor navigation: a user with a grant at /A/B/C must be able
+    // to Read/List /, /A, and /A/B in order to walk down to it.
+    if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List)
+      && self.has_descendant_grants(user_id, path)?
+    {
+      return Ok(true);
+    }
+
+    Ok(false)
+  }
+
+  /// Like `check_direct_permission`, but tolerant of the trailing-slash
+  /// convention: a path like `/A/B` is treated as a possible directory
+  /// AND a possible file, returning true if either form grants the
+  /// operation. Use this when a handler receives a user-supplied path
+  /// whose type (file vs directory) isn't pre-determined — e.g.
+  /// `/files/copy`, `/files/download`, `/files/mkdir`. The resolver's
+  /// `path_levels` only walks the trailing segment as a directory when
+  /// the input ends with `/`, so without this helper a request for the
+  /// real directory `/A/B` would silently miss any grants stored at
+  /// `/A/B/.aeordb-permissions`.
+  pub fn check_path_permission(
+    &self,
+    user_id: &Uuid,
+    path: &str,
+    operation: CrudlifyOp,
+  ) -> EngineResult<bool> {
+    if self.check_direct_permission(user_id, path, operation)? {
+      return Ok(true);
+    }
+    // Try the directory form. If the input already ended with '/', this
+    // is a no-op; otherwise it gives `path_levels` one more directory
+    // to walk so a grant stored at `path` itself is visible.
+    let dir_form = if path.ends_with('/') {
+      return Ok(false);
+    } else {
+      format!("{}/", path)
+    };
+    self.check_direct_permission(user_id, &dir_form, operation)
+  }
+
+  /// Like `check_permission`, but does NOT apply the ancestor-navigation
+  /// softening. Returns true only if the user has a direct grant at or
+  /// above `path`. Use this when you specifically need to distinguish
+  /// "owned/granted" from "merely navigable" — for example, when deciding
+  /// whether to filter a directory listing.
+  pub fn check_direct_permission(
+    &self,
+    user_id: &Uuid,
+    path: &str,
+    operation: CrudlifyOp,
+  ) -> EngineResult<bool> {
+    if is_root(user_id) {
+      return Ok(true);
+    }
+
+    // Normalize: callers may pass paths without a leading slash (e.g. the
+    // permission middleware strips "/files/" leaving "foo/bar/baz.txt").
+    // path_levels returns levels WITH a leading slash, so we must align.
+    let normalized = if path.starts_with('/') {
+      path.to_string()
+    } else {
+      format!("/{}", path)
+    };
+    let path = normalized.as_str();
 
     // Get user's group memberships.
     let user_groups = self.group_cache.get(user_id, self.engine)?;
@@ -130,6 +206,53 @@ impl<'a> PermissionResolver<'a> {
     }
 
     Ok(state[operation as usize])
+  }
+
+  /// True if the user has any permission grant at or below `path`.
+  /// Used to allow ancestor navigation: a user who can read `/A/B/C` must
+  /// be able to List its ancestors (`/`, `/A`, `/A/B`) even though those
+  /// directories have no `.permissions` link for them.
+  pub fn has_descendant_grants(&self, user_id: &Uuid, path: &str) -> EngineResult<bool> {
+    if is_root(user_id) {
+      return Ok(true);
+    }
+    let normalized = if path.starts_with('/') {
+      path.to_string()
+    } else {
+      format!("/{}", path)
+    };
+    let user_groups = self.group_cache.get(user_id, self.engine)?;
+    if user_groups.is_empty() {
+      return Ok(false);
+    }
+    let index = self.engine.grants_index_cache.get(&(), self.engine)?;
+    Ok(index.user_has_descendant_grants(&user_groups, &normalized))
+  }
+
+  /// Return the set of immediate child names of `parent_path` that the
+  /// user can either access directly or must traverse to reach a deeper
+  /// grant. Used by listing handlers to filter children when the user
+  /// reached `parent_path` via ancestor navigation rather than a direct
+  /// list grant.
+  pub fn accessible_child_names(
+    &self,
+    user_id: &Uuid,
+    parent_path: &str,
+  ) -> EngineResult<Vec<String>> {
+    if is_root(user_id) {
+      return Ok(Vec::new());
+    }
+    let normalized = if parent_path.starts_with('/') {
+      parent_path.to_string()
+    } else {
+      format!("/{}", parent_path)
+    };
+    let user_groups = self.group_cache.get(user_id, self.engine)?;
+    if user_groups.is_empty() {
+      return Ok(Vec::new());
+    }
+    let index = self.engine.grants_index_cache.get(&(), self.engine)?;
+    Ok(index.accessible_child_names(&user_groups, &normalized))
   }
 }
 

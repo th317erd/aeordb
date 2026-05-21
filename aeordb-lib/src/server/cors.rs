@@ -63,7 +63,7 @@ pub fn parse_cors_origins(flag: &str) -> Vec<String> {
 /// Returns an empty Vec if the file does not exist or is invalid.
 pub fn load_cors_config(engine: &StorageEngine) -> Vec<CorsRule> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file("/.aeordb-config/cors.json") {
+    match ops.read_file_buffered("/.aeordb-config/cors.json") {
         Ok(data) => match serde_json::from_slice::<CorsConfig>(&data) {
             Ok(config) => config.rules,
             Err(e) => {

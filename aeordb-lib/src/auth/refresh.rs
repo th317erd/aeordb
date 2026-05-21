@@ -17,13 +17,21 @@ pub struct RefreshTokenRecord {
   pub created_at: DateTime<Utc>,
   pub expires_at: DateTime<Utc>,
   pub is_revoked: bool,
+  /// The API key that issued this refresh token, when known. Refresh
+  /// requests verify the key is still active and unrevoked — otherwise
+  /// a revoked key's outstanding refresh tokens would still mint fresh
+  /// JWTs. Older refresh records (pre-2026-05) have `None`; for those we
+  /// fall back to "trust unless explicitly revoked," matching legacy
+  /// behavior so existing sessions don't break on upgrade.
+  #[serde(default)]
+  pub key_id: Option<String>,
 }
 
 /// Generate a cryptographically random refresh token with the `aeor_r_` prefix.
 pub fn generate_refresh_token() -> String {
   let mut bytes = [0u8; 32];
   rand::rngs::OsRng.fill_bytes(&mut bytes);
-  format!("{}{}", REFRESH_TOKEN_PREFIX, hex::encode(&bytes))
+  format!("{}{}", REFRESH_TOKEN_PREFIX, hex::encode(bytes))
 }
 
 /// Hash a refresh token using SHA-256.
@@ -31,5 +39,5 @@ pub fn hash_refresh_token(token: &str) -> String {
   let mut hasher = Sha256::new();
   hasher.update(token.as_bytes());
   let result = hasher.finalize();
-  hex::encode(&result)
+  hex::encode(result)
 }

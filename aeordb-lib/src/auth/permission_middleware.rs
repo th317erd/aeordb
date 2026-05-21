@@ -19,6 +19,18 @@ use crate::server::state::AppState;
 #[derive(Clone, Debug)]
 pub struct ActiveKeyRules(pub Vec<KeyRule>);
 
+/// Extension type attached when a user reached a directory via ancestor
+/// navigation rather than a direct list grant — i.e. they have a share
+/// somewhere below but no list permission on this path. Listing handlers
+/// must filter children to `allowed_children` so callers see only the
+/// names that lead to or contain their grants.
+#[derive(Clone, Debug)]
+pub struct FilteredListing {
+  /// Immediate child names of the requested path that the user can either
+  /// access directly or must traverse to reach a deeper grant.
+  pub allowed_children: std::collections::HashSet<String>,
+}
+
 /// Special file names that map to Configure or Deploy operations.
 const CONFIGURE_FILES: &[&str] = &[".aeordb-config", ".aeordb-permissions"];
 const DEPLOY_FILES: &[&str] = &[".aeordb-functions"];
@@ -48,6 +60,7 @@ pub async fn permission_middleware(
     && request_path != "/files/search"
     && request_path != "/files/download"
     && request_path != "/files/mkdir"
+    && request_path != "/files/copy"
     && request_path != "/files/share"
     && request_path != "/files/shares"
     && request_path != "/files/share-link"
@@ -55,26 +68,31 @@ pub async fn permission_middleware(
     && request_path != "/files/deleted"
     && request_path != "/files/restore"
     && !request_path.starts_with("/files/share-links");
+  // Symlinks are path-aware writes under /links/*; treat them like file paths
+  // so scoped keys can't create symlinks outside their scope.
+  let is_links_route = request_path.starts_with("/links/");
+  let is_path_route = is_files_route || is_links_route;
 
-  // For non-files routes, we still need to load key rules for downstream filtering
+  // For non-path routes, we still need to load key rules for downstream filtering
   // (e.g. /files/query endpoint filters results by key rules). But we skip the path-level
   // permission checks that are files-specific.
-  if !is_files_route {
+  if !is_path_route {
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
       if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {
-        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis() {
-          if !key_record.rules.is_empty() {
+        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis()
+          && !key_record.rules.is_empty() {
             request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
           }
-        }
       }
     }
     return next.run(request).await;
   }
 
-  // Extract the files sub-path (strip the "/files/" prefix).
-  let engine_path = &request_path["/files/".len()..];
+  // Extract the route sub-path. Both /files/ and /links/ have the same prefix
+  // length (7 chars) so this works for either.
+  let prefix_len = if is_links_route { "/links/".len() } else { "/files/".len() };
+  let engine_path = &request_path[prefix_len..];
 
   // Extract claims from extensions (set by auth_middleware).
   let claims = match request.extensions().get::<TokenClaims>() {
@@ -91,6 +109,31 @@ pub async fn permission_middleware(
         .into_response();
     }
   };
+
+  // System paths (/.aeordb-system/, /.aeordb-config/) are invisible through
+  // the HTTP file APIs for ALL users including root — the system_store
+  // module is the only legitimate access point. Return 404 (not 403) so
+  // callers cannot enumerate which system paths exist.
+  //
+  // engine_path is the post-/files/ remainder, so a request to
+  // `/files/.aeordb-system/...` has engine_path = `.aeordb-system/...`
+  // (without the leading slash). Construct the canonical absolute form for
+  // the check.
+  let abs_check_path = if engine_path.starts_with('/') {
+    engine_path.to_string()
+  } else {
+    format!("/{}", engine_path)
+  };
+  if crate::engine::directory_ops::is_system_path(&abs_check_path) {
+    return (
+      StatusCode::NOT_FOUND,
+      Json(ErrorResponse {
+        error: format!("Not found: /{}", engine_path),
+        code: None,
+      }),
+    )
+      .into_response();
+  }
 
   // Parse user_id from claims.sub.
   // Share keys use "share:<id>" as sub — they skip the permission resolver.
@@ -257,41 +300,53 @@ pub async fn permission_middleware(
     &state.group_cache,
   );
 
-  match resolver.check_permission(&user_id.unwrap(), engine_path, operation) {
-    Ok(true) => next.run(request).await,
-    Ok(false) => {
-      tracing::warn!(
-        user_id = %user_id.unwrap(),
-        path = %engine_path,
-        operation = ?operation,
-        "Permission denied"
-      );
-      (
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse {
-          error: "Permission denied".to_string(),
-          code: None,
-        }),
-      )
-        .into_response()
-    }
+  let user_uuid = user_id.unwrap();
+
+  // Direct check first: did the user receive an explicit grant for this op?
+  let direct = match resolver.check_direct_permission(&user_uuid, engine_path, operation) {
+    Ok(v) => v,
     Err(error) => {
-      tracing::error!(
-        user_id = %user_id.unwrap(),
-        path = %engine_path,
-        "Permission check failed: {}",
-        error
-      );
-      (
+      tracing::error!(user_id = %user_uuid, path = %engine_path, "Permission check failed: {}", error);
+      return (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-          error: "Permission check failed".to_string(),
-          code: None,
-        }),
-      )
-        .into_response()
+        Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }),
+      ).into_response();
+    }
+  };
+
+  if direct {
+    return next.run(request).await;
+  }
+
+  // Ancestor navigation: a user with a grant at /A/B/C can Read/List its
+  // ancestors so the file browser can walk down to it. Other ops stay
+  // strictly 403.
+  if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List) {
+    let has_descendant = resolver.has_descendant_grants(&user_uuid, engine_path).unwrap_or(false);
+    if has_descendant {
+      let children = resolver
+        .accessible_child_names(&user_uuid, engine_path)
+        .unwrap_or_default();
+      let allowed_children: std::collections::HashSet<String> = children.into_iter().collect();
+      request.extensions_mut().insert(FilteredListing { allowed_children });
+      return next.run(request).await;
     }
   }
+
+  tracing::warn!(
+    user_id = %user_uuid,
+    path = %engine_path,
+    operation = ?operation,
+    "Permission denied"
+  );
+  (
+    StatusCode::FORBIDDEN,
+    Json(ErrorResponse {
+      error: "Permission denied".to_string(),
+      code: None,
+    }),
+  )
+    .into_response()
 }
 
 /// Map an HTTP method and path to a CrudlifyOp.

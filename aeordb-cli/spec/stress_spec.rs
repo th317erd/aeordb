@@ -247,7 +247,7 @@ mod tests {
   #[test]
   fn test_percentile_p50_of_sorted_list() {
     let latencies: Vec<Duration> = (1..=100)
-      .map(|milliseconds| Duration::from_millis(milliseconds))
+      .map(Duration::from_millis)
       .collect();
 
     let p50 = calculate_percentile(&latencies, 0.5);
@@ -257,7 +257,7 @@ mod tests {
   #[test]
   fn test_percentile_p95_of_sorted_list() {
     let latencies: Vec<Duration> = (1..=100)
-      .map(|milliseconds| Duration::from_millis(milliseconds))
+      .map(Duration::from_millis)
       .collect();
 
     let p95 = calculate_percentile(&latencies, 0.95);
@@ -267,7 +267,7 @@ mod tests {
   #[test]
   fn test_percentile_p99_of_sorted_list() {
     let latencies: Vec<Duration> = (1..=100)
-      .map(|milliseconds| Duration::from_millis(milliseconds))
+      .map(Duration::from_millis)
       .collect();
 
     let p99 = calculate_percentile(&latencies, 0.99);

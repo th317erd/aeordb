@@ -14,7 +14,7 @@ use aeordb::server::create_temp_engine_for_tests;
 fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, path, data, Some("text/plain"))
         .unwrap();
 }
 
@@ -26,7 +26,7 @@ fn store_symlink(engine: &StorageEngine, path: &str, target: &str) {
 
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
     let ops = DirectoryOps::new(engine);
-    ops.read_file(path).unwrap()
+    ops.read_file_buffered(path).unwrap()
 }
 
 fn head_hash(engine: &StorageEngine) -> Vec<u8> {
@@ -128,7 +128,11 @@ fn test_compute_diff_with_paths_filter() {
 fn test_compute_diff_excludes_system() {
     let (engine, _temp) = create_temp_engine_for_tests();
     store_file(&engine, "/user/doc.txt", b"user doc");
-    store_file(&engine, "/.aeordb-system/config.json", b"system config");
+    // Use a path under a known system subdirectory (config/) — these are
+    // the paths `augment_with_system_subtrees` walks. Bare files directly
+    // under /.aeordb-system/ (no subdirectory) are only walked for the
+    // explicit list (e.g. email-config.json).
+    store_file(&engine, "/.aeordb-system/config/test.json", b"system config");
 
     // With include_system=false
     let diff = compute_sync_diff(&engine, None, None, false).unwrap();
@@ -140,7 +144,7 @@ fn test_compute_diff_excludes_system() {
     );
     for path in &added_paths {
         assert!(
-            !path.starts_with("/.system"),
+            !path.starts_with("/.aeordb-system"),
             "system path {} should be excluded",
             path
         );
@@ -154,8 +158,9 @@ fn test_compute_diff_excludes_system() {
         .map(|f| f.path.as_str())
         .collect();
     assert!(
-        all_paths.contains(&"/.aeordb-system/config.json"),
-        "system files should be present when include_system=true"
+        all_paths.contains(&"/.aeordb-system/config/test.json"),
+        "system files should be present when include_system=true, got: {:?}",
+        all_paths
     );
 }
 
@@ -266,14 +271,14 @@ fn test_list_conflicts_typed() {
     // Store files for winner/loser identity hashes
     let winner_data = b"winner content";
     let loser_data = b"loser content";
-    ops.store_file(&ctx, "/tmp/w", winner_data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/tmp/w", winner_data, Some("text/plain"))
         .unwrap();
-    ops.store_file(&ctx, "/tmp/l", loser_data, Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/tmp/l", loser_data, Some("text/plain"))
         .unwrap();
 
     let algo = engine.hash_algo();
     let w_record = ops
-        .store_file(&ctx, "/test/file.txt", winner_data, Some("text/plain"))
+        .store_file_buffered(&ctx, "/test/file.txt", winner_data, Some("text/plain"))
         .unwrap();
     let w_hash = aeordb::engine::directory_ops::file_identity_hash(
         "/test/file.txt",
@@ -284,7 +289,7 @@ fn test_list_conflicts_typed() {
     .unwrap();
 
     let l_record = ops
-        .store_file(&ctx, "/test/file_loser.txt", loser_data, Some("text/plain"))
+        .store_file_buffered(&ctx, "/test/file_loser.txt", loser_data, Some("text/plain"))
         .unwrap();
     let l_hash = aeordb::engine::directory_ops::file_identity_hash(
         "/test/file_loser.txt",
@@ -364,7 +369,7 @@ fn test_full_library_sync_cycle() {
 
     for file_entry in &diff.files_added {
         // Skip system paths that might be in the diff
-        if file_entry.path.starts_with("/.system") {
+        if file_entry.path.starts_with("/.aeordb-system") {
             continue;
         }
 
@@ -378,7 +383,7 @@ fn test_full_library_sync_cycle() {
         }
 
         ops_b
-            .store_file(
+            .store_file_buffered(
                 &ctx,
                 &file_entry.path,
                 &file_data,
@@ -410,7 +415,7 @@ fn test_compute_diff_empty_engine() {
             || diff
                 .files_added
                 .iter()
-                .all(|f| f.path.starts_with("/.system") || f.path.starts_with("/.conflicts")),
+                .all(|f| f.path.starts_with("/.aeordb-system") || f.path.starts_with("/.conflicts")),
         "empty engine should have no user files"
     );
 }

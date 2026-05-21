@@ -62,7 +62,7 @@ async fn upload_chunk(app: axum::Router, token: &str, data: &[u8]) -> String {
     let hash = compute_chunk_hash(data);
     let resp = app
         .oneshot(
-            Request::put(&format!("/blobs/chunks/{}", hash))
+            Request::put(format!("/blobs/chunks/{}", hash))
                 .header("Authorization", token)
                 .header("Content-Type", "application/octet-stream")
                 .body(Body::from(data.to_vec()))
@@ -181,7 +181,7 @@ async fn test_commit_multiple_files() {
     ] {
         let resp = rebuild_app(&jwt, &engine)
             .oneshot(
-                Request::get(&format!("/files{}", path))
+                Request::get(format!("/files{}", path))
                     .header("Authorization", &token)
                     .body(Body::empty())
                     .unwrap(),
@@ -380,4 +380,114 @@ async fn test_commit_requires_auth() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ===========================================================================
+// 8. Commit MUST refuse system paths even for root callers. Without this
+//    check, any authenticated user could overwrite /.aeordb-system/api-keys/
+//    and mint a root API key — full takeover.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_commit_rejects_system_path_aeordb_system() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    // Even root cannot write system paths through /blobs/commit. The dedicated
+    // system_store APIs are the only legitimate way to mutate /.aeordb-system/.
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/.aeordb-system/api-keys/00000000-0000-0000-0000-000000000000",
+            "chunks": [],
+            "content_type": "application/json"
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let json = body_json(resp.into_body()).await;
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("reserved") || err.contains("system"),
+        "Expected reserved-path error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_commit_rejects_system_path_aeordb_config() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/.aeordb-config/cron.json",
+            "chunks": [],
+            "content_type": "application/json"
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_commit_rejects_system_path_in_mixed_batch() {
+    // Even one system path in a batch must reject the whole commit (atomic).
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let commit_body = serde_json::json!({
+        "files": [
+            { "path": "/safe.txt", "chunks": [], "content_type": "text/plain" },
+            { "path": "/.aeordb-system/api-keys/x", "chunks": [], "content_type": "application/json" }
+        ]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Verify the safe file was NOT committed (atomic rejection).
+    let list_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/safe.txt")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        list_resp.status(),
+        StatusCode::NOT_FOUND,
+        "safe.txt should not have been committed when the batch failed"
+    );
 }

@@ -20,7 +20,7 @@ fn test_hash_converter_range() {
   // All 0xFF -> ~1.0
   let max = vec![0xFF; 32];
   let scalar = converter.to_scalar(&max);
-  assert!(scalar >= 0.0 && scalar <= 1.0, "scalar {} out of [0,1]", scalar);
+  assert!((0.0..=1.0).contains(&scalar), "scalar {} out of [0,1]", scalar);
   assert!((scalar - 1.0).abs() < 1e-10, "max hash should be ~1.0, got {}", scalar);
 
   // Various values always in range
@@ -28,7 +28,7 @@ fn test_hash_converter_range() {
     let mut hash = vec![0u8; 32];
     hash[0] = byte;
     let scalar = converter.to_scalar(&hash);
-    assert!(scalar >= 0.0 && scalar <= 1.0, "scalar {} out of [0,1] for byte 0x{:02X}", scalar, byte);
+    assert!((0.0..=1.0).contains(&scalar), "scalar {} out of [0,1] for byte 0x{:02X}", scalar, byte);
   }
 }
 
@@ -386,7 +386,7 @@ fn test_string_converter_long_string() {
   // length = 1.0 (clamped) * 0.3 = 0.3
   // total ~= 0.566
   assert!(scalar > 0.5 && scalar < 0.6, "long string scalar {} should be ~0.566", scalar);
-  assert!(scalar >= 0.0 && scalar <= 1.0, "scalar must be in [0,1]");
+  assert!((0.0..=1.0).contains(&scalar), "scalar must be in [0,1]");
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn test_string_converter_zero_max_length_uses_default() {
   // Passing 0 for max_length should not panic, should default to 1024
   let converter = StringConverter::new(0);
   let scalar = converter.to_scalar(b"hello");
-  assert!(scalar >= 0.0 && scalar <= 1.0);
+  assert!((0.0..=1.0).contains(&scalar));
 }
 
 #[test]

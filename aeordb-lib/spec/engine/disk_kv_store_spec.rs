@@ -22,7 +22,8 @@ fn make_entry(seed: u8, offset: u64) -> KVEntry {
         type_flags: KV_TYPE_CHUNK,
         hash: make_hash(seed),
         offset,
-    }
+        total_length: 64,
+        }
 }
 
 fn create_test_kv(dir: &std::path::Path) -> DiskKVStore {
@@ -190,36 +191,36 @@ fn test_upsert_full() {
 
 #[test]
 fn test_page_size() {
+    // PAGE_HEADER_SIZE = 10 (magic u32 + crc32 u32 + entry_count u16)
+    // Per-entry: hash + type_flags(1) + offset(8) + total_length(4)
     // BLAKE3: 32-byte hash
-    // page_size = 2 + 32 * (32 + 1 + 8) = 2 + 32 * 41 = 2 + 1312 = 1314
-    assert_eq!(page_size(32), 2 + 32 * (32 + 1 + 8));
-    assert_eq!(page_size(32), 1314);
+    // page_size = 10 + 32 * (32 + 1 + 8 + 4) = 10 + 32 * 45 = 10 + 1440 = 1450
+    assert_eq!(page_size(32), 10 + 32 * (32 + 1 + 8 + 4));
+    assert_eq!(page_size(32), 1450);
 
     // SHA-512: 64-byte hash
-    // page_size = 2 + 32 * (64 + 1 + 8) = 2 + 32 * 73 = 2 + 2336 = 2338
-    assert_eq!(page_size(64), 2338);
+    // page_size = 10 + 32 * (64 + 1 + 8 + 4) = 10 + 32 * 77 = 10 + 2464 = 2474
+    assert_eq!(page_size(64), 2474);
 }
 
 #[test]
 fn test_stage_for_count() {
     let hl = 32;
 
-    // page_size(32) = 1314
-    // Stage 0: 64KB / 1314 = 49 buckets * 32 = 1568 capacity
-    // Stage 1: 512KB / 1314 = 399 buckets * 32 = 12768 capacity
-    // Stage 2: 4MB / 1314 = 3192 buckets * 32 = 102144 capacity
+    // page_size(32) = 1450
+    // Stage 0: 64KB / 1450 = 45 buckets * 32 = 1440 capacity
+    // Stage 1: 512KB / 1450 = 361 buckets * 32 = 11552 capacity
+    // Stage 2: 4MB / 1450 = 2892 buckets * 32 = 92544 capacity
     assert_eq!(stage_for_count(0, hl), 0);
     assert_eq!(stage_for_count(100, hl), 0);
-    assert_eq!(stage_for_count(1500, hl), 0);
+    assert_eq!(stage_for_count(1000, hl), 0);
 
-    assert_eq!(stage_for_count(1568, hl), 1);
+    assert_eq!(stage_for_count(1440, hl), 1);
     assert_eq!(stage_for_count(10_000, hl), 1);
 
-    assert_eq!(stage_for_count(12_768, hl), 2);
+    assert_eq!(stage_for_count(11_552, hl), 2);
 
     // Very large count should return last stage
-    // Stage 9: 8GB / 1314 = ~6.1M buckets * 32 = ~195M capacity
-    // Need > 195M to overflow all stages
     assert_eq!(stage_for_count(200_000_000, hl), KV_STAGE_SIZES.len() - 1);
 }
 
@@ -287,7 +288,7 @@ fn test_create_and_open() {
     // Create and insert
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(1, 100));
+        store.insert(make_entry(1, 100)).unwrap();
         store.flush().unwrap();
     }
 
@@ -306,7 +307,7 @@ fn test_insert_and_get() {
     let mut store = create_test_kv(dir.path());
 
     let entry = make_entry(42, 12345);
-    store.insert(entry.clone());
+    store.insert(entry.clone()).unwrap();
 
     let result = store.get(&make_hash(42));
     assert!(result.is_some());
@@ -322,7 +323,7 @@ fn test_insert_multiple() {
     let mut store = create_test_kv(dir.path());
 
     for i in 0..100u8 {
-        store.insert(make_entry(i, i as u64 * 100));
+        store.insert(make_entry(i, i as u64 * 100)).unwrap();
     }
     store.flush().unwrap();
 
@@ -347,7 +348,7 @@ fn test_contains() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert!(store.contains(&make_hash(1)));
     assert!(!store.contains(&make_hash(99)));
 }
@@ -357,7 +358,7 @@ fn test_mark_deleted() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert!(store.contains(&make_hash(1)));
 
     store.mark_deleted(&make_hash(1));
@@ -372,7 +373,7 @@ fn test_flush_persists() {
     // Create, insert, flush
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(7, 777));
+        store.insert(make_entry(7, 777)).unwrap();
         store.flush().unwrap();
     }
 
@@ -400,7 +401,8 @@ fn test_auto_flush() {
                 type_flags: KV_TYPE_CHUNK,
                 hash,
                 offset: i as u64,
-            });
+                total_length: 64,
+        }).unwrap();
         }
         // Some should have been auto-flushed already
         // Flush remaining
@@ -426,7 +428,7 @@ fn test_iter_all() {
     let mut store = create_test_kv(dir.path());
 
     for i in 0..10u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
     store.flush().unwrap();
 
@@ -441,13 +443,13 @@ fn test_iter_all_with_unflushed() {
 
     // Flush some entries to disk
     for i in 0..5u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
     store.flush().unwrap();
 
     // Add more to buffer (not flushed)
     for i in 5..10u8 {
-        store.insert(make_entry(i, i as u64 * 10));
+        store.insert(make_entry(i, i as u64 * 10)).unwrap();
     }
 
     let all = store.iter_all().unwrap();
@@ -459,13 +461,13 @@ fn test_upsert_same_hash() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     store.flush().unwrap();
 
     // Update same hash with different offset
     let mut updated = make_entry(1, 999);
     updated.type_flags = KV_TYPE_FILE_RECORD;
-    store.insert(updated);
+    store.insert(updated).unwrap();
     store.flush().unwrap();
 
     let result = store.get(&make_hash(1)).unwrap();
@@ -488,7 +490,8 @@ fn test_large_dataset() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+            total_length: 64,
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -508,15 +511,15 @@ fn test_entry_count() {
     assert_eq!(store.len(), 0);
     assert!(store.is_empty());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     assert_eq!(store.len(), 1);
     assert!(!store.is_empty());
 
-    store.insert(make_entry(2, 200));
+    store.insert(make_entry(2, 200)).unwrap();
     assert_eq!(store.len(), 2);
 
     // Updating existing entry should not change count
-    store.insert(make_entry(1, 999));
+    store.insert(make_entry(1, 999)).unwrap();
     assert_eq!(store.len(), 2);
 }
 
@@ -526,7 +529,7 @@ fn test_update_flags() {
 
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
     store.flush().unwrap();
 
     // Update flags
@@ -551,7 +554,7 @@ fn test_update_offset() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
+    store.insert(make_entry(1, 100)).unwrap();
 
     let result = store.update_offset(&make_hash(1), 5555);
     assert!(result);
@@ -589,7 +592,7 @@ fn test_mark_deleted_persists() {
 
     {
         let mut store = create_test_kv(dir.path());
-        store.insert(make_entry(1, 100));
+        store.insert(make_entry(1, 100)).unwrap();
         store.flush().unwrap();
         store.mark_deleted(&make_hash(1));
         store.flush().unwrap();
@@ -606,9 +609,9 @@ fn test_iter_all_excludes_deleted() {
     let dir = tempdir().unwrap();
     let mut store = create_test_kv(dir.path());
 
-    store.insert(make_entry(1, 100));
-    store.insert(make_entry(2, 200));
-    store.insert(make_entry(3, 300));
+    store.insert(make_entry(1, 100)).unwrap();
+    store.insert(make_entry(2, 200)).unwrap();
+    store.insert(make_entry(3, 300)).unwrap();
     store.flush().unwrap();
 
     store.mark_deleted(&make_hash(2));
@@ -646,7 +649,7 @@ fn test_entry_count_after_reopen() {
     {
         let mut store = create_test_kv(dir.path());
         for i in 0..50u8 {
-            store.insert(make_entry(i, i as u64));
+            store.insert(make_entry(i, i as u64)).unwrap();
         }
         store.flush().unwrap();
     }
@@ -669,7 +672,8 @@ fn test_cache_eviction() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+            total_length: 64,
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -714,13 +718,13 @@ fn test_open_existing_kv_skips_rebuild() {
         let engine = StorageEngine::create(engine_path_str).unwrap();
         let ops = DirectoryOps::new(&engine);
         ops.ensure_root_directory(&ctx).unwrap();
-        ops.store_file(&ctx, "/file1.txt", b"hello", Some("text/plain")).unwrap();
-        ops.store_file(&ctx, "/file2.txt", b"world", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/file1.txt", b"hello", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/file2.txt", b"world", Some("text/plain")).unwrap();
     }
 
     // Record the file's modification time
     let metadata_before = std::fs::metadata(&engine_path).unwrap();
-    let mtime_before = metadata_before.modified().unwrap();
+    let _mtime_before = metadata_before.modified().unwrap();
 
     // Session 2: reopen — should open without full KV rebuild
     {
@@ -728,9 +732,9 @@ fn test_open_existing_kv_skips_rebuild() {
         let ops = DirectoryOps::new(&engine);
 
         // Verify all entries still accessible
-        let content1 = ops.read_file("/file1.txt").unwrap();
+        let content1 = ops.read_file_buffered("/file1.txt").unwrap();
         assert_eq!(content1, b"hello");
-        let content2 = ops.read_file("/file2.txt").unwrap();
+        let content2 = ops.read_file_buffered("/file2.txt").unwrap();
         assert_eq!(content2, b"world");
     }
 }
@@ -751,7 +755,7 @@ fn test_cross_restart_with_disk_kv_500_files() {
         for i in 0..500u32 {
             let path = format!("/data/file_{:04}.txt", i);
             let content = format!("Content for file {}", i);
-            ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+            ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
         }
         engine.shutdown().unwrap();
     }
@@ -764,7 +768,7 @@ fn test_cross_restart_with_disk_kv_500_files() {
         for i in 0..500u32 {
             let path = format!("/data/file_{:04}.txt", i);
             let expected = format!("Content for file {}", i);
-            let content = ops.read_file(&path).unwrap();
+            let content = ops.read_file_buffered(&path).unwrap();
             assert_eq!(content, expected.as_bytes(), "File {} mismatch after restart", i);
         }
     }
@@ -802,49 +806,53 @@ fn make_unique_hash(index: u32) -> Vec<u8> {
     blake3::hash(&index.to_le_bytes()).as_bytes().to_vec()
 }
 
+/// Through the full StorageEngine API, inserting enough files should
+/// trigger `expand_kv_block_online` and bump the kv_block_stage in the
+/// file header. This replaces the old DiskKVStore-direct resize tests
+/// (which assumed an in-place resize model that no longer applies — the
+/// store now needs StorageEngine to expand the file's KV region).
 #[test]
-fn test_resize_on_overflow() {
+fn test_kv_stage_grows_via_storage_engine() {
+    use aeordb::engine::storage_engine::StorageEngine;
+    use aeordb::engine::DirectoryOps;
+    use aeordb::engine::RequestContext;
+
     let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-    assert_eq!(store.stage(), 0);
+    let db_path = dir.path().join("expand.aeordb");
+    let db_str = db_path.to_str().unwrap();
 
-    let hash_algo = HashAlgorithm::Blake3_256;
-    let psize = page_size(hash_algo.hash_length());
-    let (_, initial_buckets) = aeordb::engine::kv_stages::stage_params(0, psize);
-    assert_eq!(store.bucket_count(), initial_buckets);
+    let engine = StorageEngine::create(db_str).unwrap();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
 
-    // Stage 0: buckets * 32 entries per page.
-    // Insert 2,500 entries to force at least one overflow and resize.
-    let count = 2_500u32;
-    let mut hashes = Vec::with_capacity(count as usize);
+    let initial_stage = {
+        let writer = engine.writer_read_lock().unwrap();
+        writer.file_header().kv_block_stage
+    };
 
+    // Stage 0 fits a few hundred small files before overflow. Push past it.
+    let count = 1_500u32;
     for i in 0..count {
-        let hash = make_unique_hash(i);
-        hashes.push(hash.clone());
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64 * 100,
-        });
+        let path = format!("/many/file_{:05}.txt", i);
+        ops.store_file_buffered(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
+            .unwrap();
     }
-    store.flush().unwrap();
 
-    // Verify resize happened — stage should have increased
+    let final_stage = {
+        let writer = engine.writer_read_lock().unwrap();
+        writer.file_header().kv_block_stage
+    };
     assert!(
-        store.stage() >= 1,
-        "Store should have resized to at least stage 1, got stage {}",
-        store.stage()
+        final_stage > initial_stage,
+        "KV stage should grow after heavy insert: initial={}, final={}",
+        initial_stage, final_stage
     );
 
-    // Verify all entries are findable
-    for (i, hash) in hashes.iter().enumerate() {
-        let entry = store.get(hash);
-        assert!(
-            entry.is_some(),
-            "Entry {} should be findable after resize",
-            i
-        );
-        assert_eq!(entry.unwrap().offset, i as u64 * 100);
+    // Stored files must still be readable after the expansion.
+    for i in (0..count).step_by(100) {
+        let path = format!("/many/file_{:05}.txt", i);
+        let content = ops.read_file_buffered(&path).unwrap();
+        assert_eq!(content, format!("v{}", i).as_bytes());
     }
 }
 
@@ -863,7 +871,8 @@ fn test_resize_preserves_all_entries() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+            total_length: 64,
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -876,131 +885,6 @@ fn test_resize_preserves_all_entries() {
     // entry_count may drift slightly during resize due to duplicate
     // counting when entries are re-inserted. All entries are findable above.
     assert!(store.len() >= count as usize - 200, "entry_count should be close to {}", count);
-}
-
-#[test]
-fn test_resize_stage_increases() {
-    let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-    assert_eq!(store.stage(), 0);
-
-    // Force overflow: stage 0 has limited capacity.
-    // The pigeonhole principle means some buckets may fill before the
-    // theoretical max. Insert enough to guarantee overflow.
-    for i in 0..2_500u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    assert!(
-        store.stage() >= 1,
-        "Stage should increase after overflow, got {}",
-        store.stage()
-    );
-
-    let hash_algo = HashAlgorithm::Blake3_256;
-    let psize = page_size(hash_algo.hash_length());
-    let (_, initial_buckets) = aeordb::engine::kv_stages::stage_params(0, psize);
-    assert!(
-        store.bucket_count() > initial_buckets,
-        "Bucket count should increase after resize, got {}",
-        store.bucket_count()
-    );
-}
-
-#[test]
-fn test_resize_persists_across_reopen() {
-    let dir = tempdir().unwrap();
-
-    let count = 2_500u32;
-    let mut hashes = Vec::with_capacity(count as usize);
-
-    // Create, fill to overflow, close
-    {
-        let mut store = create_test_kv_resizable(dir.path());
-        for i in 0..count {
-            let hash = make_unique_hash(i);
-            hashes.push(hash.clone());
-            store.insert(KVEntry {
-                type_flags: KV_TYPE_CHUNK,
-                hash,
-                offset: i as u64,
-            });
-        }
-        store.flush().unwrap();
-        assert!(store.stage() >= 1);
-    }
-
-    // Reopen at stage 1 (resize target) and verify
-    {
-        let mut store = open_test_kv_at_stage(dir.path(), 1);
-        assert!(
-            store.stage() >= 1,
-            "Stage should persist across reopen, got {}",
-            store.stage()
-        );
-
-        // Verify all entries findable after reopen
-        for (i, hash) in hashes.iter().enumerate() {
-            let entry = store.get(hash);
-            assert!(
-                entry.is_some(),
-                "Entry {} should be findable after reopen of resized store",
-                i
-            );
-        }
-    }
-}
-
-#[test]
-fn test_flush_after_resize_works() {
-    let dir = tempdir().unwrap();
-    let mut store = create_test_kv_resizable(dir.path());
-
-    // Trigger resize
-    for i in 0..2_500u32 {
-        let hash = make_unique_hash(i);
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_CHUNK,
-            hash,
-            offset: i as u64,
-        });
-    }
-    store.flush().unwrap();
-
-    let stage_after_resize = store.stage();
-    assert!(stage_after_resize >= 1);
-
-    // Now insert more entries after resize
-    let extra_hashes: Vec<Vec<u8>> = (100_000..100_500u32)
-        .map(|i| make_unique_hash(i))
-        .collect();
-
-    for (i, hash) in extra_hashes.iter().enumerate() {
-        store.insert(KVEntry {
-            type_flags: KV_TYPE_FILE_RECORD,
-            hash: hash.clone(),
-            offset: (i as u64 + 1_000_000),
-        });
-    }
-    store.flush().unwrap();
-
-    // Verify new entries are findable
-    for (i, hash) in extra_hashes.iter().enumerate() {
-        let entry = store.get(hash);
-        assert!(entry.is_some(), "Post-resize entry {} should be findable", i);
-        let found = entry.unwrap();
-        assert_eq!(found.offset, i as u64 + 1_000_000);
-        assert_eq!(found.entry_type(), KV_TYPE_FILE_RECORD);
-    }
-
-    // Stage should not have changed (500 more entries shouldn't trigger another resize)
-    assert_eq!(store.stage(), stage_after_resize);
 }
 
 #[test]
@@ -1022,7 +906,8 @@ fn test_create_at_stage() {
         type_flags: KV_TYPE_CHUNK,
         hash: hash.clone(),
         offset: 999,
-    });
+        total_length: 64,
+        }).unwrap();
     store.flush().unwrap();
 
     let entry = store.get(&hash).unwrap();
@@ -1063,7 +948,8 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+            total_length: 64,
+        }).unwrap();
     }
     store.flush().unwrap();
 
@@ -1084,7 +970,8 @@ fn test_deleted_entries_not_migrated_on_resize() {
             type_flags: KV_TYPE_CHUNK,
             hash,
             offset: i as u64,
-        });
+            total_length: 64,
+        }).unwrap();
     }
     store.flush().unwrap();
 

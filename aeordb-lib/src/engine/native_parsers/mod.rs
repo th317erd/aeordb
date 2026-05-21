@@ -1,8 +1,8 @@
-/// Native parser dispatch module.
-///
-/// Provides built-in parsers for common file formats so they work
-/// out of the box without deploying WASM plugins. Unknown content
-/// types return `None`, falling through to the WASM plugin system.
+//! Native parser dispatch module.
+//!
+//! Provides built-in parsers for common file formats so they work
+//! out of the box without deploying WASM plugins. Unknown content
+//! types return `None`, falling through to the WASM plugin system.
 
 mod text;
 pub mod exif;
@@ -145,4 +145,14 @@ fn extract_extension(name: &str) -> Option<&str> {
     } else {
         Some(ext)
     }
+}
+
+/// Build the shared metadata envelope every native parser starts with.
+/// Returns a `serde_json::Value` so callers can mutate it via `["key"] =`.
+pub(crate) fn base_metadata(filename: &str, content_type: &str, size: u64) -> serde_json::Value {
+    serde_json::json!({
+        "filename": filename,
+        "content_type": content_type,
+        "size": size,
+    })
 }

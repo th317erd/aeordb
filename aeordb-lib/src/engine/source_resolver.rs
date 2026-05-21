@@ -81,7 +81,7 @@ pub fn walk_paths(json: &serde_json::Value, segments: &[serde_json::Value]) -> V
                             }
                         } else {
                             // Try as string key on object
-                            if let Some(child) = val.get(&idx.to_string()) {
+                            if let Some(child) = val.get(idx.to_string()) {
                                 next.push(child);
                             }
                         }

@@ -8,6 +8,7 @@ use crate::auth::TokenClaims;
 use crate::engine::{
     load_cron_config, save_cron_config, validate_cron_expression,
     CronConfig, CronSchedule, RequestContext,
+    load_lifecycle_config, save_lifecycle_config, LifecycleConfig,
 };
 use crate::engine::system_store;
 use crate::server::responses::{ErrorResponse, error_codes, require_root};
@@ -414,5 +415,40 @@ pub async fn update_cron(
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle config endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /system/lifecycle -- return the current lifecycle config (retention etc.).
+pub async fn get_lifecycle(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+) -> Response {
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    let config = load_lifecycle_config(&state.engine);
+    (StatusCode::OK, Json(config)).into_response()
+}
+
+/// PUT /system/lifecycle -- replace the lifecycle config wholesale.
+pub async fn put_lifecycle(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+    Json(body): Json<LifecycleConfig>,
+) -> Response {
+    let _user_id = match require_root(&claims) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    match save_lifecycle_config(&state.engine, &body) {
+        Ok(()) => (StatusCode::OK, Json(body)).into_response(),
+        Err(e) => ErrorResponse::new(format!("Failed to save lifecycle config: {}", e))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response(),
     }
 }

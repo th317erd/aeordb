@@ -54,7 +54,7 @@ fn test_engine_shutdown_after_writes() {
     for i in 0..20 {
         let path = format!("/data/file-{}.txt", i);
         let content = format!("content for file {}", i);
-        ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
     }
 
     let result = engine.shutdown();
@@ -70,9 +70,9 @@ fn test_engine_shutdown_data_durable() {
         let ctx = RequestContext::system();
         let ops = DirectoryOps::new(&engine);
 
-        ops.store_file(&ctx, "/important.txt", b"critical data", Some("text/plain")).unwrap();
-        ops.store_file(&ctx, "/config/app.json", b"{\"key\": \"value\"}", Some("application/json")).unwrap();
-        ops.store_file(&ctx, "/logs/event.log", b"event 1\nevent 2\n", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/important.txt", b"critical data", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/config/app.json", b"{\"key\": \"value\"}", Some("application/json")).unwrap();
+        ops.store_file_buffered(&ctx, "/logs/event.log", b"event 1\nevent 2\n", Some("text/plain")).unwrap();
 
         engine.shutdown().expect("shutdown should succeed");
     }
@@ -81,13 +81,13 @@ fn test_engine_shutdown_data_durable() {
     let engine = reopen_engine(&temp_dir);
     let ops = DirectoryOps::new(&engine);
 
-    let data = ops.read_file("/important.txt").expect("file should exist after shutdown+reopen");
+    let data = ops.read_file_buffered("/important.txt").expect("file should exist after shutdown+reopen");
     assert_eq!(data, b"critical data");
 
-    let data = ops.read_file("/config/app.json").expect("config should exist after shutdown+reopen");
+    let data = ops.read_file_buffered("/config/app.json").expect("config should exist after shutdown+reopen");
     assert_eq!(data, b"{\"key\": \"value\"}");
 
-    let data = ops.read_file("/logs/event.log").expect("log should exist after shutdown+reopen");
+    let data = ops.read_file_buffered("/logs/event.log").expect("log should exist after shutdown+reopen");
     assert_eq!(data, b"event 1\nevent 2\n");
 }
 
@@ -98,7 +98,7 @@ fn test_engine_shutdown_idempotent() {
     let engine = create_engine(&temp_dir);
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
 
     assert!(engine.shutdown().is_ok());
     assert!(engine.shutdown().is_ok());
@@ -120,7 +120,7 @@ fn test_engine_shutdown_with_large_write_buffer() {
         for i in 0..100 {
             let path = format!("/batch/item-{:04}.txt", i);
             let content = format!("item number {}", i);
-            ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+            ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
         }
 
         engine.shutdown().expect("shutdown should flush write buffer");
@@ -130,13 +130,13 @@ fn test_engine_shutdown_with_large_write_buffer() {
     let engine = reopen_engine(&temp_dir);
     let ops = DirectoryOps::new(&engine);
 
-    let data = ops.read_file("/batch/item-0000.txt").expect("first item should exist");
+    let data = ops.read_file_buffered("/batch/item-0000.txt").expect("first item should exist");
     assert_eq!(data, b"item number 0");
 
-    let data = ops.read_file("/batch/item-0050.txt").expect("middle item should exist");
+    let data = ops.read_file_buffered("/batch/item-0050.txt").expect("middle item should exist");
     assert_eq!(data, b"item number 50");
 
-    let data = ops.read_file("/batch/item-0099.txt").expect("last item should exist");
+    let data = ops.read_file_buffered("/batch/item-0099.txt").expect("last item should exist");
     assert_eq!(data, b"item number 99");
 }
 
@@ -148,8 +148,8 @@ fn test_engine_shutdown_preserves_stats() {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
 
     let stats_before = engine.stats();
     assert!(stats_before.file_count >= 2, "should have at least 2 files before shutdown");
@@ -302,7 +302,7 @@ fn test_engine_shutdown_with_hot_dir() {
     ops.ensure_root_directory(&ctx).unwrap();
 
     // Write data
-    ops.store_file(&ctx, "/hot-test.txt", b"hot data", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/hot-test.txt", b"hot data", Some("text/plain")).unwrap();
 
     // Shutdown should flush both KV buffer and hot file buffer
     let result = engine.shutdown();
@@ -312,7 +312,7 @@ fn test_engine_shutdown_with_hot_dir() {
     drop(engine);
     let engine = StorageEngine::open_with_hot_dir(engine_path, Some(hot_dir)).unwrap();
     let ops = DirectoryOps::new(&engine);
-    let data = ops.read_file("/hot-test.txt").expect("data should survive shutdown+reopen with hot dir");
+    let data = ops.read_file_buffered("/hot-test.txt").expect("data should survive shutdown+reopen with hot dir");
     assert_eq!(data, b"hot data");
 }
 
@@ -329,12 +329,12 @@ fn test_engine_usable_after_shutdown() {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/before.txt", b"before shutdown", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/before.txt", b"before shutdown", Some("text/plain")).unwrap();
     engine.shutdown().unwrap();
 
     // Write after shutdown should still work
-    ops.store_file(&ctx, "/after.txt", b"after shutdown", Some("text/plain")).unwrap();
-    let data = ops.read_file("/after.txt").unwrap();
+    ops.store_file_buffered(&ctx, "/after.txt", b"after shutdown", Some("text/plain")).unwrap();
+    let data = ops.read_file_buffered("/after.txt").unwrap();
     assert_eq!(data, b"after shutdown");
 }
 
@@ -348,7 +348,7 @@ fn test_engine_shutdown_then_reopen_write_read() {
         let engine = create_engine(&temp_dir);
         let ctx = RequestContext::system();
         let ops = DirectoryOps::new(&engine);
-        ops.store_file(&ctx, "/session1.txt", b"from session 1", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/session1.txt", b"from session 1", Some("text/plain")).unwrap();
         engine.shutdown().unwrap();
     }
 
@@ -357,7 +357,7 @@ fn test_engine_shutdown_then_reopen_write_read() {
         let engine = reopen_engine(&temp_dir);
         let ctx = RequestContext::system();
         let ops = DirectoryOps::new(&engine);
-        ops.store_file(&ctx, "/session2.txt", b"from session 2", Some("text/plain")).unwrap();
+        ops.store_file_buffered(&ctx, "/session2.txt", b"from session 2", Some("text/plain")).unwrap();
         engine.shutdown().unwrap();
     }
 
@@ -366,10 +366,10 @@ fn test_engine_shutdown_then_reopen_write_read() {
         let engine = reopen_engine(&temp_dir);
         let ops = DirectoryOps::new(&engine);
 
-        let data = ops.read_file("/session1.txt").expect("session 1 data should persist");
+        let data = ops.read_file_buffered("/session1.txt").expect("session 1 data should persist");
         assert_eq!(data, b"from session 1");
 
-        let data = ops.read_file("/session2.txt").expect("session 2 data should persist");
+        let data = ops.read_file_buffered("/session2.txt").expect("session 2 data should persist");
         assert_eq!(data, b"from session 2");
     }
 }

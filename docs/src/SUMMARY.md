@@ -42,6 +42,8 @@
 - [Task System & Cron](./operations/tasks.md)
 - [Backup & Restore](./operations/backup.md)
 - [Cluster Operations](./operations/cluster.md)
+- [Threat Model](./operations/threat-model.md)
+- [API Versioning Policy](./operations/api-versioning.md)
 
 # CLI Reference
 

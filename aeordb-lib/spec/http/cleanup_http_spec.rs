@@ -66,6 +66,7 @@ async fn test_trigger_cleanup_endpoint() {
         created_at: Utc::now() - Duration::hours(2),
         expires_at: Utc::now() - Duration::hours(1),
         is_revoked: false,
+      key_id: None,
     };
     system_store::store_refresh_token(&engine, &ctx, &expired_token).unwrap();
 
@@ -185,6 +186,7 @@ async fn test_cleanup_endpoint_preserves_valid() {
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::days(30),
         is_revoked: false,
+      key_id: None,
     };
     system_store::store_refresh_token(&engine, &ctx, &valid_token).unwrap();
 
@@ -233,6 +235,7 @@ async fn test_cleanup_endpoint_idempotent() {
         created_at: Utc::now() - Duration::hours(48),
         expires_at: Utc::now() - Duration::hours(24),
         is_revoked: false,
+      key_id: None,
     };
     system_store::store_refresh_token(&engine, &ctx, &expired_token).unwrap();
 

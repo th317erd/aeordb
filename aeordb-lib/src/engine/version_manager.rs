@@ -6,6 +6,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Information about a named snapshot (a saved point-in-time reference).
@@ -359,6 +360,7 @@ impl<'a> VersionManager<'a> {
     name: &str,
     metadata: HashMap<String, String>,
   ) -> EngineResult<SnapshotInfo> {
+    let _mem = PhaseSampler::start("create_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
 
     // Check for duplicate name (only if not deleted)
@@ -380,6 +382,13 @@ impl<'a> VersionManager<'a> {
         return Ok(existing.clone());
       }
     }
+
+    // Default snapshot type to "manual" if the caller didn't specify.
+    // Callers creating safety/auto snapshots should set "type" = "auto" so
+    // they're eligible for lifecycle retention pruning.
+    let mut metadata = metadata;
+    metadata.entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
+      .or_insert_with(|| crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string());
 
     let snapshot_info = SnapshotInfo {
       name: name.to_string(),
@@ -476,6 +485,7 @@ impl<'a> VersionManager<'a> {
   /// Delete a named snapshot by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
   pub fn delete_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
+    let _mem = PhaseSampler::start("delete_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
@@ -505,7 +515,7 @@ impl<'a> VersionManager<'a> {
 
   /// Rename a snapshot. Creates a new snapshot entry with the new name
   /// and the same root hash/metadata, then deletes the old one.
-  pub fn rename_snapshot(&self, ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
+  pub fn rename_snapshot(&self, _ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
     let old_key = self.snapshot_key(old_name)?;
     let entry = self.engine.get_entry(&old_key)?;
     let Some((header, _key, value)) = entry else {
@@ -520,11 +530,20 @@ impl<'a> VersionManager<'a> {
       return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", new_name)));
     }
 
+    // User-initiated rename promotes auto-snapshots to manual: the user has
+    // expressed intent to keep this snapshot, so it shouldn't be pruned by the
+    // auto-retention policy.
+    let mut metadata = old_snapshot.metadata;
+    metadata.insert(
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string(),
+    );
+
     let new_snapshot = SnapshotInfo {
       name: new_name.to_string(),
       root_hash: old_snapshot.root_hash,
       created_at: old_snapshot.created_at,
-      metadata: old_snapshot.metadata,
+      metadata,
     };
 
     let new_value = new_snapshot.serialize(hash_length)?;

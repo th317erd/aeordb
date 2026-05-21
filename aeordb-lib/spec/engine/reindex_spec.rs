@@ -17,7 +17,7 @@ fn store_index_config(engine: &aeordb::engine::storage_engine::StorageEngine, pa
         "indexes": [{"name": "count", "type": "u64", "source": ["count"], "min": 0, "max": 200}]
     });
     let config_path = format!("{}/.aeordb-config/indexes.json", parent);
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         &config_path,
         serde_json::to_string(&config).unwrap().as_bytes(),
@@ -37,7 +37,7 @@ fn store_json_files(
     for i in 0..count {
         let data = serde_json::json!({"count": i, "name": format!("item-{}", i)});
         let path = format!("{}/item-{:03}.json", parent, i);
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &path,
             serde_json::to_string(&data).unwrap().as_bytes(),
@@ -99,6 +99,7 @@ fn test_reindex_indexes_all_files() {
     );
 }
 
+
 #[test]
 fn test_reindex_checkpoint_resume() {
     let (engine, _temp) = create_temp_engine_for_tests();
@@ -110,14 +111,17 @@ fn test_reindex_checkpoint_resume() {
     store_json_files(&engine, "/data", 100);
 
     // Enqueue reindex and manually set a checkpoint at the 50th file.
+    // The reindex executor compares each file_path > checkpoint
+    // lexicographically using the FULL path (see task_worker::execute_reindex
+    // line ~237), so the checkpoint must be a full path, not a bare name.
     let task = queue
         .enqueue("reindex", serde_json::json!({"path": "/data"}))
         .unwrap();
 
-    // Files are named item-000.json through item-099.json.
-    // Checkpoint at "item-049.json" means skip everything <= that name.
+    // Files are stored at /data/item-000.json … /data/item-099.json.
+    // Checkpoint at "/data/item-049.json" means skip everything <= that path.
     queue
-        .update_checkpoint(&task.id, "item-049.json")
+        .update_checkpoint(&task.id, "/data/item-049.json")
         .unwrap();
 
     // Process the task.
@@ -248,7 +252,7 @@ fn test_reindex_circuit_breaker() {
     // Store 15 files.
     for i in 0..15 {
         let data = serde_json::json!({"count": i});
-        ops2.store_file(
+        ops2.store_file_buffered(
             &ctx,
             &format!("/broken/item-{:03}.json", i),
             serde_json::to_string(&data).unwrap().as_bytes(),
@@ -300,7 +304,7 @@ fn test_gc_task_executes() {
     let ops = DirectoryOps::new(&engine);
     for i in 0..5 {
         let data = format!("content-{}", i);
-        ops.store_file(&ctx, &format!("/gc-test/file-{}.txt", i), data.as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &format!("/gc-test/file-{}.txt", i), data.as_bytes(), Some("text/plain"))
             .unwrap();
     }
     // Delete a couple to create garbage entries.
@@ -331,7 +335,7 @@ fn test_gc_task_with_garbage_entries() {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
     for i in 0..5 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/gc-real/file-{}.txt", i),
             format!("data-{}", i).as_bytes(),

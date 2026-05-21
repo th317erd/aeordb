@@ -45,7 +45,7 @@ pub struct ApiKeyRecord {
 pub fn generate_api_key(key_id: Uuid) -> String {
   let mut random_bytes = [0u8; 32];
   rand::RngCore::fill_bytes(&mut OsRng, &mut random_bytes);
-  let hex_string = hex::encode(&random_bytes);
+  let hex_string = hex::encode(random_bytes);
   let key_id_prefix = &key_id.simple().to_string()[..16];
   format!("{}{}_{}", API_KEY_PREFIX, key_id_prefix, hex_string)
 }
@@ -88,5 +88,34 @@ pub fn verify_api_key(key: &str, hash: &str) -> Result<bool, argon2::password_ha
     Ok(()) => Ok(true),
     Err(argon2::password_hash::Error::Password) => Ok(false),
     Err(error) => Err(error),
+  }
+}
+
+/// Validate that a key is the root API key for the given engine.
+/// Returns Ok(true) if the key matches a root key in the engine,
+/// Ok(false) if the key is valid but not root, or doesn't match any key.
+/// Used by CLI tools (export/import) to authorize system data access.
+///
+/// The root key is identified by `user_id == ROOT_USER_ID` (the nil UUID).
+pub fn validate_root_key(
+  engine: &crate::engine::StorageEngine,
+  key: &str,
+) -> Result<bool, String> {
+  let (key_id_prefix, full_key) = parse_api_key(key)?;
+
+  let record = crate::engine::system_store::get_api_key_by_prefix(engine, &key_id_prefix)
+    .map_err(|e| format!("failed to read api key record: {}", e))?
+    .ok_or_else(|| "no api key found matching the provided key".to_string())?;
+
+  // Root key has user_id == ROOT_USER_ID (the nil UUID)
+  match record.user_id {
+    Some(uid) if uid == crate::engine::user::ROOT_USER_ID => {}
+    _ => return Ok(false),
+  }
+
+  // Verify the hash
+  match verify_api_key(&full_key, &record.key_hash) {
+    Ok(matches) => Ok(matches),
+    Err(e) => Err(format!("hash verification failed: {}", e)),
   }
 }

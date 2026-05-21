@@ -65,7 +65,7 @@ async fn upload_chunk(app: axum::Router, token: &str, data: &[u8]) -> String {
     let hash = compute_chunk_hash(data);
     let resp = app
         .oneshot(
-            Request::put(&format!("/blobs/chunks/{}", hash))
+            Request::put(format!("/blobs/chunks/{}", hash))
                 .header("Authorization", token)
                 .header("Content-Type", "application/octet-stream")
                 .body(Body::from(data.to_vec()))
@@ -304,7 +304,7 @@ async fn test_commit_file_matches_regular_put() {
     // Store via regular DirectoryOps
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
-    ops.store_file(&ctx, "/regular.txt", file_content, Some("text/plain"))
+    ops.store_file_buffered(&ctx, "/regular.txt", file_content, Some("text/plain"))
         .unwrap();
 
     // Store via upload protocol
@@ -329,8 +329,8 @@ async fn test_commit_file_matches_regular_put() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Read both back via DirectoryOps and compare
-    let regular_bytes = ops.read_file("/regular.txt").unwrap();
-    let chunked_bytes = ops.read_file("/chunked.txt").unwrap();
+    let regular_bytes = ops.read_file_buffered("/regular.txt").unwrap();
+    let chunked_bytes = ops.read_file_buffered("/chunked.txt").unwrap();
 
     assert_eq!(
         regular_bytes, chunked_bytes,

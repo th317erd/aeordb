@@ -102,8 +102,8 @@ pub async fn share(
             .into_response();
     }
 
-    let has_users = body.users.as_ref().map_or(false, |u| !u.is_empty());
-    let has_groups = body.groups.as_ref().map_or(false, |g| !g.is_empty());
+    let has_users = body.users.as_ref().is_some_and(|u| !u.is_empty());
+    let has_groups = body.groups.as_ref().is_some_and(|g| !g.is_empty());
     if !has_users && !has_groups {
         return ErrorResponse::new("At least one user or group is required")
             .with_status(StatusCode::BAD_REQUEST)
@@ -134,7 +134,7 @@ pub async fn share(
 
         // Determine whether this is a file or directory.
         // Try reading as a file first; if NotFound, check as directory.
-        let is_file = ops.read_file(&normalized).is_ok();
+        let is_file = ops.read_file_buffered(&normalized).is_ok();
         let is_dir = if !is_file {
             ops.list_directory(&normalized).is_ok()
         } else {
@@ -164,7 +164,7 @@ pub async fn share(
             format!("{}/.aeordb-permissions", perm_dir)
         };
 
-        let mut perms = match ops.read_file(&perm_file_path) {
+        let mut perms = match ops.read_file_buffered(&perm_file_path) {
             Ok(data) => match PathPermissions::deserialize(&data) {
                 Ok(p) => p,
                 Err(_) => PathPermissions { links: Vec::new() },
@@ -213,7 +213,7 @@ pub async fn share(
 
         // Write back the .permissions file
         let serialized = perms.serialize();
-        if let Err(e) = ops.store_file(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+        if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
             return ErrorResponse::new(format!("Failed to store permissions: {}", e))
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response();
@@ -221,16 +221,36 @@ pub async fn share(
 
         // Evict cache for this directory
         state.engine.permissions_cache.evict(&perm_dir);
+        state.engine.grants_index_cache.evict_all();
 
         shared_count += 1;
         shared_paths.push(normalized);
+    }
+
+    // Emit per-recipient SSE events for live notification.
+    // Each user receives one event per shared path (delivered via /events/me).
+    let direct_users: Vec<String> = body.users.clone().unwrap_or_default();
+    for recipient_uid in &direct_users {
+        for path in &shared_paths {
+            let event = crate::engine::engine_event::EngineEvent::for_user(
+                crate::engine::engine_event::EVENT_FILES_SHARED,
+                &claims.sub,
+                recipient_uid,
+                serde_json::json!({
+                    "path": path,
+                    "permissions": body.permissions,
+                    "from": sharer_name,
+                }),
+            );
+            state.event_bus.emit(event);
+        }
     }
 
     // Spawn background email notification (best-effort)
     let engine_clone = state.engine.clone();
     let notify_paths = body.paths.clone();
     let notify_permissions = body.permissions.clone();
-    let notify_users: Vec<String> = body.users.clone().unwrap_or_default();
+    let notify_users: Vec<String> = direct_users;
     let sharer = sharer_name.clone();
     tokio::spawn(async move {
         send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions).await;
@@ -259,10 +279,38 @@ pub async fn list_shares(
             .with_status(StatusCode::FORBIDDEN).into_response();
     }
     let normalized = normalize_path(&query.path);
+
+    // Require the caller to have at least Read access on the queried path
+    // (or be root). Without this, a non-root user could probe arbitrary
+    // paths to enumerate who else has been granted access — leaking
+    // both path existence AND usernames of other grantees. 404 (not 403)
+    // so the response shape doesn't reveal existence on its own.
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return ErrorResponse::new("Invalid user identity")
+                .with_status(StatusCode::FORBIDDEN).into_response();
+        }
+    };
+    if !crate::engine::user::is_root(&user_id) {
+        use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+        let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+        let allowed = resolver
+            .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+            .unwrap_or(false)
+            || resolver
+                .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+                .unwrap_or(false);
+        if !allowed {
+            return ErrorResponse::new(format!("Not found: {}", normalized))
+                .with_status(StatusCode::NOT_FOUND).into_response();
+        }
+    }
+
     let ops = DirectoryOps::new(&state.engine);
 
     // Determine perm_dir: if path is a file, look at parent
-    let is_file = ops.read_file(&normalized).is_ok();
+    let is_file = ops.read_file_buffered(&normalized).is_ok();
     let perm_dir = if is_file {
         parent_path(&normalized).unwrap_or_else(|| "/".to_string())
     } else {
@@ -275,7 +323,7 @@ pub async fn list_shares(
         format!("{}/.aeordb-permissions", perm_dir)
     };
 
-    let perms = match ops.read_file(&perm_file_path) {
+    let perms = match ops.read_file_buffered(&perm_file_path) {
         Ok(data) => match PathPermissions::deserialize(&data) {
             Ok(p) => p,
             Err(_) => PathPermissions { links: Vec::new() },
@@ -364,7 +412,7 @@ pub async fn unshare(
     let ctx = RequestContext::system();
 
     // Determine perm_dir
-    let is_file = ops.read_file(&normalized).is_ok();
+    let is_file = ops.read_file_buffered(&normalized).is_ok();
     let perm_dir = if is_file {
         parent_path(&normalized).unwrap_or_else(|| "/".to_string())
     } else {
@@ -377,7 +425,7 @@ pub async fn unshare(
         format!("{}/.aeordb-permissions", perm_dir)
     };
 
-    let mut perms = match ops.read_file(&perm_file_path) {
+    let mut perms = match ops.read_file_buffered(&perm_file_path) {
         Ok(data) => match PathPermissions::deserialize(&data) {
             Ok(p) => p,
             Err(_) => {
@@ -406,7 +454,7 @@ pub async fn unshare(
 
     // Write back
     let serialized = perms.serialize();
-    if let Err(e) = ops.store_file(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+    if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
         return ErrorResponse::new(format!("Failed to update permissions: {}", e))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
@@ -414,6 +462,7 @@ pub async fn unshare(
 
     // Evict cache
     state.engine.permissions_cache.evict(&perm_dir);
+    state.engine.grants_index_cache.evict_all();
 
     Json(serde_json::json!({
         "revoked": true,
@@ -472,7 +521,7 @@ pub async fn shared_with_me(
     let mut shared_paths: Vec<serde_json::Value> = Vec::new();
 
     for entry in &perm_files {
-        let data = match ops.read_file(&entry.path) {
+        let data = match ops.read_file_buffered(&entry.path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -481,24 +530,56 @@ pub async fn shared_with_me(
             Err(_) => continue,
         };
 
-        // Check if any link in this .permissions file matches the user's groups
+        // Extract the directory path once (strip /.aeordb-permissions suffix)
+        let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
+            entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
+        } else if entry.path == "/.aeordb-permissions" {
+            "/".to_string()
+        } else {
+            continue;
+        };
+
+        // Collect EVERY link in this .permissions file that matches the user's
+        // groups — one user may have multiple shares in the same directory
+        // (e.g. share-file-A and share-file-B with different path_patterns).
         for link in &perms.links {
             if user_groups.contains(&link.group) {
-                // Extract the directory path (strip /.aeordb-permissions suffix)
-                let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
-                    entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
-                } else if entry.path == "/.aeordb-permissions" {
-                    "/".to_string()
+                // For file-pattern shares, look up the file's metadata so the
+                // client can render a real preview/listing entry instead of a
+                // placeholder.
+                let metadata = if let Some(ref pattern) = link.path_pattern {
+                    let file_path = if dir_path == "/" {
+                        format!("/{}", pattern)
+                    } else {
+                        format!("{}/{}", dir_path, pattern)
+                    };
+                    ops.get_metadata(&file_path).ok().flatten().map(|fr| {
+                        serde_json::json!({
+                            "size": fr.total_size,
+                            "created_at": fr.created_at,
+                            "updated_at": fr.updated_at,
+                            "content_type": fr.content_type,
+                        })
+                    })
                 } else {
-                    continue;
+                    None
                 };
 
-                shared_paths.push(serde_json::json!({
+                let mut entry_value = serde_json::json!({
                     "path": dir_path,
                     "permissions": link.allow,
                     "path_pattern": link.path_pattern,
-                }));
-                break; // one match per .permissions file is enough
+                });
+                if let Some(meta) = metadata {
+                    if let Some(obj) = entry_value.as_object_mut() {
+                        if let Some(meta_obj) = meta.as_object() {
+                            for (k, v) in meta_obj {
+                                obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                shared_paths.push(entry_value);
             }
         }
     }

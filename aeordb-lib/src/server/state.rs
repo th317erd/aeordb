@@ -30,6 +30,9 @@ pub struct AppState {
   pub index_cleanup: IndexCleanupSender,
   pub task_queue: Option<Arc<TaskQueue>>,
   pub peer_manager: Arc<PeerManager>,
+  /// Sync engine for peer-to-peer replication. Available when at least one
+  /// peer is configured. Used by /sync/trigger and the periodic sync loop.
+  pub sync_engine: Option<Arc<crate::engine::SyncEngine>>,
   pub startup_time: u64,
   pub startup_instant: Instant,
   pub db_path: String,

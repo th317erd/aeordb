@@ -125,6 +125,18 @@ GC should not be run concurrently with writes. The sweep phase re-verifies each 
 
 At scale, expect approximately 10K entries/sec sweep throughput. The mark phase is faster since it only walks reachable trees. The sweep phase writes are batched with a single sync at the end for performance.
 
+## Diagnostic Environment Variables
+
+The engine exposes a couple of opt-in diagnostic env vars for ops debugging. They are no-ops unless set, so leaving them unset costs nothing.
+
+| Variable | Effect |
+|---|---|
+| `AEORDB_GC_TIMING` | Per-phase wall-clock timing of GC mark + sweep on stderr (per-level BFS times, frontier sizes, dedup/sort/read breakdown, deletion-pass count). Useful for narrowing down where a slow GC is spending time. |
+| `AEORDB_GC_MEM_PROFILE` | Per-phase RSS sampling around mark, mark.bfs, mark.deletion-pass, recheck-drain, and sweep. Each phase emits `[gc-mem] <phase>: baseline_rss=X MB peak_rss=Y MB end_rss=Z MB delta_hwm=W MB elapsed=...`. Also activates wider PhaseSampler coverage in the file-write paths (`store_file_from_reader`, `store_chunk`, `finalize_file`) and snapshot operations. On macOS the values come from Mach `task_info`; on Linux from `/proc/self/status`. |
+| `AEORDB_INIT_COUNTERS_FULL` | On engine open, walk every FileRecord + Chunk in the WAL to populate `logical_data_size` and `chunk_data_size` counters exactly. Default-off because for a multi-GB database this scan reads every entry's payload and is the dominant cost of `open()` on cold disks. With the flag unset, the two byte-count counters initialize to 0 and recompute on demand. |
+
+These are intended for ops investigations, not normal operation. Set them only when you're chasing a specific problem.
+
 ## Async Index Cleanup
 
 When files are deleted, their index entries are cleaned up asynchronously in the background. Deletions are debounced with a 50ms timeout and batched up to 100 paths per batch. This means index cleanup does not block the delete response, and rapid successive deletes are coalesced into efficient batch operations.

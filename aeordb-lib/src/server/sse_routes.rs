@@ -177,3 +177,50 @@ pub async fn event_stream(
             .text("ping"),
     )
 }
+
+/// GET /events/me — per-user SSE channel for events addressed to the
+/// authenticated user. Used for things like file share notifications.
+///
+/// Authorization: requires a valid JWT. The route only delivers events
+/// whose `recipient_user_id` matches the JWT's `sub` claim. Generic
+/// events with no recipient (system/heartbeat/etc.) are NOT delivered
+/// here — those go through /system/events.
+///
+/// This means the JWT proves identity AND scopes delivery to that user.
+pub async fn user_event_stream(
+    State(state): State<AppState>,
+    Extension(claims): Extension<TokenClaims>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.event_bus.subscribe();
+    let user_id = claims.sub.clone();
+
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        match result {
+            Ok(event) => {
+                // Only deliver events explicitly addressed to this user.
+                let recipient = match &event.recipient_user_id {
+                    Some(r) => r,
+                    None => return None,
+                };
+                if recipient != &user_id {
+                    return None;
+                }
+
+                match serde_json::to_string(&event) {
+                    Ok(json) => Some(Ok(Event::default()
+                        .id(event.event_id.clone())
+                        .event(event.event_type.clone())
+                        .data(json))),
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(30))
+            .text("ping"),
+    )
+}

@@ -26,6 +26,9 @@ aeordb start [OPTIONS]
 | `--tls-key` | | -- | Path to TLS private key PEM file (requires `--tls-cert`) |
 | `--jwt-expiry` | | `3600` | JWT token lifetime in seconds |
 | `--chunk-size` | | `262144` | Write chunk size in bytes (256 KiB) |
+| `--peers` | | -- | Comma-separated peer URLs to register at startup (persisted, idempotent) |
+| `--join` | | -- | URL of an existing cluster member to join (one-shot; fetches the cluster's signing key) |
+| `--join-token` | | -- | Root API key (or bearer token) of the existing cluster member, required with `--join` |
 
 ### Auth Modes
 
@@ -68,6 +71,13 @@ aeordb start --config aeordb.toml
 
 # Config file with CLI overrides
 aeordb start --config aeordb.toml --port 8080 --auth false
+
+# Join an existing cluster (one-shot — adopts the cluster's JWT signing key)
+aeordb start --database nodeB.aeordb --auth self \
+  --join http://nodeA:6830 --join-token "$NODE_A_ROOT_KEY"
+
+# Register additional peers on a node already in a cluster
+aeordb start --database data.aeordb --peers "http://nodeC:6830,http://nodeD:6830"
 
 # Show version
 aeordb --version

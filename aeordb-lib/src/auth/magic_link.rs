@@ -20,7 +20,7 @@ pub struct MagicLinkRecord {
 pub fn generate_magic_link_code() -> String {
   let mut bytes = [0u8; 32];
   rand::rngs::OsRng.fill_bytes(&mut bytes);
-  hex::encode(&bytes)
+  hex::encode(bytes)
 }
 
 /// Hash a magic link code using SHA-256.
@@ -30,5 +30,5 @@ pub fn hash_magic_link_code(code: &str) -> String {
   let mut hasher = Sha256::new();
   hasher.update(code.as_bytes());
   let result = hasher.finalize();
-  hex::encode(&result)
+  hex::encode(result)
 }

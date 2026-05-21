@@ -35,7 +35,7 @@ pub struct CronConfig {
 /// Returns empty vec if the file is not found or cannot be parsed.
 pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
     let ops = DirectoryOps::new(engine);
-    match ops.read_file(CRON_CONFIG_PATH) {
+    match ops.read_file_buffered(CRON_CONFIG_PATH) {
         Ok(data) => match serde_json::from_slice::<CronConfig>(&data) {
             Ok(config) => config.schedules,
             Err(e) => {
@@ -53,8 +53,42 @@ pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineRe
     let ctx = RequestContext::system();
     let data = serde_json::to_vec_pretty(config)
         .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-    ops.store_file(&ctx, CRON_CONFIG_PATH, &data, Some("application/json"))?;
+    ops.store_file_buffered(&ctx, CRON_CONFIG_PATH, &data, Some("application/json"))?;
     Ok(())
+}
+
+/// Seed default cron schedules if no config file exists yet. Idempotent —
+/// if the file already exists (even an empty `schedules: []`), this is a no-op,
+/// so users can disable defaults without them being re-added on restart.
+pub fn seed_default_cron_if_missing(engine: &StorageEngine) -> EngineResult<bool> {
+    let ops = DirectoryOps::new(engine);
+    match ops.read_file_buffered(CRON_CONFIG_PATH) {
+        Ok(_) => Ok(false),
+        Err(EngineError::NotFound(_)) => {
+            let defaults = CronConfig {
+                schedules: vec![
+                    CronSchedule {
+                        id: "default-cleanup".to_string(),
+                        task_type: "cleanup".to_string(),
+                        schedule: "0 * * * *".to_string(),
+                        args: serde_json::json!({}),
+                        enabled: true,
+                    },
+                    CronSchedule {
+                        id: "default-gc".to_string(),
+                        task_type: "gc".to_string(),
+                        schedule: "0 3 * * *".to_string(),
+                        args: serde_json::json!({"dry_run": false}),
+                        enabled: true,
+                    },
+                ],
+            };
+            save_cron_config(engine, &defaults)?;
+            tracing::info!("Seeded default cron schedules: hourly cleanup, daily 03:00 GC");
+            Ok(true)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// Convert a 5-field Unix cron expression to a 6-field expression compatible
@@ -108,7 +142,7 @@ fn convert_dow_simple(field: &str) -> String {
     if field.contains(',') {
         return field
             .split(',')
-            .map(|part| convert_dow_simple(part))
+            .map(convert_dow_simple)
             .collect::<Vec<_>>()
             .join(",");
     }

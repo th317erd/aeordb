@@ -71,7 +71,7 @@ fn create_scoped_key_and_token_with_expiry(
 
     let ctx = RequestContext::system();
 
-    system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
+    system_store::store_api_key_for_bootstrap(engine, &ctx, &record).unwrap();
 
     // Create JWT with key_id embedded.
     let now_ts = now.timestamp();
@@ -107,7 +107,7 @@ fn root_bearer_token(jwt_manager: &JwtManager) -> String {
 fn store_file(engine: &StorageEngine, path: &str, content: &[u8]) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, path, content, None).unwrap();
+    ops.store_file_buffered(&ctx, path, content, None).unwrap();
 }
 
 async fn body_json(body: Body) -> serde_json::Value {

@@ -122,7 +122,16 @@ pub fn compute_sync_diff(
     let vm = VersionManager::new(engine);
     let head_hash = vm.get_head_hash()?;
 
-    let current_tree = walk_version_tree(engine, &head_hash)?;
+    let mut current_tree = walk_version_tree(engine, &head_hash)?;
+    if include_system {
+        // System paths aren't reachable from HEAD's user tree (by design).
+        // Walk them explicitly so they appear in the diff. The base tree
+        // intentionally is NOT augmented — system data isn't versioned with
+        // HEAD, so we can't reconstruct its past state. Diff treats every
+        // system file as "added"; the receiving peer dedupes by content
+        // hash.
+        crate::engine::tree_walker::augment_with_system_subtrees(engine, &mut current_tree);
+    }
 
     let (mut diff_result, chunk_hashes) = if let Some(since) = since_root_hash {
         let base_tree = walk_version_tree(engine, since)?;
@@ -504,6 +513,10 @@ pub fn file_restore_from_version(
             let mut metadata = HashMap::new();
             metadata.insert("reason".to_string(), "auto-snapshot before file restore".to_string());
             metadata.insert("restored_path".to_string(), path.to_string());
+            metadata.insert(
+                crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+                crate::engine::lifecycle_config::SNAPSHOT_TYPE_AUTO.to_string(),
+            );
             match vm.create_snapshot(ctx, &name, metadata) {
                 Ok(_) => break name,
                 Err(_) if attempt < 10 => {
@@ -521,7 +534,7 @@ pub fn file_restore_from_version(
 
     // Write to HEAD
     let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
-    ops.store_file(ctx, path, &content, file_record.content_type.as_deref())?;
+    ops.store_file_buffered(ctx, path, &content, file_record.content_type.as_deref())?;
 
     Ok((auto_snapshot_name, size))
 }

@@ -29,7 +29,7 @@ fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
   let user = User::new(username, None);
   let user_id = user.user_id;
 
-  system_store::store_user(&engine, &ctx, &user).unwrap();
+  system_store::store_user(engine, &ctx, &user).unwrap();
   user_id
 }
 
@@ -44,7 +44,7 @@ fn create_test_group(
   let ctx = RequestContext::system();
   let group = Group::new(name, "........", "........", query_field, query_operator, query_value).unwrap();
 
-  system_store::store_group(&engine, &ctx, &group).unwrap();
+  system_store::store_group(engine, &ctx, &group).unwrap();
 }
 
 /// Write a .permissions file at a given directory path.
@@ -57,7 +57,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     format!("{}/.aeordb-permissions", dir_path)
   };
   let data = permissions.serialize();
-  directory_ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
+  directory_ops.store_file_buffered(&ctx, &perm_path, &data, Some("application/json")).unwrap();
 }
 
 /// Create a PermissionLink with member-only flags.
@@ -799,8 +799,10 @@ fn test_permissions_cache_evict_reloads() {
 // Task 12: CrudlifyOp from HTTP method
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_crudlify_op_from_http_method() {
+#[tokio::test]
+async fn test_crudlify_op_from_http_method() {
+  // AppState ctor calls spawn_index_cleanup_worker which spawns a tokio
+  // task — must run inside a tokio runtime.
   use axum::http::Method;
   use aeordb::auth::permission_middleware::http_to_crudlify;
   use aeordb::server::state::AppState;
@@ -820,12 +822,14 @@ fn test_crudlify_op_from_http_method() {
     plugin_manager,
     rate_limiter,
     prometheus_handle,
-    engine,
+    engine: engine.clone(),
     event_bus: Arc::new(aeordb::engine::EventBus::new()),
     group_cache,
     task_queue: None,
     api_key_cache: Arc::new(Cache::new(ApiKeyLoader)),
     peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
+    sync_engine: None,
+    index_cleanup: aeordb::engine::index_cleanup::spawn_index_cleanup_worker(engine),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
     startup_instant: std::time::Instant::now(),
     db_path: String::new(),

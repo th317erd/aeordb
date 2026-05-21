@@ -1,6 +1,7 @@
 pub mod api_key_rules;
 pub mod append_writer;
 pub mod binary_utils;
+#[cfg(feature = "auto_heal_unimplemented")]
 pub mod auto_heal;
 pub mod cache;
 pub mod cache_loaders;
@@ -29,9 +30,13 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod metrics_pulse;
 pub mod file_header;
+pub mod header_repair;
+pub mod json_store;
 pub mod file_record;
 pub mod fuzzy;
 pub mod gc;
+pub mod grants_index;
+pub mod rss_sampler;
 pub mod hot_tail;
 pub mod group;
 pub mod health;
@@ -50,6 +55,7 @@ pub mod kv_expand;
 pub mod kv_resize;
 pub mod kv_store;
 pub mod kv_snapshot;
+pub mod lifecycle_config;
 pub mod lost_found;
 pub mod nvt;
 pub mod nvt_ops;
@@ -99,6 +105,8 @@ pub use entry_scanner::{EntryScanner, ScannedEntry};
 pub use entry_type::EntryType;
 pub use errors::{EngineError, EngineResult};
 pub use file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
+pub use header_repair::{inspect_header, repair_header_in_place, HeaderRepairReport, HotTailMismatch};
+pub use json_store::{JsonDoc, JsonStore};
 pub use file_record::FileRecord;
 pub use hash_algorithm::HashAlgorithm;
 pub use disk_kv_store::DiskKVStore;
@@ -136,7 +144,7 @@ pub use symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash}
 pub use symlink_resolver::{resolve_symlink, ResolvedTarget, MAX_SYMLINK_DEPTH};
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
-pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE};
+pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE};
 pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash, symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, is_system_path, DEFAULT_CHUNK_SIZE};
 pub use indexing_pipeline::IndexingPipeline;
@@ -153,9 +161,9 @@ pub use sync_api::{
     ChunkData, ConflictRecord, ConflictVersionInfo, FileHistoryEntry,
 };
 pub use sync_engine::{SyncEngine, SyncConfig, PeerSyncState, SyncCycleResult, spawn_sync_loop};
-pub use tree_walker::{walk_version_tree, diff_trees, VersionTree, TreeDiff};
+pub use tree_walker::{walk_version_tree, walk_subtree, diff_trees, VersionTree, TreeDiff};
 pub use version_access::{resolve_file_at_version, read_file_at_version};
-pub use backup::{export_version, export_snapshot, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
+pub use backup::{export_version, export_snapshot, export_full, backup_contains_system_data, ExportResult, create_patch, create_patch_from_snapshots, PatchResult, import_backup, ImportResult};
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use cluster_join::{has_signing_key, is_ready_for_traffic, get_cluster_mode};
 pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionState, SyncStatus};
@@ -173,7 +181,7 @@ pub use engine_event::{
     EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED,
     EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
     EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
-    EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
+    EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_FILES_SHARED,
     EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_METRICS, GcEventData,
     EVENT_TASKS_CREATED, EVENT_TASKS_STARTED, EVENT_TASKS_COMPLETED,
     EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED,
@@ -184,7 +192,8 @@ pub use heartbeat::spawn_heartbeat;
 pub use integrity_scanner::spawn_integrity_scanner;
 pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
-pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, validate_cron_expression};
+pub use cron_scheduler::{CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, seed_default_cron_if_missing, validate_cron_expression};
+pub use lifecycle_config::{LifecycleConfig, SnapshotRetention, load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, PruneResult, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_MANUAL};
 pub use request_context::RequestContext;
 pub use rate_tracker::{RateTracker, RateSnapshot, RateTrackerSet, RateSetSnapshot};
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};

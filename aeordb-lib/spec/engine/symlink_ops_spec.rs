@@ -271,7 +271,7 @@ fn test_symlink_and_file_coexist() {
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/real-file.txt", b"hello", None).unwrap();
+  ops.store_file_buffered(&ctx, "/real-file.txt", b"hello", None).unwrap();
   ops.store_symlink(&ctx, "/link-file.txt", "/real-file.txt").unwrap();
 
   let children = ops.list_directory("/").unwrap();

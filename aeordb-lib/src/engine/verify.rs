@@ -48,6 +48,15 @@ pub struct VerifyReport {
     pub stale_kv_entries: u64,
     pub missing_kv_entries: u64,
 
+    /// Directories whose `dir:{path}` entry hard-links to a content hash
+    /// that's been swept by GC. The directory is reachable through its
+    /// parent's ChildEntry but a direct `list_directory` would fail
+    /// without the runtime recovery fallback in `read_directory_data`.
+    /// Repair rewrites the path-key to point at the merkle-canonical
+    /// content hash. Known root cause: `snapshot_restore` and
+    /// `fork_promote` move HEAD without rewriting dir_key entries.
+    pub stale_dir_path_keys: Vec<String>,
+
     // Snapshot integrity
     pub snapshots_checked: u64,
     pub broken_snapshots: Vec<String>, // snapshot names with broken tree references
@@ -85,6 +94,7 @@ impl VerifyReport {
             kv_entries: 0,
             stale_kv_entries: 0,
             missing_kv_entries: 0,
+            stale_dir_path_keys: Vec::new(),
             snapshots_checked: 0,
             broken_snapshots: Vec::new(),
             repairs: Vec::new(),
@@ -99,6 +109,7 @@ impl VerifyReport {
             || self.stale_kv_entries > 0
             || self.missing_kv_entries > 0
             || !self.broken_snapshots.is_empty()
+            || !self.stale_dir_path_keys.is_empty()
     }
 }
 
@@ -173,6 +184,32 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         }
     }
 
+    // Repair 4: Rewrite stale dir_key entries to point at the canonical
+    // merkle-reachable content. Known cause: `snapshot_restore` and
+    // `fork_promote` move HEAD without rewriting dir_keys; subsequent GC
+    // sweeps the orphan content. Files under these dirs are unaffected;
+    // only `list_directory` is broken. The runtime fallback in
+    // `read_directory_data` masks the symptom, but this repair removes
+    // it permanently and removes the warning-log churn.
+    if !report.stale_dir_path_keys.is_empty() {
+        let ops = DirectoryOps::new(engine);
+        let mut repaired = 0usize;
+        let mut failed = 0usize;
+        // Clone to avoid borrow conflicts when we mutate report.repairs.
+        let paths: Vec<String> = report.stale_dir_path_keys.clone();
+        for path in &paths {
+            match ops.repair_stale_dir_key(path) {
+                Ok(true) => repaired += 1,
+                Ok(false) => {}
+                Err(_) => failed += 1,
+            }
+        }
+        report.repairs.push(format!(
+            "Stale dir_keys rewritten: {} fixed, {} unfixable",
+            repaired, failed,
+        ));
+    }
+
     // Persist repairs to disk
     if !report.repairs.is_empty() {
         match engine.shutdown() {
@@ -198,55 +235,52 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
         Err(_) => return,
     };
 
-    match writer.scan_entries_reporting() {
-        Ok(mut scanner) => {
-            while let Some(result) = scanner.next() {
-                match result {
-                    Ok(scanned) => {
-                        report.total_entries += 1;
-                        report.valid_entries += 1;
+    if let Ok(mut scanner) = writer.scan_entries_reporting() {
+        for result in scanner.by_ref() {
+            match result {
+                Ok(scanned) => {
+                    report.total_entries += 1;
+                    report.valid_entries += 1;
 
-                        match scanned.header.entry_type {
-                            EntryType::Chunk => {
-                                report.chunks += 1;
-                                report.chunk_data_size += scanned.value.len() as u64;
-                            }
-                            EntryType::FileRecord => {
-                                report.file_records += 1;
-                                report.logical_data_size += scanned.header.value_length as u64;
-                            }
-                            EntryType::DirectoryIndex => report.directory_indexes += 1,
-                            EntryType::Symlink => report.symlinks += 1,
-                            EntryType::Snapshot => report.snapshots += 1,
-                            EntryType::DeletionRecord => report.deletion_records += 1,
-                            EntryType::Fork => report.forks += 1,
-                            EntryType::Void => {
-                                report.voids += 1;
-                                report.void_bytes += scanned.header.total_length as u64;
-                            }
+                    match scanned.header.entry_type {
+                        EntryType::Chunk => {
+                            report.chunks += 1;
+                            report.chunk_data_size += scanned.value.len() as u64;
+                        }
+                        EntryType::FileRecord => {
+                            report.file_records += 1;
+                            report.logical_data_size += scanned.header.value_length as u64;
+                        }
+                        EntryType::DirectoryIndex => report.directory_indexes += 1,
+                        EntryType::Symlink => report.symlinks += 1,
+                        EntryType::Snapshot => report.snapshots += 1,
+                        EntryType::DeletionRecord => report.deletion_records += 1,
+                        EntryType::Fork => report.forks += 1,
+                        EntryType::Void => {
+                            report.voids += 1;
+                            report.void_bytes += scanned.header.total_length as u64;
                         }
                     }
-                    Err(EngineError::CorruptEntry { ref reason, .. }) => {
-                        report.total_entries += 1;
-                        if reason.contains("Hash verification") {
-                            report.corrupt_hash += 1;
-                        } else {
-                            report.corrupt_header += 1;
-                        }
-                    }
-                    Err(_) => {
-                        report.total_entries += 1;
+                }
+                Err(EngineError::CorruptEntry { ref reason, .. }) => {
+                    report.total_entries += 1;
+                    if reason.contains("Hash verification") {
+                        report.corrupt_hash += 1;
+                    } else {
                         report.corrupt_header += 1;
                     }
                 }
-            }
-
-            // Collect skipped regions from the scanner
-            for (offset, length) in &scanner.skipped_regions {
-                report.skipped_regions.push((*offset, *length as u64));
+                Err(_) => {
+                    report.total_entries += 1;
+                    report.corrupt_header += 1;
+                }
             }
         }
-        Err(_) => {}
+
+        // Collect skipped regions from the scanner
+        for (offset, length) in &scanner.skipped_regions {
+            report.skipped_regions.push((*offset, *length as u64));
+        }
     }
 
     report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
@@ -255,11 +289,8 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) {
 fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
     // Count KV entries from snapshot
     let snapshot = engine.kv_snapshot.load();
-    match snapshot.iter_all() {
-        Ok(entries) => {
-            report.kv_entries = entries.len() as u64;
-        }
-        Err(_) => {}
+    if let Ok(entries) = snapshot.iter_all() {
+        report.kv_entries = entries.len() as u64;
     }
 
     // Count unique hashes from the WAL scan (not total entries, since
@@ -276,10 +307,8 @@ fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport) {
         match writer.scan_entries() {
             Ok(scanner) => {
                 let mut seen = std::collections::HashSet::new();
-                for result in scanner {
-                    if let Ok(scanned) = result {
-                        seen.insert(scanned.key);
-                    }
+                for scanned in scanner.flatten() {
+                    seen.insert(scanned.key);
                 }
                 seen.len() as u64
             }
@@ -315,6 +344,19 @@ fn check_directory_recursive(
 
     report.directories_checked += 1;
 
+    // Detect stale dir_key (hard-link target dead, recoverable via parent
+    // walk). `recover_directory_data_if_stale` returns Some only when the
+    // path-key entry is a hard-link AND its target is missing from LIVE
+    // AND we can reach the canonical content via HEAD's merkle walk.
+    {
+        let algo = engine.hash_algo();
+        if let Ok(dir_key) = crate::engine::directory_ops::directory_path_hash(path, &algo) {
+            if let Ok(Some(_)) = ops.recover_directory_data_if_stale(path, &dir_key) {
+                report.stale_dir_path_keys.push(path.to_string());
+            }
+        }
+    }
+
     match ops.list_directory(path) {
         Ok(children) => {
             for child in &children {
@@ -329,7 +371,7 @@ fn check_directory_recursive(
                     check_directory_recursive(ops, engine, &child_path, report, depth + 1);
                 } else if child.entry_type == EntryType::FileRecord.to_u8() {
                     // Verify file record is readable
-                    match ops.read_file(&child_path) {
+                    match ops.read_file_buffered(&child_path) {
                         Ok(_) => {}
                         Err(e) => {
                             report.missing_children.push(format!(

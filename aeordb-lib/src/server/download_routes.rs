@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::io::Write;
+use uuid::Uuid;
 
 use super::responses::ErrorResponse;
 use super::state::AppState;
@@ -14,6 +15,8 @@ use crate::auth::TokenClaims;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::entry_type::EntryType;
 use crate::engine::path_utils::normalize_path;
+use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct DownloadRequest {
@@ -23,13 +26,65 @@ pub struct DownloadRequest {
 /// POST /files/download — bundle requested paths into a ZIP archive.
 pub async fn download_zip(
     State(state): State<AppState>,
-    Extension(_claims): Extension<TokenClaims>,
+    Extension(claims): Extension<TokenClaims>,
+    active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
     Json(body): Json<DownloadRequest>,
 ) -> Response {
     if body.paths.is_empty() {
         return ErrorResponse::new("At least one path is required in the 'paths' array")
             .with_status(StatusCode::BAD_REQUEST)
             .into_response();
+    }
+
+    // Scoped-key check: every requested path must be readable by the key.
+    // We use 'r' for files and 'l' for directories (the matching crudlify
+    // flag). If the key's rules don't permit a path, return 404 so the
+    // caller cannot enumerate the tree by probing.
+    if let Some(Extension(rules)) = active_key_rules.as_ref() {
+        use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
+        for raw_path in &body.paths {
+            let normalized = normalize_path(raw_path);
+            // Probe the path: check 'r' (file) OR 'l' (directory listing).
+            let permitted = match match_rules(&rules.0, &normalized) {
+                Some(rule) => {
+                    check_operation_permitted(&rule.permitted, 'r')
+                        || check_operation_permitted(&rule.permitted, 'l')
+                }
+                None => false,
+            };
+            if !permitted {
+                return ErrorResponse::new(format!("Not found: {}", raw_path))
+                    .with_status(StatusCode::NOT_FOUND)
+                    .into_response();
+            }
+        }
+    }
+
+    // User/group permission check: every requested path must be readable
+    // by the calling user. Path-aware middleware exempts /files/download,
+    // so without this, a non-root user with no API-key rules could ZIP up
+    // any path in the database. 404 (not 403) so callers can't enumerate
+    // existence by probing.
+    if !claims.sub.starts_with("share:") {
+        if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
+            if !is_root(&user_id) {
+                let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+                for raw_path in &body.paths {
+                    let normalized = normalize_path(raw_path);
+                    let allowed = resolver
+                        .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
+                        .unwrap_or(false)
+                        || resolver
+                            .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
+                            .unwrap_or(false);
+                    if !allowed {
+                        return ErrorResponse::new(format!("Not found: {}", raw_path))
+                            .with_status(StatusCode::NOT_FOUND)
+                            .into_response();
+                    }
+                }
+            }
+        }
     }
 
     const MAX_ZIP_SIZE: u64 = 2_147_483_648; // 2 GB
@@ -62,7 +117,7 @@ pub async fn download_zip(
             }
 
             // Try as file first
-            match ops.read_file(&normalized) {
+            match ops.read_file_buffered(&normalized) {
                 Ok(data) => {
                     cumulative_size += data.len() as u64;
                     if cumulative_size > MAX_ZIP_SIZE {
@@ -79,7 +134,9 @@ pub async fn download_zip(
                 }
                 Err(crate::engine::errors::EngineError::NotFound(_)) => {
                     // Not a file — try as directory
-                    if add_directory_to_zip(&ops, &normalized, &common_prefix, &mut zip_writer, options, &mut skipped, &mut cumulative_size, MAX_ZIP_SIZE).is_err() {
+                    let walk = ZipWalk { ops: &ops, common_prefix: &common_prefix, options, max_size: MAX_ZIP_SIZE };
+                    let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
+                    if add_directory_to_zip(&walk, &normalized, &mut state).is_err() {
                         if cumulative_size > MAX_ZIP_SIZE {
                             return ErrorResponse::new(
                                 "Download exceeds the 2 GB size limit. Select fewer files or download individually."
@@ -123,17 +180,28 @@ pub async fn download_zip(
         })
 }
 
-fn add_directory_to_zip(
-    ops: &DirectoryOps,
-    dir_path: &str,
-    common_prefix: &str,
-    zip_writer: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
+/// Walk-invariant arguments for the recursive ZIP builder.
+struct ZipWalk<'a> {
+    ops: &'a DirectoryOps<'a>,
+    common_prefix: &'a str,
     options: zip::write::SimpleFileOptions,
-    skipped: &mut Vec<String>,
-    cumulative_size: &mut u64,
     max_size: u64,
+}
+
+/// Mutable state threaded through the recursive ZIP builder. Bundled so the
+/// recursion signature stays short.
+struct ZipState<'a, 'b> {
+    writer: &'a mut zip::ZipWriter<std::io::Cursor<&'b mut Vec<u8>>>,
+    skipped: &'a mut Vec<String>,
+    cumulative_size: &'a mut u64,
+}
+
+fn add_directory_to_zip(
+    walk: &ZipWalk<'_>,
+    dir_path: &str,
+    state: &mut ZipState<'_, '_>,
 ) -> Result<(), ()> {
-    let entries = ops.list_directory(dir_path).map_err(|_| ())?;
+    let entries = walk.ops.list_directory(dir_path).map_err(|_| ())?;
 
     for entry in entries {
         let child_path = if dir_path == "/" {
@@ -145,21 +213,21 @@ fn add_directory_to_zip(
         let normalized = normalize_path(&child_path);
 
         if is_system_path(&normalized) {
-            skipped.push(child_path);
+            state.skipped.push(child_path);
             continue;
         }
 
         if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
-            let _ = add_directory_to_zip(ops, &normalized, common_prefix, zip_writer, options, skipped, cumulative_size, max_size);
+            let _ = add_directory_to_zip(walk, &normalized, state);
         } else if entry.entry_type == EntryType::FileRecord.to_u8() {
-            if let Ok(data) = ops.read_file(&normalized) {
-                *cumulative_size += data.len() as u64;
-                if *cumulative_size > max_size {
+            if let Ok(data) = walk.ops.read_file_buffered(&normalized) {
+                *state.cumulative_size += data.len() as u64;
+                if *state.cumulative_size > walk.max_size {
                     return Err(());
                 }
-                let zip_entry_name = strip_prefix(&normalized, common_prefix);
-                if zip_writer.start_file(&zip_entry_name, options).is_ok() {
-                    let _ = zip_writer.write_all(&data);
+                let zip_entry_name = strip_prefix(&normalized, walk.common_prefix);
+                if state.writer.start_file(&zip_entry_name, walk.options).is_ok() {
+                    let _ = state.writer.write_all(&data);
                 }
             }
         }

@@ -16,7 +16,7 @@ fn test_concurrent_readers_dont_block() {
   for i in 0..20 {
     let path = format!("/files/doc-{}.txt", i);
     let content = format!("content-for-file-{}", i);
-    ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
   }
 
   // Spawn 8 reader threads, each reading all 20 files
@@ -27,7 +27,7 @@ fn test_concurrent_readers_dont_block() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..20 {
         let path = format!("/files/doc-{}.txt", i);
-        let data = ops.read_file(&path)
+        let data = ops.read_file_buffered(&path)
           .unwrap_or_else(|e| panic!("thread {} failed to read {}: {:?}", thread_id, path, e));
         let expected = format!("content-for-file-{}", i);
         assert_eq!(
@@ -56,7 +56,7 @@ fn test_readers_and_writer_concurrent() {
   for i in 0..10 {
     let path = format!("/seed/file-{}.txt", i);
     let content = format!("seed-content-{}", i);
-    ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
   }
 
   let mut handles = Vec::new();
@@ -69,7 +69,7 @@ fn test_readers_and_writer_concurrent() {
       for _iteration in 0..50 {
         for i in 0..10 {
           let path = format!("/seed/file-{}.txt", i);
-          let data = ops.read_file(&path)
+          let data = ops.read_file_buffered(&path)
             .unwrap_or_else(|e| panic!("reader {} failed on {}: {:?}", thread_id, path, e));
           let expected = format!("seed-content-{}", i);
           assert_eq!(
@@ -91,7 +91,7 @@ fn test_readers_and_writer_concurrent() {
       for i in 0..50 {
         let path = format!("/new/written-{}.txt", i);
         let content = format!("new-content-{}", i);
-        ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });
@@ -106,7 +106,7 @@ fn test_readers_and_writer_concurrent() {
   let ops = DirectoryOps::new(&engine);
   for i in 0..50 {
     let path = format!("/new/written-{}.txt", i);
-    let data = ops.read_file(&path)
+    let data = ops.read_file_buffered(&path)
       .unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
     let expected = format!("new-content-{}", i);
     assert_eq!(data, expected.as_bytes(), "wrong content for {}", path);
@@ -125,7 +125,7 @@ fn test_long_reader_doesnt_block_writer() {
   for i in 0..100 {
     let path = format!("/bulk/item-{}.txt", i);
     let content = format!("bulk-content-{}", i);
-    ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
   }
 
   let mut handles = Vec::new();
@@ -156,7 +156,7 @@ fn test_long_reader_doesnt_block_writer() {
       for i in 0..50 {
         let path = format!("/extra/added-{}.txt", i);
         let content = format!("extra-content-{}", i);
-        ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });
@@ -171,7 +171,7 @@ fn test_long_reader_doesnt_block_writer() {
   let ops = DirectoryOps::new(&engine);
   for i in 0..50 {
     let path = format!("/extra/added-{}.txt", i);
-    let data = ops.read_file(&path)
+    let data = ops.read_file_buffered(&path)
       .unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
     let expected = format!("extra-content-{}", i);
     assert_eq!(data, expected.as_bytes(), "wrong content for {}", path);
@@ -187,7 +187,7 @@ fn test_snapshot_isolation_during_write() {
   let ops = DirectoryOps::new(&engine);
 
   // Store a file, verify it exists via has_entry
-  ops.store_file(&ctx, "/alpha.txt", b"alpha-data", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/alpha.txt", b"alpha-data", Some("text/plain")).unwrap();
   let alpha_hash = engine.compute_hash(b"file:/alpha.txt").unwrap();
   assert!(
     engine.has_entry(&alpha_hash).unwrap(),
@@ -195,11 +195,11 @@ fn test_snapshot_isolation_during_write() {
   );
 
   // Read it back to confirm data integrity
-  let alpha_data = ops.read_file("/alpha.txt").unwrap();
+  let alpha_data = ops.read_file_buffered("/alpha.txt").unwrap();
   assert_eq!(alpha_data, b"alpha-data");
 
   // Store another file, verify both exist
-  ops.store_file(&ctx, "/beta.txt", b"beta-data", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta.txt", b"beta-data", Some("text/plain")).unwrap();
   let beta_hash = engine.compute_hash(b"file:/beta.txt").unwrap();
   assert!(
     engine.has_entry(&beta_hash).unwrap(),
@@ -211,9 +211,9 @@ fn test_snapshot_isolation_during_write() {
   );
 
   // Read both back
-  let alpha_data = ops.read_file("/alpha.txt").unwrap();
+  let alpha_data = ops.read_file_buffered("/alpha.txt").unwrap();
   assert_eq!(alpha_data, b"alpha-data");
-  let beta_data = ops.read_file("/beta.txt").unwrap();
+  let beta_data = ops.read_file_buffered("/beta.txt").unwrap();
   assert_eq!(beta_data, b"beta-data");
 }
 
@@ -229,7 +229,7 @@ fn test_no_data_corruption_under_contention() {
   for i in 0..20 {
     let path = format!("/verified/entry-{}.txt", i);
     let content = format!("exact-content-{}", i);
-    ops.store_file(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain")).unwrap();
   }
 
   // Spawn 4 reader threads that verify content integrity 20 times each
@@ -241,7 +241,7 @@ fn test_no_data_corruption_under_contention() {
       for _iteration in 0..20 {
         for i in 0..20 {
           let path = format!("/verified/entry-{}.txt", i);
-          let data = ops.read_file(&path)
+          let data = ops.read_file_buffered(&path)
             .unwrap_or_else(|e| panic!(
               "thread {} failed to read {} on iteration {}: {:?}",
               thread_id, path, _iteration, e,
@@ -274,7 +274,7 @@ fn test_concurrent_readers_on_same_file() {
   let ops = DirectoryOps::new(&engine);
 
   let big_content = vec![0xABu8; 4096];
-  ops.store_file(&ctx, "/shared/big.bin", &big_content, Some("application/octet-stream")).unwrap();
+  ops.store_file_buffered(&ctx, "/shared/big.bin", &big_content, Some("application/octet-stream")).unwrap();
 
   // 8 threads all reading the exact same file 100 times
   let mut handles = Vec::new();
@@ -284,7 +284,7 @@ fn test_concurrent_readers_on_same_file() {
     let handle = thread::spawn(move || {
       let ops = DirectoryOps::new(&engine_clone);
       for iteration in 0..100 {
-        let data = ops.read_file("/shared/big.bin")
+        let data = ops.read_file_buffered("/shared/big.bin")
           .unwrap_or_else(|e| panic!(
             "thread {} failed read iteration {}: {:?}", thread_id, iteration, e,
           ));
@@ -309,7 +309,7 @@ fn test_writer_doesnt_corrupt_concurrent_reader_results() {
   let ops = DirectoryOps::new(&engine);
 
   // Seed a file that readers will continuously verify
-  ops.store_file(&ctx, "/stable.txt", b"stable-content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/stable.txt", b"stable-content", Some("text/plain")).unwrap();
 
   let mut handles = Vec::new();
 
@@ -319,7 +319,7 @@ fn test_writer_doesnt_corrupt_concurrent_reader_results() {
     let handle = thread::spawn(move || {
       let ops = DirectoryOps::new(&engine_clone);
       for iteration in 0..100 {
-        let data = ops.read_file("/stable.txt")
+        let data = ops.read_file_buffered("/stable.txt")
           .unwrap_or_else(|e| panic!(
             "reader {} failed on iteration {}: {:?}", thread_id, iteration, e,
           ));
@@ -341,7 +341,7 @@ fn test_writer_doesnt_corrupt_concurrent_reader_results() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..100 {
         let path = format!("/noise/file-{}.txt", i);
-        ops.store_file(&ctx, &path, b"noise", Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, b"noise", Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on iteration {}: {:?}", i, e));
       }
     });
@@ -363,7 +363,7 @@ fn test_has_entry_concurrent_with_writes() {
   let mut hashes = Vec::new();
   for i in 0..10 {
     let path = format!("/check/item-{}.txt", i);
-    ops.store_file(&ctx, &path, format!("data-{}", i).as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, format!("data-{}", i).as_bytes(), Some("text/plain")).unwrap();
     let hash = engine.compute_hash(format!("file:/check/item-{}.txt", i).as_bytes()).unwrap();
     hashes.push(hash);
   }
@@ -401,7 +401,7 @@ fn test_has_entry_concurrent_with_writes() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..50 {
         let path = format!("/other/new-{}.txt", i);
-        ops.store_file(&ctx, &path, b"new", Some("text/plain"))
+        ops.store_file_buffered(&ctx, &path, b"new", Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });

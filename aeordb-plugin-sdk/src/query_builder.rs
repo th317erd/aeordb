@@ -754,11 +754,13 @@ mod tests {
 
     #[test]
     fn test_single_eq_f64() {
+        // 3.14 picked as a representative non-integer; not used as PI.
+        let value = 3.14_f64;
         let json = QueryBuilder::new("/data")
             .field("score")
-            .eq_f64(3.14)
+            .eq_f64(value)
             .to_json();
-        assert_eq!(json["where"]["value"], 3.14);
+        assert_eq!(json["where"]["value"], value);
     }
 
     #[test]

@@ -30,7 +30,7 @@ fn write_permissions(engine: &StorageEngine, dir_path: &str, permissions: &PathP
     format!("{}/.aeordb-permissions", dir_path)
   };
   let data = permissions.serialize();
-  ops.store_file(&ctx, &perm_path, &data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &perm_path, &data, Some("application/json")).unwrap();
 }
 
 fn member_link(group: &str, allow: &str, deny: &str) -> PermissionLink {
@@ -238,7 +238,7 @@ fn test_directory_hard_links_read_write() {
   let ops = DirectoryOps::new(&engine);
 
   // Store a file — this should create directory entries at / and /mydir/
-  ops.store_file(&ctx, "/mydir/testfile.json", b"{\"hello\":\"world\"}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/mydir/testfile.json", b"{\"hello\":\"world\"}", Some("application/json")).unwrap();
 
   // List the root directory — should contain "mydir/"
   let root_entries = ops.list_directory("/").unwrap();
@@ -271,7 +271,7 @@ fn test_directory_hard_links_nested_three_levels() {
   let ops = DirectoryOps::new(&engine);
 
   // Store a file three levels deep
-  ops.store_file(&ctx, "/a/b/c/deep.txt", b"deep content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/a/b/c/deep.txt", b"deep content", Some("text/plain")).unwrap();
 
   // All intermediate directories should exist
   let root_entries = ops.list_directory("/").unwrap();
@@ -308,14 +308,14 @@ fn test_directory_content_cache_multiple_writes() {
   let ops = DirectoryOps::new(&engine);
 
   // Write first file in /data/
-  ops.store_file(&ctx, "/data/file1.json", b"{\"a\":1}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/data/file1.json", b"{\"a\":1}", Some("application/json")).unwrap();
 
   // Write second file in /data/ — the directory update should use the
   // content cache for the parent directory
-  ops.store_file(&ctx, "/data/file2.json", b"{\"b\":2}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/data/file2.json", b"{\"b\":2}", Some("application/json")).unwrap();
 
   // Write third file to make sure the cache stays consistent
-  ops.store_file(&ctx, "/data/file3.json", b"{\"c\":3}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/data/file3.json", b"{\"c\":3}", Some("application/json")).unwrap();
 
   // Verify all three files appear in the directory listing
   let entries = ops.list_directory("/data/").unwrap();
@@ -333,14 +333,14 @@ fn test_directory_content_cache_after_clear() {
   let ops = DirectoryOps::new(&engine);
 
   // Write files
-  ops.store_file(&ctx, "/cached/a.txt", b"aaa", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/cached/b.txt", b"bbb", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/cached/a.txt", b"aaa", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/cached/b.txt", b"bbb", Some("text/plain")).unwrap();
 
   // Clear the content cache
   engine.clear_dir_content_cache();
 
   // Write another file — should still work correctly even with a cold cache
-  ops.store_file(&ctx, "/cached/c.txt", b"ccc", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/cached/c.txt", b"ccc", Some("text/plain")).unwrap();
 
   let entries = ops.list_directory("/cached/").unwrap();
   assert_eq!(entries.len(), 3, "All 3 files should be present after cache clear");
@@ -353,10 +353,10 @@ fn test_directory_content_cache_separate_directories() {
   let ops = DirectoryOps::new(&engine);
 
   // Write to two separate directories
-  ops.store_file(&ctx, "/alpha/f1.txt", b"a1", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/beta/f1.txt", b"b1", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/alpha/f2.txt", b"a2", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/beta/f2.txt", b"b2", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/alpha/f1.txt", b"a1", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/f1.txt", b"b1", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/alpha/f2.txt", b"a2", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/f2.txt", b"b2", Some("text/plain")).unwrap();
 
   // Verify each directory has the right files
   let alpha = ops.list_directory("/alpha/").unwrap();
@@ -388,7 +388,7 @@ fn test_kv_expansion_online() {
   for i in 0..1600 {
     let path = format!("/expand/file_{:05}.txt", i);
     let data = format!("data for file {}", i);
-    ops.store_file(&ctx, &path, data.as_bytes(), Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, data.as_bytes(), Some("text/plain")).unwrap();
     stored_paths.push(path);
   }
 
@@ -402,7 +402,7 @@ fn test_kv_expansion_online() {
 
   // Verify ALL data is still readable after expansion
   for (i, path) in stored_paths.iter().enumerate() {
-    let data = ops.read_file(path).unwrap();
+    let data = ops.read_file_buffered(path).unwrap();
     let expected = format!("data for file {}", i);
     assert_eq!(
       std::str::from_utf8(&data).unwrap(), &expected,
@@ -433,7 +433,7 @@ fn test_kv_expansion_preserves_system_data() {
   // Trigger expansion with many files
   for i in 0..1600 {
     let path = format!("/syscheck/f_{:05}.txt", i);
-    ops.store_file(&ctx, &path, b"x", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, &path, b"x", Some("text/plain")).unwrap();
   }
 
   // Verify the permissions file is still readable
@@ -454,10 +454,10 @@ fn test_deleted_files_not_visible_in_get_entry() {
   let ops = DirectoryOps::new(&engine);
 
   // Write a file
-  ops.store_file(&ctx, "/deltest/target.json", b"{\"delete\":\"me\"}", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/deltest/target.json", b"{\"delete\":\"me\"}", Some("application/json")).unwrap();
 
   // Verify it exists and is readable
-  let data = ops.read_file("/deltest/target.json").unwrap();
+  let data = ops.read_file_buffered("/deltest/target.json").unwrap();
   assert_eq!(std::str::from_utf8(&data).unwrap(), "{\"delete\":\"me\"}");
 
   // Get its hash for later checking
@@ -493,8 +493,8 @@ fn test_deleted_files_removed_from_directory_listing() {
   let ops = DirectoryOps::new(&engine);
 
   // Write two files
-  ops.store_file(&ctx, "/listing/keep.txt", b"keep", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/listing/remove.txt", b"remove", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/listing/keep.txt", b"keep", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/listing/remove.txt", b"remove", Some("text/plain")).unwrap();
 
   // Both should appear
   let entries = ops.list_directory("/listing/").unwrap();
@@ -525,11 +525,11 @@ fn test_deleted_file_cannot_be_read() {
   let ctx = system_ctx();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/readtest/gone.txt", b"vanishing", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/readtest/gone.txt", b"vanishing", Some("text/plain")).unwrap();
   ops.delete_file(&ctx, "/readtest/gone.txt").unwrap();
 
   // read_file should fail for deleted files
-  let result = ops.read_file("/readtest/gone.txt");
+  let result = ops.read_file_buffered("/readtest/gone.txt");
   assert!(result.is_err(), "Reading a deleted file should return an error");
 }
 
@@ -555,8 +555,8 @@ fn test_store_and_read_empty_file() {
   let ctx = system_ctx();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/empty/file.bin", b"", Some("application/octet-stream")).unwrap();
-  let data = ops.read_file("/empty/file.bin").unwrap();
+  ops.store_file_buffered(&ctx, "/empty/file.bin", b"", Some("application/octet-stream")).unwrap();
+  let data = ops.read_file_buffered("/empty/file.bin").unwrap();
   assert!(data.is_empty(), "Empty file should read back as empty");
 }
 
@@ -566,12 +566,12 @@ fn test_overwrite_file_updates_content() {
   let ctx = system_ctx();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/overwrite/doc.txt", b"version 1", Some("text/plain")).unwrap();
-  let v1 = ops.read_file("/overwrite/doc.txt").unwrap();
+  ops.store_file_buffered(&ctx, "/overwrite/doc.txt", b"version 1", Some("text/plain")).unwrap();
+  let v1 = ops.read_file_buffered("/overwrite/doc.txt").unwrap();
   assert_eq!(std::str::from_utf8(&v1).unwrap(), "version 1");
 
-  ops.store_file(&ctx, "/overwrite/doc.txt", b"version 2", Some("text/plain")).unwrap();
-  let v2 = ops.read_file("/overwrite/doc.txt").unwrap();
+  ops.store_file_buffered(&ctx, "/overwrite/doc.txt", b"version 2", Some("text/plain")).unwrap();
+  let v2 = ops.read_file_buffered("/overwrite/doc.txt").unwrap();
   assert_eq!(std::str::from_utf8(&v2).unwrap(), "version 2");
 }
 
@@ -581,9 +581,9 @@ fn test_directory_listing_root_after_multiple_dirs() {
   let ctx = system_ctx();
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file(&ctx, "/dir1/f.txt", b"1", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/dir2/f.txt", b"2", Some("text/plain")).unwrap();
-  ops.store_file(&ctx, "/dir3/f.txt", b"3", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir1/f.txt", b"1", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir2/f.txt", b"2", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/dir3/f.txt", b"3", Some("text/plain")).unwrap();
 
   let root = ops.list_directory("/").unwrap();
   let names: Vec<&str> = root.iter().map(|e| e.name.as_str()).collect();

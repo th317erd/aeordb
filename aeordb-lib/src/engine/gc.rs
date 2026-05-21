@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use crate::engine::btree::{BTreeNode, is_btree_format};
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
 use crate::engine::engine_event::{EVENT_GC_COMPLETED, EVENT_GC_STARTED};
-use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
@@ -13,6 +12,7 @@ use crate::engine::kv_store::{
     KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
 };
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
 use crate::engine::version_manager::VersionManager;
@@ -40,26 +40,39 @@ pub struct GcResult {
 pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   let mut live: HashSet<Vec<u8>> = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
+  let mark_start = std::time::Instant::now();
 
-  // Walk HEAD
+  // Gather all merkle roots and walk them BFS with offset-sorted I/O.
+  // The walk visits each unique hash once across all roots (visited-set
+  // short-circuit), so structural sharing between snapshots is free.
+  let mut roots: Vec<(Vec<u8>, String)> = Vec::new();
   let head_hash = engine.head_hash()?;
   if !head_hash.is_empty() && head_hash.iter().any(|&b| b != 0) {
-    // HEAD points to a content-addressed directory hash for "/"
-    // Mark both the content hash and the path-based hash
-    walk_directory_tree(engine, &head_hash, "/", hash_length, &mut live)?;
+    roots.push((head_hash, "/".to_string()));
   }
 
-  // Walk every snapshot
   let vm = VersionManager::new(engine);
   let snapshots = vm.list_snapshots()?;
   for snapshot in &snapshots {
-    walk_directory_tree(engine, &snapshot.root_hash, "/", hash_length, &mut live)?;
+    roots.push((snapshot.root_hash.clone(), "/".to_string()));
   }
-
-  // Walk every fork
   let forks = vm.list_forks()?;
   for fork in &forks {
-    walk_directory_tree(engine, &fork.root_hash, "/", hash_length, &mut live)?;
+    roots.push((fork.root_hash.clone(), "/".to_string()));
+  }
+
+  if timing {
+    eprintln!("[gc-timing] mark: {} roots ({} snapshots + {} forks + HEAD)",
+      roots.len(), snapshots.len(), forks.len());
+  }
+
+  let bfs_start = std::time::Instant::now();
+  let bfs_mem = PhaseSampler::start("mark.bfs", std::time::Duration::from_millis(50));
+  walk_versions_bfs(engine, roots, hash_length, &mut live)?;
+  bfs_mem.finish();
+  if timing {
+    eprintln!("[gc-timing] mark.bfs: {:?} (live={})", bfs_start.elapsed(), live.len());
   }
 
   // Mark snapshot and fork KV key hashes as live
@@ -73,164 +86,207 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
 
   // Mark system table entries as live
+  let sys_start = std::time::Instant::now();
   mark_system_entries(engine, hash_length, &mut live)?;
+  if timing { eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed()); }
 
   // Mark task queue entries as live -- task records use deterministic hashes
   // ("::aeordb:task:{id}") that are NOT in the directory tree, so
   // mark_system_entries does not cover them.
+  let task_start = std::time::Instant::now();
   mark_task_entries(engine, &mut live)?;
+  if timing { eprintln!("[gc-timing] mark.tasks: {:?}", task_start.elapsed()); }
 
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
+  let del_start = std::time::Instant::now();
+  let del_mem = PhaseSampler::start("mark.deletion-pass", std::time::Duration::from_millis(50));
   let all_entries = engine.iter_kv_entries()?;
+  let mut deletion_count = 0usize;
   for entry in &all_entries {
     if entry.entry_type() == KV_TYPE_DELETION {
       live.insert(entry.hash.clone());
+      deletion_count += 1;
     }
+  }
+  del_mem.finish();
+  if timing {
+    eprintln!("[gc-timing] mark.deletion-pass: {:?} (kv_entries={}, deletions={})",
+      del_start.elapsed(), all_entries.len(), deletion_count);
+    eprintln!("[gc-timing] mark TOTAL: {:?} (live={})", mark_start.elapsed(), live.len());
   }
 
   Ok(live)
 }
 
-/// Walk a directory tree from a root hash, knowing the directory path.
-/// Marks both content-addressed and path-based hashes for directories.
-fn walk_directory_tree(
+/// Walk all version roots level-by-level, sorting each level by KV offset
+/// for sequential WAL I/O instead of random reads in tree-walk order.
+///
+/// The KV is in-memory, so type lookups and offset lookups are free. The
+/// expensive part — reading entry payloads from the WAL — happens in
+/// offset-ascending order, which lets the page cache and disk scheduler do
+/// large sequential reads instead of seeking on every entry.
+///
+/// **Type-aware leaf skip**: entries whose KV type is `KV_TYPE_CHUNK` are
+/// leaves — they have no children to follow. We mark them live without
+/// reading their payload from disk.
+fn walk_versions_bfs(
   engine: &StorageEngine,
-  root_hash: &[u8],
-  dir_path: &str,
+  roots: Vec<(Vec<u8>, String)>,
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
-  // Mark the content-addressed root hash
-  if !live.insert(root_hash.to_vec()) {
-    // Already visited this exact content hash — but we still need to mark
-    // the path-based hash for this directory path if it differs.
-    let path_hash = engine.compute_hash(format!("dir:{}", dir_path).as_bytes())?;
-    live.insert(path_hash);
-    return Ok(());
-  }
+  let algo = engine.hash_algo();
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
+  let mut frontier = roots;
+  let mut level = 0u32;
+  let mut total_reads = 0u64;
+  let mut total_leaves_skipped = 0u64;
 
-  // Also mark the path-based directory hash
-  let path_hash = engine.compute_hash(format!("dir:{}", dir_path).as_bytes())?;
-  live.insert(path_hash);
-
-  // Use get_entry_including_deleted: content-addressed entries may be marked
-  // deleted at HEAD but still reachable from historical snapshot roots.
-  let entry = match engine.get_entry_including_deleted(root_hash)? {
-    Some(entry) => entry,
-    None => return Ok(()),
-  };
-
-  let (header, _key, value) = entry;
-
-  // Follow hard links: if value is exactly hash_length bytes, it's a content hash pointer
-  let value = if value.len() == hash_length {
-    live.insert(value.clone()); // Mark the content hash as live
-    match engine.get_entry_including_deleted(&value)? {
-      Some((_h, _k, v)) => v,
-      None => return Ok(()),
-    }
-  } else {
-    value
-  };
-
-  match header.entry_type {
-    EntryType::DirectoryIndex => {
-      if value.is_empty() {
-        return Ok(());
+  while !frontier.is_empty() {
+    let frontier_size = frontier.len();
+    // Stage 1: dedup, mark path-keys for directories, fold in leaf-only entries.
+    // Survivors need a disk read; collect them with their KV offset.
+    let mut to_read: Vec<(Vec<u8>, String, u64)> = Vec::with_capacity(frontier.len());
+    let mut visited_dups = 0u64;
+    let mut leaves_skipped = 0u64;
+    let mut not_in_kv = 0u64;
+    let dedup_start = std::time::Instant::now();
+    for (hash, path) in frontier.drain(..) {
+      if !live.insert(hash.clone()) {
+        // Already visited content hash — still mark the path-key for this
+        // appearance because the same content can be referenced under
+        // multiple paths.
+        let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+        live.insert(path_key);
+        visited_dups += 1;
+        continue;
       }
-      let children = if is_btree_format(&value) {
-        collect_btree_children(engine, &value, hash_length, live)?
-      } else {
-        deserialize_child_entries(&value, hash_length, 0)?
-      };
-
-      for child in &children {
-        let child_path = if dir_path == "/" {
-          format!("/{}", child.name)
-        } else {
-          format!("{}/{}", dir_path, child.name)
-        };
-
-        let child_type = EntryType::from_u8(child.entry_type)?;
-        match child_type {
-          EntryType::DirectoryIndex => {
-            // Recurse into subdirectory — child.hash is the content-addressed hash
-            walk_directory_tree(engine, &child.hash, &child_path, hash_length, live)?;
+      // In-memory KV lookup tells us the type and offset without disk I/O.
+      match engine.get_kv_entry(&hash) {
+        Some(kv) => {
+          let t = kv.entry_type();
+          if t == KV_TYPE_CHUNK {
+            // Leaf — already in `live`, nothing more to do.
+            leaves_skipped += 1;
+            continue;
           }
-          EntryType::FileRecord => {
-            mark_file_entry(engine, &child.hash, hash_length, live)?;
-          }
-          EntryType::Symlink => {
-            mark_symlink_entry(engine, &child.hash, &child_path, live)?;
-          }
-          _ => {
-            live.insert(child.hash.clone());
-          }
+          to_read.push((hash, path, kv.offset));
+        }
+        None => {
+          not_in_kv += 1;
         }
       }
     }
-    _ => {}
-  }
+    let dedup_elapsed = dedup_start.elapsed();
+    total_leaves_skipped += leaves_skipped;
 
-  Ok(())
-}
+    // Stage 2: sort by WAL offset so reads are sequential.
+    let sort_start = std::time::Instant::now();
+    to_read.sort_by_key(|(_, _, offset)| *offset);
+    let sort_elapsed = sort_start.elapsed();
 
-/// Mark a file entry and its chunks as live.
-fn mark_file_entry(
-  engine: &StorageEngine,
-  file_hash: &[u8],
-  hash_length: usize,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
-  if !live.insert(file_hash.to_vec()) {
-    return Ok(());
-  }
+    // Stage 3: read each entry in offset order; emit children to next frontier.
+    let read_start = std::time::Instant::now();
+    let read_count = to_read.len();
+    total_reads += read_count as u64;
+    let mut next_frontier: Vec<(Vec<u8>, String)> = Vec::new();
+    for (hash, path, _offset) in to_read {
+      let entry = match engine.get_entry_including_deleted(&hash)? {
+        Some(e) => e,
+        None => continue,
+      };
+      let (header, _key, value) = entry;
 
-  // Use get_entry_including_deleted: file entries may be deleted at HEAD
-  // but still referenced by historical snapshots.
-  if let Some((header, _key, value)) = engine.get_entry_including_deleted(file_hash)? {
-    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-    for chunk_hash in &file_record.chunk_hashes {
-      live.insert(chunk_hash.clone());
+      // Follow hard-link: if value is exactly a content hash, dereference.
+      let value = if value.len() == hash_length {
+        live.insert(value.clone());
+        match engine.get_entry_including_deleted(&value)? {
+          Some((_h, _k, v)) => v,
+          None => continue,
+        }
+      } else {
+        value
+      };
+
+      match header.entry_type {
+        EntryType::DirectoryIndex => {
+          // Mark the path-keyed lookup for this directory.
+          let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+          live.insert(path_key);
+
+          if value.is_empty() {
+            continue;
+          }
+          let children = if is_btree_format(&value) {
+            collect_btree_children(engine, &value, hash_length, live)?
+          } else {
+            deserialize_child_entries(&value, hash_length, header.entry_version)?
+          };
+
+          for child in &children {
+            let child_path = if path == "/" {
+              format!("/{}", child.name)
+            } else {
+              format!("{}/{}", path, child.name)
+            };
+            let child_type = EntryType::from_u8(child.entry_type)?;
+            match child_type {
+              EntryType::DirectoryIndex
+              | EntryType::FileRecord
+              | EntryType::Symlink => {
+                next_frontier.push((child.hash.clone(), child_path));
+              }
+              _ => {
+                live.insert(child.hash.clone());
+              }
+            }
+          }
+        }
+        EntryType::FileRecord => {
+          let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+          // Chunks are leaves — mark them as live without disk reads.
+          for chunk_hash in &file_record.chunk_hashes {
+            live.insert(chunk_hash.clone());
+          }
+          // Mark path-key (mutable index used for reads) and content-key
+          // (immutable content-addressed entry).
+          let file_path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+          live.insert(file_path_key);
+          let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+          live.insert(content_key);
+        }
+        EntryType::Symlink => {
+          let path_key = symlink_path_hash(&path, &algo)?;
+          live.insert(path_key);
+          let content_key = symlink_content_hash(&value, &algo)?;
+          live.insert(content_key);
+        }
+        _ => {
+          // Unhandled types are simply present in `live` already.
+        }
+      }
     }
 
-    let algo = engine.hash_algo();
+    let read_elapsed = read_start.elapsed();
 
-    // Also mark the path-based key as live (mutable index for reads/indexing)
-    let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
-    live.insert(path_key);
+    if timing {
+      eprintln!(
+        "[gc-timing]   level {}: frontier={} → dedup {:?} (dups={} leaves_skip={} miss={}) → sort {:?} → read {} entries in {:?} → next={}",
+        level, frontier_size, dedup_elapsed, visited_dups, leaves_skipped, not_in_kv,
+        sort_elapsed, read_count, read_elapsed, next_frontier.len(),
+      );
+    }
 
-    // Also mark the content-addressed key as live (immutable KV store entry)
-    let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
-    live.insert(content_key);
+    frontier = next_frontier;
+    level += 1;
   }
 
-  Ok(())
-}
-
-/// Mark a symlink entry and its path-based key as live.
-fn mark_symlink_entry(
-  engine: &StorageEngine,
-  symlink_hash: &[u8],
-  symlink_path: &str,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
-  if !live.insert(symlink_hash.to_vec()) {
-    return Ok(());
-  }
-
-  let algo = engine.hash_algo();
-
-  // Also mark the path-based key as live (mutable index for reads)
-  let path_key = symlink_path_hash(symlink_path, &algo)?;
-  live.insert(path_key);
-
-  // Also mark the content-addressed key as live (immutable KV store entry)
-  // Use _including_deleted: symlink may be deleted at HEAD but snapshot-referenced.
-  if let Some((_header, _key, value)) = engine.get_entry_including_deleted(symlink_hash)? {
-    let content_key = symlink_content_hash(&value, &algo)?;
-    live.insert(content_key);
+  if timing {
+    eprintln!(
+      "[gc-timing]   bfs summary: {} levels, {} entries read from disk, {} leaves skipped",
+      level, total_reads, total_leaves_skipped,
+    );
   }
 
   Ok(())
@@ -266,6 +322,14 @@ fn collect_btree_children(
 }
 
 /// Mark system table entries as live.
+///
+/// System data (`/.aeordb-system/...`, `/.aeordb-config/...`) lives outside
+/// the user-visible tree, so `walk_versions_bfs` never sees it. We walk it
+/// here with the same path-aware logic so we mark every key the engine
+/// might use to reach an entry — identity, path, and content — not just
+/// the merkle hash. Missing any of those silently breaks `JsonStore.get`
+/// after the next sweep, which is how every api-key / user / group
+/// disappeared on the prior GC run.
 fn mark_system_entries(
   engine: &StorageEngine,
   hash_length: usize,
@@ -275,22 +339,8 @@ fn mark_system_entries(
 
   for prefix in &system_prefixes {
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
-    // System dirs may be deleted at HEAD but snapshot-referenced.
-    if let Some((_header, _key, value)) = engine.get_entry_including_deleted(&dir_hash)? {
-      live.insert(dir_hash);
-      if !value.is_empty() {
-        if is_btree_format(&value) {
-          let children = collect_btree_children(engine, &value, hash_length, live)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        } else {
-          let children = deserialize_child_entries(&value, hash_length, 0)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        }
-      }
+    if engine.get_entry_including_deleted(&dir_hash)?.is_some() {
+      mark_entry_recursive(engine, &dir_hash, prefix, hash_length, live)?;
     }
   }
 
@@ -298,13 +348,29 @@ fn mark_system_entries(
 }
 
 /// Generic recursive mark for entries reachable from system tables.
+///
+/// Mirrors the per-type handling in [`walk_versions_bfs`]:
+/// - DirectoryIndex: mark `dir:{path}` path-key + follow content-hash hard
+///   link + recurse children with the child path.
+/// - FileRecord: mark `file:{path}` path-key + content-key + chunk hashes.
+/// - Symlink: mark `symlink:{path}` path-key + content-key.
+///
+/// `path` is the absolute path of the entry being marked (e.g.
+/// `"/.aeordb-system/api-keys/abc"`). We need it because directories and
+/// symlinks don't carry their own path in the stored value, and files use
+/// `file_path_hash(path)` rather than the identity/content hash for path
+/// lookups.
 fn mark_entry_recursive(
   engine: &StorageEngine,
   hash: &[u8],
+  path: &str,
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<()> {
+  let debug = std::env::var("AEORDB_GC_DEBUG_SYSTEM").is_ok();
+
   if !live.insert(hash.to_vec()) {
+    if debug { eprintln!("[gc-rec]   hash={} path={:?} already-live, skip", hex::encode(&hash[..8.min(hash.len())]), path); }
     return Ok(());
   }
 
@@ -312,24 +378,49 @@ fn mark_entry_recursive(
   // entries that are deleted at HEAD but still needed.
   let entry = match engine.get_entry_including_deleted(hash)? {
     Some(entry) => entry,
-    None => return Ok(()),
+    None => {
+      if debug { eprintln!("[gc-rec]   hash={} path={:?} NOT-FOUND", hex::encode(&hash[..8.min(hash.len())]), path); }
+      return Ok(());
+    }
   };
 
   let (header, _key, value) = entry;
+  let algo = engine.hash_algo();
+
+  // Follow hard link: if value is exactly a content hash, dereference and
+  // mark the content entry too, then use its payload as the working value.
+  let value = if value.len() == hash_length {
+    live.insert(value.clone());
+    match engine.get_entry_including_deleted(&value)? {
+      Some((_h, _k, v)) => v,
+      None => return Ok(()),
+    }
+  } else {
+    value
+  };
+
+  if debug { eprintln!("[gc-rec]   hash={} path={:?} type={:?} value_len={}", hex::encode(&hash[..8.min(hash.len())]), path, header.entry_type, value.len()); }
+
   match header.entry_type {
     EntryType::DirectoryIndex => {
-      if !value.is_empty() {
-        if is_btree_format(&value) {
-          let children = collect_btree_children(engine, &value, hash_length, live)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
+      // Path-key the engine uses for `list_directory` / `read_file` lookups.
+      let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
+      live.insert(path_key);
+
+      if value.is_empty() { return Ok(()); }
+
+      let children = if is_btree_format(&value) {
+        collect_btree_children(engine, &value, hash_length, live)?
+      } else {
+        deserialize_child_entries(&value, hash_length, header.entry_version)?
+      };
+      for child in &children {
+        let child_path = if path == "/" {
+          format!("/{}", child.name)
         } else {
-          let children = deserialize_child_entries(&value, hash_length, header.entry_version)?;
-          for child in &children {
-            mark_entry_recursive(engine, &child.hash, hash_length, live)?;
-          }
-        }
+          format!("{}/{}", path, child.name)
+        };
+        mark_entry_recursive(engine, &child.hash, &child_path, hash_length, live)?;
       }
     }
     EntryType::FileRecord => {
@@ -337,9 +428,18 @@ fn mark_entry_recursive(
       for chunk_hash in &file_record.chunk_hashes {
         live.insert(chunk_hash.clone());
       }
+      // Match walk_versions_bfs: mark the path-key (mutable index used for
+      // reads) and the content-key (immutable content-addressed entry).
+      let file_path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+      live.insert(file_path_key);
+      let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+      live.insert(content_key);
     }
     EntryType::Symlink => {
-      // Symlinks are leaf entries — already marked by the insert above
+      let path_key = symlink_path_hash(path, &algo)?;
+      live.insert(path_key);
+      let content_key = symlink_content_hash(&value, &algo)?;
+      live.insert(content_key);
     }
     _ => {}
   }
@@ -371,20 +471,6 @@ fn mark_task_entries(
   Ok(())
 }
 
-/// Minimum DeletionRecord entry size for the given engine's hash algorithm.
-fn min_deletion_size(engine: &StorageEngine) -> u32 {
-  // DeletionRecord with path="gc", reason="gc":
-  // value = u16(2) + "gc"(2) + i64(8) + u16(2) + "gc"(2) = 16 bytes
-  // key = hash_length bytes (computed hash)
-  let hash_length = engine.hash_algo().hash_length();
-  EntryHeader::compute_total_length(engine.hash_algo(), hash_length as u32, 16)
-}
-
-/// Minimum void entry size.
-fn min_void_size(engine: &StorageEngine) -> u32 {
-  EntryHeader::compute_total_length(engine.hash_algo(), 0, 0)
-}
-
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.
 /// Uses nosync writes for batch performance — one sync at the end.
 ///
@@ -411,9 +497,7 @@ pub fn gc_sweep(
   live: &HashSet<Vec<u8>>,
   dry_run: bool,
 ) -> EngineResult<(usize, u64)> {
-  let min_del = min_deletion_size(engine);
-  let min_void = min_void_size(engine);
-
+  let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let all_entries = engine.iter_kv_entries()?;
 
   // First pass: identify garbage entries and compute sizes.
@@ -423,6 +507,12 @@ pub fn gc_sweep(
 
   for entry in &all_entries {
     if live.contains(&entry.hash) {
+      continue;
+    }
+    // Spare entries that landed during mark/sweep — they're in the recheck
+    // set the engine maintains while GC is active. Without this, concurrent
+    // writes would be eligible for sweep just because they're not in `live`.
+    if !dry_run && engine.gc_recheck_contains(&entry.hash) {
       continue;
     }
 
@@ -437,52 +527,72 @@ pub fn gc_sweep(
     }
   }
 
-  // Free the full entry list before the sweep loop
   drop(all_entries);
 
-  // Second pass (non-dry-run): re-verify each candidate against the current KV
-  // state before overwriting. A concurrent write between mark and sweep could
-  // have made an entry live (new offset for the same hash = re-created entry).
-  // Uses per-entry get_kv_entry() lookups instead of loading all entries into
-  // a HashMap to avoid doubling memory usage.
-  let mut garbage_hashes: Vec<Vec<u8>> = Vec::new();
-
-  if !dry_run && !garbage_candidates.is_empty() {
-    for (hash, offset, entry_size) in &garbage_candidates {
-      // Re-verify: if the entry no longer exists or now points to a different
-      // offset, a concurrent write occurred — skip this entry.
-      match engine.get_kv_entry(hash) {
-        Some(fresh_entry) if fresh_entry.offset == *offset => {
-          // Still garbage at the same offset — safe to sweep
-        }
-        _ => {
-          // Entry was re-written or deleted since mark — skip
-          garbage_count -= 1;
-          reclaimed_bytes -= *entry_size as u64;
-          continue;
-        }
-      }
-
-      // Best-effort in-place overwrite (nosync — batch all writes)
-      if *entry_size >= min_del {
-        let written = engine.write_deletion_at_nosync(*offset, "gc")?;
-        let remaining = *entry_size - written;
-        if remaining >= min_void {
-          let void_offset = *offset + written as u64;
-          engine.write_void_at_nosync(void_offset, remaining)?;
-        }
-      }
-
-      garbage_hashes.push(hash.clone());
-    }
+  if dry_run || garbage_candidates.is_empty() {
+    return Ok((garbage_count, reclaimed_bytes));
   }
 
-  if !dry_run && !garbage_hashes.is_empty() {
-    // One sync for all in-place overwrites
-    engine.sync_writer()?;
+  // Re-verify each candidate against the current KV state. A concurrent
+  // write between mark and sweep could have re-created an entry at a new
+  // offset (same hash, different WAL position); we must NOT delete those.
+  let reverify_start = std::time::Instant::now();
+  let mut verified_hashes: Vec<Vec<u8>> = Vec::with_capacity(garbage_candidates.len());
+  let mut freed_regions: Vec<(u64, u32)> = Vec::with_capacity(garbage_candidates.len());
+  for (hash, offset, entry_size) in &garbage_candidates {
+    match engine.get_kv_entry(hash) {
+      Some(fresh) if fresh.offset == *offset => {
+        verified_hashes.push(hash.clone());
+        freed_regions.push((*offset, *entry_size));
+      }
+      _ => {
+        // Re-created since mark — skip and rollback the size accounting.
+        garbage_count -= 1;
+        reclaimed_bytes -= *entry_size as u64;
+      }
+    }
+  }
+  let reverify_elapsed = reverify_start.elapsed();
 
-    // Batch remove from KV
-    engine.remove_kv_entries_batch(&garbage_hashes)?;
+  // Drop the verified hashes from the live KV index. All in-memory; no WAL
+  // writes from sweep itself — the durability of these deletions comes from
+  // the hot tail flush that follows (which carries the void snapshot, and
+  // by the void offsets implies the entries at those offsets are gone).
+  let kv_remove_start = std::time::Instant::now();
+  if !verified_hashes.is_empty() {
+    engine.remove_kv_entries_batch(&verified_hashes)?;
+  }
+  let kv_remove_elapsed = kv_remove_start.elapsed();
+
+  // Register the freed regions with VoidManager (in-memory). On the next
+  // hot tail flush these get mirrored to disk as VoidRecords.
+  let void_register_start = std::time::Instant::now();
+  if !freed_regions.is_empty() {
+    if let Ok(mut vm) = engine.void_manager.write() {
+      for (offset, size) in &freed_regions {
+        vm.register_void(*offset, *size);
+      }
+    }
+  }
+  let void_register_elapsed = void_register_start.elapsed();
+
+  // Sync void state into the kv_writer's pending_voids and force a hot tail
+  // flush so the new void set is durable. One sequential write at the WAL
+  // tail; one fsync. Fast on slow disks.
+  let flush_start = std::time::Instant::now();
+  engine.sync_voids_to_kv_writer();
+  if let Err(e) = engine.force_hot_tail_flush() {
+    tracing::warn!("Hot tail flush after GC sweep failed: {}", e);
+  }
+  let flush_elapsed = flush_start.elapsed();
+
+  if timing {
+    eprintln!("[gc-timing]   sweep.reverify: {:?} (kept {} of {})",
+      reverify_elapsed, verified_hashes.len(), garbage_candidates.len());
+    eprintln!("[gc-timing]   sweep.kv_remove: {:?}", kv_remove_elapsed);
+    eprintln!("[gc-timing]   sweep.void_register: {:?} ({} voids)",
+      void_register_elapsed, freed_regions.len());
+    eprintln!("[gc-timing]   sweep.hot_tail_flush: {:?}", flush_elapsed);
   }
 
   Ok((garbage_count, reclaimed_bytes))
@@ -509,6 +619,20 @@ pub fn run_gc(
   ctx.emit(EVENT_GC_STARTED, serde_json::json!({
     "dry_run": dry_run,
   }));
+
+  // Begin GC recheck tracking before any version-forest reads. From this
+  // point on, every successful write hash is recorded so the sweep phase can
+  // spare entries that arrived after the mark snapshot was captured. See
+  // bot-docs/plan/gc-mark-sweep.md. The RAII guard ensures we always call
+  // end_gc_recheck on exit, even on `?`-propagated errors.
+  struct RecheckGuard<'a>(&'a StorageEngine, bool);
+  impl<'a> Drop for RecheckGuard<'a> {
+    fn drop(&mut self) { if self.1 { self.0.end_gc_recheck(); } }
+  }
+  if !dry_run {
+    engine.begin_gc_recheck();
+  }
+  let _recheck_guard = RecheckGuard(engine, !dry_run);
 
   let vm = VersionManager::new(engine);
 
@@ -541,16 +665,74 @@ pub fn run_gc(
         }
       }
     }
+
+    // Apply user-configured retention to non-engine snapshots before the
+    // mark phase. Snapshots deleted here have their orphaned data swept in
+    // this same GC cycle.
+    let prune_start = std::time::Instant::now();
+    let _gc_timing = std::env::var("AEORDB_GC_TIMING").is_ok();
+    match crate::engine::lifecycle_config::prune_expired_snapshots(engine, ctx) {
+      Ok(result) if result.pruned_count > 0 => {
+        tracing::info!(
+          pruned = result.pruned_count,
+          names = ?result.pruned_names,
+          "Lifecycle retention pruned snapshots",
+        );
+      }
+      Ok(_) => {}
+      Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
+    }
+    if _gc_timing { eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed()); }
   }
 
   let snapshot_count = vm.list_snapshots()?.len();
   let fork_count = vm.list_forks()?.len();
   let versions_scanned = 1 + snapshot_count + fork_count;
 
-  let live = gc_mark(engine)?;
+  // RSS sampling: bracket mark, recheck-drain, and sweep separately so we can
+  // attribute the multi-GB transient to a specific phase. No-op unless
+  // AEORDB_GC_MEM_PROFILE is set.
+  let mark_mem = PhaseSampler::start("mark", std::time::Duration::from_millis(50));
+  let mut live = gc_mark(engine)?;
+  mark_mem.finish();
+
+  // Re-check drain: any entry that was written during the mark phase is now in
+  // the recheck set. Walk each one and union into `live` so the sweep doesn't
+  // clobber freshly-written data. Loop until the queue is empty for one pass.
+  if !dry_run {
+    let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
+    loop {
+      let pending = engine.take_gc_recheck();
+      if pending.is_empty() {
+        break;
+      }
+      let hash_length = engine.hash_algo().hash_length();
+      for hash in pending {
+        // Path is unknown for recheck entries — the writer recorded raw hashes
+        // only. Every key it wrote (identity, file-path, content) is in the
+        // recheck set independently, so they each get marked when their hash
+        // shows up in this loop. The empty path means path-derived keys
+        // (dir:{path}, file:{path}) computed inside the recursion are wrong,
+        // but harmless: the live set is "do not sweep" — extra hashes in it
+        // never match a real entry and are simply ignored.
+        mark_entry_recursive(engine, &hash, "", hash_length, &mut live)?;
+      }
+    }
+    drain_mem.finish();
+  }
+
   let live_entries = live.len();
 
+  // The RAII guard above calls end_gc_recheck on scope exit so failure paths
+  // don't leave recheck recording on indefinitely.
+  let sweep_start = std::time::Instant::now();
+  let sweep_mem = PhaseSampler::start("sweep", std::time::Duration::from_millis(50));
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
+  sweep_mem.finish();
+  if std::env::var("AEORDB_GC_TIMING").is_ok() {
+    eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})",
+      sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
+  }
 
   // Reconcile counters from authoritative KV state after sweep
   if !dry_run {
@@ -646,5 +828,6 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
     bytes_read_total: current.bytes_read_total,
     chunks_deduped_total: current.chunks_deduped_total,
     write_buffer_depth: current.write_buffer_depth,
+    void_count: current.void_count,
   })
 }

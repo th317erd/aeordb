@@ -94,7 +94,7 @@ fn test_mask_from_range() {
   let mask = NVTMask::from_range(128, 10, 20);
   assert_eq!(mask.popcount(), 10);
   for index in 0..128 {
-    if index >= 10 && index < 20 {
+    if (10..20).contains(&index) {
       assert!(mask.get_bit(index), "bit {} should be on", index);
     } else {
       assert!(!mask.get_bit(index), "bit {} should be off", index);

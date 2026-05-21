@@ -268,7 +268,7 @@ async fn collect_sse_with_events(
 
 #[tokio::test]
 async fn test_sse_receives_emitted_events() {
-    let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+    let (app, jwt_manager, _engine, event_bus, _temp) = test_app();
     let auth = bearer_token(&jwt_manager);
 
     let events = vec![
@@ -694,7 +694,7 @@ async fn test_sse_method_not_allowed_for_post() {
 
 /// Test the filter logic directly without HTTP overhead.
 mod filter_unit_tests {
-    use aeordb::engine::EngineEvent;
+    
     use aeordb::server::sse_routes::SseParams;
 
     #[test]

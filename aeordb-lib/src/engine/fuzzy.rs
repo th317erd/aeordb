@@ -191,7 +191,7 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
 
   // Find matching characters within window
   for i in 0..a_len {
-    let start = if i > match_window { i - match_window } else { 0 };
+    let start = i.saturating_sub(match_window);
     let end = (i + match_window + 1).min(b_len);
 
     for j in start..end {

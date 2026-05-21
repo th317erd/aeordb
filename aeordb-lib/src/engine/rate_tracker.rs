@@ -189,6 +189,12 @@ pub struct RateTrackerSet {
     pub bytes_read: RateTracker,
 }
 
+impl Default for RateTrackerSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateTrackerSet {
     pub fn new() -> Self {
         Self {

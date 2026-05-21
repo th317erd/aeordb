@@ -14,6 +14,7 @@ use crate::engine::index_store::IndexManager;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
+use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 
 /// Default chunk size for splitting file data (256 KB).
@@ -129,10 +130,21 @@ pub fn system_file_identity_hash(
     algo.compute_hash(&input)
 }
 
-/// Check if a path is under the /.aeordb-system/ directory.
+/// Check if a path is under one of the protected system roots:
+///   - `/.aeordb-system/...` (user/group records, api keys, refresh tokens,
+///     snapshots, internal config like jwt_signing_key)
+///   - `/.aeordb-config/...` (cron schedules, webhook configs, parser
+///     registry, per-directory indexes)
+///
+/// Per-directory dotfiles like `.aeordb-permissions` (at any depth) and
+/// `.aeordb-indexes/` (inside a user directory) are user-visible config
+/// and NOT system paths. Only the absolute roots are system.
 pub fn is_system_path(path: &str) -> bool {
     let normalized = crate::engine::path_utils::normalize_path(path);
-    normalized.starts_with("/.aeordb-") || normalized == "/.aeordb-system"
+    normalized == "/.aeordb-system"
+        || normalized.starts_with("/.aeordb-system/")
+        || normalized == "/.aeordb-config"
+        || normalized.starts_with("/.aeordb-config/")
 }
 
 /// Compute the domain-prefixed hash for a deletion record.
@@ -149,64 +161,71 @@ fn deletion_record_hash(
 /// All chunks are eagerly loaded upfront to avoid storing a raw pointer
 /// or reference to the StorageEngine. Each chunk is yielded one at a time,
 /// which still allows the HTTP layer to stream chunk-by-chunk from the Vec.
-pub struct EngineFileStream {
-  chunks: Vec<Result<Vec<u8>, EngineError>>,
-  current_index: usize,
+/// Internal handle that lets [`EngineFileStream`] satisfy both lifetime
+/// regimes: a borrowed `&StorageEngine` for fast in-process calls
+/// (e.g. CLI, soak-worker), and an owned `Arc<StorageEngine>` for cases
+/// that need `'static` (e.g. axum HTTP body streams).
+enum EngineHandle<'a> {
+  Borrowed(&'a StorageEngine),
+  Owned(std::sync::Arc<StorageEngine>),
 }
 
-impl EngineFileStream {
+impl<'a> EngineHandle<'a> {
+  fn engine(&self) -> &StorageEngine {
+    match self {
+      EngineHandle::Borrowed(e) => e,
+      EngineHandle::Owned(arc) => arc,
+    }
+  }
+}
+
+/// Lazy chunk stream over a file's chunk_hashes list.
+///
+/// **Truly streaming.** Construction is O(1) — no I/O happens in `new()`.
+/// Each call to `next()` fetches exactly one chunk from the engine, returns
+/// it, and frees the previous chunk on the subsequent call. Peak memory
+/// is one chunk (~256 KB), regardless of file size.
+///
+/// History: an earlier version of this struct loaded every chunk eagerly
+/// in its constructor and just iterated a pre-populated `Vec`. That made
+/// reads of large files (audiobooks, video files) spike RSS to file size.
+/// Caught during the 2026-05-15 soak diagnostics.
+pub struct EngineFileStream<'a> {
+  chunk_hashes: Vec<Vec<u8>>,
+  engine: EngineHandle<'a>,
+  current_index: usize,
+  include_deleted: bool,
+}
+
+impl<'a> EngineFileStream<'a> {
   /// Build a stream from an explicit list of chunk hashes (public entry point
   /// for hash-based retrieval where we already have the FileRecord).
-  pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+  pub fn from_chunk_hashes(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine) -> EngineResult<Self> {
     Self::new(chunk_hashes, engine, false)
   }
 
   /// Like `from_chunk_hashes` but reads chunks even if they are marked deleted.
   /// Used for streaming files from historical snapshots.
-  pub fn from_chunk_hashes_including_deleted(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine) -> EngineResult<Self> {
+  pub fn from_chunk_hashes_including_deleted(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine) -> EngineResult<Self> {
     Self::new(chunk_hashes, engine, true)
   }
 
-  fn new(chunk_hashes: Vec<Vec<u8>>, engine: &StorageEngine, include_deleted: bool) -> EngineResult<Self> {
-    let mut chunks = Vec::with_capacity(chunk_hashes.len());
-
-    for hash in &chunk_hashes {
-      // Chunks are user-facing data — verify integrity on read
-      let result = if include_deleted {
-        engine.get_entry_verified_including_deleted(hash)
-      } else {
-        engine.get_entry_verified(hash)
-      };
-      match result {
-        Ok(Some((header, _key, value))) => {
-          // Decompress if the chunk was stored compressed
-          if header.compression_algo != CompressionAlgorithm::None {
-            match decompress(&value, header.compression_algo) {
-              Ok(decompressed) => chunks.push(Ok(decompressed)),
-              Err(error) => chunks.push(Err(error)),
-            }
-          } else {
-            chunks.push(Ok(value));
-          }
-        }
-        Ok(None) => {
-          chunks.push(Err(EngineError::NotFound(
-            format!("Chunk not found: {}", hex::encode(hash)),
-          )));
-        }
-        Err(error) => {
-          chunks.push(Err(error));
-        }
-      }
-    }
-
+  pub(crate) fn new(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine, include_deleted: bool) -> EngineResult<Self> {
     Ok(EngineFileStream {
-      chunks,
+      chunk_hashes,
+      engine: EngineHandle::Borrowed(engine),
       current_index: 0,
+      include_deleted,
     })
   }
 
-  /// Collect all chunks into a single Vec<u8>.
+  /// Number of chunks the stream will yield.
+  pub fn chunk_count(&self) -> usize { self.chunk_hashes.len() }
+
+  /// Collect all chunks into a single `Vec<u8>`. Materializes the full file
+  /// in memory by definition — use only when the caller actually needs the
+  /// whole content (e.g. small config files). Prefer iterating chunks for
+  /// arbitrary-size reads.
   pub fn collect_to_vec(self) -> EngineResult<Vec<u8>> {
     let mut result = Vec::new();
     for item in self {
@@ -214,29 +233,81 @@ impl EngineFileStream {
     }
     Ok(result)
   }
+
+  fn fetch_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
+    let engine = self.engine.engine();
+    let entry = if self.include_deleted {
+      engine.get_entry_verified_including_deleted(hash)?
+    } else {
+      engine.get_entry_verified(hash)?
+    };
+    match entry {
+      Some((header, _key, value)) => {
+        if header.compression_algo != CompressionAlgorithm::None {
+          decompress(&value, header.compression_algo)
+        } else {
+          Ok(value)
+        }
+      }
+      None => Err(EngineError::NotFound(
+        format!("Chunk not found: {}", hex::encode(hash)),
+      )),
+    }
+  }
 }
 
-impl Iterator for EngineFileStream {
+impl EngineFileStream<'static> {
+  /// Build a `'static` stream from an owned `Arc<StorageEngine>`. Required
+  /// when the stream must outlive the calling stack frame (e.g. axum HTTP
+  /// response bodies that demand `'static + Send`).
+  pub fn from_chunk_hashes_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+  ) -> EngineResult<Self> {
+    Self::new_owned(chunk_hashes, engine, false)
+  }
+
+  /// Owned-Arc variant of [`from_chunk_hashes_including_deleted`].
+  pub fn from_chunk_hashes_including_deleted_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+  ) -> EngineResult<Self> {
+    Self::new_owned(chunk_hashes, engine, true)
+  }
+
+  pub(crate) fn new_owned(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<StorageEngine>,
+    include_deleted: bool,
+  ) -> EngineResult<Self> {
+    Ok(EngineFileStream {
+      chunk_hashes,
+      engine: EngineHandle::Owned(engine),
+      current_index: 0,
+      include_deleted,
+    })
+  }
+}
+
+impl<'a> Iterator for EngineFileStream<'a> {
   type Item = EngineResult<Vec<u8>>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if self.current_index >= self.chunks.len() {
+    if self.current_index >= self.chunk_hashes.len() {
       return None;
     }
-
-    let index = self.current_index;
+    let hash = self.chunk_hashes[self.current_index].clone();
     self.current_index += 1;
+    Some(self.fetch_chunk(&hash))
+  }
 
-    // Take the pre-read result, replacing with a placeholder error
-    // (the index will never be visited again since current_index only moves forward)
-    let chunk = std::mem::replace(
-      &mut self.chunks[index],
-      Err(EngineError::NotFound("already consumed".to_string())),
-    );
-
-    Some(chunk)
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let remaining = self.chunk_hashes.len() - self.current_index;
+    (remaining, Some(remaining))
   }
 }
+
+impl<'a> ExactSizeIterator for EngineFileStream<'a> {}
 
 /// Directory operations built on top of the StorageEngine.
 ///
@@ -252,9 +323,14 @@ impl<'a> DirectoryOps<'a> {
     DirectoryOps { engine }
   }
 
-  /// Store a file at the given path, splitting data into chunks.
-  /// Creates intermediate directories as needed and updates HEAD.
-  pub fn store_file(
+  /// Store a file at the given path from a fully-buffered byte slice.
+  ///
+  /// **WARNING — buffered, not streaming.** The entire file content must fit
+  /// in `data`. This is convenient for small payloads (JSON configs, indexes,
+  /// short logs) but a footgun for large files. For arbitrary-size files
+  /// (e.g. user uploads), use [`store_file_from_reader`] which streams chunks
+  /// from any `Read` source without buffering the whole file.
+  pub fn store_file_buffered(
     &self,
     ctx: &RequestContext,
     path: &str,
@@ -264,9 +340,61 @@ impl<'a> DirectoryOps<'a> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
   }
 
+  /// Store a file at the given path by streaming chunks from a `Read` source.
+  ///
+  /// Memory usage is bounded to a single chunk buffer (`DEFAULT_CHUNK_SIZE`,
+  /// 256 KB) regardless of file size. Use this for arbitrary-size uploads,
+  /// bulk imports, and anything that might not fit in memory.
+  pub fn store_file_from_reader<R: std::io::Read>(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    mut reader: R,
+    content_type: Option<&str>,
+  ) -> EngineResult<FileRecord> {
+    let _mem = PhaseSampler::start("store_file_from_reader", std::time::Duration::from_millis(50));
+    let chunk_size = DEFAULT_CHUNK_SIZE;
+    let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
+    let mut first_bytes: Vec<u8> = Vec::with_capacity(8192);
+    let mut total_size: u64 = 0;
+    let mut buffer = vec![0u8; chunk_size];
+    let mut filled = 0usize;
+
+    loop {
+      // Top up the buffer to a full chunk before emitting, so we end up with
+      // uniformly-sized chunks (last one may be smaller).
+      while filled < chunk_size {
+        let n = reader.read(&mut buffer[filled..])
+          .map_err(EngineError::IoError)?;
+        if n == 0 { break; }
+        filled += n;
+      }
+      if filled == 0 { break; }
+
+      // Capture the first up-to-8 KB for content-type detection.
+      if first_bytes.len() < 8192 {
+        let need = (8192 - first_bytes.len()).min(filled);
+        first_bytes.extend_from_slice(&buffer[..need]);
+      }
+
+      let hash = self.store_chunk(&buffer[..filled])?;
+      chunk_hashes.push(hash);
+      total_size += filled as u64;
+
+      if filled < chunk_size {
+        // Reader is exhausted (short read).
+        break;
+      }
+      filled = 0;
+    }
+
+    self.finalize_file(ctx, path, chunk_hashes, total_size, content_type, &first_bytes)
+  }
+
   /// Store a single data chunk and return its hash. Deduplicates automatically.
   /// Used by streaming upload to store chunks as they arrive without buffering.
   pub fn store_chunk(&self, data: &[u8]) -> EngineResult<Vec<u8>> {
+    let _mem = PhaseSampler::start("store_chunk", std::time::Duration::from_millis(50));
     let algo = self.engine.hash_algo();
     let chunk_key = chunk_content_hash(data, &algo)?;
     if !self.engine.has_entry(&chunk_key)? {
@@ -292,6 +420,7 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
     first_bytes: &[u8],
   ) -> EngineResult<FileRecord> {
+    let _mem = PhaseSampler::start("finalize_file", std::time::Duration::from_millis(50));
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
@@ -679,7 +808,7 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Read a file as a streaming iterator of chunk data.
-  pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream> {
+  pub fn read_file_streaming(&self, path: &str) -> EngineResult<EngineFileStream<'_>> {
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
@@ -704,7 +833,13 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Read a file's full content into memory.
-  pub fn read_file(&self, path: &str) -> EngineResult<Vec<u8>> {
+  ///
+  /// **WARNING — buffered, not streaming.** The full decompressed file is
+  /// materialized in a single `Vec<u8>`. Convenient for small payloads
+  /// (JSON configs, sub-MB content) but a footgun for large files. For
+  /// arbitrary-size reads, use [`read_file_streaming`] and iterate its
+  /// `EngineFileStream` so memory stays bounded to one chunk.
+  pub fn read_file_buffered(&self, path: &str) -> EngineResult<Vec<u8>> {
     let result = self.read_file_streaming(path)?.collect_to_vec()?;
     Ok(result)
   }
@@ -714,17 +849,14 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
 
-    // Auto-snapshot before delete (at most once per minute)
-    if !is_system_path(&normalized) {
-      self.auto_snapshot_before_delete(ctx);
-    }
-
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
-    // Verify the file exists and capture metadata for event
+    // Verify the file exists FIRST — before auto-snapshot or any side-effect.
+    // A delete of a nonexistent file must produce zero observable side-effects:
+    // no auto-snapshot, no event, no counter changes.
     let file_key = file_path_hash(&normalized, &algo)?;
     let file_record_opt = match self.engine.get_entry(&file_key)? {
       Some((header, _key, value)) => {
@@ -734,6 +866,12 @@ impl<'a> DirectoryOps<'a> {
         return Err(EngineError::NotFound(normalized));
       }
     };
+
+    // File confirmed to exist. Now take an auto-snapshot before mutating
+    // (at most once per minute).
+    if !is_system_path(&normalized) {
+      self.auto_snapshot_before_delete(ctx);
+    }
 
     // Store a DeletionRecord
     let deletion = DeletionRecord::new(normalized.clone(), None);
@@ -874,7 +1012,18 @@ impl<'a> DirectoryOps<'a> {
         );
       }
     }
-    match self.read_directory_data(&dir_key) {
+    // Defensive fallback: if dir_key's hard-link target is dead (a known
+    // failure mode after `snapshot_restore` + GC, where HEAD moves but
+    // dir_keys aren't rewritten), recover by resolving the directory via
+    // the parent's ChildEntry.hash — that's the authoritative current
+    // reference. Logs a warning so the corruption stays observable.
+    let recovered = self.recover_directory_data_if_stale(&normalized, &dir_key)?;
+    let read_result = if let Some(pair) = recovered {
+      Ok(Some(pair))
+    } else {
+      self.read_directory_data(&dir_key)
+    };
+    match read_result {
       Ok(Some((header, value))) => {
         if normalized == "/" {
           tracing::debug!(
@@ -1087,7 +1236,19 @@ impl<'a> DirectoryOps<'a> {
       dt.timestamp_subsec_millis(),
     );
 
-    match vm.create_snapshot(ctx, &name, std::collections::HashMap::new()) {
+    // Use a system context so the auto-snapshot does NOT emit a public
+    // `versions_created` event — auto-snapshots are an implementation
+    // detail of the calling operation (delete/restore), not a user-visible
+    // version mutation. The caller's own event (entries_deleted etc.)
+    // remains the observable signal.
+    let sys_ctx = crate::engine::request_context::RequestContext::system();
+    let _ = ctx; // Keep ctx parameter for future use (currently unused after the suppression above)
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+      crate::engine::lifecycle_config::SNAPSHOT_TYPE_AUTO.to_string(),
+    );
+    match vm.create_snapshot(&sys_ctx, &name, metadata) {
       Ok(_) => {
         tracing::info!(snapshot = %name, "Auto-snapshot ({})", prefix);
       }
@@ -1238,7 +1399,7 @@ impl<'a> DirectoryOps<'a> {
   /// re-propagating their parent directories up to root. Used by `verify --repair`
   /// when the root directory is empty but files exist (e.g., after a KV rebuild
   /// where the root directory entry was overwritten by a prior corrupt session).
-  pub fn rebuild_directory_tree(&self, ctx: &RequestContext) -> EngineResult<usize> {
+  pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
     let hash_length = self.engine.hash_algo().hash_length();
     let snapshot = self.engine.kv_snapshot.load();
     let all_entries = snapshot.iter_all()?;
@@ -1368,7 +1529,7 @@ impl<'a> DirectoryOps<'a> {
     if known.is_empty() {
       let mut candidates_tried = 0;
       let mut candidates_found = 0;
-      for (_hash, children) in &dir_hashes {
+      for children in dir_hashes.values() {
         for child in children {
           if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() { continue; }
           let candidate = format!("/{}", child.name);
@@ -1469,7 +1630,7 @@ impl<'a> DirectoryOps<'a> {
       format!("{}/.aeordb-config/indexes.json", parent)
     };
 
-    match self.read_file(&config_path) {
+    match self.read_file_buffered(&config_path) {
       Ok(config_data) => {
         match PathIndexConfig::deserialize_with_compression(&config_data) {
           Ok(Some(algo_str)) if algo_str == "zstd" => {
@@ -1588,6 +1749,177 @@ impl<'a> DirectoryOps<'a> {
   /// Hard link detection: if the value at dir_key is exactly hash_length bytes,
   /// it's a hard link (content hash pointer). Follow it to get the actual data.
   /// Backward compatible: values >hash_length are inline data (pre-optimization).
+  /// Walk HEAD's tree from root down to `path`, returning the canonical
+  /// content hash for the directory at `path` (the merkle-authoritative
+  /// reference, as opposed to whatever the local `dir_key` currently
+  /// hard-links to). Returns None if `path` is not reachable from HEAD.
+  /// Used by `verify --repair` to permanently fix stale dir_keys.
+  pub(crate) fn canonical_directory_content_hash(
+    &self,
+    path: &str,
+  ) -> EngineResult<Option<Vec<u8>>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+    let head_hash = self.engine.head_hash()?;
+    if head_hash.is_empty() || head_hash.iter().all(|&b| b == 0) {
+      return Ok(None);
+    }
+    let normalized = normalize_path(path);
+    if normalized == "/" {
+      return Ok(Some(head_hash));
+    }
+    let segments: Vec<&str> = normalized.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut current_content_hash = head_hash;
+    for segment in &segments {
+      let content = match self.engine.get_entry(&current_content_hash)? {
+        Some((_h, _k, v)) => v,
+        None => return Ok(None),
+      };
+      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
+      } else if content.is_empty() {
+        return Ok(None);
+      } else {
+        deserialize_child_entries(&content, hash_length, 0)?
+      };
+      let child = match children.iter().find(|c| c.name == *segment) {
+        Some(c) => c,
+        None => return Ok(None),
+      };
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        return Ok(None);
+      }
+      current_content_hash = child.hash.clone();
+    }
+    Ok(Some(current_content_hash))
+  }
+
+  /// Repair a stale dir_key by rewriting it to hard-link the canonical
+  /// content hash from HEAD's merkle walk. Handles both dead-target
+  /// (post-GC) and diverged-target (alive but != HEAD) scenarios.
+  /// Returns Ok(true) if a write happened, Ok(false) otherwise.
+  pub fn repair_stale_dir_key(&self, path: &str) -> EngineResult<bool> {
+    let algo = self.engine.hash_algo();
+    let dir_key = directory_path_hash(path, &algo)?;
+    // Skip if dir_key isn't a hard-link entry at all.
+    let raw = match self.engine.get_entry(&dir_key)? {
+      Some(e) => e,
+      None => return Ok(false),
+    };
+    if raw.2.len() != algo.hash_length() {
+      return Ok(false);
+    }
+    let canonical = match self.canonical_directory_content_hash(path)? {
+      Some(h) => h,
+      None => return Ok(false),
+    };
+    // Already pointing at HEAD's canonical — nothing to do.
+    if canonical == raw.2 {
+      return Ok(false);
+    }
+    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &canonical)?;
+    tracing::info!(
+      path = %path,
+      stale_target = %hex::encode(&raw.2),
+      canonical_target = %hex::encode(&canonical),
+      "Repaired stale dir_key hard-link"
+    );
+    Ok(true)
+  }
+
+  /// If `dir_key` is a hard-link whose target is either dead OR diverged
+  /// from HEAD's canonical content reference, try to recover by walking
+  /// HEAD's tree from root down to `path`. Returns the recovered
+  /// directory content if recovery succeeds, None otherwise (no recovery
+  /// needed, or recovery impossible).
+  ///
+  /// Known failure mode: `snapshot_restore` and `fork_promote` move HEAD
+  /// without rewriting dir_keys. After those operations, live dir_keys
+  /// can point at content hashes that are either (a) swept by GC if no
+  /// snapshot still references them, or (b) STILL alive but no longer
+  /// match HEAD's canonical view. Both cases cause `list_directory` to
+  /// return stale or no data; both are repaired here.
+  pub(crate) fn recover_directory_data_if_stale(
+    &self,
+    path: &str,
+    dir_key: &[u8],
+  ) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+
+    // Step 1: is this even a hard-link entry? If the value is the actual
+    // content, no recovery possible from us — fall through.
+    let entry = match self.engine.get_entry(dir_key)? {
+      Some(e) => e,
+      None => return Ok(None),
+    };
+    let value = &entry.2;
+    if value.len() != hash_length {
+      return Ok(None);
+    }
+
+    // Step 3: walk from HEAD root down to `path`, using ChildEntry.hash at
+    // each level — that's the merkle-authoritative reference.
+    let head_hash = self.engine.head_hash()?;
+    if head_hash.is_empty() || head_hash.iter().all(|&b| b == 0) {
+      return Ok(None);
+    }
+
+    let normalized = normalize_path(path);
+    let segments: Vec<&str> = normalized.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+
+    let mut current_content_hash = head_hash;
+    for segment in &segments {
+      let content = match self.engine.get_entry(&current_content_hash)? {
+        Some((_h, _k, v)) => v,
+        None => return Ok(None), // tree-level break — can't recover
+      };
+      // Parse children
+      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
+      } else if content.is_empty() {
+        return Ok(None);
+      } else {
+        deserialize_child_entries(&content, hash_length, 0)?
+      };
+
+      // Find ChildEntry by name
+      let child = match children.iter().find(|c| c.name == *segment) {
+        Some(c) => c,
+        None => return Ok(None),
+      };
+      // Only follow if it's a directory
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        return Ok(None);
+      }
+      current_content_hash = child.hash.clone();
+    }
+
+    // If dir_key's hard-link target matches HEAD's canonical, nothing to
+    // recover — caller falls through to the normal read path.
+    if value.as_slice() == current_content_hash.as_slice() {
+      return Ok(None);
+    }
+
+    // Step 4: read the canonical content. If alive, return it as the
+    // recovered value. This handles BOTH:
+    //   (a) dir_key target was swept by GC — only canonical is alive.
+    //   (b) dir_key target is still alive (preserved by a snapshot) but
+    //       no longer matches HEAD — listing would return stale data
+    //       compared to the current HEAD view.
+    let recovered = self.engine.get_entry(&current_content_hash)?;
+    if let Some((header, _k, v)) = recovered {
+      tracing::warn!(
+        path = %normalized,
+        stale_target = %hex::encode(value),
+        canonical_target = %hex::encode(&current_content_hash),
+        "Directory path-key diverged from HEAD; serving canonical content. \
+         Run `aeordb verify --repair` to permanently fix the stale dir_key."
+      );
+      return Ok(Some((header, v)));
+    }
+
+    Ok(None)
+  }
+
   pub(crate) fn read_directory_data(&self, dir_key: &[u8]) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
     let hash_length = self.engine.hash_algo().hash_length();
 
@@ -1991,6 +2323,8 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -2048,6 +2382,8 @@ impl<'a> DirectoryOps<'a> {
     old_path: &str,
     new_path: &str,
   ) -> EngineResult<FileRecord> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let old_normalized = normalize_path(old_path);
     let new_normalized = normalize_path(new_path);
 
@@ -2197,6 +2533,8 @@ impl<'a> DirectoryOps<'a> {
     from_path: &str,
     to_path: &str,
   ) -> EngineResult<FileRecord> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
 
@@ -2238,6 +2576,8 @@ impl<'a> DirectoryOps<'a> {
     from_path: &str,
     to_path: &str,
   ) -> EngineResult<Vec<String>> {
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
     let mut copied = Vec::new();
@@ -2401,5 +2741,212 @@ impl<'a> DirectoryOps<'a> {
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
 
     Ok(new_record)
+  }
+}
+
+#[cfg(test)]
+mod engine_file_stream_tests {
+  use super::*;
+  use crate::engine::request_context::RequestContext;
+  use crate::engine::storage_engine::StorageEngine;
+
+  fn create_test_engine() -> (StorageEngine, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("test.aeordb");
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    (engine, temp)
+  }
+
+  /// Build a payload big enough to span several 256 KB chunks so we can
+  /// verify the stream walks them one at a time.
+  fn multi_chunk_payload() -> Vec<u8> {
+    // 5 full chunks + a partial = 6 chunks. Use deterministic bytes per
+    // chunk so we can identify which chunk we got back.
+    let mut data = Vec::with_capacity(DEFAULT_CHUNK_SIZE * 5 + 1024);
+    for i in 0..5 {
+      data.extend(std::iter::repeat(i as u8).take(DEFAULT_CHUNK_SIZE));
+    }
+    data.extend(std::iter::repeat(0xFFu8).take(1024));
+    data
+  }
+
+  #[test]
+  fn lazy_stream_yields_chunks_in_order() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let payload = multi_chunk_payload();
+    ops
+      .store_file_buffered(&ctx, "/big.bin", &payload, Some("application/octet-stream"))
+      .unwrap();
+
+    let stream = ops.read_file_streaming("/big.bin").unwrap();
+    let expected_chunks = (payload.len() + DEFAULT_CHUNK_SIZE - 1) / DEFAULT_CHUNK_SIZE;
+    assert_eq!(stream.chunk_count(), expected_chunks);
+
+    let mut assembled = Vec::with_capacity(payload.len());
+    for chunk in stream {
+      assembled.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(assembled, payload);
+  }
+
+  #[test]
+  fn constructor_does_no_chunk_io() {
+    // With lazy semantics, building the stream is O(1) — no chunk reads
+    // happen until next(). Verify by constructing a stream whose chunk
+    // hashes are bogus: construction must succeed; iteration must surface
+    // the chunk-not-found errors only after next() is called.
+    let (engine, _temp) = create_test_engine();
+    let bogus_hashes: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 32]).collect();
+    let mut stream = EngineFileStream::from_chunk_hashes(bogus_hashes, &engine).unwrap();
+
+    // Constructor returned Ok — no errors surfaced yet.
+    // Each next() call surfaces the chunk-not-found error individually.
+    for _ in 0..4 {
+      let r = stream.next().unwrap();
+      assert!(r.is_err(), "expected NotFound for bogus chunk hash");
+    }
+    assert!(stream.next().is_none(), "stream should be exhausted");
+  }
+
+  #[test]
+  fn owned_arc_stream_can_be_static() {
+    // Smoke test for the 'static path used by the HTTP server. The stream
+    // must compile and run when the caller passes an Arc<StorageEngine>
+    // and the stream outlives the function's borrow scope.
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/x.bin", b"hello world", Some("text/plain")).unwrap();
+
+    // Look up the file_key path -> FileRecord -> chunk_hashes.
+    let algo = engine.hash_algo();
+    let file_key = file_path_hash("/x.bin", &algo).unwrap();
+    let (header, _key, value) = engine.get_entry(&file_key).unwrap().unwrap();
+    let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+
+    let arc = std::sync::Arc::new(engine);
+    let stream: EngineFileStream<'static> =
+      EngineFileStream::from_chunk_hashes_owned(record.chunk_hashes, arc).unwrap();
+    let collected = stream.collect_to_vec().unwrap();
+    assert_eq!(collected, b"hello world");
+  }
+
+  #[test]
+  fn dirty_recovery_preserves_writer_offset_past_recovered_entries() {
+    use std::fs::OpenOptions;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("dirty.aeordb");
+    let path_str = path.to_str().unwrap();
+
+    // Phase 1: clean session — write entries, then drop with shutdown.
+    let post_clean_hot_tail: u64;
+    {
+      let engine = StorageEngine::create(path_str).unwrap();
+      let ops = DirectoryOps::new(&engine);
+      let ctx = RequestContext::system();
+      for i in 0..20 {
+        let p = format!("/f{i:02}.txt");
+        let v = format!("value-{i}").into_bytes();
+        ops.store_file_buffered(&ctx, &p, &v, Some("text/plain")).unwrap();
+      }
+      // Force a clean flush of everything so the on-disk header is current.
+      engine.shutdown().unwrap();
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      post_clean_hot_tail = h.hot_tail_offset;
+    }
+
+    // Phase 2: simulate crash mid-flush. Rewrite the active header with
+    // a rolled-back hot_tail_offset, and zero the hot tail bytes there.
+    // (We use one of the earlier entry offsets — every entry has a header
+    // smaller than the hot tail, so reading at that offset will fail the
+    // hot tail magic check and trigger dirty recovery.)
+    let rolled_back_offset = {
+      let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+      let (mut header, active) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      // Pick a target inside the WAL — kv_block_offset + kv_block_length
+      // is the start of the WAL. We use that, which definitely has an
+      // entry header at it (not a hot tail), so the hot tail load will fail.
+      let target = header.kv_block_offset + header.kv_block_length;
+      header.hot_tail_offset = target;
+      crate::engine::file_header::write_header_to_inactive_slot(&mut f, &mut header, active).unwrap();
+      f.sync_data().unwrap();
+      target
+    };
+    assert!(rolled_back_offset < post_clean_hot_tail,
+      "rolled-back offset {} must be earlier than post-shutdown {}",
+      rolled_back_offset, post_clean_hot_tail);
+
+    // Phase 3: open the engine (triggers dirty recovery), then drop it
+    // cleanly so the on-disk header reflects post-recovery state. Read
+    // the header back: hot_tail_offset must be >= the true WAL end.
+    {
+      let _engine = StorageEngine::open(path_str).unwrap();
+      // drop here flushes + writes header
+    }
+    let recovered_hot_tail = {
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      h.hot_tail_offset
+    };
+    assert!(recovered_hot_tail >= post_clean_hot_tail,
+      "post-recovery hot_tail_offset {} should be >= true WAL end {}",
+      recovered_hot_tail, post_clean_hot_tail);
+
+    // Phase 4: open again, write a NEW entry, drop. The new entry must
+    // land at-or-past recovered_hot_tail — otherwise the append landed
+    // at rolled_back_offset and overwrote recovered data. Check by
+    // re-reading header.
+    {
+      let engine = StorageEngine::open(path_str).unwrap();
+      let ops = DirectoryOps::new(&engine);
+      let ctx = RequestContext::system();
+      ops.store_file_buffered(&ctx, "/post-recovery.txt", b"new", None).unwrap();
+    }
+    let post_new_write_hot_tail = {
+      let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+      let (h, _) = crate::engine::file_header::read_active_header(&mut f).unwrap();
+      h.hot_tail_offset
+    };
+    assert!(post_new_write_hot_tail > recovered_hot_tail,
+      "after a post-recovery write, hot_tail_offset {} must be > recovered {}",
+      post_new_write_hot_tail, recovered_hot_tail);
+
+    // Phase 5: reopen, confirm /post-recovery.txt is present and intact.
+    let engine = StorageEngine::open(path_str).unwrap();
+    let ops = DirectoryOps::new(&engine);
+
+    // Phase 5: all previously-stored files should still be readable, AND
+    // the post-recovery write must be intact (not overwritten by anything).
+    for i in 0..20 {
+      let p = format!("/f{i:02}.txt");
+      let stream = ops.read_file_streaming(&p).expect("recovered file should be readable");
+      let bytes = stream.collect_to_vec().expect("read should succeed");
+      assert_eq!(bytes, format!("value-{i}").into_bytes(), "recovered file {} content", p);
+    }
+    let post_stream = ops.read_file_streaming("/post-recovery.txt").expect("post-recovery file readable");
+    let post_bytes = post_stream.collect_to_vec().expect("read should succeed");
+    assert_eq!(post_bytes, b"new");
+  }
+
+  #[test]
+  fn size_hint_decrements_with_progress() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let payload = multi_chunk_payload();
+    ops.store_file_buffered(&ctx, "/bigger.bin", &payload, None).unwrap();
+    let mut stream = ops.read_file_streaming("/bigger.bin").unwrap();
+    let total = stream.chunk_count();
+    let (lo, hi) = stream.size_hint();
+    assert_eq!(lo, total);
+    assert_eq!(hi, Some(total));
+    let _ = stream.next().unwrap();
+    let (lo2, hi2) = stream.size_hint();
+    assert_eq!(lo2, total - 1);
+    assert_eq!(hi2, Some(total - 1));
   }
 }

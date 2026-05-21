@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -42,6 +42,12 @@ struct BatchEntry {
     key: Vec<u8>,
     value: Vec<u8>,
     kv_type: u8,
+}
+
+impl Default for WriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WriteBatch {
@@ -142,6 +148,7 @@ pub struct StorageEngine {
   /// throttle so delete/restore/manual operations don't block each other.
   pub permissions_cache: Arc<Cache<PermissionsLoader>>,
   pub index_config_cache: Arc<Cache<IndexConfigLoader>>,
+  pub grants_index_cache: Arc<Cache<crate::engine::grants_index::GrantsIndexLoader>>,
   pub(crate) last_auto_snapshot_delete: std::sync::atomic::AtomicI64,
   pub(crate) last_auto_snapshot_restore: std::sync::atomic::AtomicI64,
   pub(crate) last_manual_snapshot: std::sync::atomic::AtomicI64,
@@ -149,6 +156,11 @@ pub struct StorageEngine {
   /// is immutable, so this cache can never serve stale data for a given key.
   /// Populated by update_parent_directories, read by directory lookups.
   pub(crate) dir_content_cache: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+  /// GC recheck queue. While GC mark+sweep runs, every successful write hash
+  /// is added here so the sweep phase can avoid clobbering entries that were
+  /// written after the mark snapshot was captured. `None` means GC is not
+  /// active and writes don't bother recording. See bot-docs/plan/gc-mark-sweep.md.
+  pub(crate) gc_recheck: Mutex<Option<HashSet<Vec<u8>>>>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -199,7 +211,9 @@ impl StorageEngine {
 
     // Open a second file handle for the KV store (same .aeordb file)
     let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-    let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+    // v3 layout: data starts after BOTH header slots (HEADER_REGION_SIZE), not
+    // just the first one. The two slots make up the A/B double-buffer.
+    let kv_block_offset = crate::engine::file_header::HEADER_REGION_SIZE as u64;
     let hash_length = hash_algo.hash_length();
     let kv_block_length = crate::engine::kv_stages::initial_block_size();
     // hot_tail_offset = after header + KV block
@@ -214,7 +228,8 @@ impl StorageEngine {
     // Write empty hot tail
     {
         let mut f = OpenOptions::new().read(true).write(true).open(path)?;
-        let _ = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &[], hash_length);
+        let empty = crate::engine::hot_tail::HotTailPayload::default();
+        let _ = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &empty, hash_length);
     }
 
     // Update file header with KV layout info
@@ -240,10 +255,12 @@ impl StorageEngine {
       counters: ArcSwap::from_pointee(EngineCounters::new()),
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
       index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
+      grants_index_cache: Arc::new(Cache::new(crate::engine::grants_index::GrantsIndexLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -275,6 +292,10 @@ impl StorageEngine {
     }
 
     let mut void_manager = VoidManager::new(hash_algo);
+
+    // Voids loaded from the hot tail (clean startup path). On dirty startup
+    // these will be empty and we'll populate via gap-scan later.
+    // (Populated further down once `hot_voids` is read.)
 
     // Check for pending KV block expansion (resize was blocked at runtime).
     // expand_kv_block relocates WAL entries forward and zero-fills the KV block.
@@ -323,26 +344,39 @@ impl StorageEngine {
       "open_internal: file header loaded"
     );
 
-    // Read hot tail entries from end of file
-    let (hot_entries, needs_dirty_startup) = if hot_tail_offset > 0 {
+    // Read hot tail payload (writes + voids) from end of file
+    let (hot_payload, needs_dirty_startup) = if hot_tail_offset > 0 {
       let mut f = OpenOptions::new().read(true).open(path)?;
       match crate::engine::hot_tail::read_hot_tail(&mut f, hot_tail_offset, hash_length) {
-        Some(entries) => {
-          tracing::debug!(hot_entries_loaded = entries.len(), "open_internal: hot tail loaded");
-          (entries, false)
+        Some(payload) => {
+          tracing::debug!(
+            hot_writes_loaded = payload.writes.len(),
+            hot_voids_loaded = payload.voids.len(),
+            "open_internal: hot tail loaded",
+          );
+          (payload, false)
         }
         None => {
           tracing::warn!(
             hot_tail_offset,
             "Corrupt or missing hot tail — will rebuild KV from WAL (dirty startup)"
           );
-          (Vec::new(), true)
+          (crate::engine::hot_tail::HotTailPayload::default(), true)
         }
       }
     } else {
-      (Vec::new(), false)
+      (crate::engine::hot_tail::HotTailPayload::default(), false)
     };
+    let hot_entries = hot_payload.writes.clone();
+    let hot_voids = hot_payload.voids;
 
+    // Populate void_manager from the hot tail's void section (clean startup).
+    // On dirty startup hot_voids is empty; we re-derive via gap-scan later.
+    for v in &hot_voids {
+      void_manager.register_void(v.offset, v.size);
+    }
+
+    let mut detected_kv_corruption = false;
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -350,26 +384,24 @@ impl StorageEngine {
         kv_file, hash_algo, kv_block_offset, hot_tail_offset,
         kv_block_stage, hot_entries,
       )?;
-
-      // Scan for void entries (in-memory, not in KV)
-      let scanner = writer.scan_entries()?;
-      for scanned_result in scanner {
-        let scanned = match scanned_result {
-          Ok(entry) => entry,
-          Err(e) => {
-            tracing::warn!("Skipping corrupt entry during void scan: {}", e);
-            continue;
-          }
-        };
-        if scanned.header.entry_type == EntryType::Void {
-          void_manager.register_void(scanned.header.total_length, scanned.offset);
-        }
+      // If any bucket page failed CRC on open, the KV index is unreliable
+      // for the buckets involved — trigger dirty startup below so the WAL
+      // scan is the source of truth.
+      if kv.needs_rebuild {
+        detected_kv_corruption = true;
       }
+
+      // Voids live in the hot tail (already loaded into void_manager above).
+      // No WAL scan needed on clean startup — pre-refactor we walked the
+      // entire WAL here to find EntryType::Void records, but those records
+      // no longer represent the source of truth for void state. On a 60 GB
+      // DB on a rotational disk that scan was a >50 minute startup cost
+      // finding zero useful records.
 
       kv
     } else {
       // No valid KV block — create from full WAL scan (dirty startup)
-      let kv_block_offset = crate::engine::file_header::FILE_HEADER_SIZE as u64;
+      let kv_block_offset = crate::engine::file_header::HEADER_REGION_SIZE as u64;
       let kv_block_length = crate::engine::kv_stages::initial_block_size();
       let hot_tail_offset = kv_block_offset + kv_block_length;
 
@@ -389,13 +421,13 @@ impl StorageEngine {
             continue;
           }
         };
-        // Collect deletion records and register void entries during the scan.
+        // Collect deletion records. Voids are recovered via gap-scan
+        // (recover_voids_via_gap_scan) on dirty startup — the WAL void
+        // entries we used to register here are not the source of truth.
         if scanned.header.entry_type == EntryType::DeletionRecord {
           if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
             deletion_records.push((record.path, scanned.offset));
           }
-        } else if scanned.header.entry_type == EntryType::Void {
-          void_manager.register_void(scanned.header.total_length, scanned.offset);
         }
         let kv_type = scanned.header.entry_type.to_kv_type();
 
@@ -403,6 +435,7 @@ impl StorageEngine {
           type_flags: kv_type,
           hash: scanned.key.clone(),
           offset: scanned.offset,
+          total_length: scanned.header.total_length,
         };
         kv.insert(entry)?;
       }
@@ -457,10 +490,12 @@ impl StorageEngine {
       counters: ArcSwap::from_pointee(EngineCounters::new()),
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
       index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
+      grants_index_cache: Arc::new(Cache::new(crate::engine::grants_index::GrantsIndexLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
@@ -469,7 +504,8 @@ impl StorageEngine {
     // After KV block expansion, rebuild the entire KV index from WAL.
     // The expansion zeroed the KV pages, so only hot tail entries are loaded.
     // A full rebuild repopulates all entries at their new offsets.
-    if needs_kv_rebuild || needs_dirty_startup {
+    let did_dirty_rebuild = needs_kv_rebuild || needs_dirty_startup || detected_kv_corruption;
+    if did_dirty_rebuild {
       if needs_kv_rebuild {
         tracing::info!("Rebuilding KV index after block expansion...");
       }
@@ -480,9 +516,102 @@ impl StorageEngine {
       // Re-initialize counters from the freshly rebuilt KV
       let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine));
       engine.counters.store(refreshed);
+
+      // Dirty rebuild lost the hot tail's void state. Re-derive voids by
+      // gap-scanning the rebuilt KV (sorted by offset, ignoring deleted
+      // entries) — any byte range not covered by a live KV entry is a void.
+      engine.recover_voids_via_gap_scan()?;
     }
 
+    // Seed the DiskKVStore's pending_voids snapshot from the loaded
+    // VoidManager state so the next hot tail flush carries it forward.
+    engine.sync_voids_to_kv_writer();
+
     Ok(engine)
+  }
+
+  /// Gap-scan the live KV index and register each gap (between consecutive
+  /// non-deleted entries' offset ranges) as a void in VoidManager. Used
+  /// after dirty startup when the hot tail's void section was lost.
+  ///
+  /// The cursor starts at the WAL's start offset (immediately after the KV
+  /// block), so any gap between the KV block boundary and the first live
+  /// entry is captured. Previously this started at `ranges.first()` which
+  /// missed the very first void if it lived between kv_block_end and the
+  /// first entry.
+  pub(crate) fn recover_voids_via_gap_scan(&self) -> EngineResult<()> {
+    // WAL begins immediately after the KV block.
+    let wal_start: u64 = {
+      let writer = self.writer.read()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let hdr = writer.file_header();
+      hdr.kv_block_offset + hdr.kv_block_length
+    };
+
+    // Collect (offset, total_length) of all live (non-deleted) entries.
+    let mut ranges: Vec<(u64, u32)> = {
+      let snapshot = self.kv_snapshot.load();
+      let entries = snapshot.iter_all()?;
+      entries.iter()
+        .filter(|e| !e.is_deleted())
+        .map(|e| (e.offset, e.total_length))
+        .collect()
+    };
+    ranges.sort_by_key(|(offset, _)| *offset);
+
+    let mut vm = self.void_manager.write()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+
+    let mut cursor: u64 = wal_start;
+    for (offset, total_length) in &ranges {
+      if *offset > cursor {
+        let gap_size = *offset - cursor;
+        let gap_size_u32 = u32::try_from(gap_size).unwrap_or(u32::MAX);
+        vm.register_void(cursor, gap_size_u32);
+      }
+      cursor = offset + *total_length as u64;
+    }
+
+    tracing::info!(
+      void_count = vm.void_count(),
+      total_void_bytes = vm.total_void_space(),
+      wal_start,
+      "Recovered voids via gap-scan after dirty startup"
+    );
+
+    Ok(())
+  }
+
+  /// Force an immediate hot tail flush. Used by GC sweep after registering
+  /// new voids so the void state is durable without waiting for the normal
+  /// threshold trigger.
+  pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
+    let mut kv = self.kv_writer.lock()
+      .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    kv.force_flush_hot_buffer()
+  }
+
+  /// Mirror VoidManager state into the DiskKVStore's pending_voids so the
+  /// next hot tail flush includes the current void snapshot. Call after any
+  /// operation that changes the void set (GC sweep, void consumption,
+  /// startup population). Also refreshes the void_count + void_space
+  /// counters so dashboard metrics stay accurate.
+  pub(crate) fn sync_voids_to_kv_writer(&self) {
+    let (voids, count, total_bytes) = match self.void_manager.read() {
+      Ok(vm) => {
+        let collected: Vec<crate::engine::hot_tail::VoidRecord> = vm.iter()
+          .map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size })
+          .collect();
+        let total = vm.total_void_space();
+        let count = vm.void_count() as u64;
+        (collected, count, total)
+      }
+      Err(_) => return,
+    };
+    if let Ok(mut kv) = self.kv_writer.lock() {
+      kv.set_pending_voids(voids);
+    }
+    self.counters.load().set_void_stats(count, total_bytes);
   }
 
   /// Open an existing database file.
@@ -613,18 +742,62 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
 
-    let offset = writer.append_entry_with_compression(
-      entry_type, key, value, flags, compression_algo,
+    // Try to consume a void first. If we find one that's big enough, write
+    // the entry in-place at the void's offset instead of growing the WAL.
+    // This is how the GC's freed space gets recycled into new writes.
+    //
+    // The size is computed from the caller-provided `value` length — for
+    // compressed entries, the caller has already compressed the bytes and
+    // `value` holds the compressed payload, so compute_total_length gives
+    // the right disk size.
+    let needed = crate::engine::entry_header::EntryHeader::compute_total_length(
+      self.hash_algo, key.len(), value.len(),
     )?;
+    let void_slot = if let Ok(mut vm) = self.void_manager.write() {
+      vm.find_void(needed)
+    } else {
+      None
+    };
+    let voids_changed_via_consume = void_slot.is_some();
+
+    let (offset, total_length) = if let Some((void_offset, _void_size)) = void_slot {
+      // In-place write at the void's offset. The void is already removed
+      // from void_manager (find_void did it). After this write, the bytes
+      // at void_offset belong to the new entry.
+      //
+      // No explicit fsync here — void-consumption writes ride the same
+      // hot-tail-flush durability path as appends. The whole point of this
+      // plumbing is to AVOID per-entry random fsyncs.
+      let written = writer.write_entry_at_nosync_full(
+        void_offset, entry_type, key, value, flags, compression_algo,
+      )?;
+      (void_offset, written)
+    } else {
+      writer.append_entry_with_compression(
+        entry_type, key, value, flags, compression_algo,
+      )?
+    };
     kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: entry_type.to_kv_type(),
       hash: key.to_vec(),
       offset,
+      total_length,
     };
     kv.insert(kv_entry)?;
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
+
+    // If we consumed a void, the pending_voids snapshot in kv_writer is stale
+    // — refresh it so the next hot tail flush reflects the consumed state.
+    if voids_changed_via_consume {
+      if let Ok(vm) = self.void_manager.read() {
+        let voids: Vec<crate::engine::hot_tail::VoidRecord> = vm.iter()
+          .map(|(o, s)| crate::engine::hot_tail::VoidRecord { offset: o, size: s })
+          .collect();
+        kv.set_pending_voids(voids);
+      }
+    }
 
     // Check if KV block needs expansion (set during insert → flush → resize)
     let pending_expansion = kv.needs_expansion.take();
@@ -639,7 +812,59 @@ impl StorageEngine {
       }
     }
 
+    // If GC is running, record the hash so the sweep phase can spare it.
+    self.record_gc_recheck(key);
+
     Ok(offset)
+  }
+
+  /// Record a write into the GC recheck set if GC mark+sweep is active.
+  /// No-op otherwise. Cheap: one Mutex acquisition + an Option check.
+  fn record_gc_recheck(&self, hash: &[u8]) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_mut() {
+        set.insert(hash.to_vec());
+      }
+    }
+  }
+
+  /// Begin GC recheck tracking. Subsequent writes have their hashes recorded
+  /// into the recheck set. The caller (GC) reads + clears the set via
+  /// `take_gc_recheck` between mark and sweep, and again after sweep.
+  pub fn begin_gc_recheck(&self) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      *guard = Some(HashSet::new());
+    }
+  }
+
+  /// Drain the GC recheck set. Returns the hashes accumulated since the last
+  /// call (or since `begin_gc_recheck`). Leaves an empty set in place so
+  /// recording continues.
+  pub fn take_gc_recheck(&self) -> HashSet<Vec<u8>> {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_mut() {
+        return std::mem::take(set);
+      }
+    }
+    HashSet::new()
+  }
+
+  /// Peek at the GC recheck set without draining. Used during sweep to spare
+  /// in-flight writes (writers can still add while we read).
+  pub fn gc_recheck_contains(&self, hash: &[u8]) -> bool {
+    if let Ok(guard) = self.gc_recheck.lock() {
+      if let Some(set) = guard.as_ref() {
+        return set.contains(hash);
+      }
+    }
+    false
+  }
+
+  /// End GC recheck tracking. Writes will no longer record.
+  pub fn end_gc_recheck(&self) {
+    if let Ok(mut guard) = self.gc_recheck.lock() {
+      *guard = None;
+    }
   }
 
   /// Retrieve an entry by its hash key via a lock-free snapshot read.
@@ -671,7 +896,7 @@ impl StorageEngine {
         "get_entry: read failed at KV offset"
       );
     }
-    result.map(|t| Some(t))
+    result.map(Some)
   }
 
   /// Retrieve an entry by hash, including deleted entries.
@@ -692,7 +917,7 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
     let result = writer.read_entry_at_shared(kv_entry.offset);
-    result.map(|t| Some(t))
+    result.map(Some)
   }
 
   /// Retrieve an entry by hash with BLAKE3 hash verification.
@@ -840,13 +1065,14 @@ impl StorageEngine {
         std::io::Error::other(error.to_string()),
       ))?;
 
-    let offset = writer.append_entry(entry_type, key, value, 0)?;
+    let (offset, total_length) = writer.append_entry(entry_type, key, value, 0)?;
     kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry {
       type_flags: kv_type,
       hash: key.to_vec(),
       offset,
+      total_length,
     };
     kv.insert(kv_entry)?;
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
@@ -878,9 +1104,10 @@ impl StorageEngine {
       ))?;
 
     let mut offsets = Vec::with_capacity(batch.entries.len());
+    let mut totals = Vec::with_capacity(batch.entries.len());
 
     for entry in &batch.entries {
-      let offset = writer.append_entry(
+      let (offset, total_length) = writer.append_entry(
         entry.entry_type,
         &entry.key,
         &entry.value,
@@ -888,6 +1115,7 @@ impl StorageEngine {
       )?;
     kv.set_hot_tail_offset(writer.current_offset());
       offsets.push(offset);
+      totals.push(total_length);
     }
 
     for (i, entry) in batch.entries.iter().enumerate() {
@@ -895,6 +1123,7 @@ impl StorageEngine {
         type_flags: entry.kv_type,
         hash: entry.key.clone(),
         offset: offsets[i],
+        total_length: totals[i],
       };
       kv.insert(kv_entry)?;
     }
@@ -932,9 +1161,10 @@ impl StorageEngine {
       ))?;
 
     let mut offsets = Vec::with_capacity(batch.entries.len());
+    let mut totals = Vec::with_capacity(batch.entries.len());
 
     for entry in &batch.entries {
-      let offset = writer.append_entry(
+      let (offset, total_length) = writer.append_entry(
         entry.entry_type,
         &entry.key,
         &entry.value,
@@ -942,6 +1172,7 @@ impl StorageEngine {
       )?;
       kv.set_hot_tail_offset(writer.current_offset());
       offsets.push(offset);
+      totals.push(total_length);
     }
 
     for (i, entry) in batch.entries.iter().enumerate() {
@@ -949,6 +1180,7 @@ impl StorageEngine {
         type_flags: entry.kv_type,
         hash: entry.key.clone(),
         offset: offsets[i],
+        total_length: totals[i],
       };
       kv.insert(kv_entry)?;
     }
@@ -993,6 +1225,16 @@ impl StorageEngine {
     if let Ok(mut cache) = self.dir_content_cache.write() {
       cache.clear();
     }
+  }
+
+  /// Best-effort sizes of the engine's in-memory caches. Returns
+  /// (permissions, index_config, dir_content) entry counts. Used by
+  /// soak-test instrumentation to attribute RSS growth to specific caches.
+  pub fn engine_cache_sizes(&self) -> (usize, usize, usize) {
+    let perms = self.permissions_cache.len();
+    let idx = self.index_config_cache.len();
+    let dirc = self.dir_content_cache.read().map(|m| m.len()).unwrap_or(0);
+    (perms, idx, dirc)
   }
 
   /// Perform online KV block expansion. Called after a KV flush detects
@@ -1063,7 +1305,7 @@ impl StorageEngine {
 
     // Step 2: Read hot tail into memory, then copy growth zone data to
     // where the hot tail was. The hot tail gets rewritten after.
-    let hot_entries = writer.read_hot_tail_entries(hot_tail_offset, hash_length);
+    let hot_payload = writer.read_hot_tail_payload(hot_tail_offset, hash_length);
 
     // Copy growth zone [old_kv_end .. new_kv_end] to [hot_tail_offset ..]
     let copy_dst = hot_tail_offset;
@@ -1072,7 +1314,7 @@ impl StorageEngine {
     writer.copy_region(old_kv_end, copy_dst, growth_zone_size)?;
 
     // Rewrite hot tail at new position
-    writer.write_hot_tail_at(new_hot_tail, &hot_entries, hash_length)?;
+    writer.write_hot_tail_at(new_hot_tail, &hot_payload, hash_length)?;
 
     // Step 3: Fsync — two copies exist, crash-safe
     writer.sync()?;
@@ -1182,7 +1424,7 @@ impl StorageEngine {
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    vm.register_void(size, offset);
+    vm.register_void(offset, size);
 
     Ok(())
   }
@@ -1217,7 +1459,7 @@ impl StorageEngine {
       .map_err(|error| EngineError::IoError(
         std::io::Error::other(error.to_string()),
       ))?;
-    vm.register_void(size, offset);
+    vm.register_void(offset, size);
 
     Ok(())
   }
@@ -1358,6 +1600,8 @@ impl StorageEngine {
   /// every entry in the `.aeordb` file. Corrupt entries are skipped with a
   /// warning. The rebuilt KV store is swapped in atomically.
   pub fn rebuild_kv(&self) -> EngineResult<()> {
+    let _mem = crate::engine::rss_sampler::PhaseSampler::start(
+      "rebuild_kv", std::time::Duration::from_millis(50));
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
 
@@ -1367,15 +1611,19 @@ impl StorageEngine {
     // For directory entries, we track value_length so we can prefer
     // entries with children over empty entries (e.g., root directory
     // overwritten by ensure_root_directory on a corrupt session).
-    let entries: Vec<(u8, Vec<u8>, u64, u32)> = {
+    // Tuple: (type_flags, hash, offset, value_length, total_length).
+    // value_length is used for the empty-directory dedup heuristic;
+    // total_length is needed to populate KVEntry.total_length for the
+    // void-manager gap-scan that runs on dirty startup.
+    let entries: Vec<(u8, Vec<u8>, u64, u32, u32)> = {
       let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       tracing::debug!(
         writer_offset = writer.current_offset(),
         file_path = %writer.file_path().display(),
-        "rebuild_kv: scanning WAL"
+        "rebuild_kv: scanning WAL to EOF (dirty recovery)"
       );
-      let scanner = writer.scan_entries()?;
+      let scanner = writer.scan_entries_dirty_recovery()?;
       let mut collected = Vec::new();
       for result in scanner {
         match result {
@@ -1385,6 +1633,7 @@ impl StorageEngine {
               scanned.key.clone(),
               scanned.offset,
               scanned.header.value_length,
+              scanned.header.total_length,
             ));
           }
           Err(e) => {
@@ -1408,12 +1657,27 @@ impl StorageEngine {
     let hash_length = hash_algo.hash_length();
     let psize = crate::engine::kv_pages::page_size(hash_length);
 
-    // Determine KV block position, size, and stage.
-    // hot_tail_offset = end of WAL = writer.current_offset()
+    // Determine the true end of the WAL after dirty recovery. We CANNOT
+    // trust `writer.current_offset()` here: on a dirty open, it was seeded
+    // from the stale on-disk `header.hot_tail_offset`, which is updated
+    // only every 100 ms by the hot tail flush timer. Any entry written
+    // between the last flush and the crash sits PAST that offset and was
+    // just discovered by `scan_entries_dirty_recovery`. If we set
+    // hot_tail_offset = writer.current_offset(), header lies about where
+    // valid data ends and the next append clobbers the dirty-recovered
+    // entries — leaving the KV pointing at offsets whose data has been
+    // overwritten (stale KV pattern observed in S2 14-crash soak).
+    //
+    // The real end of the WAL is one byte past the last byte of the
+    // furthest-out entry the scanner returned.
+    let dirty_max_end: u64 = entries.iter()
+      .map(|(_, _, offset, _, total_length)| offset + *total_length as u64)
+      .max()
+      .unwrap_or(0);
     let wal_end = {
       let writer = self.writer.read()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      writer.current_offset()
+      writer.current_offset().max(dirty_max_end)
     };
 
     let (kv_offset, block_size, hot_offset, rebuild_stage) = if kv_block_offset > 0 {
@@ -1447,7 +1711,7 @@ impl StorageEngine {
     // bucket pages, potentially evicting entries from earlier flushes).
     let mut count = 0;
     let dir_type = crate::engine::kv_store::KV_TYPE_DIRECTORY;
-    for (type_flags, hash, offset, value_length) in &entries {
+    for (type_flags, hash, offset, value_length, total_length) in &entries {
       let kv_type = *type_flags & 0x0F;
 
       // For directory entries: if we already have a non-empty version,
@@ -1468,6 +1732,7 @@ impl StorageEngine {
         type_flags: *type_flags,
         hash: hash.clone(),
         offset: *offset,
+        total_length: *total_length,
       };
       new_kv.buffer_only(kv_entry);
       count += 1;
@@ -1501,6 +1766,10 @@ impl StorageEngine {
 
     // Update the file header with the current hot_tail_offset so the
     // hot tail entries (overflow from the KV page capacity) are found on reopen.
+    // ALSO update the writer's in-memory current_offset to match — otherwise
+    // the next append starts at the stale pre-crash hot_tail_offset and
+    // overwrites the dirty-recovered entries the rebuild just installed
+    // into the KV (the "462 stale entries after 14 SIGKILLs" S2 pattern).
     {
       let mut writer = self.writer.write()
         .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
@@ -1513,6 +1782,7 @@ impl StorageEngine {
       header.hot_tail_offset = wal_end;
       header.entry_count = count as u64;
       header.kv_block_stage = final_stage as u8;
+      writer.set_offset(wal_end);
       tracing::debug!(
         kv_block_offset = header.kv_block_offset,
         kv_block_length = header.kv_block_length,
@@ -1553,7 +1823,7 @@ impl StorageEngine {
   }
 
   /// Try to flush the hot buffer if the KV lock is available.
-  /// Used by the 250ms timer task — non-blocking, skips if writer is busy.
+  /// Used by the 100ms timer task — non-blocking, skips if writer is busy.
   pub fn try_flush_hot_buffer(&self) {
     // Sync WAL data to disk first — entries written since last sync are in the
     // OS page cache. This must happen BEFORE writing the hot tail, so that any

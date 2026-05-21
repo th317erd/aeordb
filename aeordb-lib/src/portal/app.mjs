@@ -1,7 +1,7 @@
 'use strict';
 
 import { escapeHtml } from '/shared/utils.js';
-import { showToast } from '/shared/components/aeor-toast.js';
+import { showToast } from '/aeor/components/aeor-toast.js';
 import '/shared/components/aeor-crudlify.js';
 
 window.aeorToast = showToast;
@@ -188,6 +188,59 @@ function setPageParam(page) {
   navigate();
 }
 
+// ---------------------------------------------------------------------------
+// Per-user SSE channel: receive notifications addressed to the current user.
+// JWT-gated; the server only delivers events whose recipient_user_id matches
+// the authenticated user.
+// ---------------------------------------------------------------------------
+
+let _userEventSource = null;
+
+function connectUserEventStream() {
+  if (_userEventSource) return;
+  if (!AUTH.token) return;
+
+  // EventSource doesn't support Authorization headers — pass token as query param.
+  const url = `/events/me?token=${encodeURIComponent(AUTH.token)}`;
+  try {
+    _userEventSource = new EventSource(url);
+
+    _userEventSource.addEventListener('files_shared', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const payload = data.payload || {};
+        const path = payload.path || 'a file';
+        const from = payload.from || 'someone';
+        if (window.aeorToast) {
+          window.aeorToast(`${from} shared ${path} with you`, 'info');
+        }
+
+        // Invalidate the file browser's cached shared-with-me data and
+        // re-fetch its listing so the new share appears immediately
+        // without requiring a page reload.
+        const browser = document.querySelector('aeor-files aeor-file-browser-portal, aeor-files aeor-file-browser');
+        if (browser) {
+          browser._sharedPathData = null;
+          if (typeof browser._fetchListing === 'function') {
+            browser._fetchListing();
+          }
+        }
+      } catch (_) {}
+    });
+
+    _userEventSource.onerror = () => {
+      if (!AUTH.token) {
+        _userEventSource.close();
+        _userEventSource = null;
+      }
+    };
+  } catch (_) {
+    // SSE not supported — silently skip
+  }
+}
+
+window.connectUserEventStream = connectUserEventStream;
+
 // Router
 function navigate() {
   const page = getPageParam();
@@ -225,19 +278,31 @@ function navigate() {
     return;
   }
 
+  // Subscribe to per-user SSE channel (file share notifications, etc).
+  // Idempotent — won't reconnect if already connected.
+  connectUserEventStream();
+
   // Show sidebar when logged in
   if (sidebar) sidebar.style.display = 'flex';
   const mobileTopBar = document.querySelector('.mobile-top-bar');
   if (mobileTopBar) mobileTopBar.style.display = '';
 
-  // Hide admin sidebar items for non-root users
+  // Hide admin sidebar items for non-root users.
+  // Snapshots is admin-only — affects HEAD globally, only root can manage.
+  // Keys is self-service so all users see it.
   const isRoot = AUTH.currentUserId && AUTH.currentUserId() === '00000000-0000-0000-0000-000000000000';
   document.querySelectorAll('.nav-link').forEach((link) => {
     const pg = link.dataset.page;
-    if (pg === 'users' || pg === 'groups' || pg === 'settings') {
+    if (pg === 'users' || pg === 'groups' || pg === 'settings' || pg === 'snapshots') {
       link.style.display = isRoot ? '' : 'none';
     }
   });
+
+  // If a non-root user lands on an admin-only page via URL, redirect to files.
+  if (!isRoot && (page === 'users' || page === 'groups' || page === 'settings' || page === 'snapshots')) {
+    setPageParam('files');
+    return;
+  }
 
   // Hide login if it exists
   const login = main.querySelector('aeor-login');

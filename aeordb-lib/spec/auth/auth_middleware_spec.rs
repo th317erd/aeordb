@@ -50,6 +50,21 @@ fn reader_token(jwt_manager: &JwtManager) -> String {
   jwt_manager.create_token(&claims).expect("create reader token")
 }
 
+/// Create a root JWT with scope="sync" (what the sync engine mints internally).
+fn sync_scoped_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "00000000-0000-0000-0000-000000000000".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: Some("sync".to_string()),
+    permissions: None,
+    key_id: None,
+  };
+  jwt_manager.create_token(&claims).expect("create sync-scoped token")
+}
+
 async fn body_json(body: Body) -> serde_json::Value {
   let bytes = body.collect().await.unwrap().to_bytes().to_vec();
   serde_json::from_slice(&bytes).expect("valid JSON response body")
@@ -575,4 +590,95 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
     .to_bytes()
     .to_vec();
   assert_eq!(String::from_utf8(body_bytes).unwrap(), "e2e test data");
+}
+
+// ---------------------------------------------------------------------------
+// Sync-scoped JWT enforcement
+// ---------------------------------------------------------------------------
+// The sync engine mints root JWTs (cluster shares the signing key) so peer
+// nodes can call /sync/diff and /sync/chunks. Without a scope claim, a leaked
+// sync token would grant unrestricted root access anywhere in the cluster.
+// We mint with scope="sync" and the middleware rejects that scope on every
+// non-/sync/* path.
+
+#[tokio::test]
+async fn test_sync_scoped_token_blocked_on_files_route() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let token = sync_scoped_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/test/file.txt")
+    .header("authorization", format!("Bearer {}", token))
+    .header("content-type", "text/plain")
+    .body(Body::from("hello"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+  let json = body_json(response.into_body()).await;
+  assert!(
+    json["error"].as_str().unwrap().contains("scope"),
+    "Expected scope error, got: {}",
+    json["error"]
+  );
+}
+
+#[tokio::test]
+async fn test_sync_scoped_token_blocked_on_admin_route() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let token = sync_scoped_token(&jwt_manager);
+
+  // /system/users is a root-only admin endpoint. Even though the sub claim
+  // is root (nil UUID), the scope must block this call before the handler
+  // runs.
+  let request = Request::builder()
+    .uri("/system/users")
+    .header("authorization", format!("Bearer {}", token))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_sync_scoped_token_allowed_on_sync_route() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let token = sync_scoped_token(&jwt_manager);
+
+  // /sync/peers should NOT be rejected by the scope check (it's under /sync/).
+  // It may still 404 or whatever the handler does — the important thing is
+  // that scope enforcement doesn't fire.
+  let request = Request::builder()
+    .uri("/sync/peers")
+    .header("authorization", format!("Bearer {}", token))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_ne!(
+    response.status(),
+    StatusCode::FORBIDDEN,
+    "sync-scoped token must not be 403'd on a /sync/ path"
+  );
+}
+
+#[tokio::test]
+async fn test_unscoped_root_token_allowed_on_files_route() {
+  // Sanity: ensure unscoped root tokens are still accepted by the new check.
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let token = admin_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/test/file.txt")
+    .header("authorization", format!("Bearer {}", token))
+    .header("content-type", "text/plain")
+    .body(Body::from("hello"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
 }

@@ -3,7 +3,6 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::FILE_HEADER_SIZE;
 
 #[derive(Debug)]
 pub struct ScannedEntry {
@@ -28,34 +27,54 @@ pub struct EntryScanner {
 
 impl EntryScanner {
   pub fn new(file: File) -> EngineResult<Self> {
-    Self::new_internal(file, false)
+    Self::new_internal(file, false, false)
   }
 
   /// Create a scanner that reports errors for corrupt entries instead of skipping.
   pub fn new_reporting(file: File) -> EngineResult<Self> {
-    Self::new_internal(file, true)
+    Self::new_internal(file, true, false)
   }
 
-  fn new_internal(mut file: File, report_errors: bool) -> EngineResult<Self> {
-    // Read header to determine where the WAL starts (after KV block)
-    file.seek(SeekFrom::Start(0))?;
-    let mut header_bytes = [0u8; FILE_HEADER_SIZE];
-    file.read_exact(&mut header_bytes)?;
-    let header = crate::engine::file_header::FileHeader::deserialize(&header_bytes)?;
+  /// Construct a scanner for dirty-startup recovery: ignore the stale
+  /// `header.hot_tail_offset` boundary and scan to EOF.
+  ///
+  /// **Why this matters.** `header.hot_tail_offset` is updated only by the
+  /// 100ms flush timer. Any WAL entry written between the last header update
+  /// and the crash sits PAST `hot_tail_offset` but before EOF. Using the
+  /// stale offset as the scan end silently drops those entries during
+  /// `rebuild_kv`. Scanning to EOF lets `scan_for_next_magic` skip any
+  /// torn-write garbage at the tail and recover the real entries beyond it.
+  pub fn new_dirty_recovery(file: File) -> EngineResult<Self> {
+    Self::new_internal(file, true, true)
+  }
+
+  fn new_internal(mut file: File, report_errors: bool, dirty_recovery: bool) -> EngineResult<Self> {
+    // Read the active header slot (v3 A/B layout).
+    let (header, _slot) = crate::engine::file_header::read_active_header(&mut file)?;
 
     // Determine WAL scan range based on layout.
-    // Standard layout: [Header] [KV block] [WAL] [Hot tail]
+    // Standard layout: [Header A/B] [KV block] [WAL] [Hot tail]
     //   → start = kv_block_offset + kv_block_length, end = hot_tail_offset
-    // Legacy layout:   [Header] [WAL] [KV block] [Hot tail]
-    //   → start = FILE_HEADER_SIZE, end = kv_block_offset (KV is after WAL)
-    // No KV layout:    [Header] [WAL]
-    //   → start = FILE_HEADER_SIZE, end = EOF
-    let header_end = FILE_HEADER_SIZE as u64;
+    // Legacy layout:   [Header A/B] [WAL] [KV block] [Hot tail]
+    //   → start = HEADER_REGION_SIZE, end = kv_block_offset (KV is after WAL)
+    // No KV layout:    [Header A/B] [WAL]
+    //   → start = HEADER_REGION_SIZE, end = EOF
+    //
+    // For `dirty_recovery == true`, every standard/no-KV branch falls back
+    // to EOF regardless of `hot_tail_offset`; the legacy branch is unaffected
+    // because the KV block (not the hot tail) bounds the WAL there.
+    let header_end = crate::engine::file_header::HEADER_REGION_SIZE as u64;
     let (start_offset, file_length) = if header.kv_block_offset > 0 && header.kv_block_length > 0 {
       if header.kv_block_offset == header_end {
         // Standard: KV at head, WAL after
         let start = header.kv_block_offset + header.kv_block_length;
-        let end = if header.hot_tail_offset > start { header.hot_tail_offset } else { file.seek(SeekFrom::End(0))? };
+        let end = if dirty_recovery {
+          file.seek(SeekFrom::End(0))?
+        } else if header.hot_tail_offset > start {
+          header.hot_tail_offset
+        } else {
+          file.seek(SeekFrom::End(0))?
+        };
         (start, end)
       } else {
         // Legacy repair: KV placed after WAL
@@ -64,7 +83,13 @@ impl EntryScanner {
       }
     } else {
       // No KV block at all
-      let end = if header.hot_tail_offset > 0 { header.hot_tail_offset } else { file.seek(SeekFrom::End(0))? };
+      let end = if dirty_recovery {
+        file.seek(SeekFrom::End(0))?
+      } else if header.hot_tail_offset > 0 {
+        header.hot_tail_offset
+      } else {
+        file.seek(SeekFrom::End(0))?
+      };
       (header_end, end)
     };
     file.seek(SeekFrom::Start(start_offset))?;
@@ -99,7 +124,7 @@ impl EntryScanner {
     }
 
     let mut buffer = vec![0u8; window_size];
-    if let Err(_) = self.file.read_exact(&mut buffer) {
+    if self.file.read_exact(&mut buffer).is_err() {
       // Partial read — truncate to what we actually have
       if self.file.seek(SeekFrom::Start(start)).is_err() {
         return None;

@@ -32,7 +32,10 @@ use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{FileHeader, FILE_HEADER_SIZE};
+use crate::engine::file_header::{
+  read_active_header, write_header_to_inactive_slot, write_initial_header,
+  FileHeader, HEADER_REGION_SIZE,
+};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
@@ -41,6 +44,9 @@ pub struct AppendWriter {
   file_path: std::path::PathBuf,
   file_header: FileHeader,
   current_offset: u64,
+  /// Which slot (0 or 1) the most recent header read came from. The next
+  /// update writes to the opposite slot. See file_header::read_active_header.
+  active_slot: usize,
 }
 
 impl AppendWriter {
@@ -51,13 +57,13 @@ impl AppendWriter {
       .create_new(true)
       .open(path)?;
 
-    let file_header = FileHeader::new(HashAlgorithm::Blake3_256);
-    let header_bytes = file_header.serialize();
-    file.write_all(&header_bytes)?;
-    file.sync_all()?;
+    let mut file_header = FileHeader::new(HashAlgorithm::Blake3_256);
+    // v3: write slot A only (slot B left zeroed), data region starts after
+    // both slots.
+    write_initial_header(&mut file, &mut file_header)?;
 
     let reader = File::open(path)?;
-    let current_offset = FILE_HEADER_SIZE as u64;
+    let current_offset = HEADER_REGION_SIZE as u64;
 
     Ok(AppendWriter {
       file,
@@ -65,6 +71,7 @@ impl AppendWriter {
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
+      active_slot: 0,
     })
   }
 
@@ -74,9 +81,7 @@ impl AppendWriter {
       .write(true)
       .open(path)?;
 
-    let mut header_bytes = [0u8; FILE_HEADER_SIZE];
-    file.read_exact(&mut header_bytes)?;
-    let file_header = FileHeader::deserialize(&header_bytes)?;
+    let (file_header, active_slot) = read_active_header(&mut file)?;
 
     let reader = File::open(path)?;
     let current_offset = file.seek(SeekFrom::End(0))?;
@@ -87,6 +92,7 @@ impl AppendWriter {
       file_path: path.to_path_buf(),
       file_header,
       current_offset,
+      active_slot,
     })
   }
 
@@ -105,23 +111,43 @@ impl AppendWriter {
     self.current_offset
   }
 
-  /// Update the file header in place (seek to 0, write 256 bytes, sync).
+  /// Update the file header by writing to the INACTIVE slot (A/B double-buffer).
+  ///
+  /// The new header carries an incremented sequence number, so on next open
+  /// `read_active_header` picks the slot we just wrote. The previously-active
+  /// slot is left untouched and remains a valid rollback point if the write
+  /// crashes mid-flight.
+  ///
+  /// Crash safety order (handled by `write_header_to_inactive_slot`):
+  ///   1. fsync (durable-ize all prior writes — protects against the
+  ///      hot_tail_offset-past-EOF corruption that hit xenocept)
+  ///   2. write new header bytes to the inactive slot
+  ///   3. fsync (durable-ize the new header)
+  ///
+  /// A crash between steps 2 and 3 leaves the inactive slot with a
+  /// partially-flushed header; on next read its CRC fails or its sequence is
+  /// behind the active slot, so the OLD slot wins. State rolls back cleanly.
   pub fn update_header(&mut self, header: &FileHeader) -> EngineResult<()> {
-    self.file_header = header.clone();
-    let bytes = header.serialize();
-    self.file.seek(SeekFrom::Start(0))?;
-    self.file.write_all(&bytes)?;
-    self.file.sync_data()?;
+    let mut new_header = header.clone();
+    // Carry the current sequence forward — write_header_to_inactive_slot
+    // increments it for us.
+    new_header.sequence = self.file_header.sequence;
+
+    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
+
+    self.file_header = new_header;
+    self.active_slot = 1 - self.active_slot;
     Ok(())
   }
 
+  /// Append an entry at the current WAL tail. Returns (entry_offset, total_length).
   pub fn append_entry(
     &mut self,
     entry_type: EntryType,
     key: &[u8],
     value: &[u8],
     flags: u8,
-  ) -> EngineResult<u64> {
+  ) -> EngineResult<(u64, u32)> {
     self.append_entry_with_compression(
       entry_type,
       key,
@@ -131,6 +157,8 @@ impl AppendWriter {
     )
   }
 
+  /// Append an entry at the current WAL tail with optional compression.
+  /// Returns (entry_offset, total_length).
   pub fn append_entry_with_compression(
     &mut self,
     entry_type: EntryType,
@@ -138,11 +166,11 @@ impl AppendWriter {
     value: &[u8],
     flags: u8,
     compression_algo: CompressionAlgorithm,
-  ) -> EngineResult<u64> {
+  ) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -169,7 +197,7 @@ impl AppendWriter {
     self.file.write_all(key)?;
     self.file.write_all(value)?;
 
-    // No per-entry fsync — the hot tail (flushed every 250ms) provides crash
+    // No per-entry fsync — the hot tail (flushed every 100ms) provides crash
     // recovery. WAL data reaches disk via the periodic timer sync in
     // try_flush_hot_buffer(). This eliminates ~4,000 fsync calls per 1GB upload.
 
@@ -177,10 +205,10 @@ impl AppendWriter {
     self.file_header.entry_count += 1;
     self.file_header.updated_at = now;
 
-    Ok(entry_offset)
+    Ok((entry_offset, total_length))
   }
 
-  pub fn write_void(&mut self, size: u32) -> EngineResult<u64> {
+  pub fn write_void(&mut self, size: u32) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let header_size = 31 + hash_algo.hash_length(); // fixed header + hash
 
@@ -218,7 +246,7 @@ impl AppendWriter {
 
   /// Write an entry at a specific offset WITHOUT syncing.
   /// Caller is responsible for calling `sync()` after all writes are done.
-  /// Used by GC sweep for batch in-place overwrites.
+  /// Used by GC sweep for batch in-place overwrites and by void consumption.
   pub fn write_entry_at_nosync(
     &mut self,
     offset: u64,
@@ -226,19 +254,47 @@ impl AppendWriter {
     key: &[u8],
     value: &[u8],
   ) -> EngineResult<u32> {
+    self.write_entry_at_nosync_full(offset, entry_type, key, value, 0, CompressionAlgorithm::None)
+  }
+
+  /// Same as [`write_entry_at_nosync`] but lets the caller specify the
+  /// entry header `flags` (e.g. `FLAG_SYSTEM`).
+  pub fn write_entry_at_nosync_with_flags(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+  ) -> EngineResult<u32> {
+    self.write_entry_at_nosync_full(offset, entry_type, key, value, flags, CompressionAlgorithm::None)
+  }
+
+  /// Full-fidelity in-place write: flags + compression_algo. The `value`
+  /// bytes are written verbatim — the caller is responsible for compressing
+  /// the data before this call if `compression_algo != None`.
+  pub fn write_entry_at_nosync_full(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+  ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len() as u32, value.len() as u32);
+      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
     let header = EntryHeader {
       entry_version: CURRENT_ENTRY_VERSION,
       entry_type,
-      flags: 0,
+      flags,
       hash_algo,
-      compression_algo: CompressionAlgorithm::None,
+      compression_algo,
       encryption_algo: 0,
       key_length: key.len() as u32,
       value_length: value.len() as u32,
@@ -290,9 +346,14 @@ impl AppendWriter {
     Ok(())
   }
 
-  /// Write hot tail entries at a specific offset using this writer's file handle.
-  pub fn write_hot_tail_at(&mut self, offset: u64, entries: &[crate::engine::kv_store::KVEntry], hash_length: usize) -> EngineResult<u64> {
-    let end = crate::engine::hot_tail::write_hot_tail(&mut self.file, offset, entries, hash_length)?;
+  /// Write hot tail payload (pending KV writes + voids) at a specific offset.
+  pub fn write_hot_tail_at(
+    &mut self,
+    offset: u64,
+    payload: &crate::engine::hot_tail::HotTailPayload,
+    hash_length: usize,
+  ) -> EngineResult<u64> {
+    let end = crate::engine::hot_tail::write_hot_tail(&mut self.file, offset, payload, hash_length)?;
     Ok(end)
   }
 
@@ -309,14 +370,20 @@ impl AppendWriter {
     Ok(())
   }
 
-  /// Read hot tail entries from this writer's reader handle.
-  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
+  /// Read hot tail payload (writes + voids) from this writer's reader handle.
+  /// Returns an empty payload if the hot tail is missing, torn, or unreadable.
+  pub fn read_hot_tail_payload(&self, offset: u64, hash_length: usize) -> crate::engine::hot_tail::HotTailPayload {
     let mut reader = match self.reader.try_clone() {
       Ok(r) => r,
-      Err(_) => return Vec::new(),
+      Err(_) => return crate::engine::hot_tail::HotTailPayload::default(),
     };
     crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length)
       .unwrap_or_default()
+  }
+
+  /// Backwards-compatible wrapper that returns only the write entries.
+  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
+    self.read_hot_tail_payload(offset, hash_length).writes
   }
 
   /// Write a void entry at a specific file offset (in-place overwrite).
@@ -489,6 +556,16 @@ impl AppendWriter {
     EntryScanner::new_reporting(file)
   }
 
+  /// Scan the WAL for dirty-startup recovery: ignore the stale
+  /// `header.hot_tail_offset` and walk to EOF. **MUST** be used by
+  /// `rebuild_kv` when the hot tail was detected as corrupt/missing —
+  /// otherwise entries written between the last 100ms timer flush and the
+  /// crash are silently dropped.
+  pub fn scan_entries_dirty_recovery(&self) -> EngineResult<EntryScanner> {
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new_dirty_recovery(file)
+  }
+
   pub fn file_header(&self) -> &FileHeader {
     &self.file_header
   }
@@ -497,12 +574,19 @@ impl AppendWriter {
     self.current_offset
   }
 
+  /// As `update_header`. In the A/B world the distinction between
+  /// `sync_data` and `sync_all` is no longer load-bearing — both
+  /// `write_header_to_inactive_slot` calls `sync_data` and the file extent
+  /// metadata is already established. Kept as a separate method for callers
+  /// who semantically want "fully durable header update".
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
-    self.file_header = header.clone();
-    let header_bytes = self.file_header.serialize();
-    self.file.seek(SeekFrom::Start(0))?;
-    self.file.write_all(&header_bytes)?;
+    let mut new_header = header.clone();
+    new_header.sequence = self.file_header.sequence;
+    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
+    // sync_all for the full-durability semantics the old API promised.
     self.file.sync_all()?;
+    self.file_header = new_header;
+    self.active_slot = 1 - self.active_slot;
     Ok(())
   }
 }

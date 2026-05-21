@@ -45,9 +45,15 @@ impl RateLimiter {
     }
   }
 
-  /// Create a rate limiter with default settings (5 requests per 60 seconds).
+  /// Create a rate limiter with default settings (30 requests per 60 seconds).
+  ///
+  /// Note: this is used by BOTH the magic-link request endpoint and the
+  /// auth-token exchange endpoint. 30/60s gives legitimate users plenty of
+  /// retries on auth/token (where argon2 is the real cost) while still
+  /// bounding spam on magic-link emails. The previous default of 5/60s
+  /// locked out legitimate batch flows.
   pub fn default_config() -> Self {
-    Self::new(5, 60)
+    Self::new(30, 60)
   }
 
   /// Check whether a request from the given key is allowed.

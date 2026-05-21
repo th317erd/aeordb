@@ -69,12 +69,12 @@ fn seed_conflict(engine: &StorageEngine, path: &str) {
     let ops = DirectoryOps::new(engine);
 
     // Store winner at the real path
-    ops.store_file(&ctx, path, b"winner-content", Some("text/plain"))
+    ops.store_file_buffered(&ctx, path, b"winner-content", Some("text/plain"))
         .unwrap();
 
     // Store loser at a temp path
     let loser_path = format!("/tmp/loser{}", path);
-    ops.store_file(&ctx, &loser_path, b"loser-content", Some("text/plain"))
+    ops.store_file_buffered(&ctx, &loser_path, b"loser-content", Some("text/plain"))
         .unwrap();
 
     let algo = engine.hash_algo();

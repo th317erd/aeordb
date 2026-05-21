@@ -661,7 +661,7 @@ async fn test_load_cors_config_from_engine() {
         ]
     }"#;
 
-    ops.store_file(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json"))
+    ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json"))
         .unwrap();
 
     let rules = aeordb::server::load_cors_config(&engine);
@@ -702,7 +702,7 @@ async fn test_load_cors_config_invalid_json() {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
 
-    ops.store_file(&ctx, "/.aeordb-config/cors.json", b"not valid json", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", b"not valid json", Some("application/json"))
         .unwrap();
 
     let rules = aeordb::server::load_cors_config(&engine);
@@ -720,7 +720,7 @@ async fn test_build_cors_state() {
     let ops = DirectoryOps::new(&engine);
 
     let config_json = r#"{"rules": [{"path": "/api/*", "origins": ["https://api.com"]}]}"#;
-    ops.store_file(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json"))
+    ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json"))
         .unwrap();
 
     let state = aeordb::server::build_cors_state(Some("https://default.com"), &engine);

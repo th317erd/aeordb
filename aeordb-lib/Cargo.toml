@@ -6,6 +6,15 @@ license-file.workspace = true
 repository.workspace = true
 autobenches = false
 
+[features]
+default = []
+# Cluster auto-healing module is a stub today (request_chunk_from_peer
+# always returns Err). The module is gated behind this opt-in flag so it
+# doesn't compile by default — preventing accidental wiring that would
+# create a false sense of corruption recovery. Remove the flag once the
+# HTTP transport is implemented.
+auto_heal_unimplemented = []
+
 [dependencies]
 crc32fast = "1"
 # File locking
@@ -194,6 +203,10 @@ path = "spec/engine/directory_ops_spec.rs"
 [[test]]
 name = "versioning_spec"
 path = "spec/engine/versioning_spec.rs"
+
+[[test]]
+name = "lifecycle_config_spec"
+path = "spec/engine/lifecycle_config_spec.rs"
 
 [[test]]
 name = "file_lock_spec"
@@ -712,3 +725,10 @@ path = "spec/http/global_search_http_spec.rs"
 name = "cache_and_hardlinks_spec"
 path = "spec/engine/cache_and_hardlinks_spec.rs"
 
+[[test]]
+name = "header_repair_spec"
+path = "spec/engine/header_repair_spec.rs"
+
+
+[lints]
+workspace = true

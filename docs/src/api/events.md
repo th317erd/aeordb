@@ -6,7 +6,8 @@ AeorDB publishes real-time events via Server-Sent Events (SSE). Clients can subs
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| GET | `/system/events` | SSE event stream | Yes |
+| GET | `/system/events` | Global SSE event stream (all events, filtered by permissions) | Yes |
+| GET | `/events/me` | Per-user SSE channel (events addressed to the authenticated user) | Yes |
 
 ---
 
@@ -207,6 +208,58 @@ evtSource.onerror = (err) => {
   console.error('SSE error:', err);
 };
 ```
+
+---
+
+## GET /events/me
+
+A per-user SSE channel that delivers ONLY events addressed to the authenticated user. The server filters the event bus and forwards an event only when its `recipient_user_id` matches the JWT's `sub` claim. Generic events with no recipient (heartbeats, system metrics, file uploads, etc.) are NOT delivered here — those go through `/system/events`.
+
+This channel is the security boundary for personal notifications: each user can only see events sent specifically to them, even if multiple users are subscribed simultaneously.
+
+### Request
+
+```bash
+curl -N http://localhost:6830/events/me \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+EventSource (browsers can't set Authorization headers on SSE):
+
+```javascript
+const evt = new EventSource('/events/me?token=' + encodeURIComponent(token));
+evt.addEventListener('files_shared', (e) => {
+  const payload = JSON.parse(e.data).payload;
+  alert(`${payload.from} shared ${payload.path} with you`);
+});
+```
+
+### Event Types Currently Routed Here
+
+| Event | Payload | Triggered By |
+|-------|---------|--------------|
+| `files_shared` | `{ path, permissions, from }` | A `POST /files/share` call where the recipient is in the `users` list. One event per (recipient, path). |
+
+Additional per-user event types (group invitations, mentions, etc.) will be added on this channel — the recipient field is the routing boundary.
+
+### Event Envelope
+
+```json
+{
+  "event_id": "uuid",
+  "event_type": "files_shared",
+  "timestamp": 1778391000000,
+  "user_id": "00000000-0000-0000-0000-000000000000",
+  "recipient_user_id": "6874d1cd-…",
+  "payload": {
+    "path": "/Pictures/Family/photo.jpg",
+    "permissions": ".r..l...",
+    "from": "Root"
+  }
+}
+```
+
+`user_id` is the actor (who performed the action). `recipient_user_id` matches the authenticated subscriber.
 
 ---
 

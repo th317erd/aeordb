@@ -59,7 +59,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops.store_file(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 /// Create two separate directories (/people and /products) each with their own
@@ -439,7 +439,7 @@ async fn test_has_more_when_more_results_exist() {
     })).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["has_more"].as_bool().unwrap(), true, "has_more should be true when more results exist");
+    assert!(json["has_more"].as_bool().unwrap(), "has_more should be true when more results exist");
   }
 }
 
@@ -456,7 +456,7 @@ async fn test_has_more_false_when_all_returned() {
   })).await;
 
   assert_eq!(status, StatusCode::OK);
-  assert_eq!(json["has_more"].as_bool().unwrap(), false, "has_more should be false when all results fit in limit");
+  assert!(!json["has_more"].as_bool().unwrap(), "has_more should be false when all results fit in limit");
 }
 
 // ===========================================================================
@@ -666,7 +666,7 @@ async fn test_no_matching_results_returns_empty() {
 
   let results = json["results"].as_array().unwrap();
   assert!(results.is_empty(), "nonsense query should return empty results");
-  assert_eq!(json["has_more"].as_bool().unwrap(), false);
+  assert!(!json["has_more"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -844,7 +844,7 @@ async fn test_offset_beyond_results_returns_empty() {
 
   let results = json["results"].as_array().unwrap();
   assert!(results.is_empty(), "offset beyond total should return empty results");
-  assert_eq!(json["has_more"].as_bool().unwrap(), false);
+  assert!(!json["has_more"].as_bool().unwrap());
 }
 
 // ===========================================================================

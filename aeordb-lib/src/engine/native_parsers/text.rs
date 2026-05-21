@@ -1,8 +1,8 @@
-/// Native text/code/markdown parser.
-///
-/// Ported from `aeordb-plugin-parser-text`.
+//! Native text/code/markdown parser.
+//!
+//! Ported from `aeordb-plugin-parser-text`.
 
-/// UTF-8 BOM bytes (0xEF, 0xBB, 0xBF).
+//! UTF-8 BOM bytes (0xEF, 0xBB, 0xBF).
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
 pub fn parse(data: &[u8], filename: &str, content_type: &str, size: u64) -> Result<serde_json::Value, String> {

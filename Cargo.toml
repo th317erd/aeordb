@@ -16,6 +16,12 @@ edition = "2021"
 license-file = "LICENSE-BSL.md"
 repository = "https://github.com/th317erd/aeordb"
 
+[workspace.lints.clippy]
+# `3.14` is a recognizable-but-not-PI representative float used in tests. Clippy
+# defaults `approx_constant` to deny because it confuses the literal with
+# std::f64::consts::PI; for our test corpus that's a false positive.
+approx_constant = "allow"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

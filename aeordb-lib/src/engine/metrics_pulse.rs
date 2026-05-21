@@ -40,9 +40,12 @@ pub fn spawn_metrics_pulse(
             let rates = rate_trackers.snapshot();
 
             // Get the db file size from disk metadata.
-            let db_file_size = std::fs::metadata(&db_path)
+            let disk_total = std::fs::metadata(&db_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
+
+            // statvfs for the partition holding the db file.
+            let disk_health = crate::engine::health::check_disk(&db_path);
 
             // Compute derived metrics.
             let dedup_savings = snapshot.logical_data_size.saturating_sub(snapshot.chunk_data_size);
@@ -67,7 +70,7 @@ pub fn spawn_metrics_pulse(
                     "chunk_data": snapshot.chunk_data_size,
                     "void_space": snapshot.void_space,
                     "dedup_savings": dedup_savings,
-                    "db_file_size": db_file_size,
+                    "disk_total": disk_total,
                 },
                 "throughput": {
                     "writes_per_sec": {
@@ -98,6 +101,7 @@ pub fn spawn_metrics_pulse(
                 "health": {
                     "write_buffer_depth": snapshot.write_buffer_depth,
                     "dedup_hit_rate": dedup_hit_rate,
+                    "disk_usage_percent": disk_health.usage_percent,
                 },
             });
 

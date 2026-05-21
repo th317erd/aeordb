@@ -11,7 +11,6 @@ use aeordb::engine::peer_connection::PeerConfig;
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_store;
-use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::user::{ROOT_USER_ID, User};
 use aeordb::engine::DirectoryOps;
 use aeordb::server::create_temp_engine_for_tests;
@@ -433,6 +432,7 @@ fn test_store_and_get_refresh_token() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::days(30),
         is_revoked: false,
+      key_id: None,
     };
 
     system_store::store_refresh_token(&engine, &ctx, &record).unwrap();
@@ -462,6 +462,7 @@ fn test_revoke_refresh_token() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::days(30),
         is_revoked: false,
+      key_id: None,
     };
 
     system_store::store_refresh_token(&engine, &ctx, &record).unwrap();
@@ -621,7 +622,7 @@ fn test_system_data_in_directory_tree() {
 
     // Walk the version tree and check that /.aeordb-system/ entries are present.
     let ops = DirectoryOps::new(&engine);
-    let children = ops.list_directory("/.system").unwrap();
+    let children = ops.list_directory("/.aeordb-system").unwrap();
     let child_names: Vec<String> = children.iter().map(|c| c.name.clone()).collect();
 
     assert!(
@@ -637,19 +638,30 @@ fn test_system_data_in_directory_tree() {
 }
 
 #[test]
-fn test_system_data_appears_in_version_tree() {
+fn test_system_data_appears_in_subtree_walk() {
+    // System paths are NOT reachable via walk_version_tree(HEAD) by design
+    // (system data isn't in the user-visible directory tree). To check
+    // system data made it to disk, walk_subtree the /.aeordb-system/config
+    // subtree directly — that's the API peer sync (and backup) use.
     let (engine, _dir) = setup();
     let ctx = test_context();
 
     system_store::store_config(&engine, &ctx, "tree_check", b"hello").unwrap();
 
-    let head = engine.head_hash().unwrap();
-    let tree = walk_version_tree(&engine, &head).unwrap();
-    let all_paths: Vec<&String> = tree.files.keys().collect();
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let dir_path = "/.aeordb-system/config";
+    let key = aeordb::engine::directory_ops::directory_path_hash(dir_path, &algo).unwrap();
+    let (_, _, raw) = engine.get_entry_including_deleted(&key).unwrap().unwrap();
+    let dir_hash = if raw.len() == hash_length { raw } else { algo.compute_hash(&raw).unwrap() };
 
+    let mut tree = aeordb::engine::tree_walker::VersionTree::new();
+    aeordb::engine::tree_walker::walk_subtree(&engine, dir_path, &dir_hash, &mut tree).unwrap();
+
+    let all_paths: Vec<&String> = tree.files.keys().collect();
     assert!(
-        all_paths.iter().any(|p| p.contains("/.aeordb-system/")),
-        "version tree should contain /.aeordb-system/ paths, got: {:?}",
+        all_paths.iter().any(|p: &&String| p.contains("tree_check")),
+        "subtree walk should contain the stored config, got: {:?}",
         all_paths
     );
 }
@@ -689,21 +701,21 @@ fn test_migrate_apikeys_to_api_keys() {
     let record = make_api_key_record(Uuid::new_v4());
     let json = serde_json::to_vec(&record).unwrap();
     let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
-    ops.store_file(&ctx, &old_path, &json, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, &old_path, &json, Some("application/json")).unwrap();
 
     // Verify old path exists before migration.
-    assert!(ops.read_file(&old_path).is_ok());
+    assert!(ops.read_file_buffered(&old_path).is_ok());
 
     // Run migration.
     system_store::migrate_system_paths(&engine).unwrap();
 
     // Verify data now lives at the new path.
     let new_path = format!("/.aeordb-system/api-keys/{}", key_id);
-    let migrated_data = ops.read_file(&new_path).unwrap();
+    let migrated_data = ops.read_file_buffered(&new_path).unwrap();
     assert_eq!(migrated_data, json);
 
     // Verify old path is gone.
-    assert!(ops.read_file(&old_path).is_err());
+    assert!(ops.read_file_buffered(&old_path).is_err());
 }
 
 #[test]
@@ -716,21 +728,21 @@ fn test_migrate_cluster_sync_to_sync_peers() {
     let peer_id = "42";
     let state_json = br#"{"last_synced_hash":"abc123","last_synced_at":"2026-04-18T00:00:00Z"}"#;
     let old_path = format!("/.aeordb-system/cluster/sync/{}", peer_id);
-    ops.store_file(&ctx, &old_path, state_json, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, &old_path, state_json, Some("application/json")).unwrap();
 
     // Verify old path exists before migration.
-    assert!(ops.read_file(&old_path).is_ok());
+    assert!(ops.read_file_buffered(&old_path).is_ok());
 
     // Run migration.
     system_store::migrate_system_paths(&engine).unwrap();
 
     // Verify data now lives at the new path.
     let new_path = format!("/.aeordb-system/sync-peers/{}", peer_id);
-    let migrated_data = ops.read_file(&new_path).unwrap();
+    let migrated_data = ops.read_file_buffered(&new_path).unwrap();
     assert_eq!(migrated_data, state_json.to_vec());
 
     // Verify old path is gone.
-    assert!(ops.read_file(&old_path).is_err());
+    assert!(ops.read_file_buffered(&old_path).is_err());
 }
 
 #[test]
@@ -744,11 +756,11 @@ fn test_migration_is_idempotent() {
     let record = make_api_key_record(Uuid::new_v4());
     let json = serde_json::to_vec(&record).unwrap();
     let old_api_path = format!("/.aeordb-system/apikeys/{}", key_id);
-    ops.store_file(&ctx, &old_api_path, &json, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, &old_api_path, &json, Some("application/json")).unwrap();
 
     let old_sync_path = "/.aeordb-system/cluster/sync/99";
     let sync_data = b"sync-state-data";
-    ops.store_file(&ctx, old_sync_path, sync_data, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, old_sync_path, sync_data, Some("application/octet-stream")).unwrap();
 
     // Run migration twice — second run should not error or corrupt data.
     system_store::migrate_system_paths(&engine).unwrap();
@@ -756,11 +768,11 @@ fn test_migration_is_idempotent() {
 
     // Verify data at new paths is intact.
     let new_api_path = format!("/.aeordb-system/api-keys/{}", key_id);
-    let api_data = ops.read_file(&new_api_path).unwrap();
+    let api_data = ops.read_file_buffered(&new_api_path).unwrap();
     assert_eq!(api_data, json);
 
     let new_sync_path = "/.aeordb-system/sync-peers/99";
-    let sync_result = ops.read_file(new_sync_path).unwrap();
+    let sync_result = ops.read_file_buffered(new_sync_path).unwrap();
     assert_eq!(sync_result, sync_data.to_vec());
 }
 
@@ -786,18 +798,18 @@ fn test_migration_preserves_existing_new_path_data() {
     // Write data at the NEW path first (simulates already-migrated data).
     let new_data = b"new-path-data";
     let new_path = format!("/.aeordb-system/api-keys/{}", key_id);
-    ops.store_file(&ctx, &new_path, new_data, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, &new_path, new_data, Some("application/octet-stream")).unwrap();
 
     // Write DIFFERENT data at the OLD path (simulates a stale leftover).
     let old_data = b"old-path-data";
     let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
-    ops.store_file(&ctx, &old_path, old_data, Some("application/octet-stream")).unwrap();
+    ops.store_file_buffered(&ctx, &old_path, old_data, Some("application/octet-stream")).unwrap();
 
     // Run migration — should skip this entry because new path already exists.
     system_store::migrate_system_paths(&engine).unwrap();
 
     // The new path should retain its original data (not overwritten).
-    let result = ops.read_file(&new_path).unwrap();
+    let result = ops.read_file_buffered(&new_path).unwrap();
     assert_eq!(result, new_data.to_vec());
 }
 
@@ -813,7 +825,7 @@ fn test_migration_handles_multiple_entries() {
         let key_id = Uuid::new_v4();
         let data = format!("record-data-{}", i).into_bytes();
         let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
-        ops.store_file(&ctx, &old_path, &data, Some("application/octet-stream")).unwrap();
+        ops.store_file_buffered(&ctx, &old_path, &data, Some("application/octet-stream")).unwrap();
         expected_data.insert(key_id, data);
     }
 
@@ -823,10 +835,343 @@ fn test_migration_handles_multiple_entries() {
     // Verify all entries exist at new paths.
     for (key_id, data) in &expected_data {
         let new_path = format!("/.aeordb-system/api-keys/{}", key_id);
-        let migrated = ops.read_file(&new_path).unwrap();
+        let migrated = ops.read_file_buffered(&new_path).unwrap();
         assert_eq!(&migrated, data);
 
         let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
-        assert!(ops.read_file(&old_path).is_err(), "old path should be gone: {}", old_path);
+        assert!(ops.read_file_buffered(&old_path).is_err(), "old path should be gone: {}", old_path);
     }
+}
+
+// Reproducer for the 2026-05-20 storage-order-write-stomp bug report:
+// when store_user (which internally also calls store_group) precedes
+// store_magic_link in the same request context, the magic-link record
+// is unreadable on the very next get_magic_link call.
+#[test]
+fn store_user_then_magic_link_then_get_magic_link() {
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+    let (engine, _tmp) = setup();
+    let ctx = test_context();
+
+    let code_plain = "ABCDEFGHIJKLMNOP".to_string();
+    let code_hash = hash_magic_link_code(&code_plain);
+    let now = Utc::now();
+    let record = MagicLinkRecord {
+        code_hash: code_hash.clone(),
+        email: "repro@example.com".to_string(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+        is_used: false,
+    };
+
+    // Buggy order: store_user (writes user + auto-group) FIRST, then magic-link.
+    let user = User::new("repro@example.com", Some("repro@example.com"));
+    system_store::store_user(&engine, &ctx, &user).expect("store_user");
+    system_store::store_magic_link(&engine, &ctx, &record).expect("store_magic_link");
+
+    // Immediate readback in the SAME process — bug report says this returns None.
+    let found = system_store::get_magic_link(&engine, &code_hash)
+        .expect("get_magic_link");
+    assert!(
+        found.is_some(),
+        "expected magic-link record to be findable after store_user → store_magic_link"
+    );
+}
+
+// Dirty-startup variant of the storage-order-write-stomp repro.
+// User reported the bug ALSO emits "Corrupt or missing hot tail —
+// will rebuild KV from WAL" + "Corrupt entry header at offset 71138"
+// on every startup. Try to reproduce with a damaged-then-reopened DB.
+#[test]
+fn store_user_then_magic_link_after_dirty_startup() {
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+    use std::io::{Seek, SeekFrom, Write};
+
+    // Build a DB with some content, then close.
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("repro.aeordb");
+    {
+        let engine = Arc::new(StorageEngine::create(db_path.to_str().unwrap()).unwrap());
+        let ctx = RequestContext::system();
+        // Write a few entries to grow the WAL past 50KB.
+        let ops = DirectoryOps::new(&engine);
+        for i in 0..30 {
+            let path = format!("/scratch/file_{:03}.txt", i);
+            let body = vec![b'X'; 2048]; // 2KB each → 60KB total
+            ops.store_file_buffered(&ctx, &path, &body, Some("text/plain")).unwrap();
+        }
+        engine.shutdown().unwrap();
+    }
+
+    // Corrupt the hot tail region — overwrite the last 256 bytes of the file
+    // with garbage so the dirty-startup path triggers.
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&db_path).unwrap();
+        let size = f.metadata().unwrap().len();
+        f.seek(SeekFrom::Start(size - 256)).unwrap();
+        f.write_all(&[0xFFu8; 256]).unwrap();
+    }
+
+    // Re-open — should trigger dirty startup + KV rebuild.
+    let engine = Arc::new(StorageEngine::open(db_path.to_str().unwrap()).unwrap());
+    let ctx = RequestContext::system();
+
+    let code_plain = "DIRTY-STARTUP-TEST".to_string();
+    let code_hash = hash_magic_link_code(&code_plain);
+    let now = Utc::now();
+    let record = MagicLinkRecord {
+        code_hash: code_hash.clone(),
+        email: "dirty@example.com".to_string(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+        is_used: false,
+    };
+
+    let user = User::new("dirty@example.com", Some("dirty@example.com"));
+    system_store::store_user(&engine, &ctx, &user).expect("store_user post-dirty");
+    system_store::store_magic_link(&engine, &ctx, &record).expect("store_magic_link post-dirty");
+
+    let found = system_store::get_magic_link(&engine, &code_hash)
+        .expect("get_magic_link post-dirty");
+    assert!(
+        found.is_some(),
+        "expected magic-link record to be findable after dirty startup + user→magic-link writes"
+    );
+}
+
+// Closer to the user's actual handler: use RequestContext::with_bus
+// (the constructor they use), do the get_user_by_username probe first,
+// then store user, then store magic-link.
+#[test]
+fn handler_flow_email_signup_first_time() {
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code, generate_magic_link_code};
+    use aeordb::engine::event_bus::EventBus;
+
+    let (engine, _tmp) = setup();
+    let event_bus = Arc::new(EventBus::new());
+    let ctx = RequestContext::with_bus(event_bus.clone());
+
+    let email = "repro@example.com";
+
+    // Step 1: check if user exists.
+    let existing = system_store::get_user_by_username(&engine, email).expect("get_user_by_username");
+    assert!(existing.is_none());
+
+    // Step 2: create user (writes user + auto-group).
+    let user = User::new(email, Some(email));
+    system_store::store_user(&engine, &ctx, &user).expect("store_user");
+
+    // Step 3: create magic-link record.
+    let code = generate_magic_link_code();
+    let code_hash = hash_magic_link_code(&code);
+    let now = Utc::now();
+    let record = MagicLinkRecord {
+        code_hash: code_hash.clone(),
+        email: email.to_string(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+        is_used: false,
+    };
+    system_store::store_magic_link(&engine, &ctx, &record).expect("store_magic_link");
+
+    // Step 4: simulate the verify endpoint reading back.
+    let found = system_store::get_magic_link(&engine, &code_hash)
+        .expect("get_magic_link");
+    assert!(found.is_some(), "magic-link record must be findable");
+
+    // Also confirm user is readable (in case there's collateral damage).
+    let recovered_user = system_store::get_user_by_username(&engine, email)
+        .expect("re-fetch user");
+    assert!(recovered_user.is_some(), "user must be findable");
+}
+
+// Reproducer for the parent-dir-stomp variant of the user's report.
+// The user's DB shows /.aeordb-system contains {config, cluster,
+// magic-links} but is missing /users, /groups, /api-keys, /snapshots
+// — even though writes to all of those happened. Each write under
+// /.aeordb-system/* seems to be overwriting the parent's child list
+// rather than appending.
+#[test]
+fn parent_dir_must_accumulate_children_across_writes() {
+    let (engine, _tmp) = setup();
+    let ctx = test_context();
+    let ops = DirectoryOps::new(&engine);
+
+    // Reproduce the user's observed write order: config first (their DB
+    // had it before signup), then user/group via store_user, then
+    // magic-link. After all writes, /.aeordb-system must list every
+    // direct-child subdirectory.
+    ops.store_file_buffered(
+        &ctx, "/.aeordb-system/config/email.json", b"{}",
+        Some("application/json"),
+    ).unwrap();
+    ops.store_file_buffered(
+        &ctx, "/.aeordb-system/cluster/peer.json", b"{}",
+        Some("application/json"),
+    ).unwrap();
+
+    let user = User::new("repro@example.com", Some("repro@example.com"));
+    system_store::store_user(&engine, &ctx, &user).unwrap();
+
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+    let code_hash = hash_magic_link_code("ABC");
+    let now = Utc::now();
+    let record = MagicLinkRecord {
+        code_hash: code_hash.clone(),
+        email: "repro@example.com".to_string(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+        is_used: false,
+    };
+    system_store::store_magic_link(&engine, &ctx, &record).unwrap();
+
+    // /.aeordb-system must list ALL the subdirs we touched.
+    let children = ops.list_directory("/.aeordb-system").unwrap();
+    let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    eprintln!("/.aeordb-system children: {:?}", sorted);
+
+    for required in &["config", "cluster", "users", "groups", "magic-links"] {
+        assert!(
+            names.contains(required),
+            "/.aeordb-system is missing child {:?}. Saw: {:?}",
+            required, sorted,
+        );
+    }
+
+    // And the lookups must work end-to-end.
+    let found_user = system_store::get_user_by_username(&engine, "repro@example.com").unwrap();
+    assert!(found_user.is_some(), "user lookup must succeed");
+
+    let found_link = system_store::get_magic_link(&engine, &code_hash).unwrap();
+    assert!(found_link.is_some(), "magic-link lookup must succeed");
+}
+
+// Process-restart variant: write some children, abandon the engine without
+// shutdown (simulating SIGKILL / power loss), reopen, check the parent
+// listing. The user's server logs "Corrupt or missing hot tail — will
+// rebuild KV from WAL" on every startup, which suggests crash-style
+// shutdown is the norm in their environment.
+#[test]
+fn parent_dir_must_survive_dirty_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("repro.aeordb").to_str().unwrap().to_string();
+
+    // Round 1: seed config, cluster, magic-link.
+    {
+        let engine = Arc::new(StorageEngine::create(&db_path).unwrap());
+        let ctx = RequestContext::system();
+        let ops = DirectoryOps::new(&engine);
+        ops.store_file_buffered(
+            &ctx, "/.aeordb-system/config/email.json", b"{}",
+            Some("application/json"),
+        ).unwrap();
+        ops.store_file_buffered(
+            &ctx, "/.aeordb-system/cluster/peer.json", b"{}",
+            Some("application/json"),
+        ).unwrap();
+
+        use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+        let now = Utc::now();
+        let record = MagicLinkRecord {
+            code_hash: hash_magic_link_code("ROUND1"),
+            email: "r1@example.com".into(),
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+            is_used: false,
+        };
+        system_store::store_magic_link(&engine, &ctx, &record).unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    // Round 2: reopen, do user + magic-link (the user's buggy order).
+    {
+        let engine = Arc::new(StorageEngine::open(&db_path).unwrap());
+        let ctx = RequestContext::system();
+        let user = User::new("r2@example.com", Some("r2@example.com"));
+        system_store::store_user(&engine, &ctx, &user).unwrap();
+        use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+        let now = Utc::now();
+        let record = MagicLinkRecord {
+            code_hash: hash_magic_link_code("ROUND2"),
+            email: "r2@example.com".into(),
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+            is_used: false,
+        };
+        system_store::store_magic_link(&engine, &ctx, &record).unwrap();
+        // INTENTIONALLY no shutdown — simulate SIGKILL / power loss.
+        // The Arc<StorageEngine> drops without flushing the hot tail.
+        drop(engine);
+    }
+
+    // Round 3: reopen (dirty startup), enumerate /.aeordb-system.
+    {
+        let engine = Arc::new(StorageEngine::open(&db_path).unwrap());
+        let ops = DirectoryOps::new(&engine);
+        let listing = ops.list_directory("/.aeordb-system").unwrap();
+        let names: Vec<&str> = listing.iter().map(|c| c.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        eprintln!("after dirty restart, /.aeordb-system: {:?}", sorted);
+
+        for required in &["config", "cluster", "users", "groups", "magic-links"] {
+            assert!(
+                names.contains(required),
+                "/.aeordb-system is missing child {:?} after dirty restart. Saw: {:?}",
+                required, sorted,
+            );
+        }
+    }
+}
+
+// Wiring smoke test for the 2026-05-20 dirty-startup write-loss fix.
+// `create_app_with_auth_mode` now spawns the 100ms hot-buffer flush
+// timer that the CLI used to install by hand — this asserts the
+// helper survives being called, the timer task spawns onto the test's
+// tokio runtime, and a write that goes through it is still
+// readable on reopen. Note: a true SIGTERM regression (Drop never
+// runs) needs a two-process harness — we can't release the file lock
+// in-process — so this is a wiring smoke test, not a full crash test.
+// The production verification is on-server soak after deploy.
+#[tokio::test]
+async fn timer_flushes_writes_without_explicit_shutdown() {
+    use aeordb::auth::magic_link::{MagicLinkRecord, DEFAULT_MAGIC_LINK_EXPIRY_SECONDS, hash_magic_link_code};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("repro.aeordb").to_str().unwrap().to_string();
+
+    let code_hash = hash_magic_link_code("TIMER-TEST");
+
+    {
+        let engine = Arc::new(StorageEngine::create(&db_path).unwrap());
+        aeordb::server::spawn_hot_buffer_flush_timer(engine.clone(), None);
+
+        let ctx = RequestContext::system();
+        let user = User::new("timer@example.com", Some("timer@example.com"));
+        system_store::store_user(&engine, &ctx, &user).unwrap();
+
+        let now = Utc::now();
+        let record = MagicLinkRecord {
+            code_hash: code_hash.clone(),
+            email: "timer@example.com".into(),
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(DEFAULT_MAGIC_LINK_EXPIRY_SECONDS),
+            is_used: false,
+        };
+        system_store::store_magic_link(&engine, &ctx, &record).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+        drop(engine);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let engine = Arc::new(StorageEngine::open(&db_path).unwrap());
+    let found = system_store::get_magic_link(&engine, &code_hash).unwrap();
+    assert!(
+        found.is_some(),
+        "magic-link record must be readable after engine drop with timer wired"
+    );
 }

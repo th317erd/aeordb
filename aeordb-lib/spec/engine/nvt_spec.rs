@@ -27,13 +27,13 @@ fn test_hash_converter_scalar_range() {
   // All zeros -> 0.0
   let zero_hash = vec![0u8; 32];
   let scalar = converter.to_scalar(&zero_hash);
-  assert!(scalar >= 0.0 && scalar <= 1.0, "scalar {} out of range", scalar);
+  assert!((0.0..=1.0).contains(&scalar), "scalar {} out of range", scalar);
   assert_eq!(scalar, 0.0);
 
   // All 0xFF -> ~1.0
   let max_hash = vec![0xFF; 32];
   let scalar = converter.to_scalar(&max_hash);
-  assert!(scalar >= 0.0 && scalar <= 1.0, "scalar {} out of range", scalar);
+  assert!((0.0..=1.0).contains(&scalar), "scalar {} out of range", scalar);
   assert!((scalar - 1.0).abs() < 1e-10, "max hash scalar should be ~1.0, got {}", scalar);
 }
 
@@ -252,7 +252,7 @@ fn test_nvt_with_u64_converter() {
   // Value 500 -> bucket ~50
   let mid_bytes = 500u64.to_be_bytes();
   let bucket = nvt.bucket_for_value(&mid_bytes);
-  assert!(bucket >= 45 && bucket <= 55, "500/1000 should map near bucket 50, got {}", bucket);
+  assert!((45..=55).contains(&bucket), "500/1000 should map near bucket 50, got {}", bucket);
 
   // Value 1000 -> last bucket
   let max_bytes = 1000u64.to_be_bytes();

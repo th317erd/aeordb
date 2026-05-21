@@ -149,7 +149,7 @@ async fn test_cancel_task_via_http() {
     // Cancel it via HTTP
     let request = Request::builder()
         .method("DELETE")
-        .uri(&format!("/system/tasks/{}", task_id))
+        .uri(format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -180,7 +180,7 @@ async fn test_get_task_by_id() {
 
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/system/tasks/{}", task_id))
+        .uri(format!("/system/tasks/{}", task_id))
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
@@ -331,7 +331,7 @@ async fn test_auto_trigger_on_indexes_json_store() {
     // Ensure the parent directory exists
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/data/test.txt", b"hello", Some("text/plain")).unwrap();
 
     // Store indexes.json via the engine PUT endpoint
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);
@@ -567,7 +567,7 @@ async fn test_auto_trigger_cancels_existing_reindex() {
     // Ensure the parent directory exists
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/data/test.txt", b"hello", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/data/test.txt", b"hello", Some("text/plain")).unwrap();
 
     // Store indexes.json which should cancel the existing reindex and create a new one
     let app2 = rebuild_app(&jwt_manager, &engine, &task_queue);

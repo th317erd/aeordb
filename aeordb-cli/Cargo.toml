@@ -9,6 +9,18 @@ repository.workspace = true
 name = "aeordb"
 path = "src/main.rs"
 
+[[bin]]
+name = "crash-soak-worker"
+path = "src/bin/crash-soak-worker.rs"
+
+[[bin]]
+name = "soak-worker"
+path = "src/bin/soak-worker.rs"
+
+[[bin]]
+name = "gc-bench"
+path = "src/bin/gc-bench.rs"
+
 [dependencies]
 aeordb = { path = "../aeordb-lib" }
 axum = "0.8"
@@ -20,6 +32,7 @@ tokio-util = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
@@ -30,10 +43,15 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
+libc = "0.2"
 
 [[test]]
 name = "stress_spec"
 path = "spec/stress_spec.rs"
+
+[[test]]
+name = "crash_inject_spec"
+path = "spec/crash_inject_spec.rs"
 
 [[test]]
 name = "emergency_reset_spec"
@@ -42,3 +60,6 @@ path = "spec/emergency_reset_spec.rs"
 [[test]]
 name = "config_spec"
 path = "spec/config_spec.rs"
+
+[lints]
+workspace = true

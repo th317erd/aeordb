@@ -68,7 +68,10 @@ class AeorDashboard extends HTMLElement {
 
   connectSSE() {
     // Build SSE URL — subscribe to metrics events
-    let url = '/events/stream?events=metrics';
+    let url = '/system/events?events=metrics';
+    if (window.AUTH && window.AUTH.token) {
+      url += '&token=' + encodeURIComponent(window.AUTH.token);
+    }
 
     // EventSource doesn't support Authorization headers natively.
     // For --auth=false mode, no token is needed. For auth mode,
@@ -78,9 +81,15 @@ class AeorDashboard extends HTMLElement {
 
       this._eventSource.addEventListener('metrics', (event) => {
         try {
-          const data = JSON.parse(event.data);
-          this._stats = data;
-          this.updateIdentityBar(data.identity);
+          const envelope = JSON.parse(event.data);
+          // SSE delivers the full EngineEvent envelope (event_id, event_type,
+          // payload, ...). The stats body is in `payload`. Tolerate the older
+          // unwrapped shape too in case a peer or proxy strips the envelope.
+          const data = envelope && envelope.payload ? envelope.payload : envelope;
+          // Identity is static; the pulse omits it. Keep the last seen one
+          // (from the initial /system/stats fetch) so the bar doesn't blank.
+          this._stats = { ...(this._stats || {}), ...data };
+          this.updateIdentityBar(this._stats.identity);
           this.updateStatCards(data);
           this.updateThroughput(data.throughput);
           this.updateHealthIndicators(data.health);

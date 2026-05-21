@@ -109,6 +109,7 @@ async fn body_json(body: Body) -> serde_json::Value {
   serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
+#[allow(dead_code)] // available for future tests; kept beside seed_revoked_api_key
 fn seed_api_key(engine: &StorageEngine) -> String {
   let ctx = RequestContext::system();
 
@@ -125,7 +126,7 @@ fn seed_api_key(engine: &StorageEngine) -> String {
     label: None,
     rules: vec![],
   };
-  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  system_store::store_api_key(engine, &ctx, &record).unwrap();
   plaintext_key
 }
 
@@ -145,7 +146,7 @@ fn seed_revoked_api_key(engine: &StorageEngine) -> String {
     label: None,
     rules: vec![],
   };
-  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  system_store::store_api_key(engine, &ctx, &record).unwrap();
   plaintext_key
 }
 

@@ -9,7 +9,8 @@ fn make_entry(hash_byte: u8, offset: u64) -> KVEntry {
     type_flags: KV_TYPE_CHUNK,
     hash,
     offset,
-  }
+    total_length: 64,
+        }
 }
 
 #[test]

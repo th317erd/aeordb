@@ -242,7 +242,7 @@ fn test_trigram_converter_to_scalar_range() {
   for trigram in &["  h", " he", "hel", "ell", "llo", "lo ", "abc", "xyz"] {
     let scalar = converter.to_scalar(trigram.as_bytes());
     assert!(
-      scalar >= 0.0 && scalar <= 1.0,
+      (0.0..=1.0).contains(&scalar),
       "scalar {} out of [0,1] for trigram '{}'",
       scalar,
       trigram
@@ -345,7 +345,7 @@ fn test_trigram_index_store_and_load() {
   for entry in &index.entries {
     assert_eq!(entry.file_hash, file_hash);
     assert!(
-      entry.scalar >= 0.0 && entry.scalar <= 1.0,
+      (0.0..=1.0).contains(&entry.scalar),
       "scalar {} out of range",
       entry.scalar
     );
@@ -427,7 +427,7 @@ fn test_trigram_converter_to_scalar_empty_input() {
   let converter = TrigramConverter;
   // blake3 can hash empty input - should still produce a valid scalar
   let scalar = converter.to_scalar(b"");
-  assert!(scalar >= 0.0 && scalar <= 1.0, "empty input scalar {} out of range", scalar);
+  assert!((0.0..=1.0).contains(&scalar), "empty input scalar {} out of range", scalar);
 }
 
 #[test]

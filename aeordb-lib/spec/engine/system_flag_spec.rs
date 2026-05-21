@@ -73,7 +73,7 @@ fn test_system_file_identity_hash() {
 fn test_is_system_path() {
     // Positive cases
     assert!(is_system_path("/.aeordb-system/config/key"), "/.aeordb-system/config/key is a system path");
-    assert!(is_system_path("/.system"), "/.system is a system path");
+    assert!(is_system_path("/.aeordb-system"), "/.system is a system path");
     assert!(is_system_path("/.aeordb-system/"), "/.aeordb-system/ is a system path");
     assert!(is_system_path("/.aeordb-system/deeply/nested/path"), "deeply nested system path");
 

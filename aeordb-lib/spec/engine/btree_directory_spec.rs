@@ -22,7 +22,22 @@ fn store_n_files(engine: &StorageEngine, dir: &str, n: usize) {
     for i in 0..n {
         let name = format!("{}/file_{:05}.json", dir, i);
         let data = format!("{{\"idx\":{}}}", i);
-        ops.store_file(&ctx, &name, data.as_bytes(), Some("application/json")).unwrap();
+        ops.store_file_buffered(&ctx, &name, data.as_bytes(), Some("application/json")).unwrap();
+    }
+}
+
+/// Resolve a directory's raw value, following hard links if present. Directory
+/// entries can be stored as either inline data or as a hash pointer to the
+/// content-addressed entry — tests that check the on-disk format must follow
+/// the link to see the actual btree/flat bytes.
+fn resolve_directory_value(engine: &StorageEngine, dir_key: &[u8]) -> Vec<u8> {
+    let (_, _, raw) = engine.get_entry(dir_key).unwrap().unwrap();
+    let hash_length = engine.hash_algo().hash_length();
+    if raw.len() == hash_length {
+        // Hard link to content-hashed entry — follow it.
+        engine.get_entry(&raw).unwrap().unwrap().2
+    } else {
+        raw
     }
 }
 
@@ -43,7 +58,7 @@ fn test_small_directory_stays_flat() {
     // Verify it's still flat format by reading the raw directory data
     let algo = engine.hash_algo();
     let dir_key = directory_path_hash("/small", &algo).unwrap();
-    let (_, _, raw_data) = engine.get_entry(&dir_key).unwrap().unwrap();
+    let raw_data = resolve_directory_value(&engine, &dir_key);
     assert!(!is_btree_format(&raw_data), "directory with 100 entries should remain flat");
 }
 
@@ -60,7 +75,7 @@ fn test_directory_at_threshold_minus_one_stays_flat() {
 
     let algo = engine.hash_algo();
     let dir_key = directory_path_hash("/edge", &algo).unwrap();
-    let (_, _, raw_data) = engine.get_entry(&dir_key).unwrap().unwrap();
+    let raw_data = resolve_directory_value(&engine, &dir_key);
     assert!(!is_btree_format(&raw_data), "directory at threshold-1 should remain flat");
 }
 
@@ -82,7 +97,7 @@ fn test_large_directory_converts_to_btree() {
     // Verify it's in B-tree format
     let algo = engine.hash_algo();
     let dir_key = directory_path_hash("/large", &algo).unwrap();
-    let (_, _, raw_data) = engine.get_entry(&dir_key).unwrap().unwrap();
+    let raw_data = resolve_directory_value(&engine, &dir_key);
     assert!(is_btree_format(&raw_data), "directory with {} entries should be B-tree format", count);
 }
 
@@ -98,7 +113,7 @@ fn test_exact_threshold_converts_to_btree() {
 
     let algo = engine.hash_algo();
     let dir_key = directory_path_hash("/exact", &algo).unwrap();
-    let (_, _, raw_data) = engine.get_entry(&dir_key).unwrap().unwrap();
+    let raw_data = resolve_directory_value(&engine, &dir_key);
     assert!(is_btree_format(&raw_data), "directory at exact threshold should be B-tree format");
 }
 
@@ -141,7 +156,7 @@ fn test_btree_directory_add_file_after_conversion() {
     // Add one more after conversion
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
-    ops.store_file(&ctx, "/grow/extra.json", b"{}", Some("application/json"))
+    ops.store_file_buffered(&ctx, "/grow/extra.json", b"{}", Some("application/json"))
         .unwrap();
 
     let children = ops.list_directory("/grow/").unwrap();
@@ -159,7 +174,7 @@ fn test_btree_directory_add_many_after_conversion() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     for i in 0..100 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/grow2/extra_{:03}.json", i),
             b"{}",
@@ -174,7 +189,7 @@ fn test_btree_directory_add_many_after_conversion() {
     // Still in B-tree format
     let algo = engine.hash_algo();
     let dir_key = directory_path_hash("/grow2", &algo).unwrap();
-    let (_, _, raw_data) = engine.get_entry(&dir_key).unwrap().unwrap();
+    let raw_data = resolve_directory_value(&engine, &dir_key);
     assert!(is_btree_format(&raw_data));
 }
 
@@ -256,7 +271,7 @@ fn test_btree_directory_overwrite_file() {
 
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
-    ops.store_file(
+    ops.store_file_buffered(
         &ctx,
         "/overwrite/file_00050.json",
         b"new_data",
@@ -268,7 +283,7 @@ fn test_btree_directory_overwrite_file() {
     assert_eq!(children.len(), 300); // same count, not duplicated
 
     // Verify the content was updated
-    let data = ops.read_file("/overwrite/file_00050.json").unwrap();
+    let data = ops.read_file_buffered("/overwrite/file_00050.json").unwrap();
     assert_eq!(data, b"new_data");
 }
 
@@ -283,7 +298,7 @@ fn test_btree_directory_read_file_works() {
     store_n_files(&engine, "/read", 300);
 
     let ops = DirectoryOps::new(&engine);
-    let data = ops.read_file("/read/file_00150.json").unwrap();
+    let data = ops.read_file_buffered("/read/file_00150.json").unwrap();
     assert_eq!(data, b"{\"idx\":150}");
 }
 
@@ -294,8 +309,8 @@ fn test_btree_directory_read_first_and_last_files() {
     store_n_files(&engine, "/readfl", 300);
 
     let ops = DirectoryOps::new(&engine);
-    assert_eq!(ops.read_file("/readfl/file_00000.json").unwrap(), b"{\"idx\":0}");
-    assert_eq!(ops.read_file("/readfl/file_00299.json").unwrap(), b"{\"idx\":299}");
+    assert_eq!(ops.read_file_buffered("/readfl/file_00000.json").unwrap(), b"{\"idx\":0}");
+    assert_eq!(ops.read_file_buffered("/readfl/file_00299.json").unwrap(), b"{\"idx\":299}");
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +330,7 @@ fn test_btree_directory_snapshot_preserves_state() {
     // Add more files after the snapshot
     let ops = DirectoryOps::new(&engine);
     for i in 300..310 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/snap/file_{:05}.json", i),
             b"{}",
@@ -366,8 +381,8 @@ fn test_mixed_format_coexistence() {
     let algo = engine.hash_algo();
     let small_key = directory_path_hash("/small", &algo).unwrap();
     let large_key = directory_path_hash("/large", &algo).unwrap();
-    let (_, _, small_data) = engine.get_entry(&small_key).unwrap().unwrap();
-    let (_, _, large_data) = engine.get_entry(&large_key).unwrap().unwrap();
+    let small_data = resolve_directory_value(&engine, &small_key);
+    let large_data = resolve_directory_value(&engine, &large_key);
     assert!(!is_btree_format(&small_data));
     assert!(is_btree_format(&large_data));
 }
@@ -385,7 +400,7 @@ fn test_root_directory_stays_flat() {
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     for i in 0..5 {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/dir{}/file.json", i),
             b"{}",
@@ -457,7 +472,7 @@ fn test_btree_directory_file_not_found_after_delete() {
     ops.delete_file(&ctx, "/notfound/file_00050.json").unwrap();
 
     // File should not be readable
-    let result = ops.read_file("/notfound/file_00050.json");
+    let result = ops.read_file_buffered("/notfound/file_00050.json");
     assert!(result.is_err(), "deleted file should not be readable");
 }
 
@@ -517,7 +532,7 @@ fn test_btree_directory_interleaved_insert_delete() {
     for i in 0..20 {
         ops.delete_file(&ctx, &format!("/interleave/file_{:05}.json", i * 5))
             .unwrap();
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/interleave/new_{:03}.json", i),
             b"{}",
@@ -559,7 +574,7 @@ fn test_snapshot_before_btree_conversion() {
     // Now push over the threshold
     let ops = DirectoryOps::new(&engine);
     for i in below..(BTREE_CONVERSION_THRESHOLD + 50) {
-        ops.store_file(
+        ops.store_file_buffered(
             &ctx,
             &format!("/conv/file_{:05}.json", i),
             b"{}",

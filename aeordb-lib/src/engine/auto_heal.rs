@@ -2,6 +2,16 @@
 //!
 //! When corruption is detected and the node has peers, attempt to
 //! recover the corrupt entry from a healthy peer before quarantining.
+//!
+//! **STATUS: STUB.** `request_chunk_from_peer` always returns `Err` and the
+//! `try_heal_from_peers` framework cannot actually recover a chunk. The
+//! module is gated behind `cfg(feature = "auto_heal_unimplemented")` so it
+//! doesn't compile by default, preventing accidental wiring that would
+//! create a false sense of corruption recovery. Re-enable when the
+//! transport layer is implemented (use `sync_engine::do_sync_cycle_remote`
+//! as a reference — same HTTP+JWT pattern).
+
+#![cfg(feature = "auto_heal_unimplemented")]
 
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;

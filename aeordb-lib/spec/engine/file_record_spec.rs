@@ -229,12 +229,18 @@ fn deserialize_version_0_works() {
 }
 
 #[test]
-fn deserialize_unknown_version_falls_back_to_v0() {
-    // Currently unknown versions also use v0 deserialization.
+fn deserialize_unknown_version_returns_error() {
+    // Unknown entry versions must produce a hard error, not silently fall
+    // back to v0 deserialization (which would risk misinterpreting future
+    // on-disk layouts).
     let record = make_record("/vX.txt", None, 50, vec![vec![0x34; BLAKE3_HASH_LEN]]);
     let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-    let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 99).unwrap();
-    assert_eq!(restored, record);
+    let err = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 99).unwrap_err();
+    assert!(
+        matches!(err, aeordb::engine::errors::EngineError::InvalidEntryVersion(99)),
+        "expected InvalidEntryVersion(99), got {:?}",
+        err
+    );
 }
 
 // ===========================================================================

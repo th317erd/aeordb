@@ -40,6 +40,9 @@ pub struct EngineCounters {
 
     // Write buffer
     pub write_buffer_depth: AtomicU64,
+
+    // Void tracking — count + total bytes of reusable space.
+    pub void_count: AtomicU64,
 }
 
 /// A plain (non-atomic) snapshot of all counter values at a point in time.
@@ -61,6 +64,7 @@ pub struct CountersSnapshot {
     pub bytes_read_total: u64,
     pub chunks_deduped_total: u64,
     pub write_buffer_depth: u64,
+    pub void_count: u64,
 }
 
 impl EngineCounters {
@@ -82,6 +86,7 @@ impl EngineCounters {
             bytes_read_total: AtomicU64::new(0),
             chunks_deduped_total: AtomicU64::new(0),
             write_buffer_depth: AtomicU64::new(0),
+            void_count: AtomicU64::new(0),
         }
     }
 
@@ -191,6 +196,11 @@ impl EngineCounters {
         self.write_buffer_depth.store(depth, Ordering::Relaxed);
     }
 
+    pub fn set_void_stats(&self, count: u64, total_bytes: u64) {
+        self.void_count.store(count, Ordering::Relaxed);
+        self.void_space.store(total_bytes, Ordering::Relaxed);
+    }
+
     // ── Snapshot / reconcile ─────────────────────────────────────────────
 
     /// Capture a point-in-time snapshot of all counter values.
@@ -212,6 +222,7 @@ impl EngineCounters {
             bytes_read_total: self.bytes_read_total.load(Ordering::Relaxed),
             chunks_deduped_total: self.chunks_deduped_total.load(Ordering::Relaxed),
             write_buffer_depth: self.write_buffer_depth.load(Ordering::Relaxed),
+            void_count: self.void_count.load(Ordering::Relaxed),
         }
     }
 
@@ -230,6 +241,7 @@ impl EngineCounters {
         self.logical_data_size.store(snapshot.logical_data_size, Ordering::Relaxed);
         self.chunk_data_size.store(snapshot.chunk_data_size, Ordering::Relaxed);
         self.void_space.store(snapshot.void_space, Ordering::Relaxed);
+        self.void_count.store(snapshot.void_count, Ordering::Relaxed);
         self.write_buffer_depth.store(snapshot.write_buffer_depth, Ordering::Relaxed);
     }
 
@@ -245,6 +257,14 @@ impl EngineCounters {
         let all_entries = kv_snapshot.iter_all().unwrap_or_default();
         let hash_length = engine.hash_algo().hash_length();
 
+        // Reading every FileRecord and Chunk payload off the WAL just to sum
+        // logical_data_size and chunk_data_size is multi-GB of disk I/O for
+        // a real DB. Gate the size accumulation on AEORDB_INIT_COUNTERS_FULL
+        // for callers that need accurate sizes at startup; default skip.
+        let accumulate_sizes = std::env::var("AEORDB_INIT_COUNTERS_FULL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
         let mut logical_size: u64 = 0;
         let mut chunk_size: u64 = 0;
 
@@ -252,11 +272,11 @@ impl EngineCounters {
             match entry.entry_type() {
                 KV_TYPE_FILE_RECORD => {
                     counters.files.fetch_add(1, Ordering::Relaxed);
-
-                    // Read the file record from the WAL to get total_size
-                    if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-                        if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
-                            logical_size += record.total_size;
+                    if accumulate_sizes {
+                        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
+                            if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
+                                logical_size += record.total_size;
+                            }
                         }
                     }
                 }
@@ -268,10 +288,10 @@ impl EngineCounters {
                 }
                 KV_TYPE_CHUNK => {
                     counters.chunks.fetch_add(1, Ordering::Relaxed);
-
-                    // Read the chunk from the WAL to get its data size
-                    if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-                        chunk_size += value.len() as u64;
+                    if accumulate_sizes {
+                        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
+                            chunk_size += value.len() as u64;
+                        }
                     }
                 }
                 KV_TYPE_SNAPSHOT => {

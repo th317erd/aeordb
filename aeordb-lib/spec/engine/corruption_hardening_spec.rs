@@ -23,10 +23,10 @@ fn create_test_db() -> (StorageEngine, tempfile::TempDir) {
 fn store_test_files(engine: &StorageEngine) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops.store_file(&ctx, "/docs/a.txt", b"file-a", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/docs/b.txt", b"file-b", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/docs/c.txt", b"file-c", Some("text/plain")).unwrap();
-    ops.store_file(&ctx, "/images/photo.jpg", b"jpeg-data", Some("image/jpeg")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/a.txt", b"file-a", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/b.txt", b"file-b", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/c.txt", b"file-c", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/images/photo.jpg", b"jpeg-data", Some("image/jpeg")).unwrap();
 }
 
 /// Inject garbage bytes at the given offset in the database file.
@@ -55,7 +55,6 @@ fn scanner_recovers_from_corrupt_header_mid_file() {
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
     // Get file size and inject corruption at ~25%
     let size = file_size(db_str);
@@ -64,10 +63,7 @@ fn scanner_recovers_from_corrupt_header_mid_file() {
     // Drop the engine so we can manipulate files
     drop(engine);
 
-    inject_corruption(db_str, offset, 64);
-
-    // Delete .kv to force full rebuild from append log
-    std::fs::remove_file(&kv_path).unwrap();
+    inject_corruption(db_str, offset, 64);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
 
     // Reopen should succeed - scanner skips corrupt regions
     let engine = StorageEngine::open(db_str).unwrap();
@@ -91,7 +87,6 @@ fn scanner_recovers_from_multiple_corrupt_regions() {
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
     let size = file_size(db_str);
 
@@ -100,10 +95,7 @@ fn scanner_recovers_from_multiple_corrupt_regions() {
     // Inject corruption at 25%, 50%, and 75%
     inject_corruption(db_str, size / 4, 32);
     inject_corruption(db_str, size / 2, 32);
-    inject_corruption(db_str, 3 * size / 4, 32);
-
-    // Delete .kv to force full rebuild
-    std::fs::remove_file(&kv_path).unwrap();
+    inject_corruption(db_str, 3 * size / 4, 32);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
 
     // Reopen should succeed
     let engine = StorageEngine::open(db_str).unwrap();
@@ -121,24 +113,30 @@ fn scanner_recovers_from_multiple_corrupt_regions() {
 
 #[test]
 fn flush_recovers_from_corrupt_kv_page() {
+    // Single-file layout: the KV block lives inside the main file just past
+    // the 256-byte FILE_HEADER. Corrupt some bytes there and verify that
+    // a subsequent write still succeeds — the engine should detect the
+    // corrupt page, reset it, and retry.
     let (engine, temp) = create_test_db();
 
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(&engine);
-    ops.store_file(&ctx, "/alpha.txt", b"alpha-content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/alpha.txt", b"alpha-content", Some("text/plain")).unwrap();
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
-    // Corrupt the .kv file
-    let kv_size = file_size(&kv_path);
-    if kv_size > 64 {
-        inject_corruption(&kv_path, 32, 32);
-    }
+    // Drop the engine so we have exclusive access to the file.
+    drop(engine);
 
-    // Writing another file should still succeed (auto-recovery/page reset)
-    let result = ops.store_file(&ctx, "/beta.txt", b"beta-content", Some("text/plain"));
+    // Corrupt 32 bytes well inside the KV block region. FILE_HEADER is 256
+    // bytes; the KV block starts at offset 256.
+    inject_corruption(db_str, 300, 32);
+
+    // Reopen and write — engine should recover.
+    let engine = StorageEngine::open(db_str).unwrap();
+    let ops = DirectoryOps::new(&engine);
+    let result = ops.store_file_buffered(&ctx, "/beta.txt", b"beta-content", Some("text/plain"));
     assert!(result.is_ok(), "Write after KV corruption should succeed: {:?}", result.err());
 }
 
@@ -155,7 +153,7 @@ fn lost_found_quarantine_writes_to_sibling_directory() {
 
     // Verify the quarantined file exists and is readable
     let ops = DirectoryOps::new(&engine);
-    let file = ops.read_file("/docs/lost+found/chunk_001.bin");
+    let file = ops.read_file_buffered("/docs/lost+found/chunk_001.bin");
     assert!(file.is_ok(), "Quarantined file should be readable");
     let content = file.unwrap();
     assert_eq!(content, data, "Quarantined content should match original data");
@@ -173,7 +171,7 @@ fn lost_found_quarantine_at_root() {
     lost_found::quarantine_bytes(&engine, "/", "root_chunk.bin", "root corruption", data);
 
     let ops = DirectoryOps::new(&engine);
-    let file = ops.read_file("/lost+found/root_chunk.bin");
+    let file = ops.read_file_buffered("/lost+found/root_chunk.bin");
     assert!(file.is_ok(), "Quarantined file at root should be readable");
     let content = file.unwrap();
     assert_eq!(content, data, "Quarantined content at root should match");
@@ -197,7 +195,7 @@ fn lost_found_metadata_is_valid_json() {
     );
 
     let ops = DirectoryOps::new(&engine);
-    let file = ops.read_file("/docs/lost+found/meta_001.json");
+    let file = ops.read_file_buffered("/docs/lost+found/meta_001.json");
     assert!(file.is_ok(), "Quarantine metadata file should be readable");
 
     let content = file.unwrap();
@@ -220,17 +218,13 @@ fn list_directory_survives_corrupt_entry() {
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
     let size = file_size(db_str);
 
     drop(engine);
 
     // Inject corruption mid-file
-    inject_corruption(db_str, size / 2, 48);
-
-    // Delete .kv to force rebuild
-    std::fs::remove_file(&kv_path).unwrap();
+    inject_corruption(db_str, size / 2, 48);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
 
     // Reopen
     let engine = StorageEngine::open(db_str).unwrap();
@@ -258,39 +252,43 @@ fn list_directory_survives_corrupt_entry() {
 
 #[test]
 fn rebuild_kv_recovers_index() {
+    // Single-file layout: KV pages live inside the main file at
+    // [FILE_HEADER_SIZE, kv_block_offset+kv_block_length). Corrupt some
+    // bytes there, then call rebuild_kv() which re-scans the WAL and
+    // repopulates the KV index. All entries should be readable again.
     let (engine, temp) = create_test_db();
     store_test_files(&engine);
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
-    // Verify files are readable before corruption
+    // Verify files are readable before corruption.
     let ops = DirectoryOps::new(&engine);
-    let before = ops.read_file("/docs/a.txt").unwrap();
+    let before = ops.read_file_buffered("/docs/a.txt").unwrap();
     assert_eq!(before, b"file-a");
 
-    // Corrupt the .kv file
-    let kv_size = file_size(&kv_path);
-    if kv_size > 128 {
-        inject_corruption(&kv_path, 64, 64);
-    }
+    // Drop engine to release exclusive lock on the file.
+    drop(engine);
 
-    // Rebuild KV index from append log
+    // Corrupt bytes inside the KV block region (well past FILE_HEADER).
+    inject_corruption(db_str, 300, 64);
+
+    // Reopen and explicitly rebuild the KV index from the WAL.
+    let engine = StorageEngine::open(db_str).unwrap();
     let result = engine.rebuild_kv();
     assert!(result.is_ok(), "rebuild_kv should succeed: {:?}", result.err());
 
     // Files should be readable again after rebuild
     let ops2 = DirectoryOps::new(&engine);
-    let after = ops2.read_file("/docs/a.txt");
+    let after = ops2.read_file_buffered("/docs/a.txt");
     assert!(after.is_ok(), "File /docs/a.txt should be readable after rebuild: {:?}", after.err());
     assert_eq!(after.unwrap(), b"file-a");
 
-    let after_b = ops2.read_file("/docs/b.txt");
+    let after_b = ops2.read_file_buffered("/docs/b.txt");
     assert!(after_b.is_ok(), "File /docs/b.txt should be readable after rebuild");
     assert_eq!(after_b.unwrap(), b"file-b");
 
-    let after_img = ops2.read_file("/images/photo.jpg");
+    let after_img = ops2.read_file_buffered("/images/photo.jpg");
     assert!(after_img.is_ok(), "File /images/photo.jpg should be readable after rebuild");
     assert_eq!(after_img.unwrap(), b"jpeg-data");
 }
@@ -318,7 +316,7 @@ fn lost_found_metadata_includes_extra_fields() {
     );
 
     let ops = DirectoryOps::new(&engine);
-    let content = ops.read_file("/data/lost+found/meta_extra.json").unwrap();
+    let content = ops.read_file_buffered("/data/lost+found/meta_extra.json").unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&content).unwrap();
 
     assert_eq!(parsed["reason"], "hash mismatch");
@@ -339,7 +337,7 @@ fn quarantine_with_empty_parent_writes_to_root_lost_found() {
     lost_found::quarantine_bytes(&engine, "", "orphan.bin", "empty parent", data);
 
     let ops = DirectoryOps::new(&engine);
-    let file = ops.read_file("/lost+found/orphan.bin");
+    let file = ops.read_file_buffered("/lost+found/orphan.bin");
     assert!(file.is_ok(), "Quarantine with empty parent should write to /lost+found/");
     assert_eq!(file.unwrap(), data);
 }
@@ -359,10 +357,10 @@ fn rebuild_kv_on_clean_database_is_idempotent() {
 
     // All files should still be readable
     let ops = DirectoryOps::new(&engine);
-    assert_eq!(ops.read_file("/docs/a.txt").unwrap(), b"file-a");
-    assert_eq!(ops.read_file("/docs/b.txt").unwrap(), b"file-b");
-    assert_eq!(ops.read_file("/docs/c.txt").unwrap(), b"file-c");
-    assert_eq!(ops.read_file("/images/photo.jpg").unwrap(), b"jpeg-data");
+    assert_eq!(ops.read_file_buffered("/docs/a.txt").unwrap(), b"file-a");
+    assert_eq!(ops.read_file_buffered("/docs/b.txt").unwrap(), b"file-b");
+    assert_eq!(ops.read_file_buffered("/docs/c.txt").unwrap(), b"file-c");
+    assert_eq!(ops.read_file_buffered("/images/photo.jpg").unwrap(), b"jpeg-data");
 }
 
 // ============================================================================
@@ -376,15 +374,14 @@ fn scanner_handles_corruption_at_start_of_data_region() {
 
     let db_path = temp.path().join("test.aeordb");
     let db_str = db_path.to_str().unwrap();
-    let kv_path = format!("{}.kv", db_str);
 
     drop(engine);
 
-    // Corrupt near the beginning but after file header (offset 128 to avoid
-    // destroying the file header which is needed to open)
-    inject_corruption(db_str, 128, 64);
-
-    std::fs::remove_file(&kv_path).unwrap();
+    // Corrupt near the beginning but after the file header. The header is
+    // 256 bytes and now carries a CRC, so corrupting within it correctly
+    // refuses to open. Use offset 300 to land in the KV region instead, where
+    // dirty startup can recover.
+    inject_corruption(db_str, 300, 64);    // Single-file layout: no separate .kv file. Reopen + rebuild_kv() instead.
 
     // Should still open (scanner skips corrupt entries)
     let result = StorageEngine::open(db_str);

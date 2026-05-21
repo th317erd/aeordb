@@ -24,7 +24,7 @@ fn make_header(
         key_length: key_len,
         value_length: val_len,
         timestamp: 1_700_000_000_000,
-        total_length: EntryHeader::compute_total_length(hash_algo, key_len, val_len),
+        total_length: EntryHeader::compute_total_length(hash_algo, key_len as usize, val_len as usize).unwrap(),
         hash,
     }
 }
@@ -85,7 +85,7 @@ fn roundtrip_with_compression_zstd() {
         key_length: 8,
         value_length: 1024,
         timestamp: 1_700_000_000_000,
-        total_length: EntryHeader::compute_total_length(hash_algo, 8, 1024),
+        total_length: EntryHeader::compute_total_length(hash_algo, 8, 1024).unwrap(),
         hash: vec![0xBB; hash_algo.hash_length()],
     };
     let bytes = header.serialize();
@@ -104,10 +104,11 @@ fn roundtrip_zero_key_and_value() {
 
 #[test]
 fn roundtrip_large_key_and_value() {
-    // Use large but non-overflowing values. compute_total_length adds
-    // header_size (63 for Blake3) + key + value, so keep sum under u32::MAX.
-    // Max safe: (u32::MAX - 63) / 2 = 2_147_483_616
-    let large = (u32::MAX - 63) / 2;
+    // Use a large but in-bounds value. MAX_KEY_OR_VALUE_BYTES = 1 GiB
+    // (introduced in audit fix to prevent u32 overflow in
+    // compute_total_length); larger values are explicitly rejected at the
+    // append layer.
+    let large = EntryHeader::MAX_KEY_OR_VALUE_BYTES;
     let header = make_header(EntryType::Chunk, 0, large, large);
     let bytes = header.serialize();
     let restored = EntryHeader::deserialize(&mut &bytes[..]).unwrap();
@@ -128,7 +129,7 @@ fn roundtrip_negative_timestamp() {
         key_length: 1,
         value_length: 1,
         timestamp: -9999,
-        total_length: EntryHeader::compute_total_length(hash_algo, 1, 1),
+        total_length: EntryHeader::compute_total_length(hash_algo, 1, 1).unwrap(),
         hash: vec![0x00; hash_algo.hash_length()],
     };
     let bytes = header.serialize();
@@ -186,7 +187,7 @@ fn compute_total_length_consistency() {
     let algo = HashAlgorithm::Blake3_256;
     let key_len = 15u32;
     let val_len = 500u32;
-    let total = EntryHeader::compute_total_length(algo, key_len, val_len);
+    let total = EntryHeader::compute_total_length(algo, key_len as usize, val_len as usize).unwrap();
     // total = header_size + key + value
     let expected = (31 + algo.hash_length()) as u32 + key_len + val_len;
     assert_eq!(total, expected);
