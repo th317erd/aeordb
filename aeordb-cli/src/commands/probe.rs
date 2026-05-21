@@ -1,10 +1,31 @@
 // Diagnostic helper: list /.aeordb-system/ contents in a database file.
 pub fn run(path: &str, probe_path: Option<&str>) {
+    // Subcommands that don't need to open the engine — handle first.
+    if let Some(arg) = probe_path {
+        if let Some(n_str) = arg.strip_prefix("--wal-tail-bytes=") {
+            let n: usize = match n_str.parse() {
+                Ok(v) => v,
+                Err(_) => { eprintln!("--wal-tail-bytes requires a usize, got: {}", n_str); std::process::exit(2); }
+            };
+            return dump_wal_tail(path, n);
+        }
+    }
+
     let engine = match aeordb::engine::StorageEngine::open(path) {
         Ok(e) => e,
         Err(e) => { eprintln!("Open failed: {}", e); std::process::exit(1); }
     };
     let ops = aeordb::engine::DirectoryOps::new(&engine);
+
+    if probe_path == Some("--growth-stats") {
+        return print_growth_stats(&engine);
+    }
+
+    if let Some(arg) = probe_path {
+        if let Some(tsv_path) = arg.strip_prefix("--diff-checkpoint=") {
+            return diff_checkpoint(&engine, tsv_path);
+        }
+    }
 
     if probe_path == Some("--list-files") {
         // Enumerate every FileRecord — try a couple of entry_version
@@ -241,5 +262,195 @@ pub fn run(path: &str, probe_path: Option<&str>) {
         }
     } else {
         println!("  not found");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --growth-stats
+// ---------------------------------------------------------------------------
+// Quick "is this DB actually growing / is recovery clean" report. Pulls
+// `engine.stats()` for counts + reads the writer offset to compare against
+// the on-disk file size. Surfaces three signals soak verify doesn't:
+//   1. live KV entries by type (sanity for "is the worker doing work")
+//   2. WAL frontier vs file size (catches "scanner stopped early; bytes
+//      past frontier are not in any KV pointer")
+//   3. void count + bytes (GC reclaim that may or may not be progressing)
+// ---------------------------------------------------------------------------
+fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
+    let stats = engine.stats();
+    let writer = match engine.writer_read_lock() {
+        Ok(w) => w,
+        Err(e) => { eprintln!("writer lock: {}", e); std::process::exit(1); }
+    };
+    let wal_end = writer.current_offset();
+    let file_size = stats.db_file_size_bytes;
+    let tail_gap: i128 = file_size as i128 - wal_end as i128;
+
+    println!("=== growth-stats ===");
+    println!("file size:           {} bytes ({:.2} GiB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+    println!("wal end (writer):    {} bytes", wal_end);
+    println!("tail gap:            {} bytes ({})",
+        tail_gap,
+        if tail_gap == 0 { "clean" }
+        else if tail_gap > 0 { "BYTES PAST FRONTIER — unrecovered tail" }
+        else { "writer ahead of file (impossible?)" }
+    );
+    println!();
+    println!("entries (total appended): {}", stats.entry_count);
+    println!("kv entries (live):        {}", stats.kv_entries);
+    println!("kv size bytes:            {}", stats.kv_size_bytes);
+    println!();
+    println!("by type:");
+    println!("  file records:    {}", stats.file_count);
+    println!("  directories:     {}", stats.directory_count);
+    println!("  chunks:          {}", stats.chunk_count);
+    println!("  snapshots:       {}", stats.snapshot_count);
+    println!("  forks:           {}", stats.fork_count);
+    println!("  voids:           {}  ({} bytes)", stats.void_count, stats.void_space_bytes);
+    println!();
+    println!("created_at: {}", stats.created_at);
+    println!("updated_at: {}", stats.updated_at);
+}
+
+// ---------------------------------------------------------------------------
+// --diff-checkpoint=<tsv>
+// ---------------------------------------------------------------------------
+// Differential check the soak-worker's checkpoint TSV against the DB. The
+// worker writes `+\t<path>` for every successful store and `-\t<path>` for
+// every successful delete, flushing after each line. After a SIGKILL, the
+// checkpoint is the *intent*; the DB is the *outcome*. If a path is in the
+// reconstructed "committed" set but missing from the DB, that's silent
+// data loss the engine claimed to deliver.
+//
+// Reports four counts:
+//   total_committed         — set after replaying + and - lines (intent)
+//   present_in_db           — committed paths actually findable by file_path_hash
+//   missing_in_db           — IN INTENT BUT NOT IN DB. This is the bug signal.
+//   present_not_checkpointed — sanity; "I see file X but the checkpoint
+//                              never mentioned it" — generally means an
+//                              in-flight write before the checkpoint line
+//                              flushed, or a system/internal file.
+// ---------------------------------------------------------------------------
+fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader};
+    use std::fs::File;
+
+    let file = match File::open(tsv_path) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("open checkpoint {}: {}", tsv_path, e); std::process::exit(1); }
+    };
+
+    // Reconstruct the worker's view: + adds, - removes. Match `load_checkpoint`
+    // in aeordb-cli/src/bin/soak-worker.rs.
+    let mut committed: HashSet<String> = HashSet::new();
+    let mut lines = 0u64;
+    let mut adds = 0u64;
+    let mut dels = 0u64;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        lines += 1;
+        if let Some(rest) = line.strip_prefix("+\t") {
+            committed.insert(rest.to_string());
+            adds += 1;
+        } else if let Some(rest) = line.strip_prefix("-\t") {
+            committed.remove(rest);
+            dels += 1;
+        }
+    }
+
+    let algo = engine.hash_algo();
+    let mut present = 0u64;
+    let mut missing: Vec<String> = Vec::new();
+    for path in &committed {
+        let hash = match aeordb::engine::file_path_hash(path, &algo) {
+            Ok(h) => h,
+            Err(_) => { missing.push(path.clone()); continue; }
+        };
+        match engine.has_entry(&hash) {
+            Ok(true) => present += 1,
+            Ok(false) => missing.push(path.clone()),
+            Err(_) => missing.push(path.clone()),
+        }
+    }
+
+    // Also gather "present-in-DB but not-in-checkpoint" — a weaker signal,
+    // but useful for spotting in-flight writes that landed before the
+    // checkpoint flush.
+    let mut extras: Vec<String> = Vec::new();
+    let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+    let hash_length = engine.hash_algo().hash_length();
+    let mut db_paths = HashSet::new();
+    for (hash, value) in &entries {
+        let version = match engine.get_entry_including_deleted(hash) {
+            Ok(Some(e)) => e.0.entry_version,
+            _ => continue,
+        };
+        if let Ok(record) = aeordb::engine::file_record::FileRecord::deserialize(value, hash_length, version) {
+            db_paths.insert(record.path);
+        }
+    }
+    for p in &db_paths {
+        if !committed.contains(p) && !p.starts_with("/.aeordb-system") {
+            extras.push(p.clone());
+        }
+    }
+
+    println!("=== diff-checkpoint ===");
+    println!("checkpoint:              {}", tsv_path);
+    println!("lines parsed:            {}  (+: {}, -: {})", lines, adds, dels);
+    println!("committed intent (net):  {}", committed.len());
+    println!("present in db:           {}", present);
+    println!("MISSING from db:         {}  {}", missing.len(),
+        if missing.is_empty() { "" } else { "← SILENT DATA LOSS" });
+    println!("extras in db (not in checkpoint, non-system): {}", extras.len());
+
+    if !missing.is_empty() {
+        println!();
+        println!("Missing paths (up to 30):");
+        for p in missing.iter().take(30) {
+            println!("  {}", p);
+        }
+        if missing.len() > 30 {
+            println!("  ... ({} more)", missing.len() - 30);
+        }
+        std::process::exit(3);  // distinct exit code for soak orchestrators
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --wal-tail-bytes=<N>
+// ---------------------------------------------------------------------------
+// Hex-dump the last N bytes of the .aeordb file as-is, no engine open. For
+// the rare case where the engine refuses to open (bad header) or you want
+// to eyeball whatever the kernel actually persisted past the recovery
+// frontier. Reads raw bytes — no parsing.
+// ---------------------------------------------------------------------------
+fn dump_wal_tail(path: &str, n: usize) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("open {}: {}", path, e); std::process::exit(1); }
+    };
+    let total = match file.metadata().map(|m| m.len()) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("metadata: {}", e); std::process::exit(1); }
+    };
+    let from = total.saturating_sub(n as u64);
+    if let Err(e) = file.seek(SeekFrom::Start(from)) {
+        eprintln!("seek: {}", e); std::process::exit(1);
+    }
+    let mut buf = vec![0u8; n];
+    let read = file.read(&mut buf).unwrap_or(0);
+    buf.truncate(read);
+
+    println!("=== wal-tail-bytes (last {} of {}, starting offset {}) ===", read, total, from);
+    // 16 bytes per row, offset | hex | ascii
+    for (i, chunk) in buf.chunks(16).enumerate() {
+        let off = from + (i as u64 * 16);
+        let hex: String = chunk.iter().map(|b| format!("{:02x} ", b)).collect();
+        let ascii: String = chunk.iter()
+            .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+            .collect();
+        println!("{:012x}  {:<48}  |{}|", off, hex, ascii);
     }
 }

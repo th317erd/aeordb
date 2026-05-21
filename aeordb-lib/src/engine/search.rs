@@ -171,7 +171,12 @@ fn broad_search(
           field_name: field_name.clone(),
           operation: QueryOp::Match(query_str.to_string()),
         })),
-        limit: None, // no per-directory limit; we paginate globally
+        // No per-directory cap — global_search paginates after every
+        // directory has contributed all its hits. `limit: None` would
+        // silently get rewritten to `DEFAULT_QUERY_LIMIT = 20` by
+        // QueryEngine::execute, so an explicit usize::MAX is required
+        // to actually mean "everything that matched".
+        limit: Some(usize::MAX),
         offset: None,
         order_by: vec![],
         after: None,
@@ -230,7 +235,8 @@ fn structured_search(
       path: dir.clone(),
       field_queries: vec![],
       node: Some(QueryNode::Field(field_query.clone())),
-      limit: None,
+      // Same caveat as in broad_search: `None` would mean 20-result cap.
+      limit: Some(usize::MAX),
       offset: None,
       order_by: vec![],
       after: None,

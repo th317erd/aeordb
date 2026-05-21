@@ -1019,6 +1019,15 @@ impl<'a> DirectoryOps<'a> {
     // reference. Logs a warning so the corruption stays observable.
     let recovered = self.recover_directory_data_if_stale(&normalized, &dir_key)?;
     let read_result = if let Some(pair) = recovered {
+      // Divergence was detected. Propagate the heal up the ancestor
+      // chain — without this, ancestor dir_keys can stay stale
+      // indefinitely (queries to ancestors bypass the dir_key index via
+      // the cached merkle root, so the divergence-detection branch
+      // never fires for them). Best-effort: errors are logged, not
+      // returned, so the read path is never blocked by repair failure.
+      if let Err(e) = self.heal_stale_dir_keys_along_path(&normalized) {
+        tracing::warn!(path = %normalized, error = %e, "Ancestor dir_key heal failed; continuing with served canonical content");
+      }
       Ok(Some(pair))
     } else {
       self.read_directory_data(&dir_key)
@@ -1754,7 +1763,7 @@ impl<'a> DirectoryOps<'a> {
   /// reference, as opposed to whatever the local `dir_key` currently
   /// hard-links to). Returns None if `path` is not reachable from HEAD.
   /// Used by `verify --repair` to permanently fix stale dir_keys.
-  pub(crate) fn canonical_directory_content_hash(
+  pub fn canonical_directory_content_hash(
     &self,
     path: &str,
   ) -> EngineResult<Option<Vec<u8>>> {
@@ -1791,6 +1800,89 @@ impl<'a> DirectoryOps<'a> {
       current_content_hash = child.hash.clone();
     }
     Ok(Some(current_content_hash))
+  }
+
+  /// Walk root → `path`, checking every ancestor's `dir_key` hard-link
+  /// against HEAD's canonical content hash. Any ancestor whose dir_key
+  /// is a stale hard-link is rewritten to point at canonical. Returns
+  /// the number of dir_keys repaired.
+  ///
+  /// Called by `list_directory` when divergence is detected, so the
+  /// online repair propagates up the ancestor chain rather than staying
+  /// pinned to the queried leaf. Without this, `snapshot_restore` /
+  /// `fork_promote` interactions could leave ancestor dir_keys stale
+  /// indefinitely — observed during the 2026-05-20 overnight S2 soak
+  /// where `/`, `/soak`, and intermediate dirs accumulated 9 stale
+  /// entries that `verify` flagged on every cycle but no read path
+  /// would heal because reads of `/` and other ancestors bypass the
+  /// dir_key index via the cached merkle root.
+  ///
+  /// Idempotent: an already-correct ancestor is skipped (no write).
+  /// Best-effort: walking errors stop the heal without propagating, so
+  /// a caller in the read path is never blocked.
+  pub(crate) fn heal_stale_dir_keys_along_path(&self, path: &str) -> EngineResult<usize> {
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let normalized = normalize_path(path);
+
+    let head_hash = self.engine.head_hash()?;
+    if head_hash.is_empty() || head_hash.iter().all(|&b| b == 0) {
+      return Ok(0);
+    }
+
+    let segments: Vec<&str> = normalized.trim_matches('/')
+      .split('/')
+      .filter(|s| !s.is_empty())
+      .collect();
+
+    // Walk steps: (ancestor_path, canonical_content_hash_at_that_path).
+    // Start with root pointing at HEAD's canonical content.
+    let mut walk: Vec<(String, Vec<u8>)> = vec![("/".to_string(), head_hash.clone())];
+    let mut current_content_hash = head_hash;
+    for (i, segment) in segments.iter().enumerate() {
+      let content = match self.engine.get_entry(&current_content_hash)? {
+        Some((_h, _k, v)) => v,
+        None => break,
+      };
+      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
+      } else if content.is_empty() {
+        break;
+      } else {
+        deserialize_child_entries(&content, hash_length, 0)?
+      };
+      let child = match children.iter().find(|c| c.name == *segment) {
+        Some(c) => c,
+        None => break,
+      };
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        break;
+      }
+      current_content_hash = child.hash.clone();
+      let p = format!("/{}", segments[..=i].join("/"));
+      walk.push((p, current_content_hash.clone()));
+    }
+
+    let mut repaired = 0;
+    for (anc_path, canonical) in &walk {
+      let anc_key = directory_path_hash(anc_path, &algo)?;
+      let stored = match self.engine.get_entry(&anc_key)? {
+        Some((_h, _k, v)) => v,
+        None => continue,
+      };
+      // Only repair hard-link entries that have actually diverged.
+      if stored.len() == hash_length && stored.as_slice() != canonical.as_slice() {
+        self.engine.store_entry(EntryType::DirectoryIndex, &anc_key, canonical)?;
+        tracing::info!(
+          path = %anc_path,
+          stale_target = %hex::encode(&stored),
+          canonical_target = %hex::encode(canonical),
+          "Auto-repaired stale dir_key during list_directory"
+        );
+        repaired += 1;
+      }
+    }
+    Ok(repaired)
   }
 
   /// Repair a stale dir_key by rewriting it to hard-link the canonical
