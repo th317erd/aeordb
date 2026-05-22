@@ -1,7 +1,7 @@
 use axum::{
     Extension,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -64,9 +64,38 @@ struct ShareInfo {
 ///     with a `path_pattern` matching the filename.
 ///   - If the path is a directory, permissions are stored on that directory
 ///     with no `path_pattern` (applies to everything inside).
+/// Derive an absolute base URL (scheme + host + optional port, no path)
+/// from the request headers. Used for embedding clickable links in
+/// outbound emails — relative URLs render dead in most mail clients.
+///
+/// Precedence:
+///   1. `X-Forwarded-Proto` + `X-Forwarded-Host` (proxy / load balancer).
+///   2. `Host` header with assumed `http://` (direct connection).
+///   3. Fallback: empty string — caller may decide to skip the email,
+///      log a warning, or proceed with a relative URL.
+fn resolve_public_base_url(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))?;
+    if host.is_empty() {
+        return None;
+    }
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .unwrap_or_else(|| {
+            // Heuristic: localhost without explicit X-Forwarded-Proto is dev.
+            if host.starts_with("localhost") || host.starts_with("127.0.0.1") { "http" } else { "https" }
+        });
+    Some(format!("{}://{}", scheme, host))
+}
+
 pub async fn share(
     State(state): State<AppState>,
     Extension(claims): Extension<TokenClaims>,
+    headers: HeaderMap,
     Json(body): Json<ShareRequest>,
 ) -> Response {
     // Parse and validate caller identity
@@ -252,8 +281,9 @@ pub async fn share(
     let notify_permissions = body.permissions.clone();
     let notify_users: Vec<String> = direct_users;
     let sharer = sharer_name.clone();
+    let public_base_url = resolve_public_base_url(&headers);
     tokio::spawn(async move {
-        send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions).await;
+        send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions, public_base_url.as_deref()).await;
     });
 
     Json(serde_json::json!({
@@ -597,12 +627,30 @@ async fn send_share_notifications(
     user_ids: &[String],
     paths: &[String],
     permissions: &str,
+    public_base_url: Option<&str>,
 ) {
     // Load email config — if not configured, silently skip
     let config = match crate::engine::email_config::load_email_config(engine) {
         Ok(Some(c)) => c,
         _ => return,
     };
+
+    // Build the View-Files link once. Without a resolved public base URL
+    // the email link would be relative ("/?page=...") and would not work
+    // in any mail client — log a warning so the deployment notices.
+    let base = match public_base_url {
+        Some(b) if !b.is_empty() => b.trim_end_matches('/').to_string(),
+        _ => {
+            tracing::warn!(
+                "Share email link will be relative — could not derive a public base URL from request headers. \
+                 Set X-Forwarded-Proto + X-Forwarded-Host at your reverse proxy, or ensure Host is reachable."
+            );
+            String::new()
+        }
+    };
+    let first_path = paths.first().map(|p| p.as_str()).unwrap_or("/");
+    let encoded_path = url_encode_path(first_path);
+    let portal_url = format!("{}/?page=files&path={}", base, encoded_path);
 
     for uid_str in user_ids {
         let uid = match uuid::Uuid::parse_str(uid_str) {
@@ -618,10 +666,6 @@ async fn send_share_notifications(
             _ => continue,
         };
 
-        let portal_url = format!(
-            "/?page=files&path={}",
-            paths.first().map(|p| p.as_str()).unwrap_or("/"),
-        );
         let (subject, html, text) = crate::engine::email_template::build_share_notification(
             sharer_name, paths, permissions, &portal_url,
         );
@@ -629,5 +673,87 @@ async fn send_share_notifications(
         if let Err(e) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
             tracing::warn!("Failed to notify {}: {}", email, e);
         }
+    }
+}
+
+/// URL-encode a path's reserved characters so it survives a query-string
+/// transit. Keeps `/`, `-`, `_`, `.`, `~` unencoded so the destination
+/// portal can route on the slash structure; everything else gets
+/// percent-encoded. (We don't pull in `url` or `percent-encoding` just
+/// for this — it's a tiny set of bytes to handle.)
+fn url_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let unreserved = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod url_resolution_tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+
+    fn make_headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn forwarded_headers_take_precedence() {
+        let h = make_headers(&[
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "aeordb.example.com"),
+            ("host", "internal:6830"),
+        ]);
+        assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
+    }
+
+    #[test]
+    fn host_only_assumes_https() {
+        let h = make_headers(&[("host", "aeordb.example.com")]);
+        assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
+    }
+
+    #[test]
+    fn localhost_host_assumes_http() {
+        let h = make_headers(&[("host", "localhost:6830")]);
+        assert_eq!(resolve_public_base_url(&h), Some("http://localhost:6830".to_string()));
+    }
+
+    #[test]
+    fn forwarded_proto_first_value_wins_when_multiple() {
+        let h = make_headers(&[
+            ("x-forwarded-proto", "https,http"),
+            ("x-forwarded-host", "example.com"),
+        ]);
+        assert_eq!(resolve_public_base_url(&h), Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn no_headers_returns_none() {
+        let h = HeaderMap::new();
+        assert_eq!(resolve_public_base_url(&h), None);
+    }
+
+    #[test]
+    fn encodes_spaces_and_special_chars_in_path() {
+        assert_eq!(url_encode_path("/Pictures/My Folder"), "/Pictures/My%20Folder");
+        assert_eq!(url_encode_path("/a&b"), "/a%26b");
+        assert_eq!(url_encode_path("/q=?#"), "/q%3D%3F%23");
+        assert_eq!(url_encode_path("/safe-chars_.~"), "/safe-chars_.~");
+        assert_eq!(url_encode_path("/"), "/");
     }
 }
