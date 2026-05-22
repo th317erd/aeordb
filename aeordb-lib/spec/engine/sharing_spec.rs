@@ -1615,3 +1615,76 @@ fn resolver_accessible_child_names_returns_navigable_segments() {
     assert_eq!(resolver.accessible_child_names(&user_id, "/D").unwrap(), vec!["report.pdf".to_string()]);
     assert!(resolver.accessible_child_names(&user_id, "/E").unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn direct_share_on_directory_grants_descend_without_trailing_slash() {
+    // Regression for bot-docs/bug-reports/2026-05-22-listing-vs-descend-
+    // permission-inconsistency.md. Setup:
+    //   - User has a direct `crudlify` share on /Pictures/Family/Susan
+    //     (a directory). No grants on any ancestor.
+    //   - Listing the parent /Pictures/Family correctly attaches
+    //     `effective_permissions = "crudlify"` to the Susan entry
+    //     (engine_routes.rs:677 adds a trailing slash before resolving).
+    //   - Pre-fix: descending into /files/Pictures/Family/Susan (NO
+    //     trailing slash) returned 403 because the middleware called
+    //     `check_direct_permission` which walks ancestor levels only —
+    //     the path itself wasn't included in path_levels() without the
+    //     trailing slash, so the direct share at Susan was invisible.
+    //
+    // The fix switches the middleware to `check_path_permission`,
+    // which tries both the as-given path AND the directory form. This
+    // test asserts both URL shapes (with and without trailing slash)
+    // succeed for the same user with the same direct grant.
+
+    let (app, jwt_manager, engine, _temp_dir) = test_app();
+    let auth_root = root_bearer_token(&jwt_manager);
+
+    // Seed a directory with a file inside (so Susan really IS a directory).
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/files/Pictures/Family/Susan/photo.jpg")
+        .header("content-type", "image/jpeg")
+        .header("authorization", &auth_root)
+        .body(Body::from("payload"))
+        .unwrap();
+    let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    drop(app);
+
+    // Direct grant on Susan only — no parent grants anywhere.
+    let user_id = create_test_user(&engine, "susan_grantee");
+    share_directory_with_user(&engine, "/Pictures/Family/Susan", &user_id, "crudlify", None);
+    let auth = user_bearer_token(&jwt_manager, &user_id);
+
+    // Descend WITH trailing slash → List op → must succeed.
+    let req_slash = Request::builder()
+        .method("GET")
+        .uri("/files/Pictures/Family/Susan/")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp_slash = rebuild_app(&jwt_manager, &engine).oneshot(req_slash).await.unwrap();
+    assert_eq!(
+        resp_slash.status(),
+        StatusCode::OK,
+        "GET /files/Pictures/Family/Susan/ with trailing slash must succeed (direct crudlify grant)"
+    );
+
+    // Descend WITHOUT trailing slash → Read op → must ALSO succeed.
+    // Pre-fix: this returned 403 because check_direct_permission walked
+    // only ancestors (which have no grants) and missed Susan's own.
+    let req_no_slash = Request::builder()
+        .method("GET")
+        .uri("/files/Pictures/Family/Susan")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap();
+    let resp_no_slash = rebuild_app(&jwt_manager, &engine).oneshot(req_no_slash).await.unwrap();
+    assert_eq!(
+        resp_no_slash.status(),
+        StatusCode::OK,
+        "GET /files/Pictures/Family/Susan WITHOUT trailing slash must also succeed — \
+         the direct grant on Susan applies regardless of the URL's trailing-slash shape. \
+         If this returns 403, the middleware regressed back to check_direct_permission."
+    );
+}
