@@ -19,6 +19,7 @@
 # API Reference
 
 - [Files & Directories](./api/files.md)
+- [JSON Merge Patch](./api/merge-patch.md)
 - [Querying](./api/querying.md)
 - [Versioning](./api/versioning.md)
 - [Upload Protocol](./api/upload-protocol.md)

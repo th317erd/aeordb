@@ -10,7 +10,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
-| PATCH | `/files/{path}` | Rename or move a file or symlink | Yes | 200, 400, 404, 500 |
+| PATCH | `/files/{path}` | Rename a file/symlink (`application/json`) or [JSON merge-patch](./merge-patch.md) into a stored document (`application/merge-patch+json`) | Yes | 200, 201, 400, 404, 413, 415, 500 |
 | POST | `/files/share` | Share paths with users/groups | Yes (root) | 200, 400, 404, 500 |
 | GET | `/files/shares?path=` | List active shares for a path | Yes | 200, 500 |
 | DELETE | `/files/shares` | Revoke a share | Yes (root) | 200, 404, 500 |
@@ -310,13 +310,22 @@ curl -X DELETE http://localhost:6830/files/data/report.pdf \
 
 ## PATCH /files/{path}
 
+`PATCH` is overloaded by `Content-Type`:
+
+- **`application/json`** → **rename** the file or symlink (documented below).
+- **`application/merge-patch+json`** → server-side **JSON merge** into the stored document. See the dedicated [JSON Merge Patch](./merge-patch.md) reference for that mode.
+
+The content-type alone discriminates — a merge-patch body that happens to contain a `"to"` key will be merged into the file, not used as a rename instruction.
+
+### Rename mode
+
 Rename or move a file or symlink to a new path. This is a metadata-only operation -- no data is copied in the content-addressed store. The file's content hash remains the same; only the path mapping changes.
 
 ### Request
 
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
-  - `Content-Type: application/json` (required)
+  - `Content-Type: application/json` (required — `application/merge-patch+json` routes to the merge endpoint instead)
 - **Body:**
 
 ```json
