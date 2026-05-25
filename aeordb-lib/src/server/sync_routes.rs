@@ -303,8 +303,12 @@ fn filter_changes_by_user_permissions(
         if crate::engine::directory_ops::is_internal_path(path) {
             return false;
         }
+        // Use `check_path_permission` so symlink-to-directory events whose
+        // path lacks a trailing slash still see grants stored at the
+        // directory itself. Same bug pattern as the share-Susan repro
+        // (2026-05-22) — directory-form fallback is needed.
         resolver
-            .check_direct_permission(&user_id, path, CrudlifyOp::Read)
+            .check_path_permission(&user_id, path, CrudlifyOp::Read)
             .unwrap_or(false)
     };
 

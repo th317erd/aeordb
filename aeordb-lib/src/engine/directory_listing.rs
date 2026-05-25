@@ -5,6 +5,68 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::path_utils::normalize_path;
 use crate::engine::storage_engine::StorageEngine;
 
+/// Count live files + directories reachable from HEAD's root.
+///
+/// "Live" means present in the current tree — i.e., reachable by walking
+/// child entries from the root directory's hash. Excludes superseded
+/// revisions still pinned by snapshots/forks; those are visible via
+/// `KvSnapshot::count_by_type(KV_TYPE_FILE_RECORD)` instead.
+///
+/// The implicit root directory is NOT counted: an empty database returns
+/// `(0, 0)`. This matches the runtime tracking in `DirectoryOps`, which
+/// only `increment_directories()` on explicit user-created directories.
+///
+/// Returns `(files, directories)`.
+pub fn count_live_tree(engine: &StorageEngine) -> EngineResult<(u64, u64)> {
+    let algo = engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let root_key = directory_path_hash("/", &algo)?;
+    let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
+    let root_value = match ops.read_directory_data(&root_key)? {
+        Some((_header, value)) => value,
+        None => return Ok((0, 0)),
+    };
+    let mut files: u64 = 0;
+    let mut dirs: u64 = 0;
+    if !root_value.is_empty() {
+        count_walk(engine, &root_value, hash_length, &mut files, &mut dirs)?;
+    }
+    Ok((files, dirs))
+}
+
+fn count_walk(
+    engine: &StorageEngine,
+    dir_value: &[u8],
+    hash_length: usize,
+    files: &mut u64,
+    dirs: &mut u64,
+) -> EngineResult<()> {
+    let children = if crate::engine::btree::is_btree_format(dir_value) {
+        crate::engine::btree::btree_list_from_node(dir_value, engine, hash_length, false)?
+    } else {
+        deserialize_child_entries(dir_value, hash_length, 0)?
+    };
+    for child in &children {
+        let entry_type = EntryType::from_u8(child.entry_type)?;
+        match entry_type {
+            EntryType::FileRecord => {
+                *files += 1;
+            }
+            EntryType::DirectoryIndex => {
+                *dirs += 1;
+                if let Some((_header, _key, sub_value)) = engine.get_entry(&child.hash)? {
+                    if !sub_value.is_empty() {
+                        count_walk(engine, &sub_value, hash_length, files, dirs)?;
+                    }
+                }
+            }
+            // Symlinks and other types don't contribute to file/dir counts.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// A file entry from a directory listing with full path and content hash.
 pub struct ListingEntry {
     pub path: String,

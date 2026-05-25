@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::engine_event::{EngineEvent, EVENT_METRICS};
 use crate::engine::event_bus::EventBus;
+use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
 use crate::engine::rate_tracker::RateTrackerSet;
+use crate::engine::storage_engine::StorageEngine;
 
 const METRICS_INTERVAL_SECS: u64 = 15;
 const RATE_SAMPLE_INTERVAL_SECS: u64 = 1;
@@ -21,6 +23,7 @@ const RATE_SAMPLE_INTERVAL_SECS: u64 = 1;
 /// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_metrics_pulse(
     bus: Arc<EventBus>,
+    engine: Arc<StorageEngine>,
     counters: Arc<EngineCounters>,
     rate_trackers: Arc<RateTrackerSet>,
     db_path: String,
@@ -38,6 +41,9 @@ pub fn spawn_metrics_pulse(
 
             let snapshot = counters.snapshot();
             let rates = rate_trackers.snapshot();
+            let kv = engine.kv_snapshot.load();
+            let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
+            let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
 
             // Get the db file size from disk metadata.
             let disk_total = std::fs::metadata(&db_path)
@@ -64,6 +70,8 @@ pub fn spawn_metrics_pulse(
                     "chunks": snapshot.chunks,
                     "snapshots": snapshot.snapshots,
                     "forks": snapshot.forks,
+                    "file_revisions": file_revisions,
+                    "directory_revisions": directory_revisions,
                 },
                 "sizes": {
                     "logical_data": snapshot.logical_data_size,

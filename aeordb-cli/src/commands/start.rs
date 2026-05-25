@@ -227,6 +227,7 @@ pub async fn run(config: StartConfig<'_>) {
   let sampler_handle = spawn_rate_sampler(counters.clone(), rate_trackers.clone(), cancel.clone());
   let metrics_handle = spawn_metrics_pulse(
     event_bus.clone(),
+    engine.clone(),
     counters,
     rate_trackers.clone(),
     database.to_string(),

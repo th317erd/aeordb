@@ -303,7 +303,12 @@ pub async fn permission_middleware(
   let user_uuid = user_id.unwrap();
 
   // Direct check first: did the user receive an explicit grant for this op?
-  let direct = match resolver.check_direct_permission(&user_uuid, engine_path, operation) {
+  // Use `check_path_permission` (NOT `check_direct_permission`) so a path
+  // without a trailing slash is also tried as a directory — otherwise a
+  // user with a direct share on `/A/B/C` is denied `GET /files/A/B/C`
+  // even though `GET /files/A/B/C/` (the listing) correctly allows them.
+  // (Bug filed 2026-05-22; listing vs descend perm inconsistency.)
+  let direct = match resolver.check_path_permission(&user_uuid, engine_path, operation) {
     Ok(v) => v,
     Err(error) => {
       tracing::error!(user_id = %user_uuid, path = %engine_path, "Permission check failed: {}", error);

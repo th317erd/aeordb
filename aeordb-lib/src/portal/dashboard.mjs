@@ -11,8 +11,11 @@ import {
 } from '/shared/utils.js';
 
 const COUNT_DEFINITIONS = [
-  { key: 'files',       label: 'Files',       format: formatNumber },
-  { key: 'directories', label: 'Directories', format: formatNumber },
+  // `revisionKey`: when set, the card shows a small subtitle with the
+  // total KV-revision count (live + historical revisions still held by
+  // HEAD/snapshots/forks). The main value is the live HEAD count.
+  { key: 'files',       label: 'Files',       format: formatNumber, revisionKey: 'file_revisions' },
+  { key: 'directories', label: 'Directories', format: formatNumber, revisionKey: 'directory_revisions' },
   { key: 'symlinks',    label: 'Symlinks',    format: formatNumber },
   { key: 'chunks',      label: 'Chunks',      format: formatNumber },
   { key: 'snapshots',   label: 'Snapshots',   format: formatNumber },
@@ -149,6 +152,9 @@ class AeorDashboard extends HTMLElement {
           <div class="stat-card">
             <div class="stat-label">${definition.label}</div>
             <div class="stat-value" id="stat-count-${definition.key}">&mdash;</div>
+            ${definition.revisionKey ? `
+            <div class="stat-sub" id="stat-sub-${definition.key}" style="font-size:0.75rem;color:var(--text-muted);margin-top:4px;min-height:1em;"></div>
+            ` : ''}
           </div>
         `).join('')}
       </div>
@@ -286,6 +292,22 @@ class AeorDashboard extends HTMLElement {
 
       const value = counts[definition.key];
       element.textContent = (value != null) ? definition.format(value) : '\u2014';
+
+      if (definition.revisionKey) {
+        const subElement = this.querySelector(`#stat-sub-${definition.key}`);
+        if (subElement) {
+          const revisions = counts[definition.revisionKey];
+          // Only show the subtitle when revisions exceed the live count
+          // (a fresh DB has revisions == files, so we'd be repeating the
+          // same number \u2014 noisy).
+          if (revisions != null && value != null && revisions > value) {
+            subElement.textContent =
+              `${definition.format(revisions)} revisions (incl. history)`;
+          } else {
+            subElement.textContent = '';
+          }
+        }
+      }
     }
 
     for (const definition of SIZE_DEFINITIONS) {

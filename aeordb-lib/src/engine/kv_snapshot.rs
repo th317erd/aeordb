@@ -177,6 +177,13 @@ impl ReadSnapshot {
         }
     }
 
+    /// Count entries of a specific type. O(1) — reads the prebuilt type
+    /// index length without cloning. Prefer this over `iter_by_type(t).len()`,
+    /// which clones every entry just to take a length.
+    pub fn count_by_type(&self, target_type: u8) -> usize {
+        self.type_index.get(&target_type).map(|m| m.len()).unwrap_or(0)
+    }
+
     /// Iterate all entries: uses the prebuilt type index to collect every
     /// non-deleted entry across all types. Still O(n) but avoids re-scanning
     /// pages and rebuilding the HashMap on every call.

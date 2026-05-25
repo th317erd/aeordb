@@ -7,6 +7,7 @@ pub mod cors;
 pub mod download_routes;
 pub mod engine_routes;
 pub mod gc_routes;
+pub mod json_merge_patch;
 pub mod portal_routes;
 pub mod responses;
 pub mod routes;
@@ -462,7 +463,7 @@ fn create_app_with_all_and_task_queue_inner(
         .get(engine_routes::engine_get)
         .delete(engine_routes::engine_delete_file)
         .head(engine_routes::engine_head)
-        .patch(engine_routes::engine_rename),
+        .patch(engine_routes::engine_patch),
     )
     .route("/blobs/chunks/{hash}", put(upload_routes::upload_chunk))
     .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10 GB

@@ -1,81 +1,73 @@
-# Business Source License 1.1
+# AeorDB
 
-**License:** Business Source License 1.1
+A **content-addressed file database** that treats your data as a filesystem, not as tables and rows. Store any file at any path, query structured fields with sub-millisecond lookups, and version everything with Git-like snapshots and forks — all from a single binary with no external dependencies.
 
-**Licensor:** AEOR Development
+- **Filesystem, not a schema** — data lives at paths like `/users/alice.json` and `/docs/reports/q1.pdf`. No tables, no migrations.
+- **Content-addressed with BLAKE3** — automatic deduplication, integrity verification, and a Merkle tree that makes versioning essentially free.
+- **Built-in versioning** — named snapshots, isolated forks, content-stable historical reads, and self-contained `.aeordb` export/import.
+- **Native HTTP API** — store with `PUT`, read with `GET`, query with `POST /files/query`. Any HTTP client works; no separate proxy or client library required.
+- **Native parsers + WASM plugins** — 8 built-in parsers (text, HTML/XML, PDF, images, audio, video, MS Office, ODF) plus a sandboxed WebAssembly plugin runtime for custom formats and query logic.
+- **Lock-free reads** — snapshot double-buffering via `ArcSwap`; queries routinely complete in under a millisecond and never block writers.
+- **Embeddable** — single `aeordb` binary, point it at a `.aeordb` file, you have a database.
 
-**Licensed Work:** AeorDB 0.9.0
-The Licensed Work is (c) 2026 AEOR Development. All rights reserved.
+For the full reference, see [`docs/`](./docs/src/introduction.md) (rendered with `mdbook`).
 
-**Additional Use Grant:**
+## Clone
 
-You may use the Licensed Work in production, provided that ALL of the following conditions are true:
+```bash
+git clone https://github.com/th317erd/aeordb.git
+cd aeordb
+```
 
-1. **Not offered as a service.** You are not offering the Licensed Work, or a substantial portion thereof, as a managed database service, hosted database platform, or database-as-a-service to third parties.
+The repository is a Cargo workspace covering the storage engine (`aeordb-lib`), the CLI / HTTP server (`aeordb-cli`), the plugin SDK (`aeordb-plugin-sdk`), and the bundled parsers (`aeordb-parsers/`).
 
-2. **Revenue threshold.** Your organization's total gross annual revenue does not exceed $2,000,000 USD.
+## Build
 
-3. **No derived competing products.** You have not created a product or service that is substantially similar to, or competitive with, the Licensed Work using knowledge obtained from examining the Licensed Work's source code, documentation, or architecture. Organizations that create such products or services are classified as commercial users and must obtain a commercial license from the Licensor, regardless of revenue.
+AeorDB builds with the stable Rust toolchain (1.75+) and has no external native dependencies.
 
-If **any** of these conditions are not met, you must obtain a commercial license. Contact sales@aeor-development.com for pricing and terms.
+If you don't have Rust:
 
-**Change Date:** Four (4) years from the date of each Licensed Work release.
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-**Change License:** Apache License, Version 2.0
+Then from the repo root:
 
----
+```bash
+cargo build --release
+```
 
-## Terms
+The binary lands at `target/release/aeordb`. Smoke-test it:
 
-The Licensor hereby grants you the right to copy, modify, create derivative works, redistribute, and make non-production use of the Licensed Work. The Licensor may make an Additional Use Grant, above, permitting limited production use.
+```bash
+./target/release/aeordb start -D /tmp/example.aeordb
+```
 
-Effective on the Change Date, or the fourth anniversary of the first publicly available distribution of a specific version of the Licensed Work, whichever comes first, the Licensor hereby grants you rights under the terms of the Change License, and the rights granted in the paragraph above terminate.
+That starts the HTTP server on `http://127.0.0.1:6830` with self-contained auth, prints a one-time root API key, and creates `/tmp/example.aeordb` if it doesn't exist. `Ctrl-C` to shut down.
 
-If your use of the Licensed Work does not comply with the requirements currently in effect as described in this License, you must purchase a commercial license from the Licensor, its affiliated entities, or authorized resellers, or you must refrain from using the Licensed Work.
+For development builds and tests:
 
-All copies of the original and modified Licensed Work, and derivative works of the Licensed Work, are subject to this License. This License applies separately for each version of the Licensed Work and the Change Date may vary for each version of the Licensed Work released by Licensor.
+```bash
+cargo build              # dev build (faster, ~10x slower at runtime)
+cargo test               # run the full test suite
+cargo test -p aeordb     # just the engine + HTTP tests
+```
 
-You must conspicuously display this License on each original or modified copy of the Licensed Work. If you receive the Licensed Work in original or modified form from a third party, the terms and conditions set forth in this License apply to your use of that work.
+## Documentation
 
-Any use of the Licensed Work in violation of this License will automatically terminate your rights under this License for the current and all other versions of the Licensed Work.
+- **User docs:** [`docs/src/`](./docs/src/) — concepts, API reference, plugin development, operations. Renderable via `mdbook serve docs/`.
+- **Onboarding for AI assistants:** [`CLAUDE.md`](./CLAUDE.md) — project-specific instructions loaded into Claude Code sessions.
+- **JSON merge-patch (new in 0.9.5):** [`docs/src/api/merge-patch.md`](./docs/src/api/merge-patch.md) — server-side `PATCH /files/<path>` with RFC 7396 semantics and a signed `?depth=N` bound.
 
-This License does not grant you any right in any trademark or logo of Licensor or its affiliates (provided that you may use a trademark or logo of Licensor as expressly required by this License).
+## License
 
-TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+AeorDB is source-available under the [Business Source License 1.1](./LICENSE-BSL.md). The short version:
 
----
+- **Free** for non-production use, internal use under $2M gross annual revenue, and any non-competing use.
+- **Commercial license required** for offering AeorDB as a managed service, internal use above the revenue threshold, or building a competing product. Contact <sales@aeor-development.com>.
+- **Every release auto-converts to Apache 2.0** four years after its publication date.
 
-## Frequently Asked Questions
+See [`LICENSE-BSL.md`](./LICENSE-BSL.md) for the full license text and FAQ.
 
-**Can I use AeorDB for free?**
-Yes, if your organization makes under $2M/year in gross revenue and you are not offering AeorDB as a managed service to third parties.
-
-**Can I use AeorDB internally at a large company?**
-You need a commercial license if your organization's gross annual revenue exceeds $2M.
-
-**Can I modify the source code?**
-Yes. You can modify it, create derivative works, and use it in non-production environments (development, testing, staging) without any restrictions.
-
-**Can I offer AeorDB as a hosted service?**
-Not without a commercial license, regardless of your revenue.
-
-**What if I build a competing product by studying AeorDB's source?**
-You are classified as a commercial user and must obtain a commercial license, regardless of your revenue.
-
-**What happens after 4 years?**
-Each version of AeorDB converts to the Apache License 2.0 four years after its release. At that point, all restrictions are removed for that version. Newer versions remain under BSL until their own 4-year clock expires.
-
-**Can I fork AeorDB?**
-Yes. Forks are subject to the same BSL terms. If you distribute a fork, you must include this license.
-
-**Is AeorDB open source?**
-AeorDB is source-available under BSL 1.1. It is not OSI-approved "open source." However, every version becomes Apache 2.0 (which is OSI-approved open source) after 4 years.
-
----
-
-## Notice
-
-This license is based on the Business Source License 1.1, originally created by MariaDB Corporation Ab. The full text of BSL 1.1 is available at https://mariadb.com/bsl11/
-
-For commercial licensing inquiries: sales@aeor-development.com
-For more information: https://aeordb.com
+For commercial inquiries: <sales@aeor-development.com>
+Project home: <https://aeordb.com>

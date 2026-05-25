@@ -2239,12 +2239,210 @@ pub struct RenameRequest {
 }
 
 /// POST /engine-rename/{*path} -- rename (move) a file or symlink.
-pub async fn engine_rename(
+/// Maximum merge-patch input/stored size — both the incoming body and
+/// the on-disk file have to fit in memory simultaneously for the
+/// read-merge-write cycle.
+const MAX_MERGE_PATCH_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Deserialize, Default)]
+pub struct MergePatchQuery {
+  /// Signed merge depth.
+  ///   * `None`          → strict RFC 7396 (unbounded recursion).
+  ///   * `Some(0)`       → wholesale document replace (PUT semantics).
+  ///   * `Some(N > 0)`   → merge N levels deep; object values beyond
+  ///                       that boundary REPLACE the target subtree.
+  ///   * `Some(N < 0)`   → merge |N| levels deep; object values beyond
+  ///                       that boundary PRESERVE the existing target
+  ///                       subtree (patch's deeper objects ignored).
+  /// Scalars and `null` patch values always behave the same regardless
+  /// of sign — `null` deletes, scalars insert/replace at the merge level.
+  depth: Option<i64>,
+}
+
+/// PATCH /files/{*path} — dispatcher.
+///
+/// PATCH on a file is overloaded by `Content-Type`:
+///   * `application/merge-patch+json` → RFC 7396 JSON merge into the
+///     stored file. Body must be JSON; stored file must be JSON (or
+///     absent). Optional `?depth=N` bounds the merge recursion.
+///   * anything else → legacy rename behavior. Body is parsed as
+///     `{"to": "/new/path"}` and the file/symlink is moved.
+pub async fn engine_patch(
+  state: State<AppState>,
+  claims: Extension<TokenClaims>,
+  AxumQuery(merge_q): AxumQuery<MergePatchQuery>,
+  path: Path<String>,
+  headers: HeaderMap,
+  body: Body,
+) -> Response {
+  let content_type = headers
+    .get("content-type")
+    .and_then(|v| v.to_str().ok())
+    .map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
+
+  if content_type.as_deref() == Some("application/merge-patch+json") {
+    return do_merge_patch(state, claims, path, merge_q, body).await;
+  }
+  do_rename(state, claims, path, body).await
+}
+
+async fn do_merge_patch(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
-  Json(payload): Json<RenameRequest>,
+  merge_q: MergePatchQuery,
+  body: Body,
 ) -> Response {
+  use crate::server::json_merge_patch::{apply_merge_patch, MergeDepth};
+
+  if is_system_path(&path) {
+    return ErrorResponse::new(format!("Not found: {}", path))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response();
+  }
+
+  let depth = match merge_q.depth {
+    None => MergeDepth::Unbounded,
+    Some(0) => MergeDepth::FullReplace,
+    Some(n) if n > 0 => MergeDepth::ReplaceBeyond(n as u32),
+    Some(n) => MergeDepth::PreserveBeyond(n.unsigned_abs() as u32),
+  };
+
+  // Read and validate the patch body.
+  let body_bytes = match axum::body::to_bytes(body, MAX_MERGE_PATCH_BYTES).await {
+    Ok(b) => b,
+    Err(_) => {
+      return ErrorResponse::new(format!(
+        "Patch body exceeds {} bytes or could not be read",
+        MAX_MERGE_PATCH_BYTES
+      ))
+        .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+        .into_response();
+    }
+  };
+  let patch_value: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+    Ok(v) => v,
+    Err(e) => {
+      return ErrorResponse::new(format!("Patch body is not valid JSON: {}", e))
+        .with_status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        .into_response();
+    }
+  };
+
+  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let engine = state.engine.clone();
+  let path_for_blocking = path.clone();
+
+  // Read existing → merge → write. Run on a blocking worker so we don't
+  // hold an async runtime thread through the disk-bound parts.
+  let result = tokio::task::spawn_blocking(move || -> EngineResult<(FileRecord, bool)> {
+    let ops = DirectoryOps::new(&engine);
+
+    // Read existing (if any). Missing file → start from empty object.
+    let (mut target, existed) = match ops.read_file_buffered(&path_for_blocking) {
+      Ok(bytes) => {
+        if bytes.len() > MAX_MERGE_PATCH_BYTES {
+          return Err(EngineError::InvalidInput(format!(
+            "stored file at {} is {} bytes, exceeds {} byte merge cap",
+            path_for_blocking, bytes.len(), MAX_MERGE_PATCH_BYTES
+          )));
+        }
+        if bytes.is_empty() {
+          (serde_json::Value::Object(serde_json::Map::new()), true)
+        } else {
+          let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| EngineError::InvalidInput(format!(
+              "stored file at {} is not valid JSON: {}", path_for_blocking, e
+            )))?;
+          (parsed, true)
+        }
+      }
+      Err(EngineError::NotFound(_)) => {
+        (serde_json::Value::Object(serde_json::Map::new()), false)
+      }
+      Err(e) => return Err(e),
+    };
+
+    apply_merge_patch(&mut target, patch_value, depth);
+
+    let serialized = serde_json::to_vec(&target)
+      .map_err(|e| EngineError::InvalidInput(format!("merged document failed to serialize: {}", e)))?;
+    let record = ops.store_file_buffered(
+      &ctx,
+      &path_for_blocking,
+      &serialized,
+      Some("application/json"),
+    )?;
+    Ok((record, existed))
+  })
+  .await;
+
+  let (file_record, existed) = match result {
+    Ok(Ok(v)) => v,
+    Ok(Err(EngineError::InvalidInput(msg))) => {
+      // Differentiate "stored file isn't JSON" (415) from "stored too big" (413).
+      let status = if msg.contains("exceeds") && msg.contains("byte merge cap") {
+        StatusCode::PAYLOAD_TOO_LARGE
+      } else if msg.contains("not valid JSON") {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+      } else {
+        StatusCode::BAD_REQUEST
+      };
+      return ErrorResponse::new(msg).with_status(status).into_response();
+    }
+    Ok(Err(error)) => {
+      tracing::error!("Engine: failed merge-patch at '{}': {}", path, error);
+      return engine_error_response("Merge-patch failed", &error);
+    }
+    Err(join_error) => {
+      tracing::error!("merge-patch task panicked: {}", join_error);
+      return ErrorResponse::new("Merge-patch failed: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+
+  evict_caches_for_path(&state, &path);
+
+  let mut response_body = EngineFileResponse::from(&file_record);
+  let algo = state.engine.hash_algo();
+  let hash_length = algo.hash_length();
+  if let Ok(file_value) = file_record.serialize(hash_length) {
+    if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
+      response_body.hash = Some(hex::encode(&content_hash));
+    }
+  }
+
+  let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
+  (status, Json(response_body)).into_response()
+}
+
+async fn do_rename(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Path(path): Path<String>,
+  body: Body,
+) -> Response {
+  // Buffer the body to JSON-parse it (axum's Json<T> extractor isn't
+  // usable inside the dispatcher because we already consumed headers
+  // separately).
+  let body_bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+    Ok(b) => b,
+    Err(_) => {
+      return ErrorResponse::new("Rename request body too large or unreadable")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+  let payload: RenameRequest = match serde_json::from_slice(&body_bytes) {
+    Ok(v) => v,
+    Err(e) => {
+      return ErrorResponse::new(format!("Rename body must be JSON {{\"to\": ...}}: {}", e))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+  };
+
   let destination = match payload.to {
     Some(ref t) if !t.is_empty() => t.as_str(),
     _ => {
