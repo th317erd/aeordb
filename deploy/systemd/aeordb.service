@@ -1,0 +1,42 @@
+[Unit]
+Description=AeorDB content-addressed file database (files.taraani.org)
+Documentation=https://aeordb.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aeordb
+Group=aeordb
+WorkingDirectory=/opt/aeordb/home
+ExecStart=/opt/aeordb/bin/aeordb start \
+    --host 127.0.0.1 \
+    --port 6830 \
+    --database /mnt/storage/aeordb/files.taraani.org.aeordb \
+    --log-format json
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/storage/aeordb /opt/aeordb/home
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+# File descriptor limit (DB engine uses many fds for hot-tail, indices, etc.)
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
