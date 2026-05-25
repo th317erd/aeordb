@@ -26,11 +26,14 @@ pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>>
 }
 
 /// Check if a path targets an internal directory that should not trigger indexing.
-/// Returns true for paths containing .logs/, .indexes/, or .config/ segments.
+/// Returns true for paths containing `.aeordb-logs/`, `.aeordb-indexes/`, or
+/// `.aeordb-config/` segments.
 pub fn is_internal_path(path: &str) -> bool {
   let normalized = normalize_path(path);
   let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
-  segments.iter().any(|s| *s == ".logs" || *s == ".aeordb-indexes" || *s == ".aeordb-config")
+  segments.iter().any(|s|
+    *s == ".aeordb-logs" || *s == ".aeordb-indexes" || *s == ".aeordb-config"
+  )
 }
 
 /// Compute the domain-prefixed hash for a directory path.
@@ -1623,8 +1626,8 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Detect the compression algorithm for a file based on its parent's index config.
-  /// Reads `.config/indexes.json` under the parent path; returns Zstd if configured
-  /// and the content type/size pass the `should_compress` heuristic, else None.
+  /// Reads `.aeordb-config/indexes.json` under the parent path; returns Zstd if
+  /// configured and the content type/size pass the `should_compress` heuristic, else None.
   fn detect_compression(
     &self,
     path: &str,
@@ -1634,7 +1637,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
     let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
     let config_path = if parent.ends_with('/') {
-      format!("{}.config/indexes.json", parent)
+      format!("{}.aeordb-config/indexes.json", parent)
     } else {
       format!("{}/.aeordb-config/indexes.json", parent)
     };

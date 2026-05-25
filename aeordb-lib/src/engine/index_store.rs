@@ -637,7 +637,7 @@ impl<'a> IndexManager<'a> {
     } else {
       format!("{}/", path)
     };
-    format!("{}.indexes/{}.idx", base, field_name)
+    format!("{}.aeordb-indexes/{}.idx", base, field_name)
   }
 
   /// Build the index file path for a field at a given path with strategy.
@@ -647,7 +647,7 @@ impl<'a> IndexManager<'a> {
     } else {
       format!("{}/", path)
     };
-    format!("{}.indexes/{}.{}.idx", base, field_name, strategy)
+    format!("{}.aeordb-indexes/{}.{}.idx", base, field_name, strategy)
   }
 
   /// Build the indexes directory path for a given path.
@@ -657,7 +657,7 @@ impl<'a> IndexManager<'a> {
     } else {
       format!("{}/", path)
     };
-    format!("{}.indexes", base)
+    format!("{}.aeordb-indexes", base)
   }
 
   /// Load an index for a field at the given path.
@@ -775,9 +775,9 @@ impl<'a> IndexManager<'a> {
 
   /// Discover all directories that contain indexes under `base_path`.
   ///
-  /// Scans `base_path` recursively for files whose path includes `/.indexes/`,
-  /// extracts the parent directory of each `.indexes` segment, and returns a
-  /// deduplicated, sorted list.
+  /// Scans `base_path` recursively for files whose path includes
+  /// `/.aeordb-indexes/`, extracts the parent directory of each
+  /// `.aeordb-indexes` segment, and returns a deduplicated, sorted list.
   pub fn discover_indexed_directories(
     &self,
     base_path: &str,
@@ -794,15 +794,15 @@ impl<'a> IndexManager<'a> {
       indexed_dirs.insert(normalized);
     }
 
-    // Recursively list all files. Files inside .indexes directories have paths
-    // like `/some/dir/.indexes/field.trigram.idx`. We extract `/some/dir` from
-    // those paths. If the recursive walk fails (e.g., malformed directory entry
-    // after KV expansion), log the error and return whatever we found from the
-    // base path scan — partial results are better than a total failure.
+    // Recursively list all files. Files inside .aeordb-indexes directories have
+    // paths like `/some/dir/.aeordb-indexes/field.trigram.idx`. We extract
+    // `/some/dir` from those paths. If the recursive walk fails (e.g., malformed
+    // directory entry after KV expansion), log the error and return whatever we
+    // found from the base path scan — partial results are better than a total failure.
     match list_directory_recursive(self.engine, base_path, -1, None, None) {
       Ok(entries) => {
         for entry in &entries {
-          if let Some(idx_pos) = entry.path.find("/.indexes/") {
+          if let Some(idx_pos) = entry.path.find("/.aeordb-indexes/") {
             let parent = &entry.path[..idx_pos];
             let dir = if parent.is_empty() { "/" } else { parent };
             indexed_dirs.insert(dir.to_string());

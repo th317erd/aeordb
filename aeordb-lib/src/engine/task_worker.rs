@@ -200,7 +200,7 @@ fn execute_reindex(
 
     // Verify index config exists and load it to check for glob.
     let config_path = if path.ends_with('/') {
-        format!("{}.config/indexes.json", path)
+        format!("{}.aeordb-config/indexes.json", path)
     } else {
         format!("{}/.aeordb-config/indexes.json", path)
     };

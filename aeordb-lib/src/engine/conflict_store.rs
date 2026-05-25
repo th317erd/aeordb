@@ -18,7 +18,7 @@ pub fn store_conflict(
     conflict: &ConflictEntry,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let base_path = format!("/.conflicts{}", conflict.path);
+    let base_path = format!("/.aeordb-conflicts{}", conflict.path);
 
     let meta = serde_json::json!({
         "path": conflict.path,
@@ -60,10 +60,10 @@ pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Va
     let ops = DirectoryOps::new(engine);
     let mut conflicts = Vec::new();
 
-    // Use recursive listing to find all .meta files under /.conflicts
+    // Use recursive listing to find all .meta files under /.aeordb-conflicts
     let entries = match crate::engine::directory_listing::list_directory_recursive(
         engine,
-        "/.conflicts",
+        "/.aeordb-conflicts",
         -1,    // unlimited depth
         Some("*.meta"),  // glob for .meta files only
         None,
@@ -92,7 +92,7 @@ pub fn get_conflict(
     path: &str,
 ) -> EngineResult<Option<serde_json::Value>> {
     let ops = DirectoryOps::new(engine);
-    let meta_path = format!("/.conflicts{}/.meta", path);
+    let meta_path = format!("/.aeordb-conflicts{}/.meta", path);
 
     match ops.read_file_buffered(&meta_path) {
         Ok(data) => {
@@ -119,7 +119,7 @@ pub fn resolve_conflict(
     let ops = DirectoryOps::new(engine);
 
     // Read the conflict metadata
-    let meta_path = format!("/.conflicts{}/.meta", path);
+    let meta_path = format!("/.aeordb-conflicts{}/.meta", path);
     let meta_data = ops.read_file_buffered(&meta_path)?;
     let meta: serde_json::Value = serde_json::from_slice(&meta_data)
         .map_err(|e| EngineError::JsonParseError(e.to_string()))?;
@@ -182,7 +182,7 @@ pub fn dismiss_conflict(
     path: &str,
 ) -> EngineResult<()> {
     let ops = DirectoryOps::new(engine);
-    let meta_path = format!("/.conflicts{}/.meta", path);
+    let meta_path = format!("/.aeordb-conflicts{}/.meta", path);
 
     // Verify the conflict exists before dismissing
     match ops.read_file_buffered(&meta_path) {
