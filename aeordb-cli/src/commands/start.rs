@@ -259,15 +259,33 @@ pub async fn run(config: StartConfig<'_>) {
         // Config exists — don't overwrite.
       }
       Err(_) => {
+        // Default index config: covers every file (`glob: **/*`) with both
+        // virtual metadata fields (`@filename`, `@hash`, ...) and the fields
+        // every native parser emits (`text`, `title`, `metadata.format`,
+        // `metadata.duration`). This gives out-of-the-box full-text + metadata
+        // search across text, JSON, HTML, PDF, MS Office, ODF, image, audio,
+        // and video files without any config tweaking. Operators can override
+        // by replacing /.aeordb-config/indexes.json before first start, or
+        // overriding via per-directory `.aeordb-config/indexes.json` files
+        // anywhere in the tree.
         let default_config = serde_json::json!({
           "glob": "**/*",
           "indexes": [
+            // Virtual metadata (always present)
             {"name": "@filename", "type": ["string", "trigram", "phonetic", "dmetaphone"]},
             {"name": "@hash", "type": "trigram"},
             {"name": "@created_at", "type": "timestamp"},
             {"name": "@updated_at", "type": "timestamp"},
             {"name": "@size", "type": "u64"},
-            {"name": "@content_type", "type": "string"}
+            {"name": "@content_type", "type": "string"},
+
+            // Extracted content from native parsers (text, html, pdf, msoffice,
+            // odf, image, audio, video). Parsers that have no body text emit
+            // an empty string for `text` and put their useful info in `metadata`.
+            {"name": "text", "type": "trigram"},
+            {"name": "title", "type": ["string", "trigram"]},
+            {"name": "metadata.format", "type": "string"},
+            {"name": "metadata.duration", "type": "f64", "min": 0, "max": 86400}
           ]
         });
         let config_bytes = serde_json::to_vec_pretty(&default_config).unwrap();
