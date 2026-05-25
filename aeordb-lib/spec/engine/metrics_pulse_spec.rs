@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_metrics_pulse_emits_event() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -25,6 +25,7 @@ async fn test_metrics_pulse_emits_event() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -49,7 +50,7 @@ async fn test_metrics_pulse_emits_event() {
 
 #[tokio::test]
 async fn test_metrics_pulse_payload_structure() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -61,6 +62,7 @@ async fn test_metrics_pulse_payload_structure() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -115,7 +117,7 @@ async fn test_metrics_pulse_payload_structure() {
 
 #[tokio::test]
 async fn test_metrics_pulse_reflects_counter_values() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -138,6 +140,7 @@ async fn test_metrics_pulse_reflects_counter_values() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -167,7 +170,7 @@ async fn test_metrics_pulse_reflects_counter_values() {
 
 #[tokio::test]
 async fn test_metrics_pulse_dedup_savings_clamped_to_zero() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -183,6 +186,7 @@ async fn test_metrics_pulse_dedup_savings_clamped_to_zero() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -205,7 +209,7 @@ async fn test_metrics_pulse_dedup_savings_clamped_to_zero() {
 
 #[tokio::test]
 async fn test_metrics_pulse_dedup_hit_rate_zero_when_no_chunks() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -218,6 +222,7 @@ async fn test_metrics_pulse_dedup_hit_rate_zero_when_no_chunks() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -241,7 +246,7 @@ async fn test_metrics_pulse_dedup_hit_rate_zero_when_no_chunks() {
 
 #[tokio::test]
 async fn test_metrics_pulse_dedup_hit_rate_with_deduplication() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -260,6 +265,7 @@ async fn test_metrics_pulse_dedup_hit_rate_with_deduplication() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -284,7 +290,7 @@ async fn test_metrics_pulse_dedup_hit_rate_with_deduplication() {
 
 #[tokio::test]
 async fn test_metrics_pulse_cancellation_stops_task() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -295,6 +301,7 @@ async fn test_metrics_pulse_cancellation_stops_task() {
 
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -315,7 +322,7 @@ async fn test_metrics_pulse_cancellation_stops_task() {
 
 #[tokio::test]
 async fn test_metrics_pulse_no_subscribers_does_not_panic() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -326,6 +333,7 @@ async fn test_metrics_pulse_no_subscribers_does_not_panic() {
 
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,
@@ -341,7 +349,7 @@ async fn test_metrics_pulse_no_subscribers_does_not_panic() {
 
 #[tokio::test]
 async fn test_metrics_pulse_db_file_size_from_disk() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -353,6 +361,7 @@ async fn test_metrics_pulse_db_file_size_from_disk() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str.clone(),
@@ -387,6 +396,7 @@ async fn test_metrics_pulse_nonexistent_db_path() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         "/tmp/nonexistent_aeordb_test_file.aeordb".to_string(),
@@ -499,7 +509,7 @@ async fn test_rate_sampler_detects_throughput_changes() {
 
 #[tokio::test]
 async fn test_metrics_pulse_event_has_valid_envelope() {
-    let (_engine, temp) = create_temp_engine_for_tests();
+    let (engine, temp) = create_temp_engine_for_tests();
     let db_path = temp.path().join("test.aeordb");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -511,6 +521,7 @@ async fn test_metrics_pulse_event_has_valid_envelope() {
     let cancel = CancellationToken::new();
     let handle = spawn_metrics_pulse(
         bus.clone(),
+        engine.clone(),
         counters.clone(),
         rate_trackers.clone(),
         db_path_str,

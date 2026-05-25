@@ -271,7 +271,10 @@ impl EngineCounters {
         for entry in &all_entries {
             match entry.entry_type() {
                 KV_TYPE_FILE_RECORD => {
-                    counters.files.fetch_add(1, Ordering::Relaxed);
+                    // Note: KV_TYPE_FILE_RECORD entries include every historical
+                    // revision (each FileRecord write is content-addressed and
+                    // creates a new KV entry). The `files` counter tracks LIVE
+                    // files — set below from the HEAD tree walker instead.
                     if accumulate_sizes {
                         if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
                             if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
@@ -281,7 +284,9 @@ impl EngineCounters {
                     }
                 }
                 KV_TYPE_DIRECTORY => {
-                    counters.directories.fetch_add(1, Ordering::Relaxed);
+                    // Same as FileRecord: every directory mutation creates a
+                    // new KV entry (parent + ancestors all change). Live count
+                    // comes from the HEAD walker below.
                 }
                 KV_TYPE_SYMLINK => {
                     counters.symlinks.fetch_add(1, Ordering::Relaxed);
@@ -301,6 +306,22 @@ impl EngineCounters {
                     counters.forks.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {}
+            }
+        }
+
+        // Files + directories are LIVE counts (reachable from HEAD), not
+        // total KV-entry counts. Walks the current tree once at startup;
+        // runtime increment_files/decrement_files keep it in sync after.
+        match crate::engine::directory_listing::count_live_tree(engine) {
+            Ok((live_files, live_dirs)) => {
+                counters.files.store(live_files, Ordering::Relaxed);
+                counters.directories.store(live_dirs, Ordering::Relaxed);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "count_live_tree failed at startup; live file/dir counts default to 0"
+                );
             }
         }
 

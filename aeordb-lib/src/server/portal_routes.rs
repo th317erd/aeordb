@@ -267,12 +267,23 @@ pub struct StatsIdentity {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsCounts {
+    /// Live files reachable from HEAD's root.
     pub files: u64,
+    /// Live directories reachable from HEAD's root (excludes the implicit
+    /// root itself).
     pub directories: u64,
     pub symlinks: u64,
     pub chunks: u64,
     pub snapshots: u64,
     pub forks: u64,
+    /// Total FileRecord KV entries — sum of all live + historical file
+    /// revisions still pinned by HEAD/snapshots/forks. Always ≥ `files`.
+    pub file_revisions: u64,
+    /// Total Directory KV entries — sum of all live + historical directory
+    /// revisions. Always ≥ `directories`. Tends to be much larger than
+    /// directories alone because every file write also creates new
+    /// Directory entries for the parent chain (merkle propagation).
+    pub directory_revisions: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -413,13 +424,24 @@ fn get_stats_inner(
             node_id: 1,
             uptime_seconds,
         },
-        counts: StatsCounts {
-            files: counters.files,
-            directories: counters.directories,
-            symlinks: counters.symlinks,
-            chunks: counters.chunks,
-            snapshots: counters.snapshots,
-            forks: counters.forks,
+        counts: {
+            // Revision counts are computed on demand from the prebuilt type
+            // index — O(1) per type.
+            let snapshot = state.engine.kv_snapshot.load();
+            StatsCounts {
+                files: counters.files,
+                directories: counters.directories,
+                symlinks: counters.symlinks,
+                chunks: counters.chunks,
+                snapshots: counters.snapshots,
+                forks: counters.forks,
+                file_revisions: snapshot.count_by_type(
+                    crate::engine::kv_store::KV_TYPE_FILE_RECORD,
+                ) as u64,
+                directory_revisions: snapshot.count_by_type(
+                    crate::engine::kv_store::KV_TYPE_DIRECTORY,
+                ) as u64,
+            }
         },
         sizes: StatsSizes {
             disk_total,
