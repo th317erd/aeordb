@@ -863,3 +863,5 @@ pub fn spawn_sync_loop(
         }
     })
 }
+
+crate::impl_json_versioned_v0!(PeerSyncState);

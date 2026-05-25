@@ -390,8 +390,13 @@ impl FieldIndex {
     self.entries.is_empty()
   }
 
-  /// Serialize the index: converter state + NVT data + entry count + sorted entries.
-  /// Each entry is: f64 scalar (8 bytes LE) + file_hash (hash_length bytes).
+  /// Current on-disk schema version for a FieldIndex blob. Bump alongside
+  /// a new `deserialize_v{n}` arm when the layout changes.
+  pub const SCHEMA_VERSION: u8 = 0;
+
+  /// Serialize the index: 1-byte schema version + converter state + NVT data +
+  /// entry count + sorted entries. Each entry is: f64 scalar (8 bytes LE) +
+  /// file_hash (hash_length bytes).
   pub fn serialize(&self, hash_length: usize) -> Vec<u8> {
     let converter_data = serialize_converter(self.converter.as_ref());
     let nvt_data = self.nvt.serialize();
@@ -400,13 +405,18 @@ impl FieldIndex {
     let values_size: usize = self.values.iter()
       .map(|(k, v)| k.len() + 4 + v.len())
       .sum();
-    let capacity = 2 + field_name_bytes.len()
+    let capacity = 1
+      + 2 + field_name_bytes.len()
       + 4 + converter_data.len()
       + 4 + nvt_data.len()
       + 4
       + self.entries.len() * (8 + hash_length)
       + 4 + values_size;
     let mut buffer = Vec::with_capacity(capacity);
+
+    // Schema version byte at offset 0. The reader checks this FIRST and
+    // dispatches; everything below is the v0 layout.
+    buffer.push(Self::SCHEMA_VERSION);
 
     // Field name
     buffer.extend_from_slice(&(field_name_bytes.len() as u16).to_le_bytes());
@@ -440,8 +450,23 @@ impl FieldIndex {
     buffer
   }
 
-  /// Deserialize an index from bytes.
+  /// Deserialize an index from bytes. Reads the schema version byte at
+  /// offset 0 and dispatches to the matching `deserialize_v{n}`.
   pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+    if data.is_empty() {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "FieldIndex data is empty".to_string(),
+      });
+    }
+    let version = data[0];
+    match version {
+      0 => Self::deserialize_v0(&data[1..], hash_length),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     let mut cursor = 0;
 
     // Field name

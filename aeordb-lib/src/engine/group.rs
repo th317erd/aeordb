@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::schema_version::JsonVersioned;
 use crate::engine::user::{SAFE_QUERY_FIELDS, User};
 
 /// A query-based group in the aeordb identity system.
@@ -45,13 +46,24 @@ impl Group {
     })
   }
 
-  /// Serialize this group to JSON bytes.
+  /// Serialize this group to JSON bytes with a `"$v"` schema-version field
+  /// injected so the reader can dispatch.
   pub fn serialize(&self) -> Vec<u8> {
-    serde_json::to_vec(self).expect("Group serialization should never fail")
+    crate::engine::schema_version::write_json_with_version(self, <Self as JsonVersioned>::SCHEMA_VERSION)
+      .expect("Group serialization should never fail")
   }
 
-  /// Deserialize a group from JSON bytes.
+  /// Deserialize a group from JSON bytes. Reads `"$v"` first and dispatches
+  /// to the matching `deserialize_v{n}`.
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
+    let version = crate::engine::schema_version::read_json_version(data)?;
+    match version {
+      0 => Self::deserialize_v0(data),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
     serde_json::from_slice(data)
       .map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize Group: {}", error)))
   }
@@ -95,4 +107,10 @@ impl Group {
       _ => false,
     }
   }
+}
+
+impl JsonVersioned for Group {
+  const SCHEMA_VERSION: u8 = 0;
+  fn serialize_versioned(&self) -> Vec<u8> { self.serialize() }
+  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self> { Self::deserialize(data) }
 }

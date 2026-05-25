@@ -66,6 +66,7 @@ pub mod query_engine;
 pub mod rate_tracker;
 pub mod request_context;
 pub mod scalar_converter;
+pub mod schema_version;
 pub mod search;
 pub mod source_resolver;
 pub mod storage_engine;

@@ -299,7 +299,9 @@ fn collect_btree_children(
   hash_length: usize,
   live: &mut HashSet<Vec<u8>>,
 ) -> EngineResult<Vec<ChildEntry>> {
-  let node = BTreeNode::deserialize(node_data, hash_length)?;
+  // TODO: thread the surrounding EntryHeader's entry_version through collect_btree_children
+  // when a v1 BTreeNode format ships. Today everything on disk is v0.
+  let node = BTreeNode::deserialize(node_data, hash_length, 0)?;
   let mut all_children = Vec::new();
 
   match node {

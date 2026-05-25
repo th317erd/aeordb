@@ -1185,7 +1185,10 @@ impl<'a> DirectoryOps<'a> {
 
     let mut results = Vec::new();
     for (_hash, value) in &deletion_entries {
-      if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value) {
+      // TODO: when a v1 DeletionRecord format ships, plumb header.entry_version
+      // through entries_by_type (it currently exposes only hash+value, not the
+      // surrounding EntryHeader). For now every entry on disk is v0.
+      if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value, 0) {
         if record.path.starts_with("/.aeordb-") { continue; }
         // Check if this deletion is a direct child of the requested directory
         if record.path.starts_with(&prefix) || (normalized == "/" && record.path.starts_with('/')) {
@@ -2204,9 +2207,9 @@ impl<'a> DirectoryOps<'a> {
     let mut batch = WriteBatch::new();
 
     let (dir_value, content_key) = match existing {
-      Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+      Some((header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
         // B-tree format: delete from tree
-        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length)?;
+        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
         let root_hash = root_node.content_hash(hash_length, &algo)?;
 
         match crate::engine::btree::btree_delete(self.engine, &root_hash, &child_name, hash_length, &algo)? {

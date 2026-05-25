@@ -13,12 +13,10 @@
 
 use std::marker::PhantomData;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::request_context::RequestContext;
+use crate::engine::schema_version::JsonVersioned;
 use crate::engine::storage_engine::StorageEngine;
 
 /// A generic CRUDL store for JSON documents under a fixed system-path prefix.
@@ -41,7 +39,7 @@ pub struct JsonDoc<T> {
 
 impl<T> JsonDoc<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: JsonVersioned,
 {
     pub const fn new(path: &'static str) -> Self {
         Self {
@@ -57,8 +55,7 @@ where
         value: &T,
     ) -> EngineResult<()> {
         let ops = DirectoryOps::new(engine);
-        let json = serde_json::to_vec(value)
-            .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+        let json = value.serialize_versioned();
         ops.store_file_buffered(ctx, self.path, &json, Some("application/json"))?;
         Ok(())
     }
@@ -66,11 +63,7 @@ where
     pub fn get(&self, engine: &StorageEngine) -> EngineResult<Option<T>> {
         let ops = DirectoryOps::new(engine);
         match ops.read_file_buffered(self.path) {
-            Ok(data) => {
-                let value: T = serde_json::from_slice(&data)
-                    .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-                Ok(Some(value))
-            }
+            Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
             Err(EngineError::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }
@@ -84,7 +77,7 @@ where
 
 impl<T> JsonStore<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: JsonVersioned,
 {
     /// Construct a new store rooted at `prefix` (e.g. `/.aeordb-system/groups`).
     /// `prefix` should NOT have a trailing slash.
@@ -109,8 +102,7 @@ where
     ) -> EngineResult<()> {
         let ops = DirectoryOps::new(engine);
         let path = self.path_for(id);
-        let json = serde_json::to_vec(value)
-            .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+        let json = value.serialize_versioned();
         ops.store_file_buffered(ctx, &path, &json, Some("application/json"))?;
         Ok(())
     }
@@ -120,11 +112,7 @@ where
         let ops = DirectoryOps::new(engine);
         let path = self.path_for(id);
         match ops.read_file_buffered(&path) {
-            Ok(data) => {
-                let value: T = serde_json::from_slice(&data)
-                    .map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-                Ok(Some(value))
-            }
+            Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
             Err(EngineError::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }
@@ -144,7 +132,7 @@ where
         for entry in &entries {
             let path = self.path_for(&entry.name);
             if let Ok(data) = ops.read_file_buffered(&path) {
-                if let Ok(value) = serde_json::from_slice::<T>(&data) {
+                if let Ok(value) = T::deserialize_versioned(&data) {
                     values.push(value);
                 }
             }
