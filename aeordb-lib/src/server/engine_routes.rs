@@ -433,10 +433,9 @@ pub async fn engine_store_file(
   };
 
   // Auto-trigger reindex when indexes.json is stored
-  if path.ends_with("/.aeordb-config/indexes.json") || path.ends_with(".config/indexes.json") {
+  if path.ends_with("/.aeordb-config/indexes.json") {
     if let Some(ref queue) = state.task_queue {
-      let parent = path.trim_end_matches("/.aeordb-config/indexes.json")
-        .trim_end_matches(".config/indexes.json");
+      let parent = path.trim_end_matches("/.aeordb-config/indexes.json");
       let parent = if parent.is_empty() { "/" } else { parent };
       let reindex_path = format!("/{}", parent.trim_start_matches('/'));
 

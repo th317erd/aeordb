@@ -19,7 +19,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
-    format!("{}.config/indexes.json", parent_path)
+    format!("{}.aeordb-config/indexes.json", parent_path)
   } else {
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
@@ -83,11 +83,11 @@ fn test_system_path_logs() {
 
   // Store a JSON file at .logs path — should not create indexes
   let data = br#"{"name":"test"}"#;
-  ops.store_file_with_indexing(&ctx, "/data/.logs/entry.json", &data[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/.aeordb-logs/entry.json", &data[..], Some("application/json")).unwrap();
 
   // Verify no indexes at /data/.logs
   let index_manager = IndexManager::new(&engine);
-  let indexes = index_manager.list_indexes("/data/.logs").unwrap();
+  let indexes = index_manager.list_indexes("/data/.aeordb-logs").unwrap();
   assert!(indexes.is_empty(), "Expected no indexes at .logs path, got: {:?}", indexes);
 }
 
@@ -108,7 +108,7 @@ fn test_system_path_indexes() {
 
   // Verify no indexes at /data/.indexes
   let index_manager = IndexManager::new(&engine);
-  let indexes = index_manager.list_indexes("/data/.indexes").unwrap();
+  let indexes = index_manager.list_indexes("/data/.aeordb-indexes").unwrap();
   assert!(indexes.is_empty(), "Expected no indexes at .indexes path, got: {:?}", indexes);
 }
 
@@ -164,18 +164,18 @@ fn test_store_to_logs_does_not_index() {
   // Store multiple JSON files under .logs
   let log1 = br#"{"level":"INFO","message":"started"}"#;
   let log2 = br#"{"level":"ERROR","message":"failed"}"#;
-  ops.store_file_with_indexing(&ctx, "/app/.logs/log1.json", &log1[..], Some("application/json")).unwrap();
-  ops.store_file_with_indexing(&ctx, "/app/.logs/log2.json", &log2[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/app/.aeordb-logs/log1.json", &log1[..], Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/app/.aeordb-logs/log2.json", &log2[..], Some("application/json")).unwrap();
 
   // Files should be stored
-  let stored1 = ops.read_file_buffered("/app/.logs/log1.json").unwrap();
+  let stored1 = ops.read_file_buffered("/app/.aeordb-logs/log1.json").unwrap();
   assert_eq!(stored1, log1.to_vec());
-  let stored2 = ops.read_file_buffered("/app/.logs/log2.json").unwrap();
+  let stored2 = ops.read_file_buffered("/app/.aeordb-logs/log2.json").unwrap();
   assert_eq!(stored2, log2.to_vec());
 
   // No indexes should exist at /app/.logs
   let index_manager = IndexManager::new(&engine);
-  let indexes = index_manager.list_indexes("/app/.logs").unwrap();
+  let indexes = index_manager.list_indexes("/app/.aeordb-logs").unwrap();
   assert!(indexes.is_empty(), "System path .logs should not have indexes");
 }
 
@@ -196,7 +196,7 @@ fn test_store_to_config_does_not_index() {
 
   // No indexes at /myapp/.config
   let index_manager = IndexManager::new(&engine);
-  let indexes = index_manager.list_indexes("/myapp/.config").unwrap();
+  let indexes = index_manager.list_indexes("/myapp/.aeordb-config").unwrap();
   assert!(indexes.is_empty(), "System path .config should not have indexes");
 }
 
@@ -429,7 +429,7 @@ fn test_pipeline_logging_creates_log_on_error() {
 
   // Check that .logs/system/parsing.log was created
   let ops = DirectoryOps::new(&engine);
-  let log_result = ops.read_file_buffered("/logged/.logs/system/parsing.log");
+  let log_result = ops.read_file_buffered("/logged/.aeordb-logs/system/parsing.log");
   assert!(log_result.is_ok(), "Expected parsing.log to be created");
   let log_content = String::from_utf8(log_result.unwrap()).unwrap();
   assert!(log_content.contains("parser") || log_content.contains("failed") || log_content.contains("no parser"),
@@ -454,7 +454,7 @@ fn test_pipeline_logging_disabled_no_log() {
 
   // Check that .logs/system/parsing.log was NOT created
   let ops = DirectoryOps::new(&engine);
-  let log_result = ops.read_file_buffered("/nolog/.logs/system/parsing.log");
+  let log_result = ops.read_file_buffered("/nolog/.aeordb-logs/system/parsing.log");
   assert!(log_result.is_err(), "Expected no parsing.log when logging is disabled");
 }
 
@@ -465,20 +465,20 @@ fn test_pipeline_logging_disabled_no_log() {
 #[test]
 fn test_system_path_deeply_nested() {
   let ctx = RequestContext::system();
-  // Even deeply nested .logs paths should be caught
+  // Even deeply nested .aeordb-logs paths should be caught
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
   let data = br#"{"name":"deep"}"#;
   ops.store_file_with_indexing(&ctx,
-    "/a/b/c/.logs/deep/entry.json",
+    "/a/b/c/.aeordb-logs/deep/entry.json",
     &data[..],
     Some("application/json"),
   ).unwrap();
 
   // File should be stored
-  let stored = ops.read_file_buffered("/a/b/c/.logs/deep/entry.json").unwrap();
+  let stored = ops.read_file_buffered("/a/b/c/.aeordb-logs/deep/entry.json").unwrap();
   assert_eq!(stored, data.to_vec());
 }
 
@@ -496,7 +496,7 @@ fn test_system_path_not_triggered_by_similar_names() {
   let data = br#"{"name":"test"}"#;
   ops.store_file_with_indexing(&ctx, "/data/logs/entry.json", &data[..], Some("application/json")).unwrap();
 
-  // This SHOULD trigger indexing since "logs" != ".logs"
+  // This SHOULD trigger indexing since "logs" != ".aeordb-logs"
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/data/logs", "name").unwrap();
   assert!(index.is_some(), "Regular 'logs' path (no dot) should still be indexed");
@@ -1019,7 +1019,7 @@ fn test_internal_path_skipped_by_pipeline() {
   assert!(result2.is_ok(), "Internal .aeordb-indexes path should return Ok without indexing");
 
   // Also try .logs
-  let result3 = pipeline.run(&ctx, "/data/.logs/system/parsing.log", &data[..], Some("text/plain"));
+  let result3 = pipeline.run(&ctx, "/data/.aeordb-logs/system/parsing.log", &data[..], Some("text/plain"));
   assert!(result3.is_ok(), "Internal .logs path should return Ok without indexing");
 }
 

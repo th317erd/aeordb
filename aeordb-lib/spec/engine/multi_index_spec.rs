@@ -24,7 +24,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   let config_path = if parent_path.ends_with('/') {
-    format!("{}.config/indexes.json", parent_path)
+    format!("{}.aeordb-config/indexes.json", parent_path)
   } else {
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
@@ -206,7 +206,7 @@ fn test_index_manager_backward_compat() {
   let data = index.serialize(hash_length);
 
   // Per-directory legacy path: /data/.indexes/score.idx (no .strategy suffix).
-  ops.store_file_buffered(&ctx, "/data/.indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
+  ops.store_file_buffered(&ctx, "/data/.aeordb-indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let loaded = index_manager.load_index("/data", "score")

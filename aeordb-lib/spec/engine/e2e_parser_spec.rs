@@ -338,7 +338,7 @@ fn test_e2e_parser_logging_on_failure() {
     assert!(result.is_ok(), "file should still be stored even when parser fails");
 
     // Check that a log was created
-    let log = ops.read_file_buffered("/docs/.logs/system/parsing.log");
+    let log = ops.read_file_buffered("/docs/.aeordb-logs/system/parsing.log");
     assert!(log.is_ok(), "parsing log should exist");
     let log_bytes = log.unwrap();
     let log_content = String::from_utf8_lossy(&log_bytes);

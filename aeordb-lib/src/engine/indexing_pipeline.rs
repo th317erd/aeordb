@@ -527,12 +527,12 @@ impl<'a> IndexingPipeline<'a> {
     })
   }
 
-  /// Write a log entry to .logs/system/{log_name}
+  /// Write a log entry to .aeordb-logs/system/{log_name}
   fn log_system(&self, parent: &str, log_name: &str, message: &str) {
     let log_path = if parent.ends_with('/') {
-      format!("{}.logs/system/{}", parent, log_name)
+      format!("{}.aeordb-logs/system/{}", parent, log_name)
     } else {
-      format!("{}/.logs/system/{}", parent, log_name)
+      format!("{}/.aeordb-logs/system/{}", parent, log_name)
     };
 
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");

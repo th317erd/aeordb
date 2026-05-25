@@ -252,7 +252,7 @@ pub async fn run(config: StartConfig<'_>) {
   {
     let ops = aeordb::engine::DirectoryOps::new(&engine);
     let ctx = aeordb::engine::RequestContext::system();
-    let config_path = "/.config/indexes.json";
+    let config_path = "/.aeordb-config/indexes.json";
 
     match ops.read_file_buffered(config_path) {
       Ok(_) => {
