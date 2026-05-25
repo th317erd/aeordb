@@ -119,3 +119,5 @@ pub fn validate_root_key(
     Err(e) => Err(format!("hash verification failed: {}", e)),
   }
 }
+
+crate::impl_json_versioned_v0!(ApiKeyRecord);

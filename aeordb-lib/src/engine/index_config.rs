@@ -65,8 +65,18 @@ impl PathIndexConfig {
     json.into_bytes()
   }
 
-  /// Deserialize from JSON bytes.
+  /// Deserialize from JSON bytes. Reads the `"$v"` schema-version field
+  /// first and dispatches; an absent `"$v"` defaults to 0 for backward
+  /// compatibility with user-written config files (humans don't know to add it).
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
+    let version = crate::engine::schema_version::read_json_version(data)?;
+    match version {
+      0 => Self::deserialize_v0(data),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
     let text = std::str::from_utf8(data).map_err(|error| {
       EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
     })?;
@@ -141,7 +151,16 @@ impl PathIndexConfig {
 
   /// Deserialize JSON bytes and extract the optional "compression" field value.
   /// Returns Ok(Some("zstd")) if compression is configured, Ok(None) otherwise.
+  /// Honors the `"$v"` schema-version field the same way as `deserialize`.
   pub fn deserialize_with_compression(data: &[u8]) -> EngineResult<Option<String>> {
+    let version = crate::engine::schema_version::read_json_version(data)?;
+    match version {
+      0 => Self::deserialize_with_compression_v0(data),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_with_compression_v0(data: &[u8]) -> EngineResult<Option<String>> {
     let text = std::str::from_utf8(data).map_err(|error| {
       EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
     })?;

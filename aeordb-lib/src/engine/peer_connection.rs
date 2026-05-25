@@ -331,3 +331,5 @@ impl PeerManager {
         }
     }
 }
+
+crate::impl_json_versioned_v0!(PeerConfig);

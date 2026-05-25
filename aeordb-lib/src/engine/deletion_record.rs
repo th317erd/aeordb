@@ -35,7 +35,17 @@ impl DeletionRecord {
     buffer
   }
 
-  pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
+  /// Deserialize a deletion record. Dispatches on the surrounding KV
+  /// `EntryHeader.entry_version` — callers MUST pass it through. Future
+  /// format changes add new arms here.
+  pub fn deserialize(data: &[u8], version: u8) -> EngineResult<Self> {
+    match version {
+      0 => Self::deserialize_v0(data),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
     let mut offset = 0;
 
     let path_length = read_u16(data, &mut offset)? as usize;

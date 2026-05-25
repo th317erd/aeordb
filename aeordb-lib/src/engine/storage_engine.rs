@@ -425,7 +425,7 @@ impl StorageEngine {
         // (recover_voids_via_gap_scan) on dirty startup — the WAL void
         // entries we used to register here are not the source of truth.
         if scanned.header.entry_type == EntryType::DeletionRecord {
-          if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value) {
+          if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version) {
             deletion_records.push((record.path, scanned.offset));
           }
         }

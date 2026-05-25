@@ -480,7 +480,17 @@ pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
     }
 }
 
-static PEER_CONFIGS_DOC: JsonDoc<Vec<PeerConfig>> =
+/// Wrapper around `Vec<PeerConfig>` so the persisted JSON is an object
+/// rather than a bare array — JSON-versioning requires the top level to
+/// be an object (so a `$v` field can be injected).
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct PeerConfigList {
+    peers: Vec<PeerConfig>,
+}
+
+crate::impl_json_versioned_v0!(PeerConfigList);
+
+static PEER_CONFIGS_DOC: JsonDoc<PeerConfigList> =
     JsonDoc::new("/.aeordb-system/cluster/peers");
 
 /// Persist the full set of peer configurations.
@@ -489,12 +499,12 @@ pub fn store_peer_configs(
     ctx: &RequestContext,
     peers: &[PeerConfig],
 ) -> EngineResult<()> {
-    PEER_CONFIGS_DOC.put(engine, ctx, &peers.to_vec())
+    PEER_CONFIGS_DOC.put(engine, ctx, &PeerConfigList { peers: peers.to_vec() })
 }
 
 /// Load persisted peer configurations.
 pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>> {
-    PEER_CONFIGS_DOC.get_or_default(engine, Vec::new())
+    Ok(PEER_CONFIGS_DOC.get_or_default(engine, PeerConfigList::default())?.peers)
 }
 
 // ---------------------------------------------------------------------------

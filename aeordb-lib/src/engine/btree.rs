@@ -80,8 +80,16 @@ impl BTreeNode {
         }
     }
 
-    /// Deserialize a B-tree node from bytes.
-    pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
+    /// Deserialize a B-tree node from bytes. Dispatches on the surrounding
+    /// KV `EntryHeader.entry_version` — callers MUST pass it through.
+    pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
+        match version {
+            0 => Self::deserialize_v0(data, hash_length),
+            _ => Err(EngineError::InvalidEntryVersion(version)),
+        }
+    }
+
+    fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
         if data.is_empty() {
             return Err(EngineError::CorruptEntry {
                 offset: 0,
@@ -340,7 +348,7 @@ pub fn btree_insert_with_data(
     hash_length: usize,
     algo: &HashAlgorithm,
 ) -> EngineResult<(Vec<u8>, Vec<u8>)> {
-    let root_node = BTreeNode::deserialize(root_data, hash_length)?;
+    let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
 
     let result = btree_insert_node(engine, root_node, entry, hash_length, algo)?;
 
@@ -391,7 +399,7 @@ fn btree_insert_node(
                 .ok_or_else(|| EngineError::NotFound(format!(
                     "B-tree child not found: {}", hex::encode(&child_hash)
                 )))?;
-            let child_node = BTreeNode::deserialize(&child_data.2, hash_length)?;
+            let child_node = BTreeNode::deserialize(&child_data.2, hash_length, child_data.0.entry_version)?;
 
             // Recurse into child
             let child_result = btree_insert_node(engine, child_node, entry, hash_length, algo)?;
@@ -541,7 +549,7 @@ pub fn btree_lookup(
         engine.get_entry(root_hash)?
     }
         .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-    let node = BTreeNode::deserialize(&node_data.2, hash_length)?;
+    let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
 
     match node {
         BTreeNode::Leaf(leaf) => Ok(leaf.find(name).cloned()),
@@ -569,7 +577,7 @@ pub fn btree_list(
         engine.get_entry(root_hash)?
     }
         .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-    let node = BTreeNode::deserialize(&node_data.2, hash_length)?;
+    let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
 
     match node {
         BTreeNode::Leaf(leaf) => Ok(leaf.entries),
@@ -596,7 +604,7 @@ pub fn btree_list_from_node(
     hash_length: usize,
     include_deleted: bool,
 ) -> EngineResult<Vec<ChildEntry>> {
-    let node = BTreeNode::deserialize(root_data, hash_length)?;
+    let node = BTreeNode::deserialize(root_data, hash_length, 0)?;
     match node {
         BTreeNode::Leaf(leaf) => Ok(leaf.entries),
         BTreeNode::Internal(internal) => {
@@ -626,7 +634,7 @@ pub fn btree_delete(
 ) -> EngineResult<Option<Vec<u8>>> {
     let node_data = engine.get_entry(root_hash)?
         .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-    let mut node = BTreeNode::deserialize(&node_data.2, hash_length)?;
+    let mut node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
 
     match &mut node {
         BTreeNode::Leaf(ref mut leaf) => {
@@ -686,7 +694,7 @@ pub fn btree_insert_batched(
     algo: &HashAlgorithm,
 ) -> EngineResult<(Vec<u8>, Vec<u8>)> {
     let mut batch = WriteBatch::new();
-    let root_node = BTreeNode::deserialize(root_data, hash_length)?;
+    let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
 
     let result = btree_insert_node_batched(engine, root_node, entry, hash_length, algo, &mut batch)?;
 
@@ -748,7 +756,7 @@ fn btree_insert_node_batched(
                 .ok_or_else(|| EngineError::NotFound(format!(
                     "B-tree child not found: {}", hex::encode(&child_hash)
                 )))?;
-            let child_node = BTreeNode::deserialize(&child_data.2, hash_length)?;
+            let child_node = BTreeNode::deserialize(&child_data.2, hash_length, child_data.0.entry_version)?;
 
             let child_result = btree_insert_node_batched(engine, child_node, entry, hash_length, algo, batch)?;
 

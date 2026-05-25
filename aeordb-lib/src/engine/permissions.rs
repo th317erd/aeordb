@@ -33,17 +33,19 @@ pub struct PathPermissions {
 }
 
 impl PathPermissions {
-  /// Serialize to JSON bytes for storage.
+  /// Serialize to JSON bytes for storage. Delegates to the
+  /// `JsonVersioned` impl so the `"$v"` field is injected.
   pub fn serialize(&self) -> Vec<u8> {
-    serde_json::to_vec(self).expect("PathPermissions serialization should never fail")
+    <Self as crate::engine::schema_version::JsonVersioned>::serialize_versioned(self)
   }
 
-  /// Deserialize from JSON bytes.
+  /// Deserialize from JSON bytes. Reads `"$v"` first and dispatches.
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
-    serde_json::from_slice(data)
-      .map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize PathPermissions: {}", error)))
+    <Self as crate::engine::schema_version::JsonVersioned>::deserialize_versioned(data)
   }
 }
+
+crate::impl_json_versioned_v0!(PathPermissions);
 
 /// Parse a crudlify flag string into an array of 8 tri-state flags.
 ///

@@ -131,7 +131,7 @@ pub fn deserialize_child_entries(
 ) -> EngineResult<Vec<ChildEntry>> {
   match version {
     0 => deserialize_child_entries_v0(data, hash_length),
-    _ => deserialize_child_entries_v0(data, hash_length), // future versions will have their own methods
+    _ => Err(crate::engine::errors::EngineError::InvalidEntryVersion(version)),
   }
 }
 

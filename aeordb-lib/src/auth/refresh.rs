@@ -41,3 +41,5 @@ pub fn hash_refresh_token(token: &str) -> String {
   let result = hasher.finalize();
   hex::encode(result)
 }
+
+crate::impl_json_versioned_v0!(RefreshTokenRecord);

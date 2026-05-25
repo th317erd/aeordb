@@ -32,3 +32,5 @@ pub fn hash_magic_link_code(code: &str) -> String {
   let result = hasher.finalize();
   hex::encode(result)
 }
+
+crate::impl_json_versioned_v0!(MagicLinkRecord);
