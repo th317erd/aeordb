@@ -120,13 +120,46 @@ fn find_sibling_dir(start: &Path, dir_name: &str) -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn create_directory_link(link_path: &Path, target: &Path, _name: &str) {
-    // Absolute target keeps the link resilient against cwd-relative
-    // resolution surprises (e.g. when cargo invokes rustc from a
-    // different working directory than the one we built relative to).
-    // The absolute path is canonical, so it's also valid under chroots
-    // / dev-container bind mounts as long as the bind point matches.
-    std::os::unix::fs::symlink(target, link_path)
-        .expect("create symlink for portal asset");
+    // Use a RELATIVE symlink target so the link survives moving the
+    // workspace to a different absolute prefix (e.g. clone to
+    // `/srv/build/aeordb` instead of `/home/wyatt/Projects/...`). The
+    // absolute target was correct but pinned to one machine's layout.
+    let link_parent = link_path.parent()
+        .expect("link path always has a parent (portal_dir)");
+    let relative = relative_path_from(link_parent, target);
+    std::os::unix::fs::symlink(&relative, link_path)
+        .expect("create relative symlink for portal asset");
+}
+
+/// Compute the path of `target` expressed relative to `base`. Both inputs
+/// must be absolute and canonical. Walks up from `base` to the deepest
+/// common ancestor, then descends into `target`.
+///
+/// Example:
+///   base   = /home/u/Projects/aeordb-workspace/aeordb/aeordb-lib/src/portal
+///   target = /home/u/Projects/aeordb-workspace/aeordb-web-components
+///   result = ../../../../aeordb-web-components
+#[cfg(unix)]
+fn relative_path_from(base: &Path, target: &Path) -> PathBuf {
+    let base_components:   Vec<_> = base.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+
+    let mut common = 0;
+    while common < base_components.len()
+       && common < target_components.len()
+       && base_components[common] == target_components[common]
+    {
+        common += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in 0..(base_components.len() - common) {
+        relative.push("..");
+    }
+    for component in &target_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    relative
 }
 
 #[cfg(windows)]
@@ -136,6 +169,14 @@ fn create_directory_link(link_path: &Path, target: &Path, name: &str) {
     // We invoke `cmd /C mklink /J` because Rust's
     // `std::os::windows::fs::symlink_dir` creates a real symlink, which
     // DOES require Developer Mode and trips up most checkouts.
+    //
+    // Note: junctions MUST point at an absolute path — NTFS doesn't
+    // support relative reparse points. The Unix branch above uses a
+    // relative symlink (workspace-portable); the Windows side accepts
+    // the absolute-path tradeoff because it's a hard NTFS limitation,
+    // not something we can work around. If you move the workspace on
+    // Windows, run `cargo build` once and the junction will be
+    // recreated against the new absolute target.
     let status = std::process::Command::new("cmd")
         .args(&[
             "/C",
