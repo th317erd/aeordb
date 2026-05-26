@@ -1825,18 +1825,35 @@ impl StorageEngine {
 
   /// Try to flush the hot buffer if the KV lock is available.
   /// Used by the 100ms timer task — non-blocking, skips if writer is busy.
+  ///
+  /// Cheap-path early-exit: if there's nothing buffered, return immediately
+  /// without acquiring the writer lock or calling fsync. Without this the
+  /// timer was issuing fdatasync 10× per second on an otherwise-idle DB,
+  /// which kept spinning HDDs from ever idling down.
   pub fn try_flush_hot_buffer(&self) {
-    // Sync WAL data to disk first — entries written since last sync are in the
-    // OS page cache. This must happen BEFORE writing the hot tail, so that any
-    // offsets referenced by the hot tail point to durable data.
+    // 1. Cheap probe: is there anything to flush? If neither buffer has
+    //    content, no recent write needs a durability sync — skip the whole
+    //    function. The lock is released before we proceed so the writer is
+    //    available for any concurrent write that arrives next.
+    let has_pending = match self.kv_writer.try_lock() {
+      Ok(kv) => kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0,
+      // Couldn't get the lock — a writer is busy; let them finish and we'll
+      // pick it up on the next tick.
+      Err(_) => return,
+    };
+    if !has_pending { return; }
+
+    // 2. Sync WAL data to disk first — entries written since last sync are
+    //    in the OS page cache. This must happen BEFORE writing the hot tail,
+    //    so that any offsets referenced by the hot tail point to durable data.
     if let Ok(mut writer) = self.writer.try_write() {
       if let Err(e) = writer.sync() {
         tracing::warn!("Timer WAL sync failed: {}", e);
       }
     }
 
-    // Extract KV state under kv lock, then drop it before acquiring writer.
-    // This avoids holding kv_writer while acquiring writer (reverse of shutdown's order).
+    // 3. Flush the hot buffer (re-takes the kv lock; the cheap probe above
+    //    has already been released by here).
     let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
       if kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
