@@ -383,6 +383,7 @@ impl StorageEngine {
       let kv = DiskKVStore::open(
         kv_file, hash_algo, kv_block_offset, hot_tail_offset,
         kv_block_stage, hot_entries,
+        file_header.kv_block_version,
       )?;
       // If any bucket page failed CRC on open, the KV index is unreliable
       // for the buckets involved — trigger dirty startup below so the WAL

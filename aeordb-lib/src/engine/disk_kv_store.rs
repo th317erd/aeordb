@@ -151,6 +151,12 @@ impl DiskKVStore {
     /// `kv_block_offset` and `hot_tail_offset` come from the file header.
     /// `stage` comes from the file header's `kv_block_stage`.
     /// `hot_entries` are entries loaded from the hot tail (passed in by StorageEngine).
+    /// Current on-disk layout version for the KV-pages block (the page array
+    /// between `kv_block_offset` and `hot_tail_offset`). Stored in the
+    /// [`FileHeader`](crate::engine::file_header::FileHeader) and re-validated
+    /// on every open. Bump alongside a new layout migration in `open`.
+    pub const CURRENT_KV_BLOCK_VERSION: u8 = 1;
+
     pub fn open(
         mut db_file: File,
         hash_algo: HashAlgorithm,
@@ -158,7 +164,15 @@ impl DiskKVStore {
         hot_tail_offset: u64,
         stage: usize,
         hot_entries: Vec<KVEntry>,
+        kv_block_version: u8,
     ) -> EngineResult<Self> {
+        if kv_block_version != Self::CURRENT_KV_BLOCK_VERSION {
+            // The KV-pages-on-disk layout we know how to read is v1. A future
+            // bump will add the matching deserializer here; today, any other
+            // value means the file was written by a newer engine and we
+            // refuse to risk silent corruption.
+            return Err(EngineError::InvalidEntryVersion(kv_block_version));
+        }
         let hot_entry_count = hot_entries.len();
         let stage = stage.min(KV_STAGE_SIZES.len() - 1);
         let hash_length = hash_algo.hash_length();
