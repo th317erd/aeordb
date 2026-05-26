@@ -17,6 +17,7 @@ const PORTAL_USERS_MJS: &str = include_str!("../portal/users.mjs");
 const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
 const PORTAL_SHARED_UTILS_JS: &str = include_str!("../portal/shared/utils.js");
 const PORTAL_SHARED_API_JS: &str = include_str!("../portal/shared/api.js");
+const PORTAL_SHARED_PREFERENCES_JS: &str = include_str!("../portal/shared/preferences.js");
 const PORTAL_SHARED_CRUDLIFY_JS: &str = include_str!("../portal/shared/components/aeor-crudlify.js");
 const PORTAL_SHARED_LOGIN_JS: &str = include_str!("../portal/shared/components/aeor-login.js");
 const PORTAL_SHARED_DASHBOARD_JS: &str = include_str!("../portal/shared/components/aeor-dashboard.js");
@@ -109,6 +110,7 @@ pub async fn portal_shared_asset(
     let (content, content_type) = match path.as_str() {
         "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
         "api.js" => (PORTAL_SHARED_API_JS, "application/javascript; charset=utf-8"),
+        "preferences.js" => (PORTAL_SHARED_PREFERENCES_JS, "application/javascript; charset=utf-8"),
         "components/aeor-crudlify.js" => (PORTAL_SHARED_CRUDLIFY_JS, "application/javascript; charset=utf-8"),
         "components/aeor-login.js" => (PORTAL_SHARED_LOGIN_JS, "application/javascript; charset=utf-8"),
         "components/aeor-dashboard.js" => (PORTAL_SHARED_DASHBOARD_JS, "application/javascript; charset=utf-8"),
