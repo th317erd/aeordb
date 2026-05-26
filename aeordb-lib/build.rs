@@ -3,58 +3,51 @@
 //! `src/server/portal_routes.rs` calls `include_str!` 53 times against
 //! files under `src/portal/aeor/...` and `src/portal/shared/...`. Those
 //! paths are not real directories — they're symlinks (Linux/macOS) or
-//! junctions (Windows) that point at the `aeor-web-components` and
-//! `aeordb-web-components` sibling checkouts.
+//! junctions (Windows) materialized at build time by this script,
+//! pointing at the `aeor-web-components` and `aeordb-web-components`
+//! sibling checkouts.
 //!
-//! Git can't represent platform-correct symlinks portably:
-//!   - Default Linux/macOS clones get real symlinks.
-//!   - Default Windows clones get plain text files containing the link
-//!     target path (because `core.symlinks` defaults to false there).
-//!     Those text files break `include_str!`, which expects a directory.
+//! Why not just commit the symlinks?
+//!   - Git can't represent platform-correct symlinks portably. Default
+//!     Linux/macOS clones get real symlinks; default Windows clones get
+//!     plain text files containing the link target (because
+//!     `core.symlinks` defaults to false there). Those text files break
+//!     `include_str!`, which expects a directory.
 //!
-//! So instead of committing the links and hoping every developer has the
-//! right `core.symlinks` setting, we don't track them at all
-//! (`.gitignore` covers them) and materialize them here on every build:
+//! Sibling-repo locations vary by developer layout. We support both:
 //!
-//!   - Linux/macOS: `std::os::unix::fs::symlink` — a real relative symlink
-//!     pointing at the sibling checkout.
-//!   - Windows:     `mklink /J` (directory junction) — works without
-//!     admin privileges and is transparent to `std::fs` / `include_str!`.
+//!   Layout A (Linux dev / per-workspace style):
+//!     <root>/
+//!     ├── aeor-web-components/        (outside aeordb-workspace)
+//!     └── aeordb-workspace/
+//!         ├── aeordb/                 (this repo)
+//!         └── aeordb-web-components/  (sibling of aeordb)
 //!
-//! If a developer manually created their own symlink/junction, we leave
-//! it alone (`is_dir()` reads as true, we skip). The build is idempotent
-//! across `cargo clean` / fresh clones / repeated builds.
+//!   Layout B (flat, common on Windows/Mac):
+//!     <root>/
+//!     ├── aeor-web-components/        (sibling of aeordb)
+//!     ├── aeordb/                     (this repo)
+//!     └── aeordb-web-components/      (sibling of aeordb)
 //!
-//! Sibling-repo layout expectations (documented in the top-level README):
-//!
-//!   <projects-root>/
-//!   ├── aeor-web-components/        (sibling of aeordb-workspace)
-//!   └── aeordb-workspace/
-//!       ├── aeordb/                 (this repo)
-//!       └── aeordb-web-components/  (sibling of aeordb)
+//! For each link we search upward from the repo for a directory of the
+//! expected name. First match wins. If we can't find one anywhere, we
+//! panic with a clear message naming the missing sibling — better than
+//! letting `include_str!` fail later with 53 cryptic errors.
 
 use std::path::{Path, PathBuf};
 
-/// Link name (placed under `aeordb-lib/src/portal/`) and the directory it
-/// must point at, expressed relative to the link's parent directory. The
-/// relative form is what works on Unix; on Windows we resolve to absolute
-/// before invoking `mklink /J`.
+/// One link to materialize: `aeordb-lib/src/portal/<name>` →
+/// nearest ancestor directory containing `<sibling_dir_name>`.
 struct LinkSpec {
-    name:     &'static str,
-    relative: &'static str,
+    /// Link basename under `aeordb-lib/src/portal/`.
+    name: &'static str,
+    /// Name of the sibling repo's checkout directory to point at.
+    sibling_dir_name: &'static str,
 }
 
 const LINKS: &[LinkSpec] = &[
-    // `portal/aeor` → `<projects-root>/aeor-web-components/`
-    LinkSpec {
-        name:     "aeor",
-        relative: "../../../../../aeor-web-components",
-    },
-    // `portal/shared` → `<aeordb-workspace>/aeordb-web-components/`
-    LinkSpec {
-        name:     "shared",
-        relative: "../../../../aeordb-web-components",
-    },
+    LinkSpec { name: "aeor",   sibling_dir_name: "aeor-web-components" },
+    LinkSpec { name: "shared", sibling_dir_name: "aeordb-web-components" },
 ];
 
 fn main() {
@@ -62,26 +55,17 @@ fn main() {
     let portal_dir   = manifest_dir.join("src").join("portal");
 
     for spec in LINKS {
-        ensure_link(&portal_dir, spec);
+        ensure_link(&manifest_dir, &portal_dir, spec);
     }
 
-    // Don't re-run on incremental builds unless a link disappears.
-    // The links themselves aren't watched as files (build.rs would loop);
-    // we rely on the user noticing if a sibling repo's contents changed
-    // and running `cargo clean` or touching a source file. Anything that
-    // does change inside the linked dirs is already covered by the
-    // `include_str!` invariant — cargo tracks the actual files those
-    // expand to.
+    // build.rs is idempotent and cheap; don't ask cargo to rerun it on
+    // every source change. It'll rerun on cargo clean / fresh checkout
+    // anyway, and that's when it actually has work to do.
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-fn ensure_link(portal_dir: &Path, spec: &LinkSpec) {
+fn ensure_link(manifest_dir: &Path, portal_dir: &Path, spec: &LinkSpec) {
     let link_path = portal_dir.join(spec.name);
-
-    // Resolve the target relative to the link's parent directory. We do
-    // this here (rather than only on Windows) so the symlink's contents
-    // and the junction's target agree about what they point at.
-    let target_resolved = portal_dir.join(spec.relative);
 
     // If the link already exists AS a working directory, we're done.
     // (Real symlink on Unix, junction on Windows — both pass `is_dir`.)
@@ -89,60 +73,69 @@ fn ensure_link(portal_dir: &Path, spec: &LinkSpec) {
         return;
     }
 
-    // It exists as something else (a text file from a Windows git
-    // checkout, or a broken symlink) — remove and recreate.
+    // It exists as something else — a text file from a Windows git
+    // checkout (pre-fix), a broken symlink, etc. Remove it before
+    // recreating.
     if link_path.exists() || link_path.symlink_metadata().is_ok() {
-        // symlink_metadata catches broken symlinks; exists() returns
-        // false for those because it follows. Either way, remove.
         let _ = std::fs::remove_file(&link_path);
         let _ = std::fs::remove_dir(&link_path);
     }
 
-    // Confirm the target sibling repo is actually present. If not, give
-    // a clear error pointing at the README layout so the user knows what
-    // to clone, instead of letting `include_str!` fail with 53 cryptic
-    // "couldn't read" errors later in the build.
-    let canonical = match target_resolved.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            panic!(
-                "portal asset sibling missing: {} (resolved to {}). \
-                 The build needs `aeor-web-components` and \
-                 `aeordb-web-components` checked out as sibling repos; \
-                 see the README for the expected layout. ({})",
-                spec.relative,
-                target_resolved.display(),
-                e,
-            );
-        }
-    };
+    // Search upward from this crate for a directory named `sibling_dir_name`.
+    // First match wins. We cap the walk so we don't drift up to `/`.
+    let target = find_sibling_dir(manifest_dir, spec.sibling_dir_name)
+        .unwrap_or_else(|| panic!(
+            "portal asset sibling `{0}` not found in any ancestor of `{1}`. \
+             The build needs the `{0}` repo checked out near this repo; see \
+             the top-level README for the expected layout.",
+            spec.sibling_dir_name,
+            manifest_dir.display(),
+        ));
 
-    create_directory_link(&link_path, &canonical, spec.name);
+    create_directory_link(&link_path, &target, spec.name);
+}
+
+/// Walk up from `start` looking for any ancestor that contains a direct
+/// child directory matching `dir_name`. Returns an absolute, canonical
+/// path so the symlink/junction stays correct even if cwd changes.
+///
+/// Cap the walk at 12 levels — enough to escape `aeordb-workspace/aeordb`
+/// or whatever extra prefix a dev uses, but far short of `/`. If we
+/// walked all the way to root we'd risk pointing at someone's
+/// unrelated `Documents/aeor-web-components` test folder.
+fn find_sibling_dir(start: &Path, dir_name: &str) -> Option<PathBuf> {
+    let mut cursor: Option<&Path> = Some(start);
+    for _ in 0..12 {
+        let dir = cursor?;
+        let candidate = dir.join(dir_name);
+        if candidate.is_dir() {
+            if let Ok(canonical) = candidate.canonicalize() {
+                return Some(canonical);
+            }
+        }
+        cursor = dir.parent();
+    }
+    None
 }
 
 #[cfg(unix)]
 fn create_directory_link(link_path: &Path, target: &Path, _name: &str) {
-    // Symlink with the relative path the spec carries — keeps the link
-    // portable across users who might clone the workspace at a different
-    // absolute prefix. Resolution via `target.canonicalize()` is only
-    // used here to validate that the target actually exists.
-    let _ = target; // suppress unused-warning when relative form is used
-    let portal_dir = link_path.parent()
-        .expect("link path always has a parent (portal_dir)");
-    let spec_relative = LINKS.iter()
-        .find(|s| portal_dir.join(s.name) == link_path)
-        .map(|s| s.relative)
-        .expect("link_path was constructed from a LinkSpec");
-    std::os::unix::fs::symlink(spec_relative, link_path)
-        .expect("create relative symlink for portal asset");
+    // Absolute target keeps the link resilient against cwd-relative
+    // resolution surprises (e.g. when cargo invokes rustc from a
+    // different working directory than the one we built relative to).
+    // The absolute path is canonical, so it's also valid under chroots
+    // / dev-container bind mounts as long as the bind point matches.
+    std::os::unix::fs::symlink(target, link_path)
+        .expect("create symlink for portal asset");
 }
 
 #[cfg(windows)]
 fn create_directory_link(link_path: &Path, target: &Path, name: &str) {
-    // NTFS junctions don't require admin / developer mode and behave like
+    // NTFS junctions don't require admin / Developer Mode and behave like
     // regular directories to every Windows API (and to Rust's std::fs).
-    // We invoke `cmd /C mklink /J` because Rust's `std::os::windows::fs::
-    // symlink_dir` creates a real symlink, which DOES require dev mode.
+    // We invoke `cmd /C mklink /J` because Rust's
+    // `std::os::windows::fs::symlink_dir` creates a real symlink, which
+    // DOES require Developer Mode and trips up most checkouts.
     let status = std::process::Command::new("cmd")
         .args(&[
             "/C",
@@ -152,9 +145,7 @@ fn create_directory_link(link_path: &Path, target: &Path, name: &str) {
             target.to_str().expect("target path is UTF-8"),
         ])
         .status()
-        .unwrap_or_else(|e| {
-            panic!("failed to invoke mklink for `{}`: {}", name, e)
-        });
+        .unwrap_or_else(|e| panic!("failed to invoke mklink for `{}`: {}", name, e));
     if !status.success() {
         panic!(
             "mklink /J failed for `{}` (target: {})",
