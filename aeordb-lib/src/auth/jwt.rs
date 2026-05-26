@@ -10,8 +10,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug)]
 pub struct JwtKeyError(pub String);
 
-/// Default token expiry in seconds (1 hour).
-pub const DEFAULT_EXPIRY_SECONDS: i64 = 3600;
+/// Default JWT lifetime in seconds (7 days). Long enough that the dashboard
+/// and other interactive clients don't have to re-exchange the API key every
+/// few minutes; short enough that revoking an API key still cuts a leaked
+/// JWT off within a week. Refresh tokens (30 days, `DEFAULT_REFRESH_EXPIRY_SECONDS`)
+/// extend the user-perceived session beyond the JWT lifetime.
+pub const DEFAULT_EXPIRY_SECONDS: i64 = 7 * 24 * 3600;
 
 /// JWT claims payload for aeordb tokens.
 /// The `sub` field contains the user_id (UUID string). For root, it is the nil UUID.

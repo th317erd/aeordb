@@ -66,7 +66,7 @@ enum Commands {
     /// Path to TLS private key PEM file (requires --tls-cert)
     #[arg(long)]
     tls_key: Option<String>,
-    /// JWT token lifetime in seconds (default: 3600)
+    /// JWT token lifetime in seconds (default: 604800 = 7 days)
     #[arg(long)]
     jwt_expiry: Option<i64>,
     /// Write chunk size in bytes (default: 262144 = 256 KiB)
