@@ -158,20 +158,29 @@ impl NormalizedVectorTable {
     buffer
   }
 
+  /// Deserialize an NVT payload. Reads the schema version byte at offset 0
+  /// and dispatches to the matching `deserialize_v{n}`. Unknown versions
+  /// fail loudly rather than getting parsed with the wrong layout.
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
+    if data.is_empty() {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "NVT data is empty".to_string(),
+      });
+    }
+    let version = data[0];
+    match version {
+      1 => Self::deserialize_v1(data),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  fn deserialize_v1(data: &[u8]) -> EngineResult<Self> {
     // Minimum: version(1) + converter_length(4) = 5 bytes
     if data.len() < 5 {
       return Err(EngineError::CorruptEntry {
         offset: 0,
         reason: "NVT data too short for header".to_string(),
-      });
-    }
-
-    let version = data[0];
-    if version == 0 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("Invalid NVT version: {}", version),
       });
     }
 
@@ -243,7 +252,7 @@ impl NormalizedVectorTable {
     }
 
     Ok(NormalizedVectorTable {
-      version,
+      version: 1,
       buckets,
       converter: ConverterHolder { inner: converter },
     })
