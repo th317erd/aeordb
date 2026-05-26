@@ -21,3 +21,10 @@ Thumbs.db
 .env
 .env.local
 data.aeordb
+
+# Portal asset links — materialized by aeordb-lib/build.rs on every build.
+# Linux/macOS: relative symlinks. Windows: NTFS junctions.
+# Tracking them in git breaks Windows clones (git renders them as text
+# files unless the user has core.symlinks=true + Developer Mode).
+aeordb-lib/src/portal/aeor
+aeordb-lib/src/portal/shared
