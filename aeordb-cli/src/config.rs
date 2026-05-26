@@ -48,7 +48,7 @@ pub struct CorsConfig {
 pub struct AuthConfig {
   /// Auth mode: "disabled", "self", or "file:///path/to/identity" (default: "self").
   pub mode: Option<String>,
-  /// JWT token lifetime in seconds (default: 3600).
+  /// JWT token lifetime in seconds (default: 604800 = 7 days).
   pub jwt_expiry_seconds: Option<i64>,
 }
 

@@ -263,6 +263,20 @@ pub async fn remove_plugin(
 #[derive(Debug, Deserialize)]
 pub struct AuthTokenRequest {
   pub api_key: String,
+  /// Whether to mint AND persist a refresh token alongside the JWT.
+  /// Defaults to `false` — most callers (dashboard, server-to-server with
+  /// the API key still available, sync peers) re-exchange the API key
+  /// directly when their JWT expires and have no use for a refresh token.
+  /// Set `true` for interactive browser sessions that hand the refresh token
+  /// to a client which can't keep the original API key around safely.
+  ///
+  /// Persisted refresh tokens take a permanent row in
+  /// `/.aeordb-system/refresh-tokens/`, only cleaned up when expired
+  /// (`DEFAULT_REFRESH_EXPIRY_SECONDS`, 30 days). Without the opt-in, a
+  /// chatty caller that exchanges the API key on every poll would
+  /// accumulate one persistent row per poll until it expired weeks later.
+  #[serde(default)]
+  pub include_refresh: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,41 +416,53 @@ pub async fn auth_token(
     }
   };
 
-  // Generate a refresh token alongside the JWT.
-  let refresh_token_plaintext = generate_refresh_token();
-  let refresh_token_hash = hash_refresh_token(&refresh_token_plaintext);
-  let refresh_expires_at =
-    chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
+  // Mint a refresh token only when the caller asked for one. Most callers
+  // (dashboard polling, server-to-server with the API key in hand) never
+  // use it and just want the JWT — issuing one anyway costs a persistent
+  // row in /.aeordb-system/refresh-tokens/ on every request, which
+  // accumulates fast on a poll-heavy client (see the dashboard 15s leak).
+  let refresh_token_plaintext = if payload.include_refresh {
+    let plaintext = generate_refresh_token();
+    let refresh_token_hash = hash_refresh_token(&plaintext);
+    let refresh_expires_at =
+      chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
 
-  let ctx = RequestContext::with_bus(state.event_bus.clone());
-  let refresh_record = RefreshTokenRecord {
-    token_hash: refresh_token_hash,
-    user_subject: match record.user_id {
-      Some(uid) => uid.to_string(),
-      None => format!("share:{}", record.key_id),
-    },
-    created_at: chrono::Utc::now(),
-    expires_at: refresh_expires_at,
-    is_revoked: false,
-    key_id: Some(record.key_id.to_string()),
+    let ctx = RequestContext::with_bus(state.event_bus.clone());
+    let refresh_record = RefreshTokenRecord {
+      token_hash: refresh_token_hash,
+      user_subject: match record.user_id {
+        Some(uid) => uid.to_string(),
+        None => format!("share:{}", record.key_id),
+      },
+      created_at: chrono::Utc::now(),
+      expires_at: refresh_expires_at,
+      is_revoked: false,
+      key_id: Some(record.key_id.to_string()),
+    };
+    if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &refresh_record) {
+      tracing::error!("Failed to store refresh token: {}", error);
+      return ErrorResponse::new("Failed to store refresh token during token exchange. If this persists, check GET /system/health for system status".to_string())
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+    Some(plaintext)
+  } else {
+    None
   };
-  if let Err(error) = system_store::store_refresh_token(&state.engine, &ctx, &refresh_record) {
-    tracing::error!("Failed to store refresh token: {}", error);
-    return ErrorResponse::new("Failed to store refresh token during token exchange. If this persists, check GET /system/health for system status".to_string())
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-  }
 
   metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "success").increment(1);
 
-  (
-    StatusCode::OK,
-    Json(serde_json::json!({
-      "token": token,
-      "expires_in": jwt_expiry,
-      "refresh_token": refresh_token_plaintext,
-    })),
-  )
+  // Only include `refresh_token` in the response when one was actually minted.
+  // Callers that didn't opt in get a leaner payload, and downstream tools that
+  // notice a missing field know not to expect one.
+  let mut body = serde_json::json!({
+    "token": token,
+    "expires_in": jwt_expiry,
+  });
+  if let Some(rt) = refresh_token_plaintext {
+    body["refresh_token"] = serde_json::Value::String(rt);
+  }
+  (StatusCode::OK, Json(body))
     .into_response()
 }
 
