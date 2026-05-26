@@ -21,6 +21,25 @@ cd aeordb
 
 The repository is a Cargo workspace covering the storage engine (`aeordb-lib`), the CLI / HTTP server (`aeordb-cli`), the plugin SDK (`aeordb-plugin-sdk`), and the bundled parsers (`aeordb-parsers/`).
 
+### Sibling repos for the embedded web UI
+
+The portal HTML/JS in `aeordb-lib/src/portal/` includes two checkouts via
+**relative** symlinks (`portal/aeor`, `portal/shared`). For the symlinks
+to resolve, clone these two sibling repos next to this one:
+
+```
+<your-projects-root>/
+├── aeor-web-components/        # sibling of aeordb-workspace
+└── aeordb-workspace/
+    ├── aeordb/                 # this repo
+    └── aeordb-web-components/  # sibling of aeordb
+```
+
+If you don't need to rebuild the portal assets you can ignore this — the
+JS/CSS gets `include_str!`'d at compile time, so as long as the symlinks
+resolve at build time you're set. If the directories don't exist, the
+build fails with "file not found" errors for the embedded assets.
+
 ## Build
 
 AeorDB builds with the stable Rust toolchain (1.75+) and has no external native dependencies.
