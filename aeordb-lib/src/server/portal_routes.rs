@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::http::{header, StatusCode};
 use serde::Serialize;
 use super::state::AppState;
@@ -83,6 +83,58 @@ pub async fn portal_index() -> Html<&'static str> {
     Html(PORTAL_HTML)
 }
 
+/// Per-process ETag suffix for embedded portal assets. A new engine
+/// process picks a fresh value, so every deploy (which rebuilds and
+/// restarts the binary) invalidates every browser's portal cache the
+/// next time it revalidates. Within a single engine session, the
+/// ETag is stable, so navigation hits return 304.
+///
+/// Combined with `Cache-Control: no-cache`, this gives "always check
+/// for updates" semantics without forcing a full re-download on every
+/// page hop. Before this header set, the engine sent no cache hints,
+/// browsers cached heuristically, and a deploy would leave users
+/// staring at stale JS through hard reloads.
+fn asset_etag() -> &'static str {
+    static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ETAG.get_or_init(|| {
+        // Random-enough per-process token; collisions across builds are
+        // a non-issue since browsers see a different value on restart.
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        format!("\"{}-{}\"", env!("CARGO_PKG_VERSION"), &nonce[..16])
+    })
+}
+
+/// Build a portal-asset response with proper revalidation headers.
+fn asset_response(
+    request_headers: &axum::http::HeaderMap,
+    content: &'static str,
+    content_type: &'static str,
+) -> Response {
+    let etag = asset_etag();
+    // Conditional GET: if the browser already has this ETag, return 304
+    // with no body. Saves bandwidth on every navigation inside a session.
+    if let Some(if_none_match) = request_headers.get(header::IF_NONE_MATCH) {
+        if if_none_match.as_bytes() == etag.as_bytes() {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, etag),
+                    (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+                ],
+            ).into_response();
+        }
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+            (header::ETAG, etag),
+        ],
+        content,
+    ).into_response()
+}
+
 /// Serve portal JS assets with correct content type.
 pub async fn portal_asset(
     request: axum::http::request::Parts,
@@ -99,13 +151,14 @@ pub async fn portal_asset(
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
 
-    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+    asset_response(&request.headers, content, content_type)
 }
 
 /// Serve shared web-component assets (symlinked into portal/shared/ at build time).
 /// Accepts a wildcard path to support nested directories (e.g., components/aeor-crudlify.js).
 pub async fn portal_shared_asset(
     axum::extract::Path(path): axum::extract::Path<String>,
+    request_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let (content, content_type) = match path.as_str() {
         "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
@@ -133,7 +186,7 @@ pub async fn portal_shared_asset(
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not found").into_response(),
     };
 
-    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+    asset_response(&request_headers, content, content_type)
 }
 
 /// Serve universal `aeor-web-components` assets (symlinked into portal/aeor/
@@ -147,6 +200,7 @@ pub async fn portal_shared_asset(
 /// rebuilding the engine. Release builds serve only the baked-in content.
 pub async fn portal_aeor_asset(
     axum::extract::Path(path): axum::extract::Path<String>,
+    request_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let (content, content_type) = match path.as_str() {
         // Core
@@ -204,7 +258,7 @@ pub async fn portal_aeor_asset(
         }
     };
 
-    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], content).into_response()
+    asset_response(&request_headers, content, content_type)
 }
 
 /// Dev-only: read a file from the on-disk `aeor-web-components` symlink so
