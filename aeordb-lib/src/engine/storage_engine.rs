@@ -1826,17 +1826,28 @@ impl StorageEngine {
   /// Try to flush the hot buffer if the KV lock is available.
   /// Used by the 100ms timer task — non-blocking, skips if writer is busy.
   ///
-  /// Cheap-path early-exit: if there's nothing buffered, return immediately
+  /// Cheap-path early-exit: if the hot buffer is empty, return immediately
   /// without acquiring the writer lock or calling fsync. Without this the
   /// timer was issuing fdatasync 10× per second on an otherwise-idle DB,
   /// which kept spinning HDDs from ever idling down.
+  ///
+  /// Subtle: the FIRST cut of this gate also checked `write_buffer_len()`,
+  /// which is wrong — `write_buffer` lifecycle is independent of hot-tail
+  /// durability. `kv.insert()` puts entries into BOTH buffers; the hot
+  /// buffer clears every 512 entries (or on this timer), but the write
+  /// buffer only flushes to KV pages when it hits `WRITE_BUFFER_THRESHOLD`
+  /// (which is much higher) or on explicit flush calls. So after any
+  /// past activity, `hot_buffer.is_empty() && write_buffer.len() > 0` is
+  /// a normal idle state. Gating on the OR meant we re-wrote the file
+  /// header (3 fdatasyncs per cycle) 10×/s indefinitely for any DB that
+  /// had ever been written to — kept HDDs spun up forever. Gate ONLY on
+  /// the hot buffer: that's what this timer is responsible for.
   pub fn try_flush_hot_buffer(&self) {
-    // 1. Cheap probe: is there anything to flush? If neither buffer has
-    //    content, no recent write needs a durability sync — skip the whole
-    //    function. The lock is released before we proceed so the writer is
+    // 1. Cheap probe: hot buffer empty? Nothing for this timer to do.
+    //    The lock is released before we proceed so the writer is
     //    available for any concurrent write that arrives next.
     let has_pending = match self.kv_writer.try_lock() {
-      Ok(kv) => kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0,
+      Ok(kv) => kv.hot_buffer_len() > 0,
       // Couldn't get the lock — a writer is busy; let them finish and we'll
       // pick it up on the next tick.
       Err(_) => return,
@@ -1853,9 +1864,10 @@ impl StorageEngine {
     }
 
     // 3. Flush the hot buffer (re-takes the kv lock; the cheap probe above
-    //    has already been released by here).
+    //    has already been released by here). Re-check hot_buffer_len in case
+    //    another path flushed between the probe and here.
     let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
-      if kv.hot_buffer_len() > 0 || kv.write_buffer_len() > 0 {
+      if kv.hot_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
           tracing::warn!("Timer flush failed: {}", e);
         }
