@@ -15,6 +15,7 @@
 - [Versioning](./concepts/versioning.md)
 - [Indexing & Queries](./concepts/indexing.md)
 - [Replication](./concepts/replication.md)
+- [Users and Workspaces](./concepts/users-and-workspaces.md)
 
 # API Reference
 
