@@ -120,8 +120,10 @@ pub async fn upload_chunk(
   let body_vec = body.to_vec();
   let store_result = tokio::task::spawn_blocking(move || -> Result<&'static str, crate::engine::errors::EngineError> {
     if engine.has_entry(&computed_bytes)? {
+      engine.counters().record_chunk_deduped();
       return Ok("exists");
     }
+    let chunk_size = body_vec.len() as u64;
     if should_compress(None, body_vec.len()) {
       match compress(&body_vec, CompressionAlgorithm::Zstd) {
         Ok(compressed) => {
@@ -136,6 +138,8 @@ pub async fn upload_chunk(
     } else {
       engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
     }
+    engine.counters().record_chunk_stored(chunk_size);
+    engine.counters().record_write(chunk_size);
     Ok("created")
   }).await;
 

@@ -178,6 +178,7 @@ pub fn get_needed_chunks(
             } else {
                 value
             };
+            engine.counters().record_read(data.len() as u64);
             result.push(ChunkData {
                 hash: hash.clone(),
                 data,
@@ -202,7 +203,11 @@ pub fn apply_sync_chunks(engine: &StorageEngine, chunks: &[ChunkData]) -> Engine
     for chunk in chunks {
         if !engine.has_entry(&chunk.hash)? {
             engine.store_entry(EntryType::Chunk, &chunk.hash, &chunk.data)?;
+            engine.counters().record_chunk_stored(chunk.data.len() as u64);
+            engine.counters().record_write(chunk.data.len() as u64);
             stored += 1;
+        } else {
+            engine.counters().record_chunk_deduped();
         }
     }
 

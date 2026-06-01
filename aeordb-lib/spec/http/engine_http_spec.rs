@@ -100,6 +100,8 @@ async fn test_engine_get_file_returns_data() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
+  let before_read = engine.counters().snapshot();
+  assert_eq!(before_read.reads_total, 0, "store should not count as a read");
 
   // Read it back
   let app = rebuild_app(&jwt_manager, &engine);
@@ -115,6 +117,12 @@ async fn test_engine_get_file_returns_data() {
 
   let bytes = body_bytes(response.into_body()).await;
   assert_eq!(bytes, vec![1u8, 2, 3, 4, 5]);
+  let after_read = engine.counters().snapshot();
+  assert!(after_read.reads_total > before_read.reads_total, "GET /files should count as a read");
+  assert!(
+    after_read.bytes_read_total - before_read.bytes_read_total >= 5,
+    "GET /files should count at least the served bytes"
+  );
 }
 
 #[tokio::test]

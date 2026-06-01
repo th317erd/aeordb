@@ -184,6 +184,82 @@ impl EngineCounters {
         self.bytes_read_total.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Record one logical write operation.
+    pub fn record_write(&self, bytes: u64) {
+        self.increment_writes();
+        self.add_bytes_written(bytes);
+    }
+
+    /// Record one logical read operation.
+    pub fn record_read(&self, bytes: u64) {
+        self.increment_reads();
+        self.add_bytes_read(bytes);
+    }
+
+    /// Record a newly persisted chunk.
+    pub fn record_chunk_stored(&self, bytes: u64) {
+        self.increment_chunks();
+        self.add_chunk_data_size(bytes);
+    }
+
+    /// Record a deduplicated chunk hit.
+    pub fn record_chunk_deduped(&self) {
+        self.increment_chunks_deduped();
+    }
+
+    /// Record a file write and keep live file/logical-size counters in sync.
+    pub fn record_file_write(&self, previous_size: Option<u64>, new_size: u64, throughput_bytes: u64) {
+        self.record_write(throughput_bytes);
+        match previous_size {
+            None => {
+                self.increment_files();
+                self.add_logical_data_size(new_size);
+            }
+            Some(old_size) if new_size >= old_size => {
+                self.add_logical_data_size(new_size - old_size);
+            }
+            Some(old_size) => {
+                self.sub_logical_data_size(old_size - new_size);
+            }
+        }
+    }
+
+    /// Record a file deletion mutation and keep live counters in sync.
+    pub fn record_file_delete(&self, size: u64) {
+        self.record_write(0);
+        self.decrement_files();
+        self.sub_logical_data_size(size);
+    }
+
+    /// Record a file becoming live again without re-writing its payload bytes.
+    pub fn record_file_restore(&self, size: u64) {
+        self.record_write(0);
+        self.increment_files();
+        self.add_logical_data_size(size);
+    }
+
+    pub fn record_directory_create(&self) {
+        self.record_write(0);
+        self.increment_directories();
+    }
+
+    pub fn record_directory_delete(&self) {
+        self.record_write(0);
+        self.decrement_directories();
+    }
+
+    pub fn record_symlink_write(&self, existed: bool) {
+        self.record_write(0);
+        if !existed {
+            self.increment_symlinks();
+        }
+    }
+
+    pub fn record_symlink_delete(&self) {
+        self.record_write(0);
+        self.decrement_symlinks();
+    }
+
     // ── Dedup tracking ───────────────────────────────────────────────────
 
     pub fn increment_chunks_deduped(&self) {

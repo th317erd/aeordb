@@ -157,12 +157,12 @@ pub fn commit_files(
 
         // Check if file already exists (preserve created_at on overwrite)
         let file_key = file_path_hash(&normalized, &algo)?;
-        let existing_created_at = match engine.get_entry(&file_key)? {
+        let (existing_created_at, existing_total_size) = match engine.get_entry(&file_key)? {
             Some((header, _key, value)) => {
                 let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-                Some(existing.created_at)
+                (Some(existing.created_at), Some(existing.total_size))
             }
-            None => None,
+            None => (None, None),
         };
 
         let mut file_record = FileRecord::new(
@@ -217,6 +217,8 @@ pub fn commit_files(
             updated_at: file_record.updated_at,
             previous_hash: None,
         });
+
+        engine.counters().record_file_write(existing_total_size, total_size, 0);
 
         file_infos.push(FileInfo {
             normalized_path: normalized,

@@ -879,6 +879,8 @@ pub fn import_backup_with_mode(
         if !target.has_entry(&entry.hash)? {
             if let Some((_flags, value)) = read_entry(&entry.hash)? {
                 target.store_entry(EntryType::Chunk, &entry.hash, &value)?;
+                target.counters().record_chunk_stored(value.len() as u64);
+                target.counters().record_write(value.len() as u64);
                 chunks_imported += 1;
                 entries_imported += 1;
             }
@@ -901,6 +903,7 @@ pub fn import_backup_with_mode(
             } else {
                 target.store_entry(EntryType::FileRecord, &entry.hash, &value)?;
             }
+            target.counters().record_write(value.len() as u64);
             files_imported += 1;
             entries_imported += 1;
         }
@@ -918,6 +921,7 @@ pub fn import_backup_with_mode(
                 continue;
             }
             target.store_entry(EntryType::DirectoryIndex, &entry.hash, &value)?;
+            target.counters().record_write(value.len() as u64);
             dirs_imported += 1;
             entries_imported += 1;
         }
@@ -935,6 +939,7 @@ pub fn import_backup_with_mode(
                 continue;
             }
             target.store_entry(EntryType::Symlink, &entry.hash, &value)?;
+            target.counters().record_write(value.len() as u64);
             entries_imported += 1;
         }
     }
@@ -947,6 +952,7 @@ pub fn import_backup_with_mode(
         for (hash, value) in &snap_entries {
             if !target.has_entry(hash)? {
                 target.store_entry(EntryType::Snapshot, hash, value)?;
+                target.counters().record_write(value.len() as u64);
                 entries_imported += 1;
             }
         }
@@ -959,6 +965,7 @@ pub fn import_backup_with_mode(
             // Mark the entry as deleted in the target
             if target.has_entry(hash)? {
                 let _ = target.mark_entry_deleted(hash);
+                target.counters().record_write(0);
                 deletions_applied += 1;
                 entries_imported += 1;
             }
@@ -968,10 +975,13 @@ pub fn import_backup_with_mode(
     // Promote HEAD if requested
     let head_promoted = if promote {
         target.update_head(&target_hash)?;
+        target.counters().record_write(0);
         true
     } else {
         false
     };
+
+    target.reconcile_counters_from_kv();
 
     // Emit import completed event
     ctx.emit(EVENT_IMPORTS_COMPLETED, serde_json::json!({"imports": [ImportEventData {

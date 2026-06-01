@@ -402,10 +402,9 @@ impl<'a> DirectoryOps<'a> {
     let chunk_key = chunk_content_hash(data, &algo)?;
     if !self.engine.has_entry(&chunk_key)? {
       self.engine.store_entry(EntryType::Chunk, &chunk_key, data)?;
-      self.engine.counters().increment_chunks();
-      self.engine.counters().add_chunk_data_size(data.len() as u64);
+      self.engine.counters().record_chunk_stored(data.len() as u64);
     } else {
-      self.engine.counters().increment_chunks_deduped();
+      self.engine.counters().record_chunk_deduped();
     }
     Ok(chunk_key)
   }
@@ -493,17 +492,7 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
-    let counters = self.engine.counters();
-    counters.increment_writes();
-    counters.add_bytes_written(total_size);
-    if existing_created_at.is_none() {
-      counters.increment_files();
-      counters.add_logical_data_size(total_size);
-    } else if let Some(old_size) = existing_total_size {
-      if total_size > old_size {
-        counters.add_logical_data_size(total_size - old_size);
-      }
-    }
+    self.engine.counters().record_file_write(existing_total_size, total_size, total_size);
 
     let entry_data = EntryEventData {
       path: normalized,
@@ -624,10 +613,9 @@ impl<'a> DirectoryOps<'a> {
               EntryType::Chunk, &chunk_key, chunk_data,
             )?;
           }
-          self.engine.counters().increment_chunks();
-          self.engine.counters().add_chunk_data_size(chunk_data.len() as u64);
+          self.engine.counters().record_chunk_stored(chunk_data.len() as u64);
         } else {
-          self.engine.counters().increment_chunks_deduped();
+          self.engine.counters().record_chunk_deduped();
         }
 
         chunk_hashes.push(chunk_key);
@@ -699,24 +687,11 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
-    // Update counters
-    let counters = self.engine.counters();
-    counters.increment_writes();
-    counters.add_bytes_written(data.len() as u64);
-    if existing_created_at.is_none() {
-      // New file
-      counters.increment_files();
-      counters.add_logical_data_size(data.len() as u64);
-    } else {
-      // Overwrite — adjust logical_data_size by delta
-      let old_size = existing_total_size.unwrap_or(0);
-      let new_size = data.len() as u64;
-      if new_size >= old_size {
-        counters.add_logical_data_size(new_size - old_size);
-      } else {
-        counters.sub_logical_data_size(old_size - new_size);
-      }
-    }
+    self.engine.counters().record_file_write(
+      existing_total_size,
+      data.len() as u64,
+      data.len() as u64,
+    );
 
     // Emit entry event after successful store
     let event_type = EVENT_ENTRIES_CREATED;
@@ -754,12 +729,12 @@ impl<'a> DirectoryOps<'a> {
 
     // Preserve created_at if file already exists
     let file_key = file_path_hash(&normalized, &algo)?;
-    let existing_created_at = match self.engine.get_entry(&file_key)? {
+    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
       Some((header, _key, value)) => {
         let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        Some(existing.created_at)
+        (Some(existing.created_at), Some(existing.total_size))
       }
-      None => None,
+      None => (None, None),
     };
 
     // Create new FileRecord pointing to the same chunks
@@ -797,6 +772,12 @@ impl<'a> DirectoryOps<'a> {
     };
     self.update_parent_directories(&normalized, child)?;
 
+    self.engine.counters().record_file_write(
+      existing_total_size,
+      source_record.total_size,
+      0,
+    );
+
     ctx.emit(
       crate::engine::engine_event::EVENT_ENTRIES_CREATED,
       serde_json::json!({"entries": [{
@@ -825,9 +806,7 @@ impl<'a> DirectoryOps<'a> {
     let (header, _key, value) = entry;
     let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
-    let counters = self.engine.counters();
-    counters.increment_reads();
-    counters.add_bytes_read(file_record.total_size);
+    self.engine.counters().record_read(file_record.total_size);
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(elapsed);
@@ -898,9 +877,7 @@ impl<'a> DirectoryOps<'a> {
 
     // Update counters
     if let Some(ref record) = file_record_opt {
-      let counters = self.engine.counters();
-      counters.decrement_files();
-      counters.sub_logical_data_size(record.total_size);
+      self.engine.counters().record_file_delete(record.total_size);
     }
 
     // Emit deletion event with captured metadata
@@ -984,7 +961,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     // Update counters
-    self.engine.counters().decrement_directories();
+    self.engine.counters().record_directory_delete();
 
     ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [{
       "path": normalized,
@@ -1138,7 +1115,7 @@ impl<'a> DirectoryOps<'a> {
     };
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
-    self.engine.counters().increment_directories();
+    self.engine.counters().record_directory_create();
 
     Ok(())
   }
@@ -1349,7 +1326,7 @@ impl<'a> DirectoryOps<'a> {
     };
     self.update_parent_directories(&normalized, child)?;
 
-    self.engine.counters().increment_files();
+    self.engine.counters().record_file_restore(file_record.total_size);
 
     ctx.emit(
       crate::engine::engine_event::EVENT_ENTRIES_CREATED,
@@ -2383,10 +2360,7 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
-    // Update counters: only increment for new symlinks, not updates
-    if existing_created_at.is_none() {
-      self.engine.counters().increment_symlinks();
-    }
+    self.engine.counters().record_symlink_write(existing_created_at.is_some());
 
     // Emit event
     let entry_data = EntryEventData {
@@ -2450,8 +2424,7 @@ impl<'a> DirectoryOps<'a> {
     // Remove from parent directory
     self.remove_from_parent_directory(&normalized)?;
 
-    // Update counters
-    self.engine.counters().decrement_symlinks();
+    self.engine.counters().record_symlink_delete();
 
     // Emit deletion event
     let entry_data = EntryEventData {
@@ -2595,6 +2568,8 @@ impl<'a> DirectoryOps<'a> {
     }
     self.engine.mark_entry_deleted(&old_file_key)?;
     self.remove_from_parent_directory(&old_normalized)?;
+
+    self.engine.counters().record_write(0);
 
     // Emit events: deleted from old path, created at new path
     let deleted_event = EntryEventData {
@@ -2812,6 +2787,8 @@ impl<'a> DirectoryOps<'a> {
     }
     self.engine.mark_entry_deleted(&old_symlink_key)?;
     self.remove_from_parent_directory(&old_normalized)?;
+
+    self.engine.counters().record_write(0);
 
     // Emit events
     let deleted_event = EntryEventData {

@@ -202,6 +202,7 @@ fn test_reconcile_overwrites_values() {
         bytes_read_total: 999,    // should NOT overwrite
         chunks_deduped_total: 999, // should NOT overwrite
         write_buffer_depth: 50,
+        void_count: 0,
     };
 
     counters.reconcile(&reconcile_snapshot);
@@ -418,19 +419,13 @@ fn test_initialize_from_kv_counts_files() {
     ops.store_file_buffered(&ctx, "/delta.txt", b"hello delta", None).unwrap();
     ops.store_file_buffered(&ctx, "/epsilon.txt", b"hello epsilon", None).unwrap();
 
-    // Cross-check: counters should match the existing stats() method
-    let stats = engine.stats();
-
     let counters = EngineCounters::initialize_from_kv(&engine);
     let snapshot = counters.snapshot();
 
-    // Each store_file creates 3 KV entries with KV_TYPE_FILE_RECORD
-    // (content-addressed, identity, and path-based), so 5 files = 15 entries
-    assert_eq!(snapshot.files, stats.file_count as u64, "should match stats().file_count");
-    assert_eq!(snapshot.directories, stats.directory_count as u64, "should match stats().directory_count");
-    assert_eq!(snapshot.chunks, stats.chunk_count as u64, "should match stats().chunk_count");
-    assert!(snapshot.logical_data_size > 0, "files have nonzero total_size");
-    assert!(snapshot.chunk_data_size > 0, "chunks have nonzero data");
+    assert_eq!(snapshot.files, 5, "startup file counter should use live tree count");
+    assert!(snapshot.chunks > 0, "files produce chunks");
+    assert_eq!(snapshot.logical_data_size, 0, "startup logical size scan is opt-in");
+    assert_eq!(snapshot.chunk_data_size, 0, "startup chunk size scan is opt-in");
 }
 
 #[test]
@@ -454,20 +449,16 @@ fn test_initialize_from_kv_counts_all_types() {
     // Create a fork
     version_manager.create_fork(&ctx, "feature-branch", None).unwrap();
 
-    let stats = engine.stats();
-
     let counters = EngineCounters::initialize_from_kv(&engine);
     let snapshot = counters.snapshot();
 
-    // Verify counters match stats() for all shared fields
-    assert_eq!(snapshot.files, stats.file_count as u64, "should match stats().file_count");
-    assert_eq!(snapshot.directories, stats.directory_count as u64, "should match stats().directory_count");
-    assert_eq!(snapshot.snapshots, stats.snapshot_count as u64, "should match stats().snapshot_count");
-    assert_eq!(snapshot.forks, stats.fork_count as u64, "should match stats().fork_count");
+    assert_eq!(snapshot.files, 2, "startup file counter should use live tree count");
+    assert!(snapshot.directories >= 1, "should count live non-root directories");
+    assert_eq!(snapshot.snapshots, 1, "should count active snapshots");
+    assert_eq!(snapshot.forks, 1, "should count active forks");
     assert!(snapshot.chunks > 0, "files produce chunks");
 
     // Additionally verify types we know were created
-    assert!(snapshot.files >= 6, "at least 6 file record KV entries (2 files x 3 entries each)");
     assert!(snapshot.symlinks >= 1, "should count at least 1 symlink");
     assert!(snapshot.snapshots >= 1, "should count at least 1 snapshot");
     assert!(snapshot.forks >= 1, "should count at least 1 fork");
@@ -491,10 +482,7 @@ fn test_initialize_from_kv_sums_logical_size() {
     let counters = EngineCounters::initialize_from_kv(&engine);
     let snapshot = counters.snapshot();
 
-    // Each store_file creates 3 KV entries with KV_TYPE_FILE_RECORD, each
-    // deserializing to the same total_size, so logical_data_size =
-    // 3 * (100 + 200 + 300) = 1800.
-    assert_eq!(snapshot.logical_data_size, 1800);
+    assert_eq!(snapshot.logical_data_size, 0, "startup logical size scan is opt-in");
 }
 
 #[test]
@@ -505,8 +493,8 @@ fn test_initialize_from_kv_empty_database() {
     let counters = EngineCounters::initialize_from_kv(&engine);
     let snapshot = counters.snapshot();
 
-    // A freshly created engine with root directory has at least 1 directory
-    assert!(snapshot.directories >= 1, "should count root directory");
+    // The live directory counter excludes the root itself.
+    assert_eq!(snapshot.directories, 0);
     assert_eq!(snapshot.files, 0);
     assert_eq!(snapshot.symlinks, 0);
     assert_eq!(snapshot.snapshots, 0);
@@ -561,6 +549,7 @@ fn test_reconcile_does_not_affect_monotonic_counters() {
         bytes_read_total: 0,
         chunks_deduped_total: 0,
         write_buffer_depth: 0,
+        void_count: 0,
     };
 
     counters.reconcile(&reconcile_snapshot);
@@ -894,7 +883,7 @@ fn test_live_counters_full_lifecycle() {
     assert_eq!(snap.symlinks, 1);
     assert_eq!(snap.snapshots, 1);
     assert_eq!(snap.forks, 1);
-    assert_eq!(snap.writes_total, 3);
+    assert_eq!(snap.writes_total, 6);
     assert_eq!(snap.logical_data_size, 14); // "alpha"(5) + "beta"(4) + "gamma"(5)
 
     // Delete one file and the fork
@@ -907,6 +896,7 @@ fn test_live_counters_full_lifecycle() {
     assert_eq!(snap2.logical_data_size, 10); // "alpha"(5) + "gamma"(5)
     assert_eq!(snap2.snapshots, 1);
     assert_eq!(snap2.symlinks, 1);
+    assert_eq!(snap2.writes_total, 8);
 }
 
 #[test]
@@ -950,12 +940,10 @@ fn test_live_counters_initialized_on_reopen() {
     let engine = StorageEngine::open(path_str).unwrap();
     let snap = engine.counters().snapshot();
 
-    // File records have 3 KV entries each (content, identity, path)
-    // so files count = 6 (2 files x 3 entries)
-    assert!(snap.files >= 2, "should count at least 2 file records");
+    assert_eq!(snap.files, 2, "should count live files");
     assert!(snap.symlinks >= 1, "should count at least 1 symlink");
-    assert!(snap.directories >= 1, "should count root directory");
-    assert!(snap.logical_data_size > 0, "should have nonzero logical data size");
+    assert_eq!(snap.directories, 0, "root directory is not counted as a user directory");
+    assert_eq!(snap.logical_data_size, 0, "startup logical size scan is opt-in");
 }
 
 #[test]

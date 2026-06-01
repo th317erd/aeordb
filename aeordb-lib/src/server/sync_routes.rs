@@ -694,6 +694,7 @@ pub async fn sync_chunks(
             } else {
                 value
             };
+            state.engine.counters().record_read(data.len() as u64);
 
             // Project base64-encoded size + JSON overhead. Bail before pushing.
             let projected = data.len().saturating_mul(4) / 3 + hex_hash.len() + 64;

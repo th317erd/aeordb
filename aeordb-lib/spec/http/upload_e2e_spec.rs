@@ -127,8 +127,21 @@ async fn test_full_round_trip_config_check_upload_commit_read() {
     assert_eq!(check_result["have"].as_array().unwrap().len(), 0);
 
     // Phase 3: PUT /upload/chunks/{hash}
+    let before_chunk = engine.counters().snapshot();
     let h = upload_chunk(rebuild_app(&jwt, &engine), &token, file_content).await;
     assert_eq!(h, chunk_hash);
+    let after_chunk = engine.counters().snapshot();
+    assert_eq!(
+        after_chunk.writes_total - before_chunk.writes_total,
+        1,
+        "chunk upload should count as a write"
+    );
+    assert_eq!(
+        after_chunk.bytes_written_total - before_chunk.bytes_written_total,
+        file_content.len() as u64,
+        "chunk upload should count uploaded payload bytes"
+    );
+    assert_eq!(after_chunk.chunks - before_chunk.chunks, 1, "new uploaded chunk should count as live chunk data");
 
     // Phase 4: POST /upload/commit
     let commit_body = serde_json::json!({
@@ -151,6 +164,23 @@ async fn test_full_round_trip_config_check_upload_commit_read() {
     assert_eq!(resp.status(), StatusCode::OK);
     let commit_result = body_json(resp.into_body()).await;
     assert_eq!(commit_result["committed"].as_u64().unwrap(), 1);
+    let after_commit = engine.counters().snapshot();
+    assert_eq!(
+        after_commit.writes_total - after_chunk.writes_total,
+        1,
+        "blob commit should count as a write"
+    );
+    assert_eq!(after_commit.files - after_chunk.files, 1, "blob commit should count the committed file");
+    assert_eq!(
+        after_commit.logical_data_size - after_chunk.logical_data_size,
+        file_content.len() as u64,
+        "blob commit should add logical file size"
+    );
+    assert_eq!(
+        after_commit.bytes_written_total - after_chunk.bytes_written_total,
+        0,
+        "blob commit should not double-count bytes already written by chunk upload"
+    );
 
     // Phase 5: GET /engine/roundtrip/file.txt to read back
     let resp = rebuild_app(&jwt, &engine)
@@ -165,6 +195,12 @@ async fn test_full_round_trip_config_check_upload_commit_read() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = body_bytes(resp.into_body()).await;
     assert_eq!(bytes, file_content);
+    let after_read = engine.counters().snapshot();
+    assert!(after_read.reads_total > after_commit.reads_total, "file GET should count as a read");
+    assert!(
+        after_read.bytes_read_total - after_commit.bytes_read_total >= file_content.len() as u64,
+        "file GET should count at least the served bytes"
+    );
 }
 
 // ===========================================================================

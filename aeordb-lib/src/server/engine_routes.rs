@@ -831,6 +831,7 @@ fn handle_file_response(
         .into_response();
     }
   };
+  engine.counters().record_read(file_record.total_size);
 
   let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
     chunk_result
@@ -1159,6 +1160,7 @@ async fn engine_get_at_version(
         .into_response();
     }
   };
+  state.engine.counters().record_read(file_record.total_size);
 
   let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
     chunk_result
@@ -1572,7 +1574,7 @@ pub async fn engine_get_by_hash(
       };
 
       let file_stream = match EngineFileStream::from_chunk_hashes_owned(
-        file_record.chunk_hashes,
+        file_record.chunk_hashes.clone(),
         std::sync::Arc::clone(&state.engine),
       ) {
         Ok(s) => s,
@@ -1583,6 +1585,7 @@ pub async fn engine_get_by_hash(
             .into_response();
         }
       };
+      state.engine.counters().record_read(file_record.total_size);
 
       let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
         chunk_result
@@ -1619,6 +1622,7 @@ pub async fn engine_get_by_hash(
       } else {
         value
       };
+      state.engine.counters().record_read(data.len() as u64);
 
       axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -1632,6 +1636,7 @@ pub async fn engine_get_by_hash(
     }
 
     EntryType::DirectoryIndex => {
+      state.engine.counters().record_read(value.len() as u64);
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")

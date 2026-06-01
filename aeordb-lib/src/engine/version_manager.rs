@@ -294,6 +294,7 @@ impl<'a> VersionManager<'a> {
       &deletion_key,
       &deletion_value,
     )?;
+    engine.counters().record_write(0);
     Ok(())
   }
 
@@ -406,6 +407,7 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_SNAPSHOT,
     )?;
 
+    self.engine.counters().record_write(value.len() as u64);
     self.engine.counters().increment_snapshots();
 
     // Emit version created event
@@ -424,6 +426,7 @@ impl<'a> VersionManager<'a> {
   pub fn restore_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let root_hash = self.get_snapshot_hash(name)?;
     self.engine.update_head(&root_hash)?;
+    self.engine.counters().record_write(0);
 
     // Emit version restored event
     ctx.emit(EVENT_VERSIONS_RESTORED, serde_json::json!({"versions": [VersionEventData {
@@ -555,6 +558,7 @@ impl<'a> VersionManager<'a> {
     )?;
 
     self.engine.mark_entry_deleted(&old_key)?;
+    self.engine.counters().record_write(new_value.len() as u64);
 
     Ok(new_snapshot)
   }
@@ -603,6 +607,7 @@ impl<'a> VersionManager<'a> {
       KV_TYPE_FORK,
     )?;
 
+    self.engine.counters().record_write(value.len() as u64);
     self.engine.counters().increment_forks();
 
     // Emit version created event
@@ -627,6 +632,7 @@ impl<'a> VersionManager<'a> {
       ))?;
 
     self.engine.update_head(&fork_hash)?;
+    self.engine.counters().record_write(0);
 
     // Emit promote event before abandon (abandon emits its own delete event)
     ctx.emit(EVENT_VERSIONS_PROMOTED, serde_json::json!({"versions": [VersionEventData {
@@ -724,6 +730,7 @@ impl<'a> VersionManager<'a> {
       &value,
       KV_TYPE_FORK,
     )?;
+    self.engine.counters().record_write(value.len() as u64);
 
     Ok(())
   }

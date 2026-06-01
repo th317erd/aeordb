@@ -1000,6 +1000,18 @@ impl StorageEngine {
     self.counters.load()
   }
 
+  /// Reconcile live count counters from the authoritative KV snapshot while
+  /// preserving runtime byte-size and monotonic throughput counters.
+  pub fn reconcile_counters_from_kv(&self) {
+    let current = self.counters.load().snapshot();
+    let mut refreshed = EngineCounters::initialize_from_kv(self).snapshot();
+    refreshed.logical_data_size = current.logical_data_size;
+    refreshed.chunk_data_size = current.chunk_data_size;
+    refreshed.void_space = current.void_space;
+    refreshed.void_count = current.void_count;
+    self.counters.load().reconcile(&refreshed);
+  }
+
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
     let mut writer = self.writer.write()
