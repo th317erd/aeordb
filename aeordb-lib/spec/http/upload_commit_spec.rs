@@ -49,6 +49,14 @@ async fn body_bytes(body: Body) -> Vec<u8> {
     body.collect().await.unwrap().to_bytes().to_vec()
 }
 
+fn minimal_mp4_bytes() -> Vec<u8> {
+    vec![
+        0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
+        0x00, 0x00, 0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+        b'a', b'v', b'c', b'1', b'm', b'p', b'4', b'1',
+    ]
+}
+
 /// Compute a chunk hash the same way the server expects: blake3("chunk:" + data).
 fn compute_chunk_hash(data: &[u8]) -> String {
     let mut input = Vec::with_capacity(6 + data.len());
@@ -295,6 +303,188 @@ async fn test_commit_empty_file_zero_chunks() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["committed"].as_u64().unwrap(), 1);
     assert_eq!(json["files"][0]["size"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_commit_refines_octet_stream_content_type_from_chunk_bytes() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let data = minimal_mp4_bytes();
+    let h1 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data).await;
+
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/media/skoal.mp4",
+            "chunks": [h1],
+            "content_type": "application/octet-stream"
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let list_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/media")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let listing = body_json(list_resp.into_body()).await;
+    assert_eq!(listing["items"][0]["content_type"], "video/mp4");
+
+    let get_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/media/skoal.mp4")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    assert_eq!(
+        get_resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "video/mp4"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_refines_missing_content_type_from_chunk_bytes() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let data = minimal_mp4_bytes();
+    let h1 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data).await;
+
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/media/no-type.mp4",
+            "chunks": [h1]
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let list_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/media")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let listing = body_json(list_resp.into_body()).await;
+    assert_eq!(listing["items"][0]["content_type"], "video/mp4");
+}
+
+#[tokio::test]
+async fn test_commit_preserves_specific_content_type() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let data = minimal_mp4_bytes();
+    let h1 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data).await;
+
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/media/custom.mp4",
+            "chunks": [h1],
+            "content_type": "video/custom"
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let get_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/media/custom.mp4")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    assert_eq!(
+        get_resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "video/custom"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_empty_file_without_content_type_defaults_to_octet_stream() {
+    let (_app, jwt, engine, _tmp) = test_app();
+    let token = root_bearer_token(&jwt);
+
+    let commit_body = serde_json::json!({
+        "files": [{
+            "path": "/empty-without-type.bin",
+            "chunks": []
+        }]
+    });
+
+    let resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::post("/blobs/commit")
+                .header("Authorization", &token)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let get_resp = rebuild_app(&jwt, &engine)
+        .oneshot(
+            Request::get("/files/empty-without-type.bin")
+                .header("Authorization", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    assert_eq!(
+        get_resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/octet-stream"
+    );
 }
 
 // ===========================================================================

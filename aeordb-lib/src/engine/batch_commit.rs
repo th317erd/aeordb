@@ -142,18 +142,18 @@ pub fn commit_files(
         // Compute total size from chunk data sizes
         let total_size: u64 = file_chunks[i].iter().map(|(_, sz)| *sz).sum();
 
-        // Detect content type: read first chunk data for magic byte detection
-        let detected_content_type = if let Some(ref ct) = file.content_type {
-            ct.clone()
-        } else if !chunk_hashes.is_empty() {
-            // Read first chunk to detect content type from magic bytes
-            match engine.get_entry(&chunk_hashes[0])? {
-                Some((_h, _k, v)) => detect_content_type(&v, None),
-                None => "application/octet-stream".to_string(),
+        // Match DirectoryOps' MIME contract: trust specific caller-provided
+        // types, but treat empty/octet-stream as unknown and sniff bytes.
+        let first_chunk_bytes = if let Some(first_hash) = chunk_hashes.first() {
+            match engine.get_entry(first_hash)? {
+                Some((_h, _k, v)) => v,
+                None => Vec::new(),
             }
         } else {
-            "application/octet-stream".to_string()
+            Vec::new()
         };
+        let detected_content_type =
+            detect_content_type(&first_chunk_bytes, file.content_type.as_deref());
 
         // Check if file already exists (preserve created_at on overwrite)
         let file_key = file_path_hash(&normalized, &algo)?;

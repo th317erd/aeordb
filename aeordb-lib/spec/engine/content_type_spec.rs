@@ -92,6 +92,17 @@ fn test_empty_string_triggers_detection() {
 }
 
 #[test]
+fn test_mp4_detection_normalizes_to_video_mp4() {
+    let mp4_header = [
+        0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
+        0x00, 0x00, 0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+        b'a', b'v', b'c', b'1', b'm', b'p', b'4', b'1',
+    ];
+    let result = detect_content_type(&mp4_header, Some("application/octet-stream"));
+    assert_eq!(result, "video/mp4");
+}
+
+#[test]
 fn test_gif_detection() {
     let gif_header = b"GIF89a";
     let result = detect_content_type(gif_header, None);
