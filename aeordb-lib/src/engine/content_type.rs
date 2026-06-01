@@ -27,7 +27,10 @@ pub fn detect_content_type(data: &[u8], provided: Option<&str>) -> String {
         return "application/octet-stream".to_string();
     }
 
-    media_type.to_string()
+    match media_type {
+        "application/mp4" => "video/mp4".to_string(),
+        _ => media_type.to_string(),
+    }
 }
 
 /// Simple heuristic: if data is valid UTF-8 and has no control characters
