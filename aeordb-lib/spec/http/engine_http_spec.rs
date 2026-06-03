@@ -225,6 +225,104 @@ async fn test_engine_get_directory_returns_listing() {
 }
 
 #[tokio::test]
+async fn test_engine_directory_listing_paginates_directories_before_files() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  for (path, body) in [
+    ("/files/wallpapers/aaa-file.txt", "file-a"),
+    ("/files/wallpapers/aardvark.txt", "file-b"),
+    ("/files/wallpapers/zzz-folder/item.txt", "dir-z"),
+    ("/files/wallpapers/mid-folder/item.txt", "dir-m"),
+  ] {
+    let response = rebuild_app(&jwt_manager, &engine)
+      .oneshot(
+        Request::builder()
+          .method("PUT")
+          .uri(path)
+          .header("content-type", "text/plain")
+          .header("authorization", &auth)
+          .body(Body::from(body))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+  }
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/wallpapers?limit=2&offset=0&sort=name&order=asc")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let names: Vec<&str> = json["items"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|entry| entry["name"].as_str().unwrap())
+    .collect();
+  assert_eq!(names, vec!["mid-folder", "zzz-folder"]);
+}
+
+#[tokio::test]
+async fn test_engine_directory_listing_desc_keeps_directories_first() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  for (path, body) in [
+    ("/files/gallery/aaa-file.txt", "file-a"),
+    ("/files/gallery/zzz-file.txt", "file-z"),
+    ("/files/gallery/alpha-dir/item.txt", "dir-a"),
+    ("/files/gallery/omega-dir/item.txt", "dir-o"),
+  ] {
+    let response = rebuild_app(&jwt_manager, &engine)
+      .oneshot(
+        Request::builder()
+          .method("PUT")
+          .uri(path)
+          .header("content-type", "text/plain")
+          .header("authorization", &auth)
+          .body(Body::from(body))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+  }
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/gallery?limit=2&offset=0&sort=name&order=desc")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let names: Vec<&str> = json["items"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|entry| entry["name"].as_str().unwrap())
+    .collect();
+  assert_eq!(names, vec!["omega-dir", "alpha-dir"]);
+}
+
+#[tokio::test]
 async fn test_engine_delete_file_returns_200() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);

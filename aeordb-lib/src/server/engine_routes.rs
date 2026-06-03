@@ -171,6 +171,22 @@ fn paginated_listing_response(
   let descending = order.map(|o| o == "desc").unwrap_or(false);
 
   listing.sort_by(|a, b| {
+    let a_is_dir = a["entry_type"].as_u64()
+      .map(|entry_type| entry_type == EntryType::DirectoryIndex.to_u8() as u64)
+      .unwrap_or(false);
+    let b_is_dir = b["entry_type"].as_u64()
+      .map(|entry_type| entry_type == EntryType::DirectoryIndex.to_u8() as u64)
+      .unwrap_or(false);
+
+    let category_cmp = match (a_is_dir, b_is_dir) {
+      (true, false) => std::cmp::Ordering::Less,
+      (false, true) => std::cmp::Ordering::Greater,
+      _ => std::cmp::Ordering::Equal,
+    };
+    if category_cmp != std::cmp::Ordering::Equal {
+      return category_cmp;
+    }
+
     let cmp = match sort_field {
       "size" => {
         let a_size = a["size"].as_u64().unwrap_or(0);
