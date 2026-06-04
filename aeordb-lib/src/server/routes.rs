@@ -138,13 +138,19 @@ pub async fn invoke_plugin(
   let request_bytes = serde_json::to_vec(&plugin_request).unwrap_or_default();
 
   // Create a RequestContext from the authenticated caller's claims.
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
+  let ctx = RequestContext::from_claims_with_key(
+    &claims.sub,
+    claims.key_id.clone(),
+    state.event_bus.clone(),
+  );
 
-  match state.plugin_manager.invoke_wasm_plugin_with_context(
+  match state.plugin_manager.invoke_wasm_plugin_with_auth(
     &plugin_path,
     &request_bytes,
     state.engine.clone(),
     ctx,
+    state.group_cache.clone(),
+    state.api_key_cache.clone(),
   ) {
     Ok(response_bytes) => {
       // Try to deserialize as a PluginResponse envelope.

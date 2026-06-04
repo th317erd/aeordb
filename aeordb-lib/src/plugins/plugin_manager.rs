@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use super::types::{PluginMetadata, PluginType};
 use super::wasm_runtime::WasmPluginRuntime;
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
 use crate::engine::RequestContext;
 use crate::engine::StorageEngine;
 use crate::engine::system_store;
@@ -275,6 +277,31 @@ impl PluginManager {
     engine: std::sync::Arc<StorageEngine>,
     ctx: RequestContext,
   ) -> Result<Vec<u8>, PluginManagerError> {
+    self.invoke_wasm_plugin_with_auth(
+      path,
+      request_bytes,
+      engine,
+      ctx,
+      Arc::new(Cache::new(GroupLoader)),
+      Arc::new(Cache::new(ApiKeyLoader)),
+    )
+  }
+
+  /// Instantiate and invoke a deployed WASM plugin with authenticated engine context.
+  ///
+  /// Provides the same permission caches used by HTTP middleware so host
+  /// functions can enforce per-path authorization for paths supplied inside
+  /// plugin request bodies.
+  #[tracing::instrument(skip(self, request_bytes, engine, ctx, group_cache, api_key_cache), fields(path = %path, request_size = request_bytes.len()))]
+  pub fn invoke_wasm_plugin_with_auth(
+    &self,
+    path: &str,
+    request_bytes: &[u8],
+    engine: std::sync::Arc<StorageEngine>,
+    ctx: RequestContext,
+    group_cache: Arc<Cache<GroupLoader>>,
+    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+  ) -> Result<Vec<u8>, PluginManagerError> {
     let start = std::time::Instant::now();
 
     let record = self
@@ -290,7 +317,13 @@ impl PluginManager {
 
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
 
-    let result = runtime.call_handle_with_context(request_bytes, engine, ctx).map_err(|error| {
+    let result = runtime.call_handle_with_context(
+      request_bytes,
+      engine,
+      ctx,
+      group_cache,
+      api_key_cache,
+    ).map_err(|error| {
       tracing::error!(path = %path, error = %error, "WASM execution failed");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))

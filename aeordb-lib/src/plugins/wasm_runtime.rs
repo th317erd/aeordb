@@ -7,6 +7,12 @@ use wasmi::{
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
+use crate::engine::api_key_rules::{
+  check_operation_permitted, is_ancestor_of_any_rule, match_rules, operation_to_flag_char,
+};
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
+use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::query_engine::{
   AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField,
 };
@@ -67,6 +73,10 @@ struct HostState {
   engine: Option<Arc<StorageEngine>>,
   /// Request context for permission-checked operations.
   request_context: Option<RequestContext>,
+  /// Group cache for request-scoped permission checks.
+  group_cache: Option<Arc<Cache<GroupLoader>>>,
+  /// API key cache for scoped-key path checks.
+  api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
 }
 
 /// A sandboxed WASM plugin runtime powered by wasmi.
@@ -117,6 +127,8 @@ impl WasmPluginRuntime {
       memory: None,
       engine: None,
       request_context: None,
+      group_cache: None,
+      api_key_cache: None,
     });
     store
       .set_fuel(self.fuel_limit)
@@ -212,11 +224,15 @@ impl WasmPluginRuntime {
     request_bytes: &[u8],
     engine: Arc<StorageEngine>,
     ctx: RequestContext,
+    group_cache: Arc<Cache<GroupLoader>>,
+    api_key_cache: Arc<Cache<ApiKeyLoader>>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
     let mut store = Store::new(&self.engine, HostState {
       memory: None,
       engine: Some(engine),
       request_context: Some(ctx),
+      group_cache: Some(group_cache),
+      api_key_cache: Some(api_key_cache),
     });
     store
       .set_fuel(self.fuel_limit)
@@ -342,6 +358,10 @@ impl WasmPluginRuntime {
             None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
           };
 
+          if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+            return write_error_response(&mut caller, &e);
+          }
+
           let dir_ops = DirectoryOps::new(&engine);
 
           // Read file content
@@ -408,6 +428,10 @@ impl WasmPluginRuntime {
             Err(e) => return write_error_response(&mut caller, &e),
           };
 
+          if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Create) {
+            return write_error_response(&mut caller, &e);
+          }
+
           let dir_ops = DirectoryOps::new(&engine);
           let size = data.len();
 
@@ -450,6 +474,10 @@ impl WasmPluginRuntime {
             Err(e) => return write_error_response(&mut caller, &e),
           };
 
+          if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Delete) {
+            return write_error_response(&mut caller, &e);
+          }
+
           let dir_ops = DirectoryOps::new(&engine);
 
           match dir_ops.delete_file(&ctx, &path) {
@@ -487,6 +515,10 @@ impl WasmPluginRuntime {
             Some(e) => Arc::clone(e),
             None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
           };
+
+          if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+            return write_error_response(&mut caller, &e);
+          }
 
           let dir_ops = DirectoryOps::new(&engine);
 
@@ -532,6 +564,10 @@ impl WasmPluginRuntime {
             Some(e) => Arc::clone(e),
             None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
           };
+
+          if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::List) {
+            return write_error_response(&mut caller, &e);
+          }
 
           let dir_ops = DirectoryOps::new(&engine);
 
@@ -585,11 +621,16 @@ impl WasmPluginRuntime {
             Err(e) => return write_error_response(&mut caller, &e),
           };
 
+          if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+            return write_error_response(&mut caller, &e);
+          }
+
           let query_engine = QueryEngine::new(&engine);
           match query_engine.execute_paginated(&query) {
             Ok(paginated) => {
               let result_items: Vec<serde_json::Value> = paginated.results
                 .iter()
+                .filter(|r| authorize_plugin_path(&caller, &r.file_record.path, CrudlifyOp::Read).is_ok())
                 .map(|r| {
                   serde_json::json!({
                     "path": r.file_record.path,
@@ -602,6 +643,7 @@ impl WasmPluginRuntime {
                   })
                 })
                 .collect();
+              let visible_count = result_items.len();
 
               let mut response = serde_json::json!({
                 "items": result_items,
@@ -609,7 +651,7 @@ impl WasmPluginRuntime {
               });
 
               if let Some(total) = paginated.total_count {
-                response["total"] = serde_json::json!(total);
+                response["total"] = serde_json::json!(std::cmp::min(total, visible_count as u64));
               }
 
               write_json_response(&mut caller, &response)
@@ -646,8 +688,15 @@ impl WasmPluginRuntime {
             Err(e) => return write_error_response(&mut caller, &e),
           };
 
+          if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+            return write_error_response(&mut caller, &e);
+          }
+
           if query.aggregate.is_none() {
             return write_error_response(&mut caller, "Missing 'aggregate' section in query");
+          }
+          if !is_unrestricted_plugin_context(&caller) {
+            return write_error_response(&mut caller, "Aggregate host function requires root or system context");
           }
 
           let query_engine = QueryEngine::new(&engine);
@@ -759,11 +808,95 @@ fn get_engine_and_context(
     }
     None => RequestContext::system(),
   };
-  // TODO(H4): Integrate PermissionResolver to enforce per-operation permission
-  // checks inside WASM host functions, rather than relying solely on the
-  // request-level middleware. This requires threading the PermissionResolver
-  // (or at minimum group_cache + permissions_cache) into the HostState.
   Ok((Arc::clone(engine), ctx))
+}
+
+fn authorize_plugin_path(
+  caller: &Caller<'_, HostState>,
+  path: &str,
+  operation: CrudlifyOp,
+) -> Result<(), String> {
+  let engine = caller.data().engine.as_ref()
+    .ok_or_else(|| "Database access not available in this plugin context".to_string())?;
+  let ctx = caller.data().request_context.as_ref()
+    .ok_or_else(|| "Request context not available in this plugin context".to_string())?;
+
+  if ctx.user_id == "system" {
+    return Ok(());
+  }
+
+  let normalized = if path.starts_with('/') {
+    path.to_string()
+  } else {
+    format!("/{}", path)
+  };
+
+  if crate::engine::directory_ops::is_system_path(&normalized) {
+    return Err(format!("Permission denied: {}", normalized));
+  }
+
+  if let Some(key_id) = ctx.key_id.as_ref() {
+    let api_key_cache = caller.data().api_key_cache.as_ref()
+      .ok_or_else(|| "API key cache not available in this plugin context".to_string())?;
+    let key_record = api_key_cache
+      .get(key_id, engine)
+      .map_err(|error| format!("Failed to verify API key: {}", error))?
+      .ok_or_else(|| "API key not found".to_string())?;
+
+    if key_record.is_revoked {
+      return Err("API key has been revoked".to_string());
+    }
+    if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
+      return Err("API key expired".to_string());
+    }
+
+    if !key_record.rules.is_empty() {
+      let flag_char = operation_to_flag_char(&operation);
+      let is_ancestor = is_ancestor_of_any_rule(&key_record.rules, &normalized);
+      let ancestor_allowed = is_ancestor && matches!(operation, CrudlifyOp::Read | CrudlifyOp::List);
+
+      if !ancestor_allowed {
+        match match_rules(&key_record.rules, &normalized) {
+          Some(rule) if check_operation_permitted(&rule.permitted, flag_char) => {}
+          _ => return Err(format!("Permission denied: {}", normalized)),
+        }
+      }
+    }
+
+    if ctx.user_id.starts_with("share:") {
+      return Ok(());
+    }
+  }
+
+  let user_id = uuid::Uuid::parse_str(&ctx.user_id)
+    .map_err(|_| "Invalid user identity".to_string())?;
+  let group_cache = caller.data().group_cache.as_ref()
+    .ok_or_else(|| "Group cache not available in this plugin context".to_string())?;
+  let resolver = PermissionResolver::new(engine, group_cache);
+  let allowed = resolver
+    .check_path_permission(&user_id, &normalized, operation)
+    .map_err(|error| format!("Permission check failed: {}", error))?;
+
+  if allowed {
+    Ok(())
+  } else {
+    Err(format!("Permission denied: {}", normalized))
+  }
+}
+
+fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
+  let Some(ctx) = caller.data().request_context.as_ref() else {
+    return false;
+  };
+  if ctx.user_id == "system" {
+    return true;
+  }
+  if ctx.key_id.is_some() {
+    return false;
+  }
+  uuid::Uuid::parse_str(&ctx.user_id)
+    .map(|user_id| user_id.is_nil())
+    .unwrap_or(false)
 }
 
 /// Maximum size for a single guest message read (16 MB).

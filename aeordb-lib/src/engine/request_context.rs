@@ -10,6 +10,7 @@ use crate::engine::engine_event::EngineEvent;
 #[derive(Clone)]
 pub struct RequestContext {
     pub user_id: String,
+    pub key_id: Option<String>,
     event_bus: Option<Arc<EventBus>>,
 }
 
@@ -19,6 +20,7 @@ impl RequestContext {
     pub fn system() -> Self {
         RequestContext {
             user_id: "system".to_string(),
+            key_id: None,
             event_bus: None,
         }
     }
@@ -28,6 +30,7 @@ impl RequestContext {
     pub fn with_bus(bus: Arc<EventBus>) -> Self {
         RequestContext {
             user_id: "system".to_string(),
+            key_id: None,
             event_bus: Some(bus),
         }
     }
@@ -36,6 +39,20 @@ impl RequestContext {
     pub fn from_claims(user_id: &str, bus: Arc<EventBus>) -> Self {
         RequestContext {
             user_id: user_id.to_string(),
+            key_id: None,
+            event_bus: Some(bus),
+        }
+    }
+
+    /// Full context from HTTP request claims, including scoped API key identity.
+    pub fn from_claims_with_key(
+        user_id: &str,
+        key_id: Option<String>,
+        bus: Arc<EventBus>,
+    ) -> Self {
+        RequestContext {
+            user_id: user_id.to_string(),
+            key_id,
             event_bus: Some(bus),
         }
     }
@@ -64,6 +81,7 @@ impl std::fmt::Debug for RequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequestContext")
             .field("user_id", &self.user_id)
+            .field("key_id", &self.key_id)
             .field("events_enabled", &self.events_enabled())
             .finish()
     }
