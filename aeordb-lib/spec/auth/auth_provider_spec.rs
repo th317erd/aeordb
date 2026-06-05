@@ -23,6 +23,11 @@ fn test_parse_auth_uri_false() {
 }
 
 #[test]
+fn test_parse_auth_uri_disabled() {
+  assert_eq!(parse_auth_uri("disabled").unwrap(), AuthMode::Disabled);
+}
+
+#[test]
 fn test_parse_auth_uri_null() {
   assert_eq!(parse_auth_uri("null").unwrap(), AuthMode::Disabled);
 }
@@ -41,6 +46,8 @@ fn test_parse_auth_uri_zero() {
 fn test_parse_auth_uri_false_case_insensitive() {
   assert_eq!(parse_auth_uri("FALSE").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("False").unwrap(), AuthMode::Disabled);
+  assert_eq!(parse_auth_uri("DISABLED").unwrap(), AuthMode::Disabled);
+  assert_eq!(parse_auth_uri("Disabled").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("NO").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("NULL").unwrap(), AuthMode::Disabled);
 }

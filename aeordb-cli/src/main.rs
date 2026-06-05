@@ -192,14 +192,40 @@ enum Commands {
     #[arg(long)]
     dry_run: bool,
   },
-  /// Probe a database file: list /.aeordb-system/ contents (diagnostic).
-  #[command(hide = true)]
+  /// Probe database internals for path, WAL, and recovery diagnostics
   Probe {
     #[arg(short = 'D', long)]
     database: String,
-    /// Probe a specific path: prints dir-path-key + file-path-key presence.
+    /// Probe a database path directly.
     #[arg(long)]
     path: Option<String>,
+    /// Probe an HTTP /files/... route path by stripping the route prefix.
+    #[arg(long, conflicts_with = "path")]
+    http_path: Option<String>,
+    /// Route prefix to strip when using --http-path.
+    #[arg(long, default_value = "/files")]
+    route_prefix: String,
+    /// Verify and time a streaming file read for the probed path.
+    #[arg(long)]
+    read: bool,
+    /// Print chunk KV entries and verified per-chunk read results.
+    #[arg(long)]
+    chunks: bool,
+    /// Enumerate every FileRecord path.
+    #[arg(long)]
+    list_files: bool,
+    /// Print growth, WAL frontier, KV, and void statistics.
+    #[arg(long)]
+    growth_stats: bool,
+    /// Dump every live DirectoryIndex entry.
+    #[arg(long)]
+    wal_dump: bool,
+    /// Hex-dump the last N bytes of the .aeordb file without opening the engine.
+    #[arg(long)]
+    wal_tail_bytes: Option<usize>,
+    /// Diff a checkpoint TSV against DB file records.
+    #[arg(long)]
+    diff_checkpoint: Option<String>,
   },
 }
 
@@ -344,8 +370,32 @@ async fn main() {
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);
     }
-    Commands::Probe { database, path } => {
-      commands::probe::run(&database, path.as_deref());
+    Commands::Probe {
+      database,
+      path,
+      http_path,
+      route_prefix,
+      read,
+      chunks,
+      list_files,
+      growth_stats,
+      wal_dump,
+      wal_tail_bytes,
+      diff_checkpoint,
+    } => {
+      commands::probe::run(commands::probe::ProbeConfig {
+        database: &database,
+        path: path.as_deref(),
+        http_path: http_path.as_deref(),
+        route_prefix: &route_prefix,
+        read,
+        chunks,
+        list_files,
+        growth_stats,
+        wal_dump,
+        wal_tail_bytes,
+        diff_checkpoint: diff_checkpoint.as_deref(),
+      });
     }
   }
 }
