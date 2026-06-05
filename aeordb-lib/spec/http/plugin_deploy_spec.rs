@@ -113,6 +113,10 @@ async fn test_deploy_wasm_plugin_returns_200() {
   assert_eq!(json["path"], "myfunc");
   assert_eq!(json["plugin_type"], "wasm");
   assert!(json["plugin_id"].is_string());
+  assert_eq!(json["version"], serde_json::Value::Null);
+  assert_eq!(json["author"], serde_json::Value::Null);
+  assert!(json["checksum"].as_str().unwrap().starts_with("blake3:"));
+  assert!(json["updated_at"].is_string());
 }
 
 #[tokio::test]
@@ -133,6 +137,31 @@ async fn test_deploy_invalid_wasm_returns_400() {
 
   let json = body_json(response.into_body()).await;
   assert!(json["error"].as_str().unwrap().contains("Invalid plugin"));
+}
+
+#[tokio::test]
+async fn test_deploy_wasm_plugin_accepts_metadata_query_params() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let wasm_bytes = minimal_wasm_bytes();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/plugins/with-meta?name=With%20Meta&version=1.2.3&author=Plugin%20Author")
+    .header("authorization", &auth)
+    .body(Body::from(wasm_bytes))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["name"], "With Meta");
+  assert_eq!(json["path"], "with-meta");
+  assert_eq!(json["version"], "1.2.3");
+  assert_eq!(json["author"], "Plugin Author");
+  assert!(json["checksum"].as_str().unwrap().starts_with("blake3:"));
+  assert!(json["updated_at"].is_string());
 }
 
 #[tokio::test]
@@ -280,8 +309,23 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   assert_eq!(list_response.status(), StatusCode::OK);
   let list_json = body_json(list_response.into_body()).await;
   let plugins = list_json["items"].as_array().expect("should have items array");
-  assert!(plugins.iter().any(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract"));
-  assert!(plugins.iter().any(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq"));
+  let extract = plugins
+    .iter()
+    .find(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract")
+    .expect("extract bundled plugin listed");
+  assert_eq!(extract["version"], "0.1.0");
+  assert_eq!(extract["author"], "AeorDB");
+  assert!(extract["checksum"].as_str().unwrap().starts_with("blake3:"));
+  assert!(extract["updated_at"].is_string());
+
+  let jq = plugins
+    .iter()
+    .find(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq")
+    .expect("jq bundled plugin listed");
+  assert_eq!(jq["version"], "0.1.0");
+  assert_eq!(jq["author"], "AeorDB");
+  assert!(jq["checksum"].as_str().unwrap().starts_with("blake3:"));
+  assert!(jq["updated_at"].is_string());
 
   let ops = DirectoryOps::new(engine.as_ref());
   ops
@@ -341,7 +385,7 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
 }
 
 #[tokio::test]
-async fn test_bundled_plugins_reinstall_when_checksum_differs() {
+async fn test_bundled_plugins_do_not_reinstall_only_because_checksum_differs() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let manager = PluginManager::new(engine.clone());
@@ -367,12 +411,15 @@ async fn test_bundled_plugins_reinstall_when_checksum_differs() {
   assert_ne!(blake3::hash(&replaced.wasm_bytes), blake3::hash(&original.wasm_bytes));
 
   let _restarted_app = rebuild_app(&jwt_manager, &engine);
-  let restored = manager
+  let after_restart = manager
     .get_plugin("extract")
-    .expect("read restored extract")
-    .expect("extract should be restored");
-  assert_eq!(blake3::hash(&restored.wasm_bytes), blake3::hash(&original.wasm_bytes));
-  assert_eq!(restored.plugin_id, replaced.plugin_id);
+    .expect("read extract after restart")
+    .expect("extract should still exist");
+  assert_eq!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&replaced.wasm_bytes));
+  assert_ne!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&original.wasm_bytes));
+  assert_eq!(after_restart.plugin_id, replaced.plugin_id);
+  assert!(after_restart.author.is_none());
+  assert!(after_restart.version.is_none());
 }
 
 #[tokio::test]

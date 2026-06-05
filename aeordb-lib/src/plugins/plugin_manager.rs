@@ -18,6 +18,8 @@ use crate::engine::system_store;
 pub struct BundledPlugin {
   pub name: &'static str,
   pub path: &'static str,
+  pub version: &'static str,
+  pub author: &'static str,
   pub wasm_bytes: &'static [u8],
 }
 
@@ -27,14 +29,26 @@ pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
   BundledPlugin {
     name: "extract",
     path: "extract",
+    version: "0.1.0",
+    author: "AeorDB",
     wasm_bytes: include_bytes!("bundled/extract.wasm"),
   },
   BundledPlugin {
     name: "jq",
     path: "jq",
+    version: "0.1.0",
+    author: "AeorDB",
     wasm_bytes: include_bytes!("bundled/jq.wasm"),
   },
 ];
+
+fn checksum_for_bytes(bytes: &[u8]) -> String {
+  format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+fn default_updated_at() -> DateTime<Utc> {
+  Utc::now()
+}
 
 /// Persistent record for a deployed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,9 +59,23 @@ pub struct PluginRecord {
   pub plugin_type: PluginType,
   pub wasm_bytes: Vec<u8>,
   pub created_at: DateTime<Utc>,
+  #[serde(default)]
+  pub version: Option<String>,
+  #[serde(default)]
+  pub author: Option<String>,
+  #[serde(default)]
+  pub checksum: String,
+  #[serde(default = "default_updated_at")]
+  pub updated_at: DateTime<Utc>,
 }
 
 impl PluginRecord {
+  fn normalize_metadata(&mut self) {
+    if self.checksum.is_empty() {
+      self.checksum = checksum_for_bytes(&self.wasm_bytes);
+    }
+  }
+
   /// Convert to lightweight metadata (strips the WASM bytes).
   pub fn to_metadata(&self) -> PluginMetadata {
     PluginMetadata {
@@ -56,6 +84,14 @@ impl PluginRecord {
       path: self.path.clone(),
       plugin_type: self.plugin_type.clone(),
       created_at: self.created_at,
+      version: self.version.clone(),
+      author: self.author.clone(),
+      checksum: if self.checksum.is_empty() {
+        checksum_for_bytes(&self.wasm_bytes)
+      } else {
+        self.checksum.clone()
+      },
+      updated_at: self.updated_at,
     }
   }
 }
@@ -127,30 +163,55 @@ impl PluginManager {
   /// Install or update all bundled first-party plugins.
   ///
   /// Bundled plugins are stored at their public plugin path, so `extract`
-  /// becomes available at `/plugins/extract/invoke`. Existing records are left
-  /// untouched when their WASM bytes match the embedded copy. If a user replaced
-  /// a bundled plugin path with different bytes, startup restores the bundled
-  /// version.
+  /// becomes available at `/plugins/extract/invoke`. Existing records are
+  /// updated only when they already identify as the same AeorDB bundled plugin
+  /// and the bundled version changed. Matching-version checksum differences are
+  /// logged but not overwritten.
   pub fn install_bundled_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
     let mut installed_or_updated = Vec::new();
 
     for bundled in BUNDLED_PLUGINS {
-      let should_install = match self.get_plugin(bundled.path)? {
+      match self.get_plugin(bundled.path)? {
         Some(existing) => {
-          existing.plugin_type != PluginType::Wasm
-            || blake3::hash(&existing.wasm_bytes) != blake3::hash(bundled.wasm_bytes)
-        }
-        None => true,
-      };
+          let is_managed_bundle = existing.author.as_deref() == Some(bundled.author)
+            && existing.name == bundled.name;
+          let version_differs = existing.version.as_deref() != Some(bundled.version);
+          let checksum_differs = existing.checksum != checksum_for_bytes(bundled.wasm_bytes);
 
-      if should_install {
-        let record = self.deploy_plugin(
-          bundled.name,
-          bundled.path,
-          PluginType::Wasm,
-          bundled.wasm_bytes.to_vec(),
-        )?;
-        installed_or_updated.push(record.to_metadata());
+          if is_managed_bundle && version_differs {
+            let record = self.deploy_plugin_with_metadata(
+              bundled.name,
+              bundled.path,
+              PluginType::Wasm,
+              bundled.wasm_bytes.to_vec(),
+              Some(bundled.version.to_string()),
+              Some(bundled.author.to_string()),
+            )?;
+            installed_or_updated.push(record.to_metadata());
+          } else if is_managed_bundle && checksum_differs {
+            tracing::warn!(
+              path = %bundled.path,
+              version = %bundled.version,
+              "Bundled plugin checksum differs but version matches; leaving stored plugin untouched"
+            );
+          } else if !is_managed_bundle {
+            tracing::warn!(
+              path = %bundled.path,
+              "Bundled plugin path is occupied by a non-bundled plugin; leaving it untouched"
+            );
+          }
+        }
+        None => {
+          let record = self.deploy_plugin_with_metadata(
+            bundled.name,
+            bundled.path,
+            PluginType::Wasm,
+            bundled.wasm_bytes.to_vec(),
+            Some(bundled.version.to_string()),
+            Some(bundled.author.to_string()),
+          )?;
+          installed_or_updated.push(record.to_metadata());
+        }
       }
     }
 
@@ -168,6 +229,19 @@ impl PluginManager {
     path: &str,
     plugin_type: PluginType,
     wasm_bytes: Vec<u8>,
+  ) -> Result<PluginRecord, PluginManagerError> {
+    self.deploy_plugin_with_metadata(name, path, plugin_type, wasm_bytes, None, None)
+  }
+
+  /// Deploy (or overwrite) a plugin with optional package metadata.
+  pub fn deploy_plugin_with_metadata(
+    &self,
+    name: &str,
+    path: &str,
+    plugin_type: PluginType,
+    wasm_bytes: Vec<u8>,
+    version: Option<String>,
+    author: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
     if plugin_type == PluginType::Wasm {
@@ -188,7 +262,8 @@ impl PluginManager {
       .map(|record| record.plugin_id)
       .unwrap_or_else(Uuid::new_v4);
 
-    let record = PluginRecord {
+    let now = Utc::now();
+    let mut record = PluginRecord {
       plugin_id,
       name: name.to_string(),
       path: path.to_string(),
@@ -196,8 +271,13 @@ impl PluginManager {
       wasm_bytes,
       created_at: existing
         .map(|record| record.created_at)
-        .unwrap_or_else(Utc::now),
+        .unwrap_or(now),
+      version,
+      author,
+      checksum: String::new(),
+      updated_at: now,
     };
+    record.normalize_metadata();
 
     let encoded = serde_json::to_vec(&record)
       .map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
@@ -223,8 +303,9 @@ impl PluginManager {
 
     match data {
       Some(bytes) => {
-        let record: PluginRecord = serde_json::from_slice(&bytes)
+        let mut record: PluginRecord = serde_json::from_slice(&bytes)
           .map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
+        record.normalize_metadata();
         Ok(Some(record))
       }
       None => Ok(None),
@@ -238,9 +319,10 @@ impl PluginManager {
 
     let mut plugins = Vec::new();
     for (_path, bytes) in entries {
-      let record: PluginRecord = serde_json::from_slice(&bytes).map_err(|error| {
+      let mut record: PluginRecord = serde_json::from_slice(&bytes).map_err(|error| {
         PluginManagerError::Storage(format!("deserialization failed: {}", error))
       })?;
+      record.normalize_metadata();
       plugins.push(record.to_metadata());
     }
 

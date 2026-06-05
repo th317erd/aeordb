@@ -190,10 +190,17 @@ fn test_serialize_for_ffi_plugin_metadata() {
     path: "db/schema/table".to_string(),
     plugin_type: PluginType::Wasm,
     created_at: chrono::Utc::now(),
+    version: Some("1.2.3".to_string()),
+    author: Some("Test Author".to_string()),
+    checksum: "blake3:test".to_string(),
+    updated_at: chrono::Utc::now(),
   };
 
   let bytes = serialize_for_ffi(&metadata).unwrap();
   let deserialized: PluginMetadata = deserialize_from_ffi(&bytes).unwrap();
   assert_eq!(deserialized.name, "test-plugin");
   assert_eq!(deserialized.plugin_type, PluginType::Wasm);
+  assert_eq!(deserialized.version.as_deref(), Some("1.2.3"));
+  assert_eq!(deserialized.author.as_deref(), Some("Test Author"));
+  assert_eq!(deserialized.checksum, "blake3:test");
 }

@@ -46,6 +46,38 @@ fn test_deploy_plugin_stores_in_database() {
   assert_eq!(record.path, "db/schema/table");
   assert_eq!(record.plugin_type, PluginType::Wasm);
   assert!(!record.wasm_bytes.is_empty());
+  assert!(record.version.is_none());
+  assert!(record.author.is_none());
+  assert!(record.checksum.starts_with("blake3:"));
+  assert_eq!(record.checksum.len(), "blake3:".len() + 64);
+  assert!(record.updated_at >= record.created_at);
+}
+
+#[test]
+fn test_deploy_plugin_with_metadata_stores_rich_metadata() {
+  let (manager, _temp_dir) = test_manager();
+  let wasm_bytes = minimal_wasm_bytes();
+
+  let record = manager
+    .deploy_plugin_with_metadata(
+      "my_plugin",
+      "db/schema/table",
+      PluginType::Wasm,
+      wasm_bytes,
+      Some("1.2.3".to_string()),
+      Some("Test Author".to_string()),
+    )
+    .expect("deploy should succeed");
+
+  assert_eq!(record.version.as_deref(), Some("1.2.3"));
+  assert_eq!(record.author.as_deref(), Some("Test Author"));
+  assert!(record.checksum.starts_with("blake3:"));
+
+  let metadata = record.to_metadata();
+  assert_eq!(metadata.version.as_deref(), Some("1.2.3"));
+  assert_eq!(metadata.author.as_deref(), Some("Test Author"));
+  assert_eq!(metadata.checksum, record.checksum);
+  assert_eq!(metadata.updated_at, record.updated_at);
 }
 
 #[test]
@@ -65,6 +97,7 @@ fn test_get_deployed_plugin() {
   assert_eq!(retrieved.name, "my_plugin");
   assert_eq!(retrieved.path, "db/schema/table");
   assert_eq!(retrieved.wasm_bytes, wasm_bytes);
+  assert!(retrieved.checksum.starts_with("blake3:"));
 }
 
 #[test]
@@ -85,6 +118,7 @@ fn test_list_deployed_plugins() {
   let names: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
   assert!(names.contains(&"plugin_a"));
   assert!(names.contains(&"plugin_b"));
+  assert!(plugins.iter().all(|p| p.checksum.starts_with("blake3:")));
 }
 
 #[test]
@@ -125,6 +159,7 @@ fn test_deploy_duplicate_path_overwrites() {
   assert_eq!(first.plugin_id, second.plugin_id);
   // But the name should be updated.
   assert_eq!(second.name, "v2");
+  assert!(second.updated_at >= first.updated_at);
 
   // Only one plugin should exist.
   let plugins = manager.list_plugins().expect("list");

@@ -42,6 +42,10 @@ pub struct PluginMetadata {
   pub path: String,
   pub plugin_type: PluginType,
   pub created_at: DateTime<Utc>,
+  pub version: Option<String>,
+  pub author: Option<String>,
+  pub checksum: String,
+  pub updated_at: DateTime<Utc>,
 }
 
 /// Decision returned by a permission rule plugin.

@@ -47,6 +47,8 @@ pub async fn health_check(
 pub struct DeployPluginQuery {
   pub name: Option<String>,
   pub plugin_type: Option<String>,
+  pub version: Option<String>,
+  pub author: Option<String>,
 }
 
 /// PUT /plugins/:name — deploy a plugin.
@@ -81,7 +83,14 @@ pub async fn deploy_plugin(
 
   match state
     .plugin_manager
-    .deploy_plugin(&plugin_name, &plugin_path, plugin_type, body.to_vec())
+    .deploy_plugin_with_metadata(
+      &plugin_name,
+      &plugin_path,
+      plugin_type,
+      body.to_vec(),
+      query.version,
+      query.author,
+    )
   {
     Ok(record) => {
       let metadata = record.to_metadata();
