@@ -1,7 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 /// The kind of plugin deployed into the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,7 +35,7 @@ impl std::str::FromStr for PluginType {
 /// Lightweight metadata about a deployed plugin (excludes the WASM bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMetadata {
-  pub plugin_id: Uuid,
+  pub plugin_id: String,
   pub name: String,
   pub path: String,
   pub plugin_type: PluginType,

@@ -25,17 +25,11 @@ pub struct BundledPlugin {
   pub wasm_bytes: &'static [u8],
 }
 
-impl BundledPlugin {
-  pub fn parsed_plugin_id(&self) -> Uuid {
-    Uuid::parse_str(self.plugin_id).expect("bundled plugin IDs must be valid UUIDs")
-  }
-}
-
 /// WASM query plugins installed into user-accessible `/plugins/{name}` paths
 /// when the server starts.
 pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
   BundledPlugin {
-    plugin_id: "ac6337bd-9ecd-4dce-87a7-e87ce5cdb7ee",
+    plugin_id: "/org/aeordev/aeordb/plugins/extract",
     name: "extract",
     path: "extract",
     version: "0.1.0",
@@ -43,7 +37,7 @@ pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
     wasm_bytes: include_bytes!("bundled/extract.wasm"),
   },
   BundledPlugin {
-    plugin_id: "46b9070a-9869-42b2-afaf-a816970c2c37",
+    plugin_id: "/org/aeordev/aeordb/plugins/jq",
     name: "jq",
     path: "jq",
     version: "0.1.0",
@@ -76,7 +70,7 @@ fn bundled_version_can_replace(bundled_version: &str, current_version: Option<&s
 /// Persistent record for a deployed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRecord {
-  pub plugin_id: Uuid,
+  pub plugin_id: String,
   pub name: String,
   pub path: String,
   pub plugin_type: PluginType,
@@ -102,7 +96,7 @@ impl PluginRecord {
   /// Convert to lightweight metadata (strips the WASM bytes).
   pub fn to_metadata(&self) -> PluginMetadata {
     PluginMetadata {
-      plugin_id: self.plugin_id,
+      plugin_id: self.plugin_id.clone(),
       name: self.name.clone(),
       path: self.path.clone(),
       plugin_type: self.plugin_type.clone(),
@@ -193,7 +187,7 @@ impl PluginManager {
     let mut installed_or_updated = Vec::new();
 
     for bundled in BUNDLED_PLUGINS {
-      let bundled_plugin_id = bundled.parsed_plugin_id();
+      let bundled_plugin_id = bundled.plugin_id.to_string();
       let bundled_checksum = checksum_for_bytes(bundled.wasm_bytes);
 
       match self.get_plugin(bundled.path)? {
@@ -313,7 +307,7 @@ impl PluginManager {
     wasm_bytes: Vec<u8>,
     version: Option<String>,
     author: Option<String>,
-    plugin_id_override: Option<Uuid>,
+    plugin_id_override: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
     if plugin_type == PluginType::Wasm {
@@ -330,8 +324,8 @@ impl PluginManager {
     // Check if a plugin already exists at this path — reuse its ID if so.
     let existing = self.get_plugin(path)?;
     let plugin_id = plugin_id_override
-      .or_else(|| existing.as_ref().map(|record| record.plugin_id))
-      .unwrap_or_else(Uuid::new_v4);
+      .or_else(|| existing.as_ref().map(|record| record.plugin_id.clone()))
+      .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let created_at = existing.as_ref().map(|record| record.created_at);
 

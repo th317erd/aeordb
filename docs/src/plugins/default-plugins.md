@@ -11,8 +11,8 @@ This makes checksum drift a signal, not the authority. A stored plugin at the sa
 
 | Plugin | Plugin ID | Version | Author | Public invoke path |
 |--------|-----------|---------|--------|--------------------|
-| `extract` | `ac6337bd-9ecd-4dce-87a7-e87ce5cdb7ee` | `0.1.0` | `AeorDB` | `POST /plugins/extract/invoke` |
-| `jq` | `46b9070a-9869-42b2-afaf-a816970c2c37` | `0.1.0` | `AeorDB` | `POST /plugins/jq/invoke` |
+| `extract` | `/org/aeordev/aeordb/plugins/extract` | `0.1.0` | `AeorDB` | `POST /plugins/extract/invoke` |
+| `jq` | `/org/aeordev/aeordb/plugins/jq` | `0.1.0` | `AeorDB` | `POST /plugins/jq/invoke` |
 
 If you change a default plugin's source, rebuild its WASM and refresh the embedded copy before rebuilding AeorDB:
 
