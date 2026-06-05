@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
+use aeordb::plugins::plugin_manager::BUNDLED_PLUGINS;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 
@@ -308,20 +309,32 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   let list_response = app.clone().oneshot(list_request).await.unwrap();
   assert_eq!(list_response.status(), StatusCode::OK);
   let list_json = body_json(list_response.into_body()).await;
-  let plugins = list_json["items"].as_array().expect("should have items array");
+  let plugins = list_json["items"]
+    .as_array()
+    .expect("should have items array");
+  let extract_bundle = BUNDLED_PLUGINS
+    .iter()
+    .find(|plugin| plugin.path == "extract")
+    .expect("extract bundle metadata");
   let extract = plugins
     .iter()
     .find(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract")
     .expect("extract bundled plugin listed");
+  assert_eq!(extract["plugin_id"], extract_bundle.plugin_id);
   assert_eq!(extract["version"], "0.1.0");
   assert_eq!(extract["author"], "AeorDB");
   assert!(extract["checksum"].as_str().unwrap().starts_with("blake3:"));
   assert!(extract["updated_at"].is_string());
 
+  let jq_bundle = BUNDLED_PLUGINS
+    .iter()
+    .find(|plugin| plugin.path == "jq")
+    .expect("jq bundle metadata");
   let jq = plugins
     .iter()
     .find(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq")
     .expect("jq bundled plugin listed");
+  assert_eq!(jq["plugin_id"], jq_bundle.plugin_id);
   assert_eq!(jq["version"], "0.1.0");
   assert_eq!(jq["author"], "AeorDB");
   assert!(jq["checksum"].as_str().unwrap().starts_with("blake3:"));
@@ -385,7 +398,7 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
 }
 
 #[tokio::test]
-async fn test_bundled_plugins_do_not_reinstall_only_because_checksum_differs() {
+async fn test_bundled_plugins_reinstall_when_id_matches_and_version_allows() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let manager = PluginManager::new(engine.clone());
@@ -397,7 +410,7 @@ async fn test_bundled_plugins_do_not_reinstall_only_because_checksum_differs() {
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy_request = Request::builder()
     .method("PUT")
-    .uri("/plugins/extract")
+    .uri("/plugins/extract?name=extract&version=0.1.0&author=AeorDB")
     .header("authorization", &auth)
     .body(Body::from(minimal_wasm_bytes()))
     .unwrap();
@@ -408,18 +421,111 @@ async fn test_bundled_plugins_do_not_reinstall_only_because_checksum_differs() {
     .get_plugin("extract")
     .expect("read replaced extract")
     .expect("extract should still exist");
-  assert_ne!(blake3::hash(&replaced.wasm_bytes), blake3::hash(&original.wasm_bytes));
+  assert_ne!(
+    blake3::hash(&replaced.wasm_bytes),
+    blake3::hash(&original.wasm_bytes)
+  );
+  assert_eq!(replaced.plugin_id, original.plugin_id);
+  assert_eq!(replaced.version.as_deref(), Some("0.1.0"));
 
   let _restarted_app = rebuild_app(&jwt_manager, &engine);
   let after_restart = manager
     .get_plugin("extract")
     .expect("read extract after restart")
     .expect("extract should still exist");
-  assert_eq!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&replaced.wasm_bytes));
-  assert_ne!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&original.wasm_bytes));
+  assert_eq!(
+    blake3::hash(&after_restart.wasm_bytes),
+    blake3::hash(&original.wasm_bytes)
+  );
   assert_eq!(after_restart.plugin_id, replaced.plugin_id);
-  assert!(after_restart.author.is_none());
-  assert!(after_restart.version.is_none());
+  assert_eq!(after_restart.author.as_deref(), Some("AeorDB"));
+  assert_eq!(after_restart.version.as_deref(), Some("0.1.0"));
+}
+
+#[tokio::test]
+async fn test_bundled_plugins_do_not_reinstall_when_plugin_id_differs() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let manager = PluginManager::new(engine.clone());
+  let original = manager
+    .get_plugin("extract")
+    .expect("read bundled extract")
+    .expect("extract should be installed");
+
+  manager
+    .remove_plugin("extract")
+    .expect("remove bundled extract before user replacement");
+  let replacement = manager
+    .deploy_plugin(
+      "user-extract",
+      "extract",
+      aeordb::plugins::PluginType::Wasm,
+      minimal_wasm_bytes(),
+    )
+    .expect("deploy user replacement");
+  assert_ne!(replacement.plugin_id, original.plugin_id);
+
+  let _restarted_app = rebuild_app(&jwt_manager, &engine);
+  let after_restart = manager
+    .get_plugin("extract")
+    .expect("read extract after restart")
+    .expect("extract should still exist");
+  assert_eq!(after_restart.plugin_id, replacement.plugin_id);
+  assert_eq!(
+    blake3::hash(&after_restart.wasm_bytes),
+    blake3::hash(&replacement.wasm_bytes)
+  );
+  assert_ne!(
+    blake3::hash(&after_restart.wasm_bytes),
+    blake3::hash(&original.wasm_bytes)
+  );
+}
+
+#[tokio::test]
+async fn test_bundled_plugins_do_not_downgrade_same_id_newer_version() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let manager = PluginManager::new(engine.clone());
+  let original = manager
+    .get_plugin("extract")
+    .expect("read bundled extract")
+    .expect("extract should be installed");
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let deploy_request = Request::builder()
+    .method("PUT")
+    .uri("/plugins/extract?name=extract&version=999.0.0&author=AeorDB")
+    .header("authorization", &auth)
+    .body(Body::from(minimal_wasm_bytes()))
+    .unwrap();
+  let deploy_response = app.oneshot(deploy_request).await.unwrap();
+  assert_eq!(deploy_response.status(), StatusCode::OK);
+
+  let replacement = manager
+    .get_plugin("extract")
+    .expect("read replaced extract")
+    .expect("extract should still exist");
+  assert_eq!(replacement.plugin_id, original.plugin_id);
+  assert_eq!(replacement.version.as_deref(), Some("999.0.0"));
+  assert_ne!(
+    blake3::hash(&replacement.wasm_bytes),
+    blake3::hash(&original.wasm_bytes)
+  );
+
+  let _restarted_app = rebuild_app(&jwt_manager, &engine);
+  let after_restart = manager
+    .get_plugin("extract")
+    .expect("read extract after restart")
+    .expect("extract should still exist");
+  assert_eq!(after_restart.plugin_id, replacement.plugin_id);
+  assert_eq!(after_restart.version.as_deref(), Some("999.0.0"));
+  assert_eq!(
+    blake3::hash(&after_restart.wasm_bytes),
+    blake3::hash(&replacement.wasm_bytes)
+  );
+  assert_ne!(
+    blake3::hash(&after_restart.wasm_bytes),
+    blake3::hash(&original.wasm_bytes)
+  );
 }
 
 #[tokio::test]

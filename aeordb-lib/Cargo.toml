@@ -39,6 +39,7 @@ arc-swap = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
+semver = "1"
 
 # URL query-string parsing (for ?token= auth)
 form_urlencoded = "1"

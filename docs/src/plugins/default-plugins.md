@@ -2,12 +2,17 @@
 
 AeorDB ships first-party WASM query plugins under `aeordb-plugins/`. Release WASM builds for these plugins are embedded into the AeorDB server binary and installed at startup into user-accessible plugin paths.
 
-On startup, AeorDB installs these bundled plugins if they are missing. If an existing plugin at that path already identifies as the same AeorDB-authored bundled plugin, AeorDB updates it only when the bundled version changes. Matching-version checksum differences are logged but not overwritten.
+On startup, AeorDB installs these bundled plugins if they are missing. If a plugin already exists at a bundled path, AeorDB overwrites it only when both conditions are true:
 
-| Plugin | Version | Author | Public invoke path |
-|--------|---------|--------|--------------------|
-| `extract` | `0.1.0` | `AeorDB` | `POST /plugins/extract/invoke` |
-| `jq` | `0.1.0` | `AeorDB` | `POST /plugins/jq/invoke` |
+- The stored plugin ID matches the bundled plugin ID.
+- The bundled plugin version is greater than or equal to the stored plugin version.
+
+This makes checksum drift a signal, not the authority. A stored plugin at the same path with a different plugin ID is treated as user-managed and left untouched. A stored plugin with the bundled ID but a newer version is also left untouched to avoid downgrades.
+
+| Plugin | Plugin ID | Version | Author | Public invoke path |
+|--------|-----------|---------|--------|--------------------|
+| `extract` | `ac6337bd-9ecd-4dce-87a7-e87ce5cdb7ee` | `0.1.0` | `AeorDB` | `POST /plugins/extract/invoke` |
+| `jq` | `46b9070a-9869-42b2-afaf-a816970c2c37` | `0.1.0` | `AeorDB` | `POST /plugins/jq/invoke` |
 
 If you change a default plugin's source, rebuild its WASM and refresh the embedded copy before rebuilding AeorDB:
 
@@ -23,7 +28,7 @@ cp target/wasm32-unknown-unknown/release/aeordb_jq_plugin.wasm \
   ../../aeordb-lib/src/plugins/bundled/jq.wasm
 ```
 
-User-deployed plugins still use the normal plugin deployment API. The bundled plugin paths are reserved for AeorDB defaults; if one of those paths is occupied by a plugin without matching bundled metadata, startup leaves it untouched and logs a warning.
+User-deployed plugins still use the normal plugin deployment API. The bundled plugin paths are reserved for AeorDB defaults; if one of those paths is occupied by a plugin without the matching bundled plugin ID, startup leaves it untouched and logs a warning.
 
 ## `extract`
 

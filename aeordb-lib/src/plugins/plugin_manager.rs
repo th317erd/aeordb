@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,6 +17,7 @@ use crate::engine::system_store;
 /// A first-party plugin embedded into the AeorDB binary.
 #[derive(Debug, Clone, Copy)]
 pub struct BundledPlugin {
+  pub plugin_id: &'static str,
   pub name: &'static str,
   pub path: &'static str,
   pub version: &'static str,
@@ -23,10 +25,17 @@ pub struct BundledPlugin {
   pub wasm_bytes: &'static [u8],
 }
 
+impl BundledPlugin {
+  pub fn parsed_plugin_id(&self) -> Uuid {
+    Uuid::parse_str(self.plugin_id).expect("bundled plugin IDs must be valid UUIDs")
+  }
+}
+
 /// WASM query plugins installed into user-accessible `/plugins/{name}` paths
 /// when the server starts.
 pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
   BundledPlugin {
+    plugin_id: "ac6337bd-9ecd-4dce-87a7-e87ce5cdb7ee",
     name: "extract",
     path: "extract",
     version: "0.1.0",
@@ -34,6 +43,7 @@ pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
     wasm_bytes: include_bytes!("bundled/extract.wasm"),
   },
   BundledPlugin {
+    plugin_id: "46b9070a-9869-42b2-afaf-a816970c2c37",
     name: "jq",
     path: "jq",
     version: "0.1.0",
@@ -48,6 +58,19 @@ fn checksum_for_bytes(bytes: &[u8]) -> String {
 
 fn default_updated_at() -> DateTime<Utc> {
   Utc::now()
+}
+
+fn bundled_version_can_replace(bundled_version: &str, current_version: Option<&str>) -> bool {
+  let Ok(bundled) = Version::parse(bundled_version) else {
+    return false;
+  };
+
+  match current_version {
+    Some(current_version) => Version::parse(current_version)
+      .map(|current| bundled >= current)
+      .unwrap_or(true),
+    None => true,
+  }
 }
 
 /// Persistent record for a deployed plugin.
@@ -163,52 +186,80 @@ impl PluginManager {
   /// Install or update all bundled first-party plugins.
   ///
   /// Bundled plugins are stored at their public plugin path, so `extract`
-  /// becomes available at `/plugins/extract/invoke`. Existing records are
-  /// updated only when they already identify as the same AeorDB bundled plugin
-  /// and the bundled version changed. Matching-version checksum differences are
-  /// logged but not overwritten.
+  /// becomes available at `/plugins/extract/invoke`. Existing records are only
+  /// overwritten when they carry the bundled plugin ID and the bundled version
+  /// is not older than the stored version.
   pub fn install_bundled_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
     let mut installed_or_updated = Vec::new();
 
     for bundled in BUNDLED_PLUGINS {
+      let bundled_plugin_id = bundled.parsed_plugin_id();
+      let bundled_checksum = checksum_for_bytes(bundled.wasm_bytes);
+
       match self.get_plugin(bundled.path)? {
         Some(existing) => {
-          let is_managed_bundle = existing.author.as_deref() == Some(bundled.author)
-            && existing.name == bundled.name;
-          let version_differs = existing.version.as_deref() != Some(bundled.version);
-          let checksum_differs = existing.checksum != checksum_for_bytes(bundled.wasm_bytes);
+          let is_current_bundled_plugin = existing.plugin_id == bundled_plugin_id;
+          let version_allows_replace =
+            bundled_version_can_replace(bundled.version, existing.version.as_deref());
+          let bytes_or_metadata_differ = existing.checksum != bundled_checksum
+            || existing.version.as_deref() != Some(bundled.version)
+            || existing.author.as_deref() != Some(bundled.author)
+            || existing.name != bundled.name
+            || existing.plugin_type != PluginType::Wasm;
 
-          if is_managed_bundle && version_differs {
-            let record = self.deploy_plugin_with_metadata(
+          if is_current_bundled_plugin && version_allows_replace && bytes_or_metadata_differ {
+            let record = self.deploy_plugin_with_metadata_and_id(
               bundled.name,
               bundled.path,
               PluginType::Wasm,
               bundled.wasm_bytes.to_vec(),
               Some(bundled.version.to_string()),
               Some(bundled.author.to_string()),
+              Some(bundled_plugin_id),
             )?;
             installed_or_updated.push(record.to_metadata());
-          } else if is_managed_bundle && checksum_differs {
+          } else if !is_current_bundled_plugin
+            && existing.author.as_deref() == Some(bundled.author)
+            && existing.name == bundled.name
+            && existing.version.as_deref() == Some(bundled.version)
+            && existing.checksum == bundled_checksum
+            && existing.plugin_type == PluginType::Wasm
+          {
+            let record = self.deploy_plugin_with_metadata_and_id(
+              bundled.name,
+              bundled.path,
+              PluginType::Wasm,
+              bundled.wasm_bytes.to_vec(),
+              Some(bundled.version.to_string()),
+              Some(bundled.author.to_string()),
+              Some(bundled_plugin_id),
+            )?;
+            installed_or_updated.push(record.to_metadata());
+          } else if is_current_bundled_plugin && !version_allows_replace {
             tracing::warn!(
               path = %bundled.path,
-              version = %bundled.version,
-              "Bundled plugin checksum differs but version matches; leaving stored plugin untouched"
+              bundled_version = %bundled.version,
+              current_version = ?existing.version,
+              "Bundled plugin version is older than stored plugin version; leaving stored plugin untouched"
             );
-          } else if !is_managed_bundle {
+          } else if !is_current_bundled_plugin {
             tracing::warn!(
               path = %bundled.path,
-              "Bundled plugin path is occupied by a non-bundled plugin; leaving it untouched"
+              bundled_plugin_id = %bundled_plugin_id,
+              current_plugin_id = %existing.plugin_id,
+              "Bundled plugin path is occupied by a different plugin ID; leaving it untouched"
             );
           }
         }
         None => {
-          let record = self.deploy_plugin_with_metadata(
+          let record = self.deploy_plugin_with_metadata_and_id(
             bundled.name,
             bundled.path,
             PluginType::Wasm,
             bundled.wasm_bytes.to_vec(),
             Some(bundled.version.to_string()),
             Some(bundled.author.to_string()),
+            Some(bundled_plugin_id),
           )?;
           installed_or_updated.push(record.to_metadata());
         }
@@ -243,6 +294,27 @@ impl PluginManager {
     version: Option<String>,
     author: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
+    self.deploy_plugin_with_metadata_and_id(
+      name,
+      path,
+      plugin_type,
+      wasm_bytes,
+      version,
+      author,
+      None,
+    )
+  }
+
+  fn deploy_plugin_with_metadata_and_id(
+    &self,
+    name: &str,
+    path: &str,
+    plugin_type: PluginType,
+    wasm_bytes: Vec<u8>,
+    version: Option<String>,
+    author: Option<String>,
+    plugin_id_override: Option<Uuid>,
+  ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
     if plugin_type == PluginType::Wasm {
       WasmPluginRuntime::new(&wasm_bytes).map_err(|error| {
@@ -257,10 +329,11 @@ impl PluginManager {
 
     // Check if a plugin already exists at this path — reuse its ID if so.
     let existing = self.get_plugin(path)?;
-    let plugin_id = existing
-      .as_ref()
-      .map(|record| record.plugin_id)
+    let plugin_id = plugin_id_override
+      .or_else(|| existing.as_ref().map(|record| record.plugin_id))
       .unwrap_or_else(Uuid::new_v4);
+
+    let created_at = existing.as_ref().map(|record| record.created_at);
 
     let now = Utc::now();
     let mut record = PluginRecord {
@@ -269,9 +342,7 @@ impl PluginManager {
       path: path.to_string(),
       plugin_type,
       wasm_bytes,
-      created_at: existing
-        .map(|record| record.created_at)
-        .unwrap_or(now),
+      created_at: created_at.unwrap_or(now),
       version,
       author,
       checksum: String::new(),
@@ -376,8 +447,7 @@ impl PluginManager {
 
     if record.plugin_type != PluginType::Wasm {
       return Err(PluginManagerError::InvalidPlugin(format!(
-        "plugin at '{}' is not a WASM plugin",
-        path
+        "plugin at '{}' is not a WASM plugin", path
       )));
     }
 
@@ -455,13 +525,7 @@ impl PluginManager {
 
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
 
-    let result = runtime.call_handle_with_context(
-      request_bytes,
-      engine,
-      ctx,
-      group_cache,
-      api_key_cache,
-    ).map_err(|error| {
+    let result = runtime.call_handle_with_context(request_bytes, engine, ctx, group_cache, api_key_cache).map_err(|error| {
       tracing::error!(path = %path, error = %error, "WASM execution failed");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
       PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
@@ -494,7 +558,8 @@ impl PluginManager {
 
     if record.plugin_type != PluginType::Wasm {
       return Err(PluginManagerError::InvalidPlugin(format!(
-        "plugin at '{}' is not a WASM plugin", path
+        "plugin at '{}' is not a WASM plugin",
+        path
       )));
     }
 
@@ -502,7 +567,8 @@ impl PluginManager {
       &record.wasm_bytes,
       memory_limit_bytes,
       1_000_000, // default fuel limit
-    ).map_err(|error| {
+    )
+    .map_err(|error| {
       PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
     })?;
 
