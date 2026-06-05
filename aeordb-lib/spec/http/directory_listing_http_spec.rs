@@ -65,12 +65,7 @@ async fn test_default_listing_includes_hash_and_path() {
   store_file(&engine, "/dir/a.txt", b"hello");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/dir/").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -97,12 +92,7 @@ async fn test_recursive_unlimited() {
   store_file(&engine, "/dir/sub/deep/c.txt", b"ccc");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/?depth=-1")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/dir/?depth=-1").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -128,12 +118,7 @@ async fn test_recursive_depth_1() {
   store_file(&engine, "/dir/sub/deep/c.txt", b"ccc");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/?depth=1")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/dir/?depth=1").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -157,12 +142,7 @@ async fn test_glob_filter() {
   store_file(&engine, "/dir/b.psd", b"bbb");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/?glob=*.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/dir/?glob=*.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -184,12 +164,8 @@ async fn test_glob_with_depth() {
   store_file(&engine, "/dir/sub/c.psd", b"ccc");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/?depth=-1&glob=*.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/dir/?depth=-1&glob=*.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -204,6 +180,33 @@ async fn test_glob_with_depth() {
   assert!(!names.contains(&"c.psd"));
 }
 
+/// path-shaped glob combined with depth=-1 matches paths under the requested base.
+#[tokio::test]
+async fn test_path_glob_with_depth() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  store_file(&engine, "/kikx/sessions/s1/interactions/i1/frames/0001.json", b"{}");
+  store_file(&engine, "/kikx/sessions/s1/commits/0001.json", b"{}");
+  store_file(&engine, "/kikx/sessions/s1/interactions/i1/frames/notes.txt", b"text");
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/kikx/sessions/?depth=-1&glob=**/frames/*.json")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let entries = json["items"].as_array().expect("listing should have items array");
+  let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
+  assert_eq!(paths, vec!["/kikx/sessions/s1/interactions/i1/frames/0001.json"]);
+}
+
 /// Recursive listing excludes directory entries (entry_type 3).
 #[tokio::test]
 async fn test_directories_excluded_recursive() {
@@ -214,12 +217,7 @@ async fn test_directories_excluded_recursive() {
   store_file(&engine, "/dir/sub/b.txt", b"bbb");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/dir/?depth=-1")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/dir/?depth=-1").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -241,12 +239,8 @@ async fn test_nonexistent_directory_404() {
   let (app, jwt_manager, _engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/nonexistent/?depth=-1")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/nonexistent/?depth=-1").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -261,12 +255,7 @@ async fn test_file_get_unaffected() {
   store_file(&engine, "/file.txt", b"raw content here");
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/file.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/file.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -294,12 +283,8 @@ async fn test_version_query_still_works() {
 
   // GET at snapshot should return v1
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/file.txt?snapshot=snap1")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/file.txt?snapshot=snap1").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -325,10 +310,7 @@ async fn test_listing_with_limit() {
   }
 
   let app = rebuild_app(&jwt, &engine);
-  let request = Request::get("/files/page?limit=2")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::get("/files/page?limit=2").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -351,10 +333,7 @@ async fn test_listing_with_offset() {
   }
 
   let app = rebuild_app(&jwt, &engine);
-  let request = Request::get("/files/page2?offset=3")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::get("/files/page2?offset=3").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -376,10 +355,7 @@ async fn test_listing_with_limit_and_offset() {
   }
 
   let app = rebuild_app(&jwt, &engine);
-  let request = Request::get("/files/page3?limit=3&offset=2")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::get("/files/page3?limit=3&offset=2").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -400,10 +376,7 @@ async fn test_listing_offset_beyond_total_returns_empty() {
   ops.store_file_buffered(&ctx, "/page4/only.txt", b"data", None).unwrap();
 
   let app = rebuild_app(&jwt, &engine);
-  let request = Request::get("/files/page4?offset=100")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::get("/files/page4?offset=100").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -424,10 +397,7 @@ async fn test_listing_no_pagination_returns_total() {
   }
 
   let app = rebuild_app(&jwt, &engine);
-  let request = Request::get("/files/page5")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::get("/files/page5").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 

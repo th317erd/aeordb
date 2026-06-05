@@ -72,6 +72,9 @@ let entries = list_directory_recursive(&engine, "/assets", -1, None).unwrap();
 // List with glob filter
 let psds = list_directory_recursive(&engine, "/assets", -1, Some("*.psd")).unwrap();
 
+// List with a recursive path-shaped glob under the requested directory
+let frames = list_directory_recursive(&engine, "/sessions", -1, Some("**/frames/*.json")).unwrap();
+
 // List one level deep
 let shallow = list_directory_recursive(&engine, "/assets", 1, None).unwrap();
 ```

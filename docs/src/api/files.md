@@ -99,7 +99,7 @@ Read a file or list a directory. The server determines the type automatically:
 | `version` | string | — | Read the file at this version hash (hex) |
 | `nofollow` | boolean | `false` | If the path is a symlink, return metadata instead of following |
 | `depth` | integer | `0` | Directory listing depth: `0` = immediate children, `-1` = unlimited recursion |
-| `glob` | string | — | Filter directory listing by file name glob pattern (`*`, `?`, `[abc]`) |
+| `glob` | string | — | Filter directory listings by name, relative path, or full-path glob pattern (`*`, `?`, `**`) |
 | `limit` | integer | — | Maximum number of entries to return in a directory listing |
 | `offset` | integer | — | Number of entries to skip before returning results |
 
@@ -223,12 +223,16 @@ curl http://localhost:6830/files/data/?depth=-1 \
 curl "http://localhost:6830/files/assets/?depth=-1&glob=*.psd" \
   -H "Authorization: Bearer $TOKEN"
 
+# List JSON frames anywhere under /sessions/
+curl "http://localhost:6830/files/sessions/?depth=-1&glob=**/frames/*.json" \
+  -H "Authorization: Bearer $TOKEN"
+
 # List one level deep
 curl http://localhost:6830/files/data/?depth=1 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-When `depth > 0` or `depth = -1`, the response contains **files only** in a flat list. Directory entries are traversed but not included in the output.
+When `depth > 0` or `depth = -1`, the response contains **files only** in a flat list. Directory entries are traversed but not included in the output. Recursive globs can match a basename (`*.psd`), a path relative to the requested directory (`**/frames/*.json`), or a full path.
 
 ### Versioned Reads
 
