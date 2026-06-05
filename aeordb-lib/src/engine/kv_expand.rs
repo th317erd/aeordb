@@ -13,9 +13,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::errors::EngineResult;
-use crate::engine::file_header::{
-  read_active_header, write_header_to_inactive_slot,
-};
+use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot};
 use crate::engine::kv_pages::page_size;
 use crate::engine::kv_stages::stage_params;
 
@@ -26,100 +24,97 @@ use crate::engine::kv_stages::stage_params;
 ///
 /// The caller must rebuild the KV index after this — all WAL offsets
 /// have changed by `delta`.
-pub fn expand_kv_block(
-    db_path: &str,
-    target_stage: usize,
-    hash_length: usize,
-) -> EngineResult<(u64, usize, u64)> {
-    let psize = page_size(hash_length);
-    let (new_block_size, _new_bucket_count) = stage_params(target_stage, psize);
+pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -> EngineResult<(u64, usize, u64)> {
+  let psize = page_size(hash_length);
+  let (new_block_size, _new_bucket_count) = stage_params(target_stage, psize);
 
-    // Read the active header slot (v3 A/B layout).
-    let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
-    let (mut header, active_slot) = read_active_header(&mut file)?;
+  // Read the active header slot (v3 A/B layout).
+  let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
+  let (mut header, active_slot) = read_active_header(&mut file)?;
 
-    let old_kv_offset = header.kv_block_offset;
-    let old_kv_length = header.kv_block_length;
-    let old_hot_tail = header.hot_tail_offset;
+  let old_kv_offset = header.kv_block_offset;
+  let old_kv_length = header.kv_block_length;
+  let old_hot_tail = header.hot_tail_offset;
 
-    // WAL region: from (kv_offset + old_kv_length) to hot_tail_offset
-    let wal_start = old_kv_offset + old_kv_length;
-    let wal_end = old_hot_tail;
-    let wal_size = wal_end.saturating_sub(wal_start);
+  // WAL region: from (kv_offset + old_kv_length) to hot_tail_offset
+  let wal_start = old_kv_offset + old_kv_length;
+  let wal_end = old_hot_tail;
+  let wal_size = wal_end.saturating_sub(wal_start);
 
-    if new_block_size <= old_kv_length {
-        tracing::info!("KV block already large enough ({} >= {})", old_kv_length, new_block_size);
-        return Ok((old_kv_length, header.kv_block_stage as usize, 0));
-    }
+  if new_block_size <= old_kv_length {
+    tracing::info!("KV block already large enough ({} >= {})", old_kv_length, new_block_size);
+    return Ok((old_kv_length, header.kv_block_stage as usize, 0));
+  }
 
-    let delta = new_block_size - old_kv_length;
-    // hot_tail_offset == 0 means "no hot tail"; preserve that sentinel.
-    let new_hot_tail = if old_hot_tail == 0 { 0 } else { wal_end + delta };
+  let delta = new_block_size - old_kv_length;
+  // hot_tail_offset == 0 means "no hot tail"; preserve that sentinel.
+  let new_hot_tail = if old_hot_tail == 0 { 0 } else { wal_end + delta };
 
-    tracing::info!(
-        old_kv_length, new_block_size = new_block_size, delta, wal_size,
-        "Expanding KV block: relocating {} bytes of WAL data forward by {} bytes",
-        wal_size, delta,
-    );
+  tracing::info!(
+    old_kv_length,
+    new_block_size = new_block_size,
+    delta,
+    wal_size,
+    "Expanding KV block: relocating {} bytes of WAL data forward by {} bytes",
+    wal_size,
+    delta,
+  );
 
-    // Relocate WAL entries: copy backwards from end to avoid overwriting
-    // data we haven't copied yet.
-    //
-    // Crash-safety ordering — MUST match `expand_kv_block_online` in
-    // storage_engine.rs. Without intermediate fsyncs, the OS may persist the
-    // new header (pointing at the new layout) before the relocated WAL data
-    // is durable. After a crash the header would say "new layout" but the
-    // WAL data would still live at old offsets → those entries get treated
-    // as part of the KV block and effectively lost.
-    const CHUNK_SIZE: u64 = 64 * 1024 * 1024; // 64MB copy chunks
-    let mut remaining = wal_size;
-    let mut buf = vec![0u8; CHUNK_SIZE.min(remaining) as usize];
+  // Relocate WAL entries: copy backwards from end to avoid overwriting
+  // data we haven't copied yet.
+  //
+  // Crash-safety ordering — MUST match `expand_kv_block_online` in
+  // storage_engine.rs. Without intermediate fsyncs, the OS may persist the
+  // new header (pointing at the new layout) before the relocated WAL data
+  // is durable. After a crash the header would say "new layout" but the
+  // WAL data would still live at old offsets → those entries get treated
+  // as part of the KV block and effectively lost.
+  const CHUNK_SIZE: u64 = 64 * 1024 * 1024; // 64MB copy chunks
+  let mut remaining = wal_size;
+  let mut buf = vec![0u8; CHUNK_SIZE.min(remaining) as usize];
 
-    while remaining > 0 {
-        let chunk_len = CHUNK_SIZE.min(remaining) as usize;
-        let src_offset = wal_start + remaining - chunk_len as u64;
-        let dst_offset = src_offset + delta;
+  while remaining > 0 {
+    let chunk_len = CHUNK_SIZE.min(remaining) as usize;
+    let src_offset = wal_start + remaining - chunk_len as u64;
+    let dst_offset = src_offset + delta;
 
-        file.seek(SeekFrom::Start(src_offset))?;
-        file.read_exact(&mut buf[..chunk_len])?;
-        file.seek(SeekFrom::Start(dst_offset))?;
-        file.write_all(&buf[..chunk_len])?;
+    file.seek(SeekFrom::Start(src_offset))?;
+    file.read_exact(&mut buf[..chunk_len])?;
+    file.seek(SeekFrom::Start(dst_offset))?;
+    file.write_all(&buf[..chunk_len])?;
 
-        remaining -= chunk_len as u64;
-    }
+    remaining -= chunk_len as u64;
+  }
 
-    // CRITICAL: fsync after WAL relocation, BEFORE the header rewrite.
-    // Otherwise a reordered durability would expose new-layout header
-    // with old-position WAL data.
-    file.sync_all()?;
+  // CRITICAL: fsync after WAL relocation, BEFORE the header rewrite.
+  // Otherwise a reordered durability would expose new-layout header
+  // with old-position WAL data.
+  file.sync_all()?;
 
-    // Zero-fill the new KV block area (old KV area + expansion gap)
-    let zero_buf = vec![0u8; 65536.min(new_block_size as usize)];
-    let mut zeroed = 0u64;
-    while zeroed < new_block_size {
-        let chunk = zero_buf.len().min((new_block_size - zeroed) as usize);
-        file.seek(SeekFrom::Start(old_kv_offset + zeroed))?;
-        file.write_all(&zero_buf[..chunk])?;
-        zeroed += chunk as u64;
-    }
+  // Zero-fill the new KV block area (old KV area + expansion gap)
+  let zero_buf = vec![0u8; 65536.min(new_block_size as usize)];
+  let mut zeroed = 0u64;
+  while zeroed < new_block_size {
+    let chunk = zero_buf.len().min((new_block_size - zeroed) as usize);
+    file.seek(SeekFrom::Start(old_kv_offset + zeroed))?;
+    file.write_all(&zero_buf[..chunk])?;
+    zeroed += chunk as u64;
+  }
 
-    // Fsync the zero-fill before the header update so the rebuilt KV doesn't
-    // see stale old-KV bytes in the "new" block.
-    file.sync_all()?;
+  // Fsync the zero-fill before the header update so the rebuilt KV doesn't
+  // see stale old-KV bytes in the "new" block.
+  file.sync_all()?;
 
-    // Update header — write to the inactive slot. The old slot remains the
-    // rollback point if the write crashes mid-flight.
-    header.kv_block_length = new_block_size;
-    header.kv_block_stage = target_stage as u8;
-    header.resize_target_stage = 0; // Clear pending resize flag
-    header.hot_tail_offset = new_hot_tail;
-    write_header_to_inactive_slot(&mut file, &mut header, active_slot)?;
-    file.sync_all()?;
+  // Update header — write to the inactive slot. The old slot remains the
+  // rollback point if the write crashes mid-flight.
+  header.kv_block_length = new_block_size;
+  header.kv_block_stage = target_stage as u8;
+  header.resize_target_stage = 0; // Clear pending resize flag
+  header.hot_tail_offset = new_hot_tail;
+  write_header_to_inactive_slot(&mut file, &mut header, active_slot)?;
+  file.sync_all()?;
 
-    tracing::info!(
-        new_block_size, new_hot_tail, target_stage,
-        "KV block expansion complete"
-    );
+  tracing::info!(new_block_size, new_hot_tail, target_stage, "KV block expansion complete");
 
-    Ok((new_block_size, target_stage, delta))
+  Ok((new_block_size, target_stage, delta))
 }

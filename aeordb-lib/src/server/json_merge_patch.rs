@@ -53,10 +53,7 @@ impl ActiveDepth {
   fn descend(self) -> Self {
     match self {
       ActiveDepth::Unbounded => ActiveDepth::Unbounded,
-      ActiveDepth::Bounded { levels, beyond } => ActiveDepth::Bounded {
-        levels: levels.saturating_sub(1),
-        beyond,
-      },
+      ActiveDepth::Bounded { levels, beyond } => ActiveDepth::Bounded { levels: levels.saturating_sub(1), beyond },
     }
   }
 
@@ -95,7 +92,9 @@ pub fn apply_merge_patch(target: &mut Value, patch: Value, depth: MergeDepth) {
   // document replace (same as FullReplace); Preserve policy = no-op.
   if !active.allows_merge() {
     match active.beyond() {
-      BeyondPolicy::Replace => { *target = patch; }
+      BeyondPolicy::Replace => {
+        *target = patch;
+      }
       BeyondPolicy::Preserve => { /* leave target alone */ }
     }
     return;
@@ -251,10 +250,13 @@ mod tests {
       json!({"user": {"prefs": {"theme": "light"}}}),
       MergeDepth::ReplaceBeyond(2),
     );
-    assert_eq!(out, json!({
-      "user": {"name": "Alice", "prefs": {"theme": "light"}},
-      "session": "abc"
-    }));
+    assert_eq!(
+      out,
+      json!({
+        "user": {"name": "Alice", "prefs": {"theme": "light"}},
+        "session": "abc"
+      })
+    );
   }
 
   #[test]
@@ -330,10 +332,13 @@ mod tests {
     );
     // user unchanged (object value at the boundary is preserved);
     // session is a scalar so it still updates.
-    assert_eq!(out, json!({
-      "user": {"name": "Alice", "prefs": {"theme": "dark"}},
-      "session": "xyz",
-    }));
+    assert_eq!(
+      out,
+      json!({
+        "user": {"name": "Alice", "prefs": {"theme": "dark"}},
+        "session": "xyz",
+      })
+    );
   }
 
   #[test]
@@ -345,9 +350,12 @@ mod tests {
       json!({"user": {"name": "Bob", "prefs": {"theme": "light"}}}),
       MergeDepth::PreserveBeyond(2),
     );
-    assert_eq!(out, json!({
-      "user": {"name": "Bob", "prefs": {"theme": "dark", "lang": "en"}},
-    }));
+    assert_eq!(
+      out,
+      json!({
+        "user": {"name": "Bob", "prefs": {"theme": "dark", "lang": "en"}},
+      })
+    );
   }
 
   #[test]
@@ -359,10 +367,13 @@ mod tests {
       json!({"keep_me": {"a": 99}, "delete_me": null, "scalar": 2}),
       MergeDepth::PreserveBeyond(1),
     );
-    assert_eq!(out, json!({
-      "keep_me": {"a": 1},
-      "scalar": 2,
-    }));
+    assert_eq!(
+      out,
+      json!({
+        "keep_me": {"a": 1},
+        "scalar": 2,
+      })
+    );
   }
 
   #[test]
@@ -370,21 +381,13 @@ mod tests {
     // Patch tries to introduce a NEW object key beyond the boundary.
     // Preserve policy means we don't touch the depths — including not
     // creating new ones from patch.
-    let out = merged(
-      json!({"existing": "v"}),
-      json!({"new_nested": {"a": 1}}),
-      MergeDepth::PreserveBeyond(1),
-    );
+    let out = merged(json!({"existing": "v"}), json!({"new_nested": {"a": 1}}), MergeDepth::PreserveBeyond(1));
     assert_eq!(out, json!({"existing": "v"}));
   }
 
   #[test]
   fn preserve_beyond_0_is_noop() {
-    let out = merged(
-      json!({"a": 1, "b": 2}),
-      json!({"a": 99, "c": 3}),
-      MergeDepth::PreserveBeyond(0),
-    );
+    let out = merged(json!({"a": 1, "b": 2}), json!({"a": 99, "c": 3}), MergeDepth::PreserveBeyond(0));
     // Budget=0 with preserve = leave everything alone.
     assert_eq!(out, json!({"a": 1, "b": 2}));
   }
@@ -395,21 +398,13 @@ mod tests {
     // no merge happening at all, the semantics collapse to wholesale
     // document replace, identical to FullReplace. Existing target keys
     // not in the patch are LOST.
-    let out = merged(
-      json!({"a": 1, "b": 2}),
-      json!({"a": 99, "c": 3}),
-      MergeDepth::ReplaceBeyond(0),
-    );
+    let out = merged(json!({"a": 1, "b": 2}), json!({"a": 99, "c": 3}), MergeDepth::ReplaceBeyond(0));
     assert_eq!(out, json!({"a": 99, "c": 3}));
   }
 
   #[test]
   fn target_path_missing_creates_object() {
-    let out = merged(
-      json!({}),
-      json!({"new": {"nested": {"key": "value"}}}),
-      MergeDepth::Unbounded,
-    );
+    let out = merged(json!({}), json!({"new": {"nested": {"key": "value"}}}), MergeDepth::Unbounded);
     assert_eq!(out, json!({"new": {"nested": {"key": "value"}}}));
   }
 }

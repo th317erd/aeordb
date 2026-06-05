@@ -60,9 +60,7 @@ fn bundled_version_can_replace(bundled_version: &str, current_version: Option<&s
   };
 
   match current_version {
-    Some(current_version) => Version::parse(current_version)
-      .map(|current| bundled >= current)
-      .unwrap_or(true),
+    Some(current_version) => Version::parse(current_version).map(|current| bundled >= current).unwrap_or(true),
     None => true,
   }
 }
@@ -103,11 +101,7 @@ impl PluginRecord {
       created_at: self.created_at,
       version: self.version.clone(),
       author: self.author.clone(),
-      checksum: if self.checksum.is_empty() {
-        checksum_for_bytes(&self.wasm_bytes)
-      } else {
-        self.checksum.clone()
-      },
+      checksum: if self.checksum.is_empty() { checksum_for_bytes(&self.wasm_bytes) } else { self.checksum.clone() },
       updated_at: self.updated_at,
     }
   }
@@ -125,17 +119,11 @@ struct PluginCache {
 
 impl PluginCache {
   fn new() -> Self {
-    PluginCache {
-      entries: HashMap::new(),
-    }
+    PluginCache { entries: HashMap::new() }
   }
 
   /// Get a cached runtime, or compile + cache it from the given WASM bytes.
-  fn get_or_compile(
-    &mut self,
-    path: &str,
-    wasm_bytes: &[u8],
-  ) -> Result<Arc<WasmPluginRuntime>, super::wasm_runtime::WasmRuntimeError> {
+  fn get_or_compile(&mut self, path: &str, wasm_bytes: &[u8]) -> Result<Arc<WasmPluginRuntime>, super::wasm_runtime::WasmRuntimeError> {
     if let Some(runtime) = self.entries.get(path) {
       return Ok(Arc::clone(runtime));
     }
@@ -171,10 +159,7 @@ pub struct PluginManager {
 impl PluginManager {
   /// Create a new PluginManager sharing the given StorageEngine.
   pub fn new(engine: std::sync::Arc<StorageEngine>) -> Self {
-    Self {
-      engine,
-      cache: Mutex::new(PluginCache::new()),
-    }
+    Self { engine, cache: Mutex::new(PluginCache::new()) }
   }
 
   /// Install or update all bundled first-party plugins.
@@ -193,8 +178,7 @@ impl PluginManager {
       match self.get_plugin(bundled.path)? {
         Some(existing) => {
           let is_current_bundled_plugin = existing.plugin_id == bundled_plugin_id;
-          let version_allows_replace =
-            bundled_version_can_replace(bundled.version, existing.version.as_deref());
+          let version_allows_replace = bundled_version_can_replace(bundled.version, existing.version.as_deref());
           let bytes_or_metadata_differ = existing.checksum != bundled_checksum
             || existing.version.as_deref() != Some(bundled.version)
             || existing.author.as_deref() != Some(bundled.author)
@@ -288,15 +272,7 @@ impl PluginManager {
     version: Option<String>,
     author: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
-    self.deploy_plugin_with_metadata_and_id(
-      name,
-      path,
-      plugin_type,
-      wasm_bytes,
-      version,
-      author,
-      None,
-    )
+    self.deploy_plugin_with_metadata_and_id(name, path, plugin_type, wasm_bytes, version, author, None)
   }
 
   fn deploy_plugin_with_metadata_and_id(
@@ -311,9 +287,8 @@ impl PluginManager {
   ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
     if plugin_type == PluginType::Wasm {
-      WasmPluginRuntime::new(&wasm_bytes).map_err(|error| {
-        PluginManagerError::InvalidPlugin(format!("WASM validation failed: {}", error))
-      })?;
+      WasmPluginRuntime::new(&wasm_bytes)
+        .map_err(|error| PluginManagerError::InvalidPlugin(format!("WASM validation failed: {}", error)))?;
     }
 
     // Invalidate cached runtime for this path (new WASM bytes).
@@ -323,9 +298,8 @@ impl PluginManager {
 
     // Check if a plugin already exists at this path — reuse its ID if so.
     let existing = self.get_plugin(path)?;
-    let plugin_id = plugin_id_override
-      .or_else(|| existing.as_ref().map(|record| record.plugin_id.clone()))
-      .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let plugin_id =
+      plugin_id_override.or_else(|| existing.as_ref().map(|record| record.plugin_id.clone())).unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let created_at = existing.as_ref().map(|record| record.created_at);
 
@@ -344,12 +318,10 @@ impl PluginManager {
     };
     record.normalize_metadata();
 
-    let encoded = serde_json::to_vec(&record)
-      .map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
+    let encoded = serde_json::to_vec(&record).map_err(|error| PluginManagerError::Storage(format!("serialization failed: {}", error)))?;
 
     let ctx = RequestContext::system();
-    system_store::store_plugin(&self.engine, &ctx, path, &encoded)
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+    system_store::store_plugin(&self.engine, &ctx, path, &encoded).map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     tracing::info!(
       path = %path,
@@ -363,13 +335,12 @@ impl PluginManager {
 
   /// Retrieve a deployed plugin by its path.
   pub fn get_plugin(&self, path: &str) -> Result<Option<PluginRecord>, PluginManagerError> {
-    let data = system_store::get_plugin(&self.engine, path)
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+    let data = system_store::get_plugin(&self.engine, path).map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     match data {
       Some(bytes) => {
-        let mut record: PluginRecord = serde_json::from_slice(&bytes)
-          .map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
+        let mut record: PluginRecord =
+          serde_json::from_slice(&bytes).map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
         record.normalize_metadata();
         Ok(Some(record))
       }
@@ -379,14 +350,12 @@ impl PluginManager {
 
   /// List metadata for all deployed plugins.
   pub fn list_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
-    let entries = system_store::list_plugins(&self.engine)
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+    let entries = system_store::list_plugins(&self.engine).map_err(|error| PluginManagerError::Storage(error.to_string()))?;
 
     let mut plugins = Vec::new();
     for (_path, bytes) in entries {
-      let mut record: PluginRecord = serde_json::from_slice(&bytes).map_err(|error| {
-        PluginManagerError::Storage(format!("deserialization failed: {}", error))
-      })?;
+      let mut record: PluginRecord =
+        serde_json::from_slice(&bytes).map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
       record.normalize_metadata();
       plugins.push(record.to_metadata());
     }
@@ -405,20 +374,12 @@ impl PluginManager {
     }
 
     let ctx = RequestContext::system();
-    system_store::remove_plugin(&self.engine, &ctx, path)
-      .map_err(|error| PluginManagerError::Storage(error.to_string()))
+    system_store::remove_plugin(&self.engine, &ctx, path).map_err(|error| PluginManagerError::Storage(error.to_string()))
   }
 
   /// Get a cached compiled runtime for a plugin, or compile and cache it.
-  fn get_cached_runtime(
-    &self,
-    path: &str,
-    wasm_bytes: &[u8],
-  ) -> Result<Arc<WasmPluginRuntime>, PluginManagerError> {
-    let mut cache = self.cache.lock()
-      .map_err(|e| PluginManagerError::ExecutionFailed(
-        format!("plugin cache lock poisoned: {}", e),
-      ))?;
+  fn get_cached_runtime(&self, path: &str, wasm_bytes: &[u8]) -> Result<Arc<WasmPluginRuntime>, PluginManagerError> {
+    let mut cache = self.cache.lock().map_err(|e| PluginManagerError::ExecutionFailed(format!("plugin cache lock poisoned: {}", e)))?;
     cache.get_or_compile(path, wasm_bytes).map_err(|error| {
       tracing::error!(path = %path, error = %error, "Failed to load WASM module");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "load_failed").increment(1);
@@ -428,21 +389,13 @@ impl PluginManager {
 
   /// Instantiate and invoke a deployed WASM plugin.
   #[tracing::instrument(skip(self, request_bytes), fields(path = %path, request_size = request_bytes.len()))]
-  pub fn invoke_wasm_plugin(
-    &self,
-    path: &str,
-    request_bytes: &[u8],
-  ) -> Result<Vec<u8>, PluginManagerError> {
+  pub fn invoke_wasm_plugin(&self, path: &str, request_bytes: &[u8]) -> Result<Vec<u8>, PluginManagerError> {
     let start = std::time::Instant::now();
 
-    let record = self
-      .get_plugin(path)?
-      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
 
     if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!(
-        "plugin at '{}' is not a WASM plugin", path
-      )));
+      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
     }
 
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
@@ -506,15 +459,10 @@ impl PluginManager {
   ) -> Result<Vec<u8>, PluginManagerError> {
     let start = std::time::Instant::now();
 
-    let record = self
-      .get_plugin(path)?
-      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
 
     if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!(
-        "plugin at '{}' is not a WASM plugin",
-        path
-      )));
+      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
     }
 
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
@@ -546,15 +494,10 @@ impl PluginManager {
     request_bytes: &[u8],
     memory_limit_bytes: usize,
   ) -> Result<Vec<u8>, PluginManagerError> {
-    let record = self
-      .get_plugin(path)?
-      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
 
     if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!(
-        "plugin at '{}' is not a WASM plugin",
-        path
-      )));
+      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
     }
 
     let runtime = PluginCache::compile_with_limits(
@@ -562,13 +505,9 @@ impl PluginManager {
       memory_limit_bytes,
       1_000_000, // default fuel limit
     )
-    .map_err(|error| {
-      PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
-    })?;
+    .map_err(|error| PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error)))?;
 
-    runtime.call_handle(request_bytes).map_err(|error| {
-      PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
-    })
+    runtime.call_handle(request_bytes).map_err(|error| PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error)))
   }
 }
 

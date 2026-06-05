@@ -33,20 +33,37 @@ fn main() {
   let mut i = 1;
   while i < args.len() {
     match args[i].as_str() {
-      "--database" => { database = args.get(i + 1).cloned(); i += 2; }
-      "--checkpoint" => { checkpoint = args.get(i + 1).cloned(); i += 2; }
-      "--mode" => { mode = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-      _ => { i += 1; }
+      "--database" => {
+        database = args.get(i + 1).cloned();
+        i += 2;
+      }
+      "--checkpoint" => {
+        checkpoint = args.get(i + 1).cloned();
+        i += 2;
+      }
+      "--mode" => {
+        mode = args.get(i + 1).cloned().unwrap_or_default();
+        i += 2;
+      }
+      _ => {
+        i += 1;
+      }
     }
   }
 
   let database = match database {
     Some(value) => value,
-    None => { eprintln!("--database required"); process::exit(2); }
+    None => {
+      eprintln!("--database required");
+      process::exit(2);
+    }
   };
   let checkpoint = match checkpoint {
     Some(value) => value,
-    None => { eprintln!("--checkpoint required"); process::exit(2); }
+    None => {
+      eprintln!("--checkpoint required");
+      process::exit(2);
+    }
   };
 
   let engine = match StorageEngine::open(&database) {
@@ -69,11 +86,7 @@ fn main() {
 
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
-  let mut checkpoint_file = OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open(&checkpoint)
-    .expect("open checkpoint");
+  let mut checkpoint_file = OpenOptions::new().create(true).append(true).open(&checkpoint).expect("open checkpoint");
 
   // Signal that we're up so the parent knows the engine opened cleanly.
   writeln!(checkpoint_file, "# worker up mode={}", mode).ok();

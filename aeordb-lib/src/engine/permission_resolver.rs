@@ -28,14 +28,8 @@ pub struct PermissionResolver<'a> {
 }
 
 impl<'a> PermissionResolver<'a> {
-  pub fn new(
-    engine: &'a StorageEngine,
-    group_cache: &'a Cache<GroupLoader>,
-  ) -> Self {
-    PermissionResolver {
-      engine,
-      group_cache,
-    }
+  pub fn new(engine: &'a StorageEngine, group_cache: &'a Cache<GroupLoader>) -> Self {
+    PermissionResolver { engine, group_cache }
   }
 
   /// Check whether a user has permission to perform an operation at a path.
@@ -49,12 +43,7 @@ impl<'a> PermissionResolver<'a> {
   ///    `is_ancestor_of_any_rule` for API key rules — directories on the
   ///    path to a grant are implicitly navigable.
   /// 5. Return the final state for the requested operation.
-  pub fn check_permission(
-    &self,
-    user_id: &Uuid,
-    path: &str,
-    operation: CrudlifyOp,
-  ) -> EngineResult<bool> {
+  pub fn check_permission(&self, user_id: &Uuid, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
     // Root bypasses everything.
     if is_root(user_id) {
       return Ok(true);
@@ -67,9 +56,7 @@ impl<'a> PermissionResolver<'a> {
 
     // Allow ancestor navigation: a user with a grant at /A/B/C must be able
     // to Read/List /, /A, and /A/B in order to walk down to it.
-    if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List)
-      && self.has_descendant_grants(user_id, path)?
-    {
+    if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List) && self.has_descendant_grants(user_id, path)? {
       return Ok(true);
     }
 
@@ -86,12 +73,7 @@ impl<'a> PermissionResolver<'a> {
   /// the input ends with `/`, so without this helper a request for the
   /// real directory `/A/B` would silently miss any grants stored at
   /// `/A/B/.aeordb-permissions`.
-  pub fn check_path_permission(
-    &self,
-    user_id: &Uuid,
-    path: &str,
-    operation: CrudlifyOp,
-  ) -> EngineResult<bool> {
+  pub fn check_path_permission(&self, user_id: &Uuid, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
     if self.check_direct_permission(user_id, path, operation)? {
       return Ok(true);
     }
@@ -111,12 +93,7 @@ impl<'a> PermissionResolver<'a> {
   /// above `path`. Use this when you specifically need to distinguish
   /// "owned/granted" from "merely navigable" — for example, when deciding
   /// whether to filter a directory listing.
-  pub fn check_direct_permission(
-    &self,
-    user_id: &Uuid,
-    path: &str,
-    operation: CrudlifyOp,
-  ) -> EngineResult<bool> {
+  pub fn check_direct_permission(&self, user_id: &Uuid, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
     if is_root(user_id) {
       return Ok(true);
     }
@@ -124,11 +101,7 @@ impl<'a> PermissionResolver<'a> {
     // Normalize: callers may pass paths without a leading slash (e.g. the
     // permission middleware strips "/files/" leaving "foo/bar/baz.txt").
     // path_levels returns levels WITH a leading slash, so we must align.
-    let normalized = if path.starts_with('/') {
-      path.to_string()
-    } else {
-      format!("/{}", path)
-    };
+    let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
     let path = normalized.as_str();
 
     // Get user's group memberships.
@@ -216,11 +189,7 @@ impl<'a> PermissionResolver<'a> {
     if is_root(user_id) {
       return Ok(true);
     }
-    let normalized = if path.starts_with('/') {
-      path.to_string()
-    } else {
-      format!("/{}", path)
-    };
+    let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
     let user_groups = self.group_cache.get(user_id, self.engine)?;
     if user_groups.is_empty() {
       return Ok(false);
@@ -234,19 +203,11 @@ impl<'a> PermissionResolver<'a> {
   /// grant. Used by listing handlers to filter children when the user
   /// reached `parent_path` via ancestor navigation rather than a direct
   /// list grant.
-  pub fn accessible_child_names(
-    &self,
-    user_id: &Uuid,
-    parent_path: &str,
-  ) -> EngineResult<Vec<String>> {
+  pub fn accessible_child_names(&self, user_id: &Uuid, parent_path: &str) -> EngineResult<Vec<String>> {
     if is_root(user_id) {
       return Ok(Vec::new());
     }
-    let normalized = if parent_path.starts_with('/') {
-      parent_path.to_string()
-    } else {
-      format!("/{}", parent_path)
-    };
+    let normalized = if parent_path.starts_with('/') { parent_path.to_string() } else { format!("/{}", parent_path) };
     let user_groups = self.group_cache.get(user_id, self.engine)?;
     if user_groups.is_empty() {
       return Ok(Vec::new());

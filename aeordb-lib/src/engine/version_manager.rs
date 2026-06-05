@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::engine_event::{VersionEventData, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED};
+use crate::engine::engine_event::{
+  VersionEventData, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED,
+};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
@@ -51,19 +53,14 @@ pub struct ForkInfo {
 ///   metadata_json: [u8; metadata_json_length]
 impl SnapshotInfo {
   pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
-    let metadata_json = serde_json::to_vec(&self.metadata)
-      .unwrap_or_default();
+    let metadata_json = serde_json::to_vec(&self.metadata).unwrap_or_default();
     let name_bytes = self.name.as_bytes();
 
     if name_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Snapshot name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Snapshot name too long: {} bytes exceeds u16 max (65535)", name_bytes.len())));
     }
     if metadata_json.len() > u32::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Snapshot metadata too large: {} bytes exceeds u32 max", metadata_json.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Snapshot metadata too large: {} bytes exceeds u32 max", metadata_json.len())));
     }
 
     let capacity = 2 + name_bytes.len() + hash_length + 8 + 4 + metadata_json.len();
@@ -96,27 +93,18 @@ impl SnapshotInfo {
 
   fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     if data.len() < 2 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "SnapshotInfo data too short for name_length".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "SnapshotInfo data too short for name_length".to_string() });
     }
 
     let name_length = u16::from_le_bytes([data[0], data[1]]) as usize;
     let mut cursor = 2;
 
     if data.len() < cursor + name_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "SnapshotInfo data too short for name".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "SnapshotInfo data too short for name".to_string() });
     }
 
     let name = String::from_utf8(data[cursor..cursor + name_length].to_vec())
-      .map_err(|_| EngineError::CorruptEntry {
-        offset: 0,
-        reason: "Invalid UTF-8 in snapshot name".to_string(),
-      })?;
+      .map_err(|_| EngineError::CorruptEntry { offset: 0, reason: "Invalid UTF-8 in snapshot name".to_string() })?;
     cursor += name_length;
 
     if data.len() < cursor + hash_length + 8 + 4 {
@@ -130,39 +118,32 @@ impl SnapshotInfo {
     cursor += hash_length;
 
     let created_at = i64::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-      data[cursor + 4], data[cursor + 5], data[cursor + 6], data[cursor + 7],
+      data[cursor],
+      data[cursor + 1],
+      data[cursor + 2],
+      data[cursor + 3],
+      data[cursor + 4],
+      data[cursor + 5],
+      data[cursor + 6],
+      data[cursor + 7],
     ]);
     cursor += 8;
 
-    let metadata_json_length = u32::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-    ]) as usize;
+    let metadata_json_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     if data.len() < cursor + metadata_json_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "SnapshotInfo data too short for metadata_json".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "SnapshotInfo data too short for metadata_json".to_string() });
     }
 
     let metadata: HashMap<String, String> = if metadata_json_length > 0 {
       serde_json::from_slice(&data[cursor..cursor + metadata_json_length])
-        .map_err(|error| EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("Failed to deserialize snapshot metadata: {}", error),
-        })?
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("Failed to deserialize snapshot metadata: {}", error) })?
     } else {
       HashMap::new()
     };
 
-    Ok(SnapshotInfo {
-      name,
-      root_hash,
-      created_at,
-      metadata,
-    })
+    Ok(SnapshotInfo { name, root_hash, created_at, metadata })
   }
 }
 
@@ -178,9 +159,7 @@ impl ForkInfo {
     let name_bytes = self.name.as_bytes();
 
     if name_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Fork name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Fork name too long: {} bytes exceeds u16 max (65535)", name_bytes.len())));
     }
 
     let capacity = 2 + name_bytes.len() + hash_length + 8;
@@ -210,49 +189,39 @@ impl ForkInfo {
 
   fn deserialize_v0(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     if data.len() < 2 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "ForkInfo data too short for name_length".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "ForkInfo data too short for name_length".to_string() });
     }
 
     let name_length = u16::from_le_bytes([data[0], data[1]]) as usize;
     let mut cursor = 2;
 
     if data.len() < cursor + name_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "ForkInfo data too short for name".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "ForkInfo data too short for name".to_string() });
     }
 
     let name = String::from_utf8(data[cursor..cursor + name_length].to_vec())
-      .map_err(|_| EngineError::CorruptEntry {
-        offset: 0,
-        reason: "Invalid UTF-8 in fork name".to_string(),
-      })?;
+      .map_err(|_| EngineError::CorruptEntry { offset: 0, reason: "Invalid UTF-8 in fork name".to_string() })?;
     cursor += name_length;
 
     if data.len() < cursor + hash_length + 8 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "ForkInfo data too short for hash + timestamp".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "ForkInfo data too short for hash + timestamp".to_string() });
     }
 
     let root_hash = data[cursor..cursor + hash_length].to_vec();
     cursor += hash_length;
 
     let created_at = i64::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-      data[cursor + 4], data[cursor + 5], data[cursor + 6], data[cursor + 7],
+      data[cursor],
+      data[cursor + 1],
+      data[cursor + 2],
+      data[cursor + 3],
+      data[cursor + 4],
+      data[cursor + 5],
+      data[cursor + 6],
+      data[cursor + 7],
     ]);
 
-    Ok(ForkInfo {
-      name,
-      root_hash,
-      created_at,
-    })
+    Ok(ForkInfo { name, root_hash, created_at })
   }
 }
 
@@ -285,15 +254,9 @@ impl<'a> VersionManager<'a> {
   /// that `open_internal` can recompute the hash and replay the deletion.
   fn persist_deletion(engine: &StorageEngine, key_string: &str) -> EngineResult<()> {
     let deletion = DeletionRecord::new(key_string.to_string(), None);
-    let deletion_key = engine.compute_hash(
-      format!("del:{}:{}", key_string, deletion.deleted_at).as_bytes(),
-    )?;
+    let deletion_key = engine.compute_hash(format!("del:{}:{}", key_string, deletion.deleted_at).as_bytes())?;
     let deletion_value = deletion.serialize();
-    engine.store_entry(
-      EntryType::DeletionRecord,
-      &deletion_key,
-      &deletion_value,
-    )?;
+    engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
     engine.counters().record_write(0);
     Ok(())
   }
@@ -325,9 +288,7 @@ impl<'a> VersionManager<'a> {
     let entry = self.engine.get_entry(&key)?;
 
     let Some((header, _key, value)) = entry else {
-      return Err(EngineError::NotFound(
-        format!("Snapshot not found: {}", name),
-      ));
+      return Err(EngineError::NotFound(format!("Snapshot not found: {}", name)));
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
@@ -355,20 +316,13 @@ impl<'a> VersionManager<'a> {
   /// Create a named snapshot of the current HEAD state with optional metadata.
   ///
   /// Returns an error if a snapshot with the given name already exists.
-  pub fn create_snapshot(
-    &self,
-    ctx: &RequestContext,
-    name: &str,
-    metadata: HashMap<String, String>,
-  ) -> EngineResult<SnapshotInfo> {
+  pub fn create_snapshot(&self, ctx: &RequestContext, name: &str, metadata: HashMap<String, String>) -> EngineResult<SnapshotInfo> {
     let _mem = PhaseSampler::start("create_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
 
     // Check for duplicate name (only if not deleted)
     if self.engine.has_entry(&key)? && !self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::AlreadyExists(
-        format!("Snapshot already exists: {}", name),
-      ));
+      return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", name)));
     }
 
     let root_hash = self.get_head_hash()?;
@@ -388,24 +342,15 @@ impl<'a> VersionManager<'a> {
     // Callers creating safety/auto snapshots should set "type" = "auto" so
     // they're eligible for lifecycle retention pruning.
     let mut metadata = metadata;
-    metadata.entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
+    metadata
+      .entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
       .or_insert_with(|| crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string());
 
-    let snapshot_info = SnapshotInfo {
-      name: name.to_string(),
-      root_hash,
-      created_at,
-      metadata,
-    };
+    let snapshot_info = SnapshotInfo { name: name.to_string(), root_hash, created_at, metadata };
 
     let value = snapshot_info.serialize(hash_length)?;
 
-    self.engine.store_entry_typed(
-      EntryType::Snapshot,
-      &key,
-      &value,
-      KV_TYPE_SNAPSHOT,
-    )?;
+    self.engine.store_entry_typed(EntryType::Snapshot, &key, &value, KV_TYPE_SNAPSHOT)?;
 
     self.engine.counters().record_write(value.len() as u64);
     self.engine.counters().increment_snapshots();
@@ -429,12 +374,15 @@ impl<'a> VersionManager<'a> {
     self.engine.counters().record_write(0);
 
     // Emit version restored event
-    ctx.emit(EVENT_VERSIONS_RESTORED, serde_json::json!({"versions": [VersionEventData {
-      name: name.to_string(),
-      version_type: Some("snapshot".to_string()),
-      root_hash: hex::encode(&root_hash),
-      created_at: None,
-    }]}));
+    ctx.emit(
+      EVENT_VERSIONS_RESTORED,
+      serde_json::json!({"versions": [VersionEventData {
+        name: name.to_string(),
+        version_type: Some("snapshot".to_string()),
+        root_hash: hex::encode(&root_hash),
+        created_at: None,
+      }]}),
+    );
 
     Ok(())
   }
@@ -460,8 +408,7 @@ impl<'a> VersionManager<'a> {
 
   /// Find a snapshot by its ID (hex-encoded root hash).
   pub fn get_snapshot_by_id(&self, id: &str) -> EngineResult<Option<SnapshotInfo>> {
-    let target_hash = hex::decode(id)
-      .map_err(|_| EngineError::InvalidInput(format!("Invalid snapshot ID: {}", id)))?;
+    let target_hash = hex::decode(id).map_err(|_| EngineError::InvalidInput(format!("Invalid snapshot ID: {}", id)))?;
     let snapshots = self.list_snapshots()?;
     Ok(snapshots.into_iter().find(|s| s.root_hash == target_hash))
   }
@@ -478,9 +425,7 @@ impl<'a> VersionManager<'a> {
     let hash_length = self.engine.hash_algo().hash_length();
     let key = self.snapshot_key(identifier)?;
     match self.engine.get_entry(&key)? {
-      Some((_header, _key, value)) => {
-        Ok(SnapshotInfo::deserialize(&value, hash_length, 0)?)
-      }
+      Some((_header, _key, value)) => Ok(SnapshotInfo::deserialize(&value, hash_length, 0)?),
       None => Err(EngineError::NotFound(format!("Snapshot not found: {}", identifier))),
     }
   }
@@ -492,9 +437,7 @@ impl<'a> VersionManager<'a> {
     let key = self.snapshot_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(
-        format!("Snapshot not found: {}", name),
-      ));
+      return Err(EngineError::NotFound(format!("Snapshot not found: {}", name)));
     }
 
     self.engine.mark_entry_deleted(&key)?;
@@ -506,12 +449,15 @@ impl<'a> VersionManager<'a> {
     self.engine.counters().decrement_snapshots();
 
     // Emit version deleted event
-    ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {
-      name: name.to_string(),
-      version_type: Some("snapshot".to_string()),
-      root_hash: hex::encode(&key),
-      created_at: None,
-    }]}));
+    ctx.emit(
+      EVENT_VERSIONS_DELETED,
+      serde_json::json!({"versions": [VersionEventData {
+        name: name.to_string(),
+        version_type: Some("snapshot".to_string()),
+        root_hash: hex::encode(&key),
+        created_at: None,
+      }]}),
+    );
 
     Ok(())
   }
@@ -542,12 +488,8 @@ impl<'a> VersionManager<'a> {
       crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string(),
     );
 
-    let new_snapshot = SnapshotInfo {
-      name: new_name.to_string(),
-      root_hash: old_snapshot.root_hash,
-      created_at: old_snapshot.created_at,
-      metadata,
-    };
+    let new_snapshot =
+      SnapshotInfo { name: new_name.to_string(), root_hash: old_snapshot.root_hash, created_at: old_snapshot.created_at, metadata };
 
     let new_value = new_snapshot.serialize(hash_length)?;
     self.engine.store_entry_typed(
@@ -569,19 +511,12 @@ impl<'a> VersionManager<'a> {
   /// - If `base` is a snapshot name, forks from that snapshot's root hash.
   ///
   /// Returns an error if a fork with the given name already exists.
-  pub fn create_fork(
-    &self,
-    ctx: &RequestContext,
-    name: &str,
-    base: Option<&str>,
-  ) -> EngineResult<ForkInfo> {
+  pub fn create_fork(&self, ctx: &RequestContext, name: &str, base: Option<&str>) -> EngineResult<ForkInfo> {
     let key = self.fork_key(name)?;
 
     // Check for duplicate fork name
     if self.engine.has_entry(&key)? && !self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::AlreadyExists(
-        format!("Fork already exists: {}", name),
-      ));
+      return Err(EngineError::AlreadyExists(format!("Fork already exists: {}", name)));
     }
 
     let root_hash = match base {
@@ -591,21 +526,12 @@ impl<'a> VersionManager<'a> {
 
     let created_at = chrono::Utc::now().timestamp_millis();
 
-    let fork_info = ForkInfo {
-      name: name.to_string(),
-      root_hash,
-      created_at,
-    };
+    let fork_info = ForkInfo { name: name.to_string(), root_hash, created_at };
 
     let hash_length = self.engine.hash_algo().hash_length();
     let value = fork_info.serialize(hash_length)?;
 
-    self.engine.store_entry_typed(
-      EntryType::Fork,
-      &key,
-      &value,
-      KV_TYPE_FORK,
-    )?;
+    self.engine.store_entry_typed(EntryType::Fork, &key, &value, KV_TYPE_FORK)?;
 
     self.engine.counters().record_write(value.len() as u64);
     self.engine.counters().increment_forks();
@@ -626,21 +552,21 @@ impl<'a> VersionManager<'a> {
   ///
   /// After promotion, the fork's state becomes the new main-line version.
   pub fn promote_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
-    let fork_hash = self.get_fork_hash(name)?
-      .ok_or_else(|| EngineError::NotFound(
-        format!("Fork not found: {}", name),
-      ))?;
+    let fork_hash = self.get_fork_hash(name)?.ok_or_else(|| EngineError::NotFound(format!("Fork not found: {}", name)))?;
 
     self.engine.update_head(&fork_hash)?;
     self.engine.counters().record_write(0);
 
     // Emit promote event before abandon (abandon emits its own delete event)
-    ctx.emit(EVENT_VERSIONS_PROMOTED, serde_json::json!({"versions": [VersionEventData {
-      name: name.to_string(),
-      version_type: Some("fork".to_string()),
-      root_hash: hex::encode(&fork_hash),
-      created_at: None,
-    }]}));
+    ctx.emit(
+      EVENT_VERSIONS_PROMOTED,
+      serde_json::json!({"versions": [VersionEventData {
+        name: name.to_string(),
+        version_type: Some("fork".to_string()),
+        root_hash: hex::encode(&fork_hash),
+        created_at: None,
+      }]}),
+    );
 
     self.abandon_fork(ctx, name)
   }
@@ -651,9 +577,7 @@ impl<'a> VersionManager<'a> {
     let key = self.fork_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(
-        format!("Fork not found: {}", name),
-      ));
+      return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
     }
 
     self.engine.mark_entry_deleted(&key)?;
@@ -665,12 +589,15 @@ impl<'a> VersionManager<'a> {
     self.engine.counters().decrement_forks();
 
     // Emit version deleted event
-    ctx.emit(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [VersionEventData {
-      name: name.to_string(),
-      version_type: Some("fork".to_string()),
-      root_hash: hex::encode(&key),
-      created_at: None,
-    }]}));
+    ctx.emit(
+      EVENT_VERSIONS_DELETED,
+      serde_json::json!({"versions": [VersionEventData {
+        name: name.to_string(),
+        version_type: Some("fork".to_string()),
+        root_hash: hex::encode(&key),
+        created_at: None,
+      }]}),
+    );
 
     Ok(())
   }
@@ -694,42 +621,24 @@ impl<'a> VersionManager<'a> {
   }
 
   /// Update a fork's root hash (used when writing to a fork).
-  pub fn update_fork_hash(
-    &self,
-    name: &str,
-    new_root_hash: &[u8],
-  ) -> EngineResult<()> {
+  pub fn update_fork_hash(&self, name: &str, new_root_hash: &[u8]) -> EngineResult<()> {
     let key = self.fork_key(name)?;
 
     if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(
-        format!("Fork not found: {}", name),
-      ));
+      return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
     }
 
     // Read existing fork info to preserve created_at
-    let entry = self.engine.get_entry(&key)?
-      .ok_or_else(|| EngineError::NotFound(
-        format!("Fork not found: {}", name),
-      ))?;
+    let entry = self.engine.get_entry(&key)?.ok_or_else(|| EngineError::NotFound(format!("Fork not found: {}", name)))?;
 
     let hash_length = self.engine.hash_algo().hash_length();
     let existing = ForkInfo::deserialize(&entry.2, hash_length, entry.0.entry_version)?;
 
-    let updated = ForkInfo {
-      name: name.to_string(),
-      root_hash: new_root_hash.to_vec(),
-      created_at: existing.created_at,
-    };
+    let updated = ForkInfo { name: name.to_string(), root_hash: new_root_hash.to_vec(), created_at: existing.created_at };
 
     let value = updated.serialize(hash_length)?;
 
-    self.engine.store_entry_typed(
-      EntryType::Fork,
-      &key,
-      &value,
-      KV_TYPE_FORK,
-    )?;
+    self.engine.store_entry_typed(EntryType::Fork, &key, &value, KV_TYPE_FORK)?;
     self.engine.counters().record_write(value.len() as u64);
 
     Ok(())

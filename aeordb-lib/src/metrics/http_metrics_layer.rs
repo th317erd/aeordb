@@ -6,9 +6,7 @@ use std::time::Instant;
 use axum::http::{Request, Response};
 use tower::{Layer, Service};
 
-use super::definitions::{
-  HTTP_REQUESTS_TOTAL, HTTP_REQUEST_BYTES, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES,
-};
+use super::definitions::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_BYTES, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES};
 
 /// A tower Layer that records HTTP metrics for every request.
 #[derive(Clone, Debug)]
@@ -46,11 +44,7 @@ where
   fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
-    let request_size = request
-      .body()
-      .size_hint()
-      .exact()
-      .unwrap_or(0);
+    let request_size = request.body().size_hint().exact().unwrap_or(0);
 
     let mut inner = self.inner.clone();
     let start = Instant::now();
@@ -60,11 +54,7 @@ where
 
       let duration = start.elapsed().as_secs_f64();
       let status = response.status().as_u16().to_string();
-      let response_size = response
-        .body()
-        .size_hint()
-        .exact()
-        .unwrap_or(0);
+      let response_size = response.body().size_hint().exact().unwrap_or(0);
 
       metrics::counter!(HTTP_REQUESTS_TOTAL, "method" => method.clone(), "path" => path.clone(), "status" => status.clone()).increment(1);
       metrics::histogram!(HTTP_REQUEST_DURATION, "method" => method.clone(), "path" => path.clone(), "status" => status).record(duration);

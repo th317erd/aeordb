@@ -14,7 +14,9 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   // Tests create multiple snapshots back-to-back; bypass the 1-per-60s
   // manual-snapshot throttle in production code.
   // SAFETY: tests run single-threaded per binary; setting env var here is fine.
-  unsafe { std::env::set_var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT", "1"); }
+  unsafe {
+    std::env::set_var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT", "1");
+  }
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
@@ -22,10 +24,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
 }
 
 /// Rebuild app from shared state (for multi-request tests).
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -105,12 +104,7 @@ async fn test_engine_get_file_returns_data() {
 
   // Read it back
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/test/data.bin")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/test/data.bin").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -119,10 +113,7 @@ async fn test_engine_get_file_returns_data() {
   assert_eq!(bytes, vec![1u8, 2, 3, 4, 5]);
   let after_read = engine.counters().snapshot();
   assert!(after_read.reads_total > before_read.reads_total, "GET /files should count as a read");
-  assert!(
-    after_read.bytes_read_total - before_read.bytes_read_total >= 5,
-    "GET /files should count at least the served bytes"
-  );
+  assert!(after_read.bytes_read_total - before_read.bytes_read_total >= 5, "GET /files should count at least the served bytes");
 }
 
 #[tokio::test]
@@ -142,19 +133,11 @@ async fn test_engine_get_file_returns_content_type() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/app/config.json")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/app/config.json").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "application/json"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "application/json");
 }
 
 #[tokio::test]
@@ -162,12 +145,8 @@ async fn test_engine_get_file_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/nonexistent/file.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/nonexistent/file.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -202,12 +181,7 @@ async fn test_engine_get_directory_returns_listing() {
 
   // List the directory
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/mydir")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/mydir").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -216,10 +190,7 @@ async fn test_engine_get_directory_returns_listing() {
   let entries = json["items"].as_array().expect("expected items array");
   assert_eq!(entries.len(), 2);
 
-  let names: Vec<&str> = entries
-    .iter()
-    .map(|entry| entry["name"].as_str().unwrap())
-    .collect();
+  let names: Vec<&str> = entries.iter().map(|entry| entry["name"].as_str().unwrap()).collect();
   assert!(names.contains(&"file1.txt"));
   assert!(names.contains(&"file2.txt"));
 }
@@ -264,12 +235,7 @@ async fn test_engine_directory_listing_paginates_directories_before_files() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let names: Vec<&str> = json["items"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|entry| entry["name"].as_str().unwrap())
-    .collect();
+  let names: Vec<&str> = json["items"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
   assert_eq!(names, vec!["mid-folder", "zzz-folder"]);
 }
 
@@ -313,12 +279,7 @@ async fn test_engine_directory_listing_desc_keeps_directories_first() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let names: Vec<&str> = json["items"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|entry| entry["name"].as_str().unwrap())
-    .collect();
+  let names: Vec<&str> = json["items"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
   assert_eq!(names, vec!["omega-dir", "alpha-dir"]);
 }
 
@@ -328,23 +289,15 @@ async fn test_engine_delete_file_returns_200() {
   let auth = bearer_token(&jwt_manager);
 
   // Store first
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/files/todelete/file.txt")
-    .header("authorization", &auth)
-    .body(Body::from("delete me"))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/files/todelete/file.txt").header("authorization", &auth).body(Body::from("delete me")).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Delete
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/files/todelete/file.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/files/todelete/file.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -358,12 +311,7 @@ async fn test_engine_delete_file_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/files/nope/gone.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri("/files/nope/gone.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -385,27 +333,13 @@ async fn test_engine_head_returns_metadata() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("HEAD")
-    .uri("/files/meta/info.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("HEAD").uri("/files/meta/info.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
-  assert_eq!(
-    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
-    "file"
-  );
-  assert_eq!(
-    response.headers().get("X-AeorDB-Size").unwrap().to_str().unwrap(),
-    "13"
-  );
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "text/plain"
-  );
+  assert_eq!(response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(), "file");
+  assert_eq!(response.headers().get("X-AeorDB-Size").unwrap().to_str().unwrap(), "13");
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "text/plain");
 
   // Body should be empty for HEAD
   let bytes = body_bytes(response.into_body()).await;
@@ -434,19 +368,11 @@ async fn test_engine_head_on_directory_returns_directory_type() {
 
   // HEAD on the parent directory
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("HEAD")
-    .uri("/files/headdir")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("HEAD").uri("/files/headdir").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
-  assert_eq!(
-    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
-    "directory"
-  );
+  assert_eq!(response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(), "directory");
 
   let bytes = body_bytes(response.into_body()).await;
   assert!(bytes.is_empty(), "HEAD response body should be empty");
@@ -458,12 +384,8 @@ async fn test_engine_store_without_content_type() {
   let auth = bearer_token(&jwt_manager);
 
   // PUT without content-type header -- should still succeed
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/files/noct/file.bin")
-    .header("authorization", &auth)
-    .body(Body::from("some data"))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/files/noct/file.bin").header("authorization", &auth).body(Body::from("some data")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
@@ -471,10 +393,7 @@ async fn test_engine_store_without_content_type() {
   let json = body_json(response.into_body()).await;
   assert_eq!(json["size"], 9);
   // content_type should be auto-detected as text/plain (magic byte sniffing for "some data")
-  assert_eq!(
-    json["content_type"].as_str(), Some("text/plain"),
-    "content_type should be auto-detected when not provided"
-  );
+  assert_eq!(json["content_type"].as_str(), Some("text/plain"), "content_type should be auto-detected when not provided");
 }
 
 #[tokio::test]
@@ -482,12 +401,8 @@ async fn test_engine_get_nonexistent_directory() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/totally/does/not/exist")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/totally/does/not/exist").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -528,11 +443,7 @@ async fn test_engine_put_requires_auth() {
 async fn test_engine_delete_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/files/unauthed/file.txt")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri("/files/unauthed/file.txt").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -542,11 +453,7 @@ async fn test_engine_delete_requires_auth() {
 async fn test_engine_head_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("HEAD")
-    .uri("/files/unauthed/file.txt")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("HEAD").uri("/files/unauthed/file.txt").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -617,11 +524,7 @@ async fn test_snapshot_create_with_malformed_json_returns_error() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -639,11 +542,7 @@ async fn test_fork_create_with_malformed_json_returns_error() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -661,11 +560,7 @@ async fn test_snapshot_restore_with_missing_name_returns_error() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -684,12 +579,7 @@ async fn test_engine_get_file_returns_metadata_headers() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/headers/test.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/headers/test.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -699,10 +589,7 @@ async fn test_engine_get_file_returns_metadata_headers() {
   assert!(response.headers().get("X-AeorDB-Size").is_some());
   assert!(response.headers().get("X-AeorDB-Created").is_some());
   assert!(response.headers().get("X-AeorDB-Updated").is_some());
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "text/plain"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "text/plain");
 }
 
 #[tokio::test]
@@ -735,12 +622,8 @@ async fn test_engine_overwrite_existing_file() {
 
   // Read back should return the new content
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/overwrite/file.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/overwrite/file.txt").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -754,23 +637,14 @@ async fn test_engine_store_creates_intermediate_dirs() {
   let auth = bearer_token(&jwt_manager);
 
   // Store file at a deeply nested path
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/files/a/b/c/deep.txt")
-    .header("authorization", &auth)
-    .body(Body::from("deep"))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/files/a/b/c/deep.txt").header("authorization", &auth).body(Body::from("deep")).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::CREATED);
 
   // Listing "a/b/c" should show "deep.txt"
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/a/b/c")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/a/b/c").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -799,12 +673,8 @@ async fn test_engine_store_and_get_roundtrip() {
   assert_eq!(response.status(), StatusCode::CREATED);
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/roundtrip/fox.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/roundtrip/fox.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -818,11 +688,7 @@ async fn test_engine_routes_require_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
   // GET without auth should fail
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/some/path")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/some/path").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -897,12 +763,7 @@ async fn test_snapshot_list() {
 
   // List snapshots
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/versions/snapshots")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/versions/snapshots").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -964,12 +825,8 @@ async fn test_snapshot_delete() {
 
   // Delete it
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/versions/snapshots/to-delete")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/versions/snapshots/to-delete").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -979,12 +836,7 @@ async fn test_snapshot_delete() {
 
   // Should be gone from list
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/versions/snapshots")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/versions/snapshots").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
@@ -1036,12 +888,7 @@ async fn test_fork_list() {
 
   // List forks
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/versions/forks")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/versions/forks").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1070,12 +917,8 @@ async fn test_fork_promote() {
 
   // Promote it
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("POST")
-    .uri("/versions/forks/promote-me/promote")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/versions/forks/promote-me/promote").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1086,12 +929,7 @@ async fn test_fork_promote() {
 
   // Fork should be gone after promote
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/versions/forks")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/versions/forks").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
@@ -1117,12 +955,8 @@ async fn test_fork_abandon() {
 
   // Abandon it
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/versions/forks/abandon-me")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/versions/forks/abandon-me").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1132,12 +966,7 @@ async fn test_fork_abandon() {
 
   // Fork should be gone
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/versions/forks")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/versions/forks").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   let json = body_json(response.into_body()).await;
@@ -1173,12 +1002,8 @@ async fn test_engine_large_file() {
 
   // Read it back and verify roundtrip
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/big/largefile.bin")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/big/largefile.bin").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1243,12 +1068,8 @@ async fn test_snapshot_delete_nonexistent_returns_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/versions/snapshots/nope")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/versions/snapshots/nope").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1287,12 +1108,8 @@ async fn test_fork_promote_nonexistent_returns_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/versions/forks/ghost/promote")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/versions/forks/ghost/promote").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1303,12 +1120,8 @@ async fn test_fork_abandon_nonexistent_returns_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/versions/forks/ghost")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/versions/forks/ghost").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1334,12 +1147,8 @@ async fn test_engine_head_nonexistent_returns_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("HEAD")
-    .uri("/files/nope/nothing.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("HEAD").uri("/files/nope/nothing.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1366,12 +1175,7 @@ async fn test_engine_store_empty_file() {
 
   // Read it back
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/empty/zero.txt")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/empty/zero.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1410,31 +1214,17 @@ async fn test_get_by_hash_returns_file_content() {
   // Fetch by hash
   let app = rebuild_app(&jwt_manager, &engine);
   let uri = format!("/blobs/{}", hash);
-  let request = Request::builder()
-    .method("GET")
-    .uri(&uri)
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri(&uri).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
   // Verify content-type header carried through from the FileRecord
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "text/plain"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "text/plain");
   // Verify X-AeorDB-Hash echo header
-  assert_eq!(
-    response.headers().get("X-AeorDB-Hash").unwrap().to_str().unwrap(),
-    hash
-  );
+  assert_eq!(response.headers().get("X-AeorDB-Hash").unwrap().to_str().unwrap(), hash);
   // Verify X-AeorDB-Type header (FileRecord = 0x02)
-  assert_eq!(
-    response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(),
-    "2"
-  );
+  assert_eq!(response.headers().get("X-AeorDB-Type").unwrap().to_str().unwrap(), "2");
 
   let bytes = body_bytes(response.into_body()).await;
   assert_eq!(String::from_utf8(bytes).unwrap(), content);
@@ -1448,12 +1238,8 @@ async fn test_get_by_hash_not_found() {
   // Fabricate a plausible but nonexistent 32-byte hex hash (64 hex chars)
   let fake_hash = "aa".repeat(32);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri(format!("/blobs/{}", fake_hash))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri(format!("/blobs/{}", fake_hash)).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1464,32 +1250,21 @@ async fn test_get_by_hash_invalid_hex() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/blobs/not-valid-hex-string!")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/blobs/not-valid-hex-string!").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
   let json = body_json(response.into_body()).await;
-  assert!(
-    json["error"].as_str().unwrap().contains("Invalid hex hash"),
-    "Error message should mention invalid hex hash"
-  );
+  assert!(json["error"].as_str().unwrap().contains("Invalid hex hash"), "Error message should mention invalid hex hash");
 }
 
 #[tokio::test]
 async fn test_get_by_hash_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/blobs/deadbeef")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/blobs/deadbeef").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1520,12 +1295,7 @@ async fn test_get_by_hash_large_file_roundtrip() {
   // Fetch the large file by hash
   let app = rebuild_app(&jwt_manager, &engine);
   let uri = format!("/blobs/{}", hash);
-  let request = Request::builder()
-    .method("GET")
-    .uri(&uri)
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri(&uri).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1558,12 +1328,7 @@ async fn test_get_by_hash_empty_file() {
   // Fetch by hash — should return empty body
   let app = rebuild_app(&jwt_manager, &engine);
   let uri = format!("/blobs/{}", hash);
-  let request = Request::builder()
-    .method("GET")
-    .uri(&uri)
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri(&uri).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -1593,10 +1358,7 @@ async fn test_put_response_includes_hash_field() {
   let hash = json["hash"].as_str().unwrap();
   // Content hash should be a valid hex string of reasonable length
   assert!(hash.len() >= 32, "hash should be at least 32 hex chars");
-  assert!(
-    hash.chars().all(|c| c.is_ascii_hexdigit()),
-    "hash should be valid hex"
-  );
+  assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "hash should be valid hex");
 }
 
 #[tokio::test]
@@ -1639,12 +1401,8 @@ async fn test_get_by_hash_same_content_different_paths() {
   // Both should be fetchable by their respective hashes
   for (hash, _expected_path) in [(&hash1, "/dup/a.txt"), (&hash2, "/dup/b.txt")] {
     let app = rebuild_app(&jwt_manager, &engine);
-    let request = Request::builder()
-      .method("GET")
-      .uri(format!("/blobs/{}", hash))
-      .header("authorization", &auth)
-      .body(Body::empty())
-      .unwrap();
+    let request =
+      Request::builder().method("GET").uri(format!("/blobs/{}", hash)).header("authorization", &auth).body(Body::empty()).unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = body_bytes(response.into_body()).await;

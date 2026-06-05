@@ -103,11 +103,11 @@ mod tests {
     let flags = parse_crudlify_flags("cr..l..y");
     assert_eq!(flags[0], Some(true)); // c
     assert_eq!(flags[1], Some(true)); // r
-    assert_eq!(flags[2], None);       // u
-    assert_eq!(flags[3], None);       // d
+    assert_eq!(flags[2], None); // u
+    assert_eq!(flags[3], None); // d
     assert_eq!(flags[4], Some(true)); // l
-    assert_eq!(flags[5], None);       // i
-    assert_eq!(flags[6], None);       // f
+    assert_eq!(flags[5], None); // i
+    assert_eq!(flags[6], None); // f
     assert_eq!(flags[7], Some(true)); // y
   }
 

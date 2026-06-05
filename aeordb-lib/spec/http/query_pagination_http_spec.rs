@@ -19,10 +19,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -73,20 +70,8 @@ fn setup_people(engine: &StorageEngine, count: usize) {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/people", &config);
@@ -95,17 +80,11 @@ fn setup_people(engine: &StorageEngine, count: usize) {
     let age = 20 + i as u64;
     let name = format!("person_{:02}", i);
     let path = format!("/people/{}.json", name);
-    ops.store_file_with_indexing(
-      &ctx, &path, &make_person_json(&name, age), Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, &path, &make_person_json(&name, age), Some("application/json")).unwrap();
   }
 }
 
-async fn query_post(
-  app: axum::Router,
-  auth: &str,
-  body: &serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
+async fn query_post(app: axum::Router, auth: &str, body: &serde_json::Value) -> (StatusCode, serde_json::Value) {
   let request = Request::builder()
     .method("POST")
     .uri("/files/query")
@@ -186,8 +165,7 @@ async fn test_query_with_offset() {
     "limit": 5
   });
   let (_, json1) = query_post(app1, &auth, &body1).await;
-  let paths1: Vec<&str> = json1["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths1: Vec<&str> = json1["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   let app2 = rebuild_app(&jwt_manager, &engine);
   let body2 = serde_json::json!({
@@ -198,8 +176,7 @@ async fn test_query_with_offset() {
     "offset": 5
   });
   let (_, json2) = query_post(app2, &auth, &body2).await;
-  let paths2: Vec<&str> = json2["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths2: Vec<&str> = json2["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   assert_eq!(paths1.len(), 5);
   assert_eq!(paths2.len(), 5);
@@ -240,10 +217,8 @@ async fn test_query_with_cursor() {
   assert_eq!(json2["items"].as_array().unwrap().len(), 5);
 
   // No overlap
-  let paths1: Vec<&str> = json1["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
-  let paths2: Vec<&str> = json2["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths1: Vec<&str> = json1["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths2: Vec<&str> = json2["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
   for p in &paths1 {
     assert!(!paths2.contains(p), "Overlap: {}", p);
   }
@@ -306,8 +281,7 @@ async fn test_query_sort_direction() {
     "limit": 10
   });
   let (_, json_asc) = query_post(app1, &auth, &body_asc).await;
-  let paths_asc: Vec<&str> = json_asc["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths_asc: Vec<&str> = json_asc["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   // DESC
   let app2 = rebuild_app(&jwt_manager, &engine);
@@ -318,8 +292,7 @@ async fn test_query_sort_direction() {
     "limit": 10
   });
   let (_, json_desc) = query_post(app2, &auth, &body_desc).await;
-  let paths_desc: Vec<&str> = json_desc["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths_desc: Vec<&str> = json_desc["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
 
   // Verify they are reversed
   let mut reversed_desc = paths_desc.clone();
@@ -343,8 +316,7 @@ async fn test_query_virtual_field_sort() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  let paths: Vec<&str> = json["items"].as_array().unwrap()
-    .iter().map(|r| r["path"].as_str().unwrap()).collect();
+  let paths: Vec<&str> = json["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
   for i in 1..paths.len() {
     assert!(paths[i - 1] <= paths[i]);
   }
@@ -384,6 +356,8 @@ async fn test_query_explicit_limit_no_default_hit() {
   assert_eq!(json["items"].as_array().unwrap().len(), 5);
   assert_eq!(json["has_more"], true);
   // default_limit_hit should NOT be present (explicit limit used)
-  assert!(json.get("default_limit_hit").is_none() || json["default_limit_hit"].is_null(),
-    "default_limit_hit should not be present when explicit limit is used");
+  assert!(
+    json.get("default_limit_hit").is_none() || json["default_limit_hit"].is_null(),
+    "default_limit_hit should not be present when explicit limit is used"
+  );
 }

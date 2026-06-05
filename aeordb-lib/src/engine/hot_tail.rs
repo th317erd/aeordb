@@ -25,7 +25,9 @@ pub const VOID_RECORD_VERSION: u8 = 1;
 const HOT_TAIL_HEADER_SIZE: usize = 5 + 1 + 4 + 4 + 4;
 
 /// Per-write-record size: version(1) + hash + type_flags(1) + offset(8) + total_length(4).
-fn write_record_size(hash_length: usize) -> usize { 1 + hash_length + 1 + 8 + 4 }
+fn write_record_size(hash_length: usize) -> usize {
+  1 + hash_length + 1 + 8 + 4
+}
 
 /// Per-void-record size: version(1) + offset(8) + size(4) = 13 bytes.
 const VOID_RECORD_SIZE: usize = 1 + 8 + 4;
@@ -50,9 +52,7 @@ pub struct HotTailPayload {
 /// Serialize the hot tail payload (writes + voids) into a single byte buffer.
 pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> Vec<u8> {
   let wsize = write_record_size(hash_length);
-  let total = HOT_TAIL_HEADER_SIZE
-    + payload.writes.len() * wsize
-    + payload.voids.len() * VOID_RECORD_SIZE;
+  let total = HOT_TAIL_HEADER_SIZE + payload.writes.len() * wsize + payload.voids.len() * VOID_RECORD_SIZE;
 
   let mut buf = Vec::with_capacity(total);
   buf.extend_from_slice(&HOT_TAIL_MAGIC);
@@ -92,20 +92,30 @@ pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> Vec<u
 /// mismatches, CRC fails, format version is unrecognized, or the buffer
 /// is truncated.
 pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPayload> {
-  if data.len() < HOT_TAIL_HEADER_SIZE { return None; }
-  if data[..5] != HOT_TAIL_MAGIC { return None; }
+  if data.len() < HOT_TAIL_HEADER_SIZE {
+    return None;
+  }
+  if data[..5] != HOT_TAIL_MAGIC {
+    return None;
+  }
   let format_version = data[5];
-  if format_version != HOT_TAIL_FORMAT_VERSION { return None; }
+  if format_version != HOT_TAIL_FORMAT_VERSION {
+    return None;
+  }
 
   let write_count = u32::from_le_bytes(data[6..10].try_into().ok()?) as usize;
-  let void_count  = u32::from_le_bytes(data[10..14].try_into().ok()?) as usize;
-  let stored_crc  = u32::from_le_bytes(data[14..18].try_into().ok()?);
-  let actual_crc  = crc32fast::hash(&data[..14]);
-  if stored_crc != actual_crc { return None; }
+  let void_count = u32::from_le_bytes(data[10..14].try_into().ok()?) as usize;
+  let stored_crc = u32::from_le_bytes(data[14..18].try_into().ok()?);
+  let actual_crc = crc32fast::hash(&data[..14]);
+  if stored_crc != actual_crc {
+    return None;
+  }
 
   let wsize = write_record_size(hash_length);
   let expected_len = HOT_TAIL_HEADER_SIZE + write_count * wsize + void_count * VOID_RECORD_SIZE;
-  if data.len() < expected_len { return None; }
+  if data.len() < expected_len {
+    return None;
+  }
 
   let mut writes = Vec::with_capacity(write_count);
   let mut cursor = HOT_TAIL_HEADER_SIZE;
@@ -141,12 +151,7 @@ pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPa
 }
 
 /// Write the hot tail payload to a file at the given offset.
-pub fn write_hot_tail<W: Write + Seek>(
-  writer: &mut W,
-  offset: u64,
-  payload: &HotTailPayload,
-  hash_length: usize,
-) -> EngineResult<u64> {
+pub fn write_hot_tail<W: Write + Seek>(writer: &mut W, offset: u64, payload: &HotTailPayload, hash_length: usize) -> EngineResult<u64> {
   let data = serialize_hot_tail(payload, hash_length);
   writer.seek(SeekFrom::Start(offset))?;
   writer.write_all(&data)?;
@@ -155,23 +160,25 @@ pub fn write_hot_tail<W: Write + Seek>(
 
 /// Read the hot tail payload from a file at the given offset.
 /// Returns `None` for any failure (missing, torn, wrong version, etc.).
-pub fn read_hot_tail<R: Read + Seek>(
-  reader: &mut R,
-  offset: u64,
-  hash_length: usize,
-) -> Option<HotTailPayload> {
+pub fn read_hot_tail<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: usize) -> Option<HotTailPayload> {
   reader.seek(SeekFrom::Start(offset)).ok()?;
 
   let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
   reader.read_exact(&mut header).ok()?;
 
-  if header[..5] != HOT_TAIL_MAGIC { return None; }
-  if header[5] != HOT_TAIL_FORMAT_VERSION { return None; }
+  if header[..5] != HOT_TAIL_MAGIC {
+    return None;
+  }
+  if header[5] != HOT_TAIL_FORMAT_VERSION {
+    return None;
+  }
 
   let write_count = u32::from_le_bytes(header[6..10].try_into().ok()?) as usize;
-  let void_count  = u32::from_le_bytes(header[10..14].try_into().ok()?) as usize;
-  let stored_crc  = u32::from_le_bytes(header[14..18].try_into().ok()?);
-  if crc32fast::hash(&header[..14]) != stored_crc { return None; }
+  let void_count = u32::from_le_bytes(header[10..14].try_into().ok()?) as usize;
+  let stored_crc = u32::from_le_bytes(header[14..18].try_into().ok()?);
+  if crc32fast::hash(&header[..14]) != stored_crc {
+    return None;
+  }
 
   let wsize = write_record_size(hash_length);
   let body_len = write_count * wsize + void_count * VOID_RECORD_SIZE;
@@ -194,13 +201,7 @@ mod tests {
 
   #[test]
   fn writes_only_roundtrip() {
-    let p = HotTailPayload {
-      writes: vec![
-        make_entry(0xAA, 0x01, 100, 128),
-        make_entry(0xBB, 0x02, 200, 256),
-      ],
-      voids: vec![],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 128), make_entry(0xBB, 0x02, 200, 256)], voids: vec![] };
     let data = serialize_hot_tail(&p, 32);
     let got = deserialize_hot_tail(&data, 32).unwrap();
     assert_eq!(got.writes.len(), 2);
@@ -211,10 +212,7 @@ mod tests {
 
   #[test]
   fn voids_only_roundtrip() {
-    let p = HotTailPayload {
-      writes: vec![],
-      voids: vec![VoidRecord { offset: 1000, size: 500 }, VoidRecord { offset: 5000, size: 256 }],
-    };
+    let p = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 1000, size: 500 }, VoidRecord { offset: 5000, size: 256 }] };
     let data = serialize_hot_tail(&p, 32);
     let got = deserialize_hot_tail(&data, 32).unwrap();
     assert_eq!(got.writes.len(), 0);
@@ -223,10 +221,7 @@ mod tests {
 
   #[test]
   fn mixed_roundtrip() {
-    let p = HotTailPayload {
-      writes: vec![make_entry(0xCC, 0x03, 300, 512)],
-      voids: vec![VoidRecord { offset: 2000, size: 128 }],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xCC, 0x03, 300, 512)], voids: vec![VoidRecord { offset: 2000, size: 128 }] };
     let data = serialize_hot_tail(&p, 32);
     let got = deserialize_hot_tail(&data, 32).unwrap();
     assert_eq!(got.writes.len(), 1);
@@ -244,10 +239,7 @@ mod tests {
 
   #[test]
   fn corrupt_magic_returns_none() {
-    let p = HotTailPayload {
-      writes: vec![make_entry(0xAA, 0x01, 100, 64)],
-      voids: vec![],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
     let mut data = serialize_hot_tail(&p, 32);
     data[0] = 0xFF;
     assert!(deserialize_hot_tail(&data, 32).is_none());
@@ -255,10 +247,7 @@ mod tests {
 
   #[test]
   fn corrupt_crc_returns_none() {
-    let p = HotTailPayload {
-      writes: vec![make_entry(0xAA, 0x01, 100, 64)],
-      voids: vec![],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
     let mut data = serialize_hot_tail(&p, 32);
     // Tamper a count byte without updating the CRC.
     data[6] = 99;
@@ -270,7 +259,7 @@ mod tests {
     let p = HotTailPayload::default();
     let mut data = serialize_hot_tail(&p, 32);
     data[5] = 99; // Unknown format version
-    // CRC must still match the (now-tampered) bytes for the version check to be the rejector.
+                  // CRC must still match the (now-tampered) bytes for the version check to be the rejector.
     let new_crc = crc32fast::hash(&data[..14]);
     data[14..18].copy_from_slice(&new_crc.to_le_bytes());
     assert!(deserialize_hot_tail(&data, 32).is_none());
@@ -278,10 +267,7 @@ mod tests {
 
   #[test]
   fn truncated_returns_none() {
-    let p = HotTailPayload {
-      writes: vec![make_entry(0xAA, 0x01, 100, 64)],
-      voids: vec![VoidRecord { offset: 5, size: 9 }],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![VoidRecord { offset: 5, size: 9 }] };
     let data = serialize_hot_tail(&p, 32);
     let truncated = &data[..data.len() - 4];
     assert!(deserialize_hot_tail(truncated, 32).is_none());
@@ -304,10 +290,7 @@ mod tests {
 
   #[test]
   fn write_at_nonzero_offset() {
-    let p = HotTailPayload {
-      writes: vec![make_entry(0xFF, 0x01, 999, 100)],
-      voids: vec![],
-    };
+    let p = HotTailPayload { writes: vec![make_entry(0xFF, 0x01, 999, 100)], voids: vec![] };
     let mut cursor = std::io::Cursor::new(vec![0u8; 1024]);
     let end = write_hot_tail(&mut cursor, 256, &p, 32).unwrap();
     assert!(end > 256);

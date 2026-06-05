@@ -17,10 +17,7 @@ pub struct ErrorResponse {
 
 impl ErrorResponse {
   pub fn new(error: impl Into<String>) -> Self {
-    Self {
-      error: error.into(),
-      code: None,
-    }
+    Self { error: error.into(), code: None }
   }
 
   /// Attach a machine-readable error code (from [`error_codes`]).
@@ -63,9 +60,7 @@ impl IntoResponse for ErrorResponse {
 /// or a 403 Forbidden Response on failure.
 pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
   let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
-    ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response()
+    ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID").with_status(StatusCode::FORBIDDEN).into_response()
   })?;
   if !crate::engine::user::is_root(&user_id) {
     return Err(
@@ -201,11 +196,7 @@ pub struct ForkResponse {
 
 impl From<&crate::engine::ForkInfo> for ForkResponse {
   fn from(info: &crate::engine::ForkInfo) -> Self {
-    Self {
-      name: info.name.clone(),
-      root_hash: hex::encode(&info.root_hash),
-      created_at: info.created_at,
-    }
+    Self { name: info.name.clone(), root_hash: hex::encode(&info.root_hash), created_at: info.created_at }
   }
 }
 
@@ -346,16 +337,13 @@ mod tests {
 
   #[test]
   fn error_response_with_code_attaches_code() {
-    let resp = ErrorResponse::new("forbidden")
-      .with_code(error_codes::FORBIDDEN);
+    let resp = ErrorResponse::new("forbidden").with_code(error_codes::FORBIDDEN);
     assert_eq!(resp.code.as_deref(), Some("FORBIDDEN"));
   }
 
   #[test]
   fn error_response_with_status_preserves_code() {
-    let (status, Json(body)) = ErrorResponse::new("gone")
-      .with_code(error_codes::NOT_FOUND)
-      .with_status(StatusCode::NOT_FOUND);
+    let (status, Json(body)) = ErrorResponse::new("gone").with_code(error_codes::NOT_FOUND).with_status(StatusCode::NOT_FOUND);
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body.code.as_deref(), Some("NOT_FOUND"));
     assert_eq!(body.error, "gone");
@@ -371,8 +359,7 @@ mod tests {
 
   #[test]
   fn error_response_serializes_with_code_when_set() {
-    let resp = ErrorResponse::new("too big")
-      .with_code(error_codes::PAYLOAD_TOO_LARGE);
+    let resp = ErrorResponse::new("too big").with_code(error_codes::PAYLOAD_TOO_LARGE);
     let json = serde_json::to_value(&resp).unwrap();
     assert_eq!(json["code"], "PAYLOAD_TOO_LARGE");
     assert_eq!(json["error"], "too big");
@@ -380,8 +367,7 @@ mod tests {
 
   #[test]
   fn error_response_clone_preserves_code() {
-    let resp = ErrorResponse::new("err")
-      .with_code(error_codes::CONFLICT);
+    let resp = ErrorResponse::new("err").with_code(error_codes::CONFLICT);
     let cloned = resp.clone();
     assert_eq!(cloned.error, "err");
     assert_eq!(cloned.code.as_deref(), Some("CONFLICT"));
@@ -389,9 +375,7 @@ mod tests {
 
   #[test]
   fn with_code_is_chainable_last_wins() {
-    let resp = ErrorResponse::new("x")
-      .with_code(error_codes::INVALID_INPUT)
-      .with_code(error_codes::INTERNAL_ERROR);
+    let resp = ErrorResponse::new("x").with_code(error_codes::INVALID_INPUT).with_code(error_codes::INTERNAL_ERROR);
     assert_eq!(resp.code.as_deref(), Some("INTERNAL_ERROR"));
   }
 }

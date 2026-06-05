@@ -3,10 +3,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use aeordb::engine::{
-  CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink,
-  PermissionResolver, StorageEngine,
-  merge_flags, parse_crudlify_flags, path_levels,
-  Cache, GroupLoader, PermissionsLoader, ApiKeyLoader,
+  CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink, PermissionResolver, StorageEngine, merge_flags, parse_crudlify_flags,
+  path_levels, Cache, GroupLoader, PermissionsLoader, ApiKeyLoader,
 };
 use aeordb::engine::system_store;
 use aeordb::engine::group::Group;
@@ -34,13 +32,7 @@ fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
 }
 
 /// Create a group by name with given query parameters.
-fn create_test_group(
-  engine: &StorageEngine,
-  name: &str,
-  query_field: &str,
-  query_operator: &str,
-  query_value: &str,
-) {
+fn create_test_group(engine: &StorageEngine, name: &str, query_field: &str, query_operator: &str, query_value: &str) {
   let ctx = RequestContext::system();
   let group = Group::new(name, "........", "........", query_field, query_operator, query_value).unwrap();
 
@@ -73,13 +65,7 @@ fn member_link(group: &str, allow: &str, deny: &str) -> PermissionLink {
 }
 
 /// Create a PermissionLink with others flags.
-fn link_with_others(
-  group: &str,
-  allow: &str,
-  deny: &str,
-  others_allow: &str,
-  others_deny: &str,
-) -> PermissionLink {
+fn link_with_others(group: &str, allow: &str, deny: &str, others_allow: &str, others_deny: &str) -> PermissionLink {
   PermissionLink {
     group: group.to_string(),
     allow: allow.to_string(),
@@ -115,11 +101,11 @@ fn test_parse_crudlify_flags_mixed() {
   let flags = parse_crudlify_flags("cr..l..y");
   assert_eq!(flags[0], Some(true)); // c
   assert_eq!(flags[1], Some(true)); // r
-  assert_eq!(flags[2], None);       // u
-  assert_eq!(flags[3], None);       // d
+  assert_eq!(flags[2], None); // u
+  assert_eq!(flags[3], None); // d
   assert_eq!(flags[4], Some(true)); // l
-  assert_eq!(flags[5], None);       // i
-  assert_eq!(flags[6], None);       // f
+  assert_eq!(flags[5], None); // i
+  assert_eq!(flags[6], None); // f
   assert_eq!(flags[7], Some(true)); // y
 }
 
@@ -212,12 +198,8 @@ fn test_merge_flags_full_union() {
 
 #[test]
 fn test_path_permissions_serialize_deserialize() {
-  let permissions = PathPermissions {
-    links: vec![
-      member_link("engineers", "crudli..", "........"),
-      member_link("viewers", ".r..l...", "........"),
-    ],
-  };
+  let permissions =
+    PathPermissions { links: vec![member_link("engineers", "crudli..", "........"), member_link("viewers", ".r..l...", "........")] };
 
   let bytes = permissions.serialize();
   let deserialized = PathPermissions::deserialize(&bytes).unwrap();
@@ -244,11 +226,7 @@ fn test_path_permissions_deserialize_invalid_json() {
 
 #[test]
 fn test_permission_link_with_others() {
-  let permissions = PathPermissions {
-    links: vec![
-      link_with_others("security", "crudlify", "........", "........", "crudlify"),
-    ],
-  };
+  let permissions = PathPermissions { links: vec![link_with_others("security", "crudlify", "........", "........", "crudlify")] };
 
   let bytes = permissions.serialize();
   let deserialized = PathPermissions::deserialize(&bytes).unwrap();
@@ -258,11 +236,7 @@ fn test_permission_link_with_others() {
 
 #[test]
 fn test_permission_link_without_others_serializes_clean() {
-  let permissions = PathPermissions {
-    links: vec![
-      member_link("team", "crudlify", "........"),
-    ],
-  };
+  let permissions = PathPermissions { links: vec![member_link("team", "crudlify", "........")] };
   let bytes = permissions.serialize();
   let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
   // others_allow and others_deny should be absent (skip_serializing_if = None)
@@ -347,11 +321,7 @@ fn test_resolve_simple_allow() {
   // The auto-group was already created by store_user, so it exists.
 
   // Write .permissions at root granting read+list to user:bob
-  let permissions = PathPermissions {
-    links: vec![
-      member_link(&user_group_name, ".r..l...", "........"),
-    ],
-  };
+  let permissions = PathPermissions { links: vec![member_link(&user_group_name, ".r..l...", "........")] };
   write_permissions(&engine, "/", &permissions);
 
   let group_cache = Cache::new(GroupLoader);
@@ -373,12 +343,8 @@ fn test_resolve_deny_overrides_allow_same_level() {
   create_test_group(&engine, "everyone", "is_active", "eq", "true");
 
   // At root: "everyone" allows crudlify, but user:carol denies delete
-  let permissions = PathPermissions {
-    links: vec![
-      member_link("everyone", "crudlify", "........"),
-      member_link(&user_group, "........", "...d...."),
-    ],
-  };
+  let permissions =
+    PathPermissions { links: vec![member_link("everyone", "crudlify", "........"), member_link(&user_group, "........", "...d....")] };
   write_permissions(&engine, "/", &permissions);
 
   let group_cache = Cache::new(GroupLoader);
@@ -399,19 +365,11 @@ fn test_resolve_deeper_allow_overrides_shallower_deny() {
   let user_group = format!("user:{}", user_id);
 
   // At root: deny everything
-  let root_perms = PathPermissions {
-    links: vec![
-      member_link(&user_group, "........", "crudlify"),
-    ],
-  };
+  let root_perms = PathPermissions { links: vec![member_link(&user_group, "........", "crudlify")] };
   write_permissions(&engine, "/", &root_perms);
 
   // At /myapp: allow read+list
-  let app_perms = PathPermissions {
-    links: vec![
-      member_link(&user_group, ".r..l...", "........"),
-    ],
-  };
+  let app_perms = PathPermissions { links: vec![member_link(&user_group, ".r..l...", "........")] };
   write_permissions(&engine, "/myapp", &app_perms);
 
   let group_cache = Cache::new(GroupLoader);
@@ -433,11 +391,7 @@ fn test_resolve_others_flags() {
   create_test_group(&engine, "admins", "user_id", "eq", &Uuid::new_v4().to_string());
 
   // At root: admins get full access, others get read-only
-  let permissions = PathPermissions {
-    links: vec![
-      link_with_others("admins", "crudlify", "........", ".r..l...", "........"),
-    ],
-  };
+  let permissions = PathPermissions { links: vec![link_with_others("admins", "crudlify", "........", ".r..l...", "........")] };
   write_permissions(&engine, "/", &permissions);
 
   let group_cache = Cache::new(GroupLoader);
@@ -459,11 +413,7 @@ fn test_resolve_others_deny_flags() {
   create_test_group(&engine, "trusted", "user_id", "eq", &Uuid::new_v4().to_string());
 
   // At root: trusted members get full access, others are denied everything
-  let permissions = PathPermissions {
-    links: vec![
-      link_with_others("trusted", "crudlify", "........", "........", "crudlify"),
-    ],
-  };
+  let permissions = PathPermissions { links: vec![link_with_others("trusted", "crudlify", "........", "........", "crudlify")] };
   write_permissions(&engine, "/", &permissions);
 
   let group_cache = Cache::new(GroupLoader);
@@ -484,12 +434,8 @@ fn test_resolve_multiple_groups_union() {
   create_test_group(&engine, "writers", "is_active", "eq", "true");
 
   // readers allow read+list, writers allow create+update
-  let permissions = PathPermissions {
-    links: vec![
-      member_link("readers", ".r..l...", "........"),
-      member_link("writers", "c.u.....", "........"),
-    ],
-  };
+  let permissions =
+    PathPermissions { links: vec![member_link("readers", ".r..l...", "........"), member_link("writers", "c.u.....", "........")] };
   write_permissions(&engine, "/", &permissions);
 
   let group_cache = Cache::new(GroupLoader);
@@ -511,19 +457,13 @@ fn test_resolve_nested_path_inheritance() {
   let user_group = format!("user:{}", user_id);
 
   // Root: allow read+list
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, ".r..l...", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, ".r..l...", "........")] });
 
   // /app: allow create+update (inherits read+list from root)
-  write_permissions(&engine, "/app", &PathPermissions {
-    links: vec![member_link(&user_group, "c.u.....", "........")],
-  });
+  write_permissions(&engine, "/app", &PathPermissions { links: vec![member_link(&user_group, "c.u.....", "........")] });
 
   // /app/restricted: deny everything
-  write_permissions(&engine, "/app/restricted", &PathPermissions {
-    links: vec![member_link(&user_group, "........", "crudlify")],
-  });
+  write_permissions(&engine, "/app/restricted", &PathPermissions { links: vec![member_link(&user_group, "........", "crudlify")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);
@@ -545,9 +485,7 @@ fn test_resolve_no_permissions_file_passes_through() {
   let user_group = format!("user:{}", user_id);
 
   // Only set permissions at root, skip /app level
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, ".r......", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, ".r......", "........")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);
@@ -684,9 +622,7 @@ fn test_group_cache_evict_reloads() {
 fn test_permissions_cache_hit() {
   let (engine, _temp_dir) = test_engine();
 
-  let permissions = PathPermissions {
-    links: vec![member_link("team", "crudlify", "........")],
-  };
+  let permissions = PathPermissions { links: vec![member_link("team", "crudlify", "........")] };
   write_permissions(&engine, "/", &permissions);
 
   let cache = Cache::new(PermissionsLoader);
@@ -720,9 +656,7 @@ fn test_permissions_cache_miss_returns_none() {
 fn test_permissions_cache_evict() {
   let (engine, _temp_dir) = test_engine();
 
-  let permissions_v1 = PathPermissions {
-    links: vec![member_link("team_v1", ".r......", "........")],
-  };
+  let permissions_v1 = PathPermissions { links: vec![member_link("team_v1", ".r......", "........")] };
   write_permissions(&engine, "/", &permissions_v1);
 
   let cache = Cache::new(PermissionsLoader);
@@ -730,9 +664,7 @@ fn test_permissions_cache_evict() {
   assert_eq!(result.unwrap().links[0].group, "team_v1");
 
   // Write updated permissions
-  let permissions_v2 = PathPermissions {
-    links: vec![member_link("team_v2", "crudlify", "........")],
-  };
+  let permissions_v2 = PathPermissions { links: vec![member_link("team_v2", "crudlify", "........")] };
   write_permissions(&engine, "/", &permissions_v2);
 
   // Without eviction, still returns stale
@@ -749,12 +681,8 @@ fn test_permissions_cache_evict() {
 fn test_permissions_cache_evict_all() {
   let (engine, _temp_dir) = test_engine();
 
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link("root_team", "crudlify", "........")],
-  });
-  write_permissions(&engine, "/app", &PathPermissions {
-    links: vec![member_link("app_team", ".r......", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("root_team", "crudlify", "........")] });
+  write_permissions(&engine, "/app", &PathPermissions { links: vec![member_link("app_team", ".r......", "........")] });
 
   let cache = Cache::new(PermissionsLoader);
   cache.get(&"/".to_string(), &engine).unwrap();
@@ -773,17 +701,13 @@ fn test_permissions_cache_evict_all() {
 fn test_permissions_cache_evict_reloads() {
   let (engine, _temp_dir) = test_engine();
 
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link("original", ".r......", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("original", ".r......", "........")] });
 
   let cache = Cache::new(PermissionsLoader);
   cache.get(&"/".to_string(), &engine).unwrap();
 
   // Update permissions
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link("updated", "crudlify", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("updated", "crudlify", "........")] });
 
   // Without eviction, returns stale
   let stale = cache.get(&"/".to_string(), &engine).unwrap();
@@ -958,9 +882,7 @@ async fn test_permission_middleware_allows_with_permission() {
   let user_group = format!("user:{}", user_id);
 
   // Write .permissions at root allowing this user full access
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, "crudlify", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, "crudlify", "........")] });
 
   let app = aeordb::server::create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
 
@@ -1002,11 +924,7 @@ async fn test_permission_middleware_skips_non_engine_routes() {
   let app = aeordb::server::create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
 
   // Health check should work without any permission
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/health")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/health").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -1025,9 +943,7 @@ fn test_resolve_user_not_in_any_group() {
   create_test_group(&engine, "exclusive", "user_id", "eq", &Uuid::new_v4().to_string());
 
   // Grant permissions only to the exclusive group
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link("exclusive", "crudlify", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("exclusive", "crudlify", "........")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);
@@ -1058,9 +974,7 @@ fn test_resolve_all_eight_operations() {
   let user_id = create_test_user(&engine, "fullaccess");
   let user_group = format!("user:{}", user_id);
 
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, "crudlify", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, "crudlify", "........")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);
@@ -1077,11 +991,7 @@ fn test_resolve_all_eight_operations() {
   ];
 
   for op in &operations {
-    assert!(
-      resolver.check_permission(&user_id, "/data.json", *op).unwrap(),
-      "Operation {:?} should be allowed with full crudlify",
-      op
-    );
+    assert!(resolver.check_permission(&user_id, "/data.json", *op).unwrap(), "Operation {:?} should be allowed with full crudlify", op);
   }
 }
 
@@ -1092,9 +1002,7 @@ fn test_resolve_deny_specific_operations() {
   let user_group = format!("user:{}", user_id);
 
   // Allow everything, then deny configure and deploy
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, "crudlify", "......fy")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, "crudlify", "......fy")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);
@@ -1112,19 +1020,13 @@ fn test_resolve_multiple_levels_accumulate() {
   let user_group = format!("user:{}", user_id);
 
   // Root: allow read
-  write_permissions(&engine, "/", &PathPermissions {
-    links: vec![member_link(&user_group, ".r......", "........")],
-  });
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link(&user_group, ".r......", "........")] });
 
   // /a: allow create
-  write_permissions(&engine, "/a", &PathPermissions {
-    links: vec![member_link(&user_group, "c.......", "........")],
-  });
+  write_permissions(&engine, "/a", &PathPermissions { links: vec![member_link(&user_group, "c.......", "........")] });
 
   // /a/b: allow update
-  write_permissions(&engine, "/a/b", &PathPermissions {
-    links: vec![member_link(&user_group, "..u.....", "........")],
-  });
+  write_permissions(&engine, "/a/b", &PathPermissions { links: vec![member_link(&user_group, "..u.....", "........")] });
 
   let group_cache = Cache::new(GroupLoader);
   let resolver = PermissionResolver::new(&engine, &group_cache);

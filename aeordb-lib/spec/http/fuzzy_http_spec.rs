@@ -23,10 +23,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -74,34 +71,10 @@ fn setup_fuzzy_users(engine: &StorageEngine) {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "soundex".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "dmetaphone".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "soundex".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "dmetaphone".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/people", &config);
@@ -116,11 +89,7 @@ fn setup_fuzzy_users(engine: &StorageEngine) {
   ];
 
   for (filename, json) in &users {
-    ops.store_file_with_indexing(&ctx,
-      &format!("/people/{}", filename),
-      json.as_bytes(),
-      Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, &format!("/people/{}", filename), json.as_bytes(), Some("application/json")).unwrap();
   }
 }
 
@@ -345,9 +314,7 @@ async fn test_match_query_http() {
   assert!(paths.contains(&"/people/schmidt.json"), "should match Schmidt exactly, got: {:?}", paths);
 
   // The Schmidt result should have matched_by with multiple strategies
-  let schmidt_result = results.iter()
-    .find(|r| r["path"].as_str().unwrap() == "/people/schmidt.json")
-    .unwrap();
+  let schmidt_result = results.iter().find(|r| r["path"].as_str().unwrap() == "/people/schmidt.json").unwrap();
   let matched_by = schmidt_result["matched_by"].as_array().unwrap();
   assert!(!matched_by.is_empty(), "matched_by should not be empty for exact match");
   let strategies: Vec<&str> = matched_by.iter().map(|v| v.as_str().unwrap()).collect();
@@ -467,15 +434,9 @@ async fn test_results_sorted_by_score() {
   let results = json["items"].as_array().unwrap();
 
   if results.len() >= 2 {
-    let scores: Vec<f64> = results.iter()
-      .map(|r| r["score"].as_f64().unwrap())
-      .collect();
+    let scores: Vec<f64> = results.iter().map(|r| r["score"].as_f64().unwrap()).collect();
     for window in scores.windows(2) {
-      assert!(
-        window[0] >= window[1],
-        "results should be sorted by score descending: {:?}",
-        scores,
-      );
+      assert!(window[0] >= window[1], "results should be sorted by score descending: {:?}", scores,);
     }
   }
 }
@@ -880,12 +841,9 @@ async fn test_match_composite_returns_multiple_strategies() {
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
 
-  let smith_result = results.iter()
-    .find(|r| r["path"].as_str().unwrap() == "/people/smith.json")
-    .expect("Smith should be in results");
+  let smith_result = results.iter().find(|r| r["path"].as_str().unwrap() == "/people/smith.json").expect("Smith should be in results");
 
   let matched_by = smith_result["matched_by"].as_array().unwrap();
   // An exact match for "Smith" should trigger multiple strategies
-  assert!(matched_by.len() >= 2,
-    "exact match should trigger multiple strategies, got: {:?}", matched_by);
+  assert!(matched_by.len() >= 2, "exact match should trigger multiple strategies, got: {:?}", matched_by);
 }

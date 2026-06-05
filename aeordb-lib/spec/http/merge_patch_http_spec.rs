@@ -79,28 +79,39 @@ fn patch_req(uri: &str, auth: &str, body: serde_json::Value) -> Request<Body> {
 async fn merge_patch_default_recursive() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
-  seed_json(&engine, "/doc.json", serde_json::json!({
-    "name": "Alice",
-    "prefs": {"theme": "dark", "lang": "en"},
-    "tags": ["a", "b"],
-  }));
+  seed_json(
+    &engine,
+    "/doc.json",
+    serde_json::json!({
+      "name": "Alice",
+      "prefs": {"theme": "dark", "lang": "en"},
+      "tags": ["a", "b"],
+    }),
+  );
 
   let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({
-      "prefs": {"theme": "light"},
-      "email": "a@x",
-    })))
+    .oneshot(patch_req(
+      "/files/doc.json",
+      &auth,
+      serde_json::json!({
+        "prefs": {"theme": "light"},
+        "email": "a@x",
+      }),
+    ))
     .await
     .unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
   let stored = read_json(&engine, "/doc.json");
-  assert_eq!(stored, serde_json::json!({
-    "name": "Alice",
-    "prefs": {"theme": "light", "lang": "en"},
-    "tags": ["a", "b"],
-    "email": "a@x",
-  }));
+  assert_eq!(
+    stored,
+    serde_json::json!({
+      "name": "Alice",
+      "prefs": {"theme": "light", "lang": "en"},
+      "tags": ["a", "b"],
+      "email": "a@x",
+    })
+  );
 }
 
 #[tokio::test]
@@ -109,10 +120,7 @@ async fn merge_patch_null_deletes_keys() {
   let auth = bearer_token(&jwt);
   seed_json(&engine, "/doc.json", serde_json::json!({"a": 1, "b": 2, "c": 3}));
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"b": null, "d": 4})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"b": null, "d": 4}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
   let stored = read_json(&engine, "/doc.json");
@@ -125,10 +133,7 @@ async fn merge_patch_arrays_replace_wholesale() {
   let auth = bearer_token(&jwt);
   seed_json(&engine, "/doc.json", serde_json::json!({"items": [1, 2, 3, 4, 5]}));
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"items": [10]})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"items": [10]}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
   // RFC 7396: arrays replace, no concat or merge by index.
@@ -143,25 +148,36 @@ async fn merge_patch_arrays_replace_wholesale() {
 async fn merge_patch_depth_1_replaces_subtrees() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
-  seed_json(&engine, "/doc.json", serde_json::json!({
-    "user": {"name": "Alice", "prefs": {"theme": "dark"}},
-    "session": "abc",
-  }));
+  seed_json(
+    &engine,
+    "/doc.json",
+    serde_json::json!({
+      "user": {"name": "Alice", "prefs": {"theme": "dark"}},
+      "session": "abc",
+    }),
+  );
 
   let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json?depth=1", &auth, serde_json::json!({
-      "user": {"prefs": {"theme": "light"}},
-    })))
+    .oneshot(patch_req(
+      "/files/doc.json?depth=1",
+      &auth,
+      serde_json::json!({
+        "user": {"prefs": {"theme": "light"}},
+      }),
+    ))
     .await
     .unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
   // depth=1 = top-level keys merge; object values replace wholesale.
   // `user` is replaced (name lost), `session` is preserved.
-  assert_eq!(read_json(&engine, "/doc.json"), serde_json::json!({
-    "user": {"prefs": {"theme": "light"}},
-    "session": "abc",
-  }));
+  assert_eq!(
+    read_json(&engine, "/doc.json"),
+    serde_json::json!({
+      "user": {"prefs": {"theme": "light"}},
+      "session": "abc",
+    })
+  );
 }
 
 #[tokio::test]
@@ -170,10 +186,7 @@ async fn merge_patch_depth_0_is_full_replace() {
   let auth = bearer_token(&jwt);
   seed_json(&engine, "/doc.json", serde_json::json!({"a": 1, "b": 2, "nested": {"x": 1}}));
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json?depth=0", &auth, serde_json::json!({"c": 3})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/doc.json?depth=0", &auth, serde_json::json!({"c": 3}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
   // depth=0 = wholesale replace. Original a/b/nested gone.
@@ -184,26 +197,37 @@ async fn merge_patch_depth_0_is_full_replace() {
 async fn merge_patch_negative_depth_preserves_subtrees() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
-  seed_json(&engine, "/doc.json", serde_json::json!({
-    "user": {"name": "Alice", "prefs": {"theme": "dark"}},
-    "scalar": "old",
-  }));
+  seed_json(
+    &engine,
+    "/doc.json",
+    serde_json::json!({
+      "user": {"name": "Alice", "prefs": {"theme": "dark"}},
+      "scalar": "old",
+    }),
+  );
 
   // depth=-1: top-level scalars merge as usual, but object values
   // (target.user) are PRESERVED — the patch's deeper object is ignored.
   let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json?depth=-1", &auth, serde_json::json!({
-      "user": {"prefs": {"theme": "light"}},
-      "scalar": "new",
-    })))
+    .oneshot(patch_req(
+      "/files/doc.json?depth=-1",
+      &auth,
+      serde_json::json!({
+        "user": {"prefs": {"theme": "light"}},
+        "scalar": "new",
+      }),
+    ))
     .await
     .unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
-  assert_eq!(read_json(&engine, "/doc.json"), serde_json::json!({
-    "user": {"name": "Alice", "prefs": {"theme": "dark"}},  // unchanged
-    "scalar": "new",
-  }));
+  assert_eq!(
+    read_json(&engine, "/doc.json"),
+    serde_json::json!({
+      "user": {"name": "Alice", "prefs": {"theme": "dark"}},  // unchanged
+      "scalar": "new",
+    })
+  );
 }
 
 #[tokio::test]
@@ -215,41 +239,59 @@ async fn merge_patch_negative_depth_does_not_create_new_subtrees() {
   // Patch tries to add a NEW nested object. With preserve-beyond policy
   // at depth=-1, we don't touch the depths — so this isn't created.
   let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json?depth=-1", &auth, serde_json::json!({
-      "new_nested": {"key": "value"},
-      "scalar_ok": 42,
-    })))
+    .oneshot(patch_req(
+      "/files/doc.json?depth=-1",
+      &auth,
+      serde_json::json!({
+        "new_nested": {"key": "value"},
+        "scalar_ok": 42,
+      }),
+    ))
     .await
     .unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
-  assert_eq!(read_json(&engine, "/doc.json"), serde_json::json!({
-    "existing": "v",
-    "scalar_ok": 42,
-  }));
+  assert_eq!(
+    read_json(&engine, "/doc.json"),
+    serde_json::json!({
+      "existing": "v",
+      "scalar_ok": 42,
+    })
+  );
 }
 
 #[tokio::test]
 async fn merge_patch_negative_depth_null_still_deletes_at_top_level() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
-  seed_json(&engine, "/doc.json", serde_json::json!({
-    "keep_object": {"deep": "untouched"},
-    "delete_me": "x",
-  }));
+  seed_json(
+    &engine,
+    "/doc.json",
+    serde_json::json!({
+      "keep_object": {"deep": "untouched"},
+      "delete_me": "x",
+    }),
+  );
 
   let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json?depth=-1", &auth, serde_json::json!({
-      "keep_object": {"deep": "ignored"},
-      "delete_me": null,
-    })))
+    .oneshot(patch_req(
+      "/files/doc.json?depth=-1",
+      &auth,
+      serde_json::json!({
+        "keep_object": {"deep": "ignored"},
+        "delete_me": null,
+      }),
+    ))
     .await
     .unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 
-  assert_eq!(read_json(&engine, "/doc.json"), serde_json::json!({
-    "keep_object": {"deep": "untouched"},
-  }));
+  assert_eq!(
+    read_json(&engine, "/doc.json"),
+    serde_json::json!({
+      "keep_object": {"deep": "untouched"},
+    })
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -261,10 +303,7 @@ async fn merge_patch_creates_when_file_absent() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/new.json", &auth, serde_json::json!({"created": true})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/new.json", &auth, serde_json::json!({"created": true}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::CREATED);
 
   assert_eq!(read_json(&engine, "/new.json"), serde_json::json!({"created": true}));
@@ -276,10 +315,7 @@ async fn merge_patch_existing_returns_200() {
   let auth = bearer_token(&jwt);
   seed_json(&engine, "/doc.json", serde_json::json!({"a": 1}));
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"b": 2})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/doc.json", &auth, serde_json::json!({"b": 2}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -317,10 +353,7 @@ async fn merge_patch_stored_not_json_returns_415() {
   let ops = DirectoryOps::new(&engine);
   ops.store_file_buffered(&ctx, "/blob.bin", b"this is binary garbage", Some("application/octet-stream")).unwrap();
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/blob.bin", &auth, serde_json::json!({"key": "value"})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/blob.bin", &auth, serde_json::json!({"key": "value"}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
@@ -329,10 +362,7 @@ async fn merge_patch_system_path_returns_404() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
 
-  let resp = rebuild_app(&jwt, &engine)
-    .oneshot(patch_req("/files/.aeordb-system/foo", &auth, serde_json::json!({})))
-    .await
-    .unwrap();
+  let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/.aeordb-system/foo", &auth, serde_json::json!({}))).await.unwrap();
   assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -381,10 +411,13 @@ async fn patch_with_merge_content_type_does_not_rename() {
   assert_eq!(resp.status(), StatusCode::OK);
 
   let stored = read_json(&engine, "/doc.json");
-  assert_eq!(stored, serde_json::json!({
-    "existing": true,
-    "to": "/should-not-be-a-rename",
-  }));
+  assert_eq!(
+    stored,
+    serde_json::json!({
+      "existing": true,
+      "to": "/should-not-be-a-rename",
+    })
+  );
 
   // Confirm rename did NOT happen.
   let ops = DirectoryOps::new(&engine);

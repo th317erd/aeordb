@@ -16,9 +16,7 @@ use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLimiter>, tempfile::TempDir) {
@@ -40,11 +38,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-  rate_limiter: &Arc<RateLimiter>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>, rate_limiter: &Arc<RateLimiter>) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
@@ -112,10 +106,7 @@ async fn test_request_magic_link_returns_200_always() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  assert_eq!(
-    json["message"],
-    "If an account exists, a login link has been sent."
-  );
+  assert_eq!(json["message"], "If an account exists, a login link has been sent.");
 }
 
 #[tokio::test]
@@ -141,13 +132,18 @@ async fn test_magic_link_code_stored_hashed() {
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: "stored@example.com".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  }).unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash: code_hash.clone(),
+      email: "stored@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_used: false,
+    },
+  )
+  .unwrap();
 
   let record = system_store::get_magic_link(&engine, &code_hash).unwrap();
   assert!(record.is_some());
@@ -174,19 +170,21 @@ async fn test_verify_valid_code_returns_jwt() {
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: "valid@example.com".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  }).unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash: code_hash.clone(),
+      email: "valid@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_used: false,
+    },
+  )
+  .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .uri(format!("/auth/magic-link/verify?code={}", code))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -204,19 +202,21 @@ async fn test_verify_expired_code_returns_401() {
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
-  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: "expired@example.com".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  }).unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash: code_hash.clone(),
+      email: "expired@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_used: false,
+    },
+  )
+  .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .uri(format!("/auth/magic-link/verify?code={}", code))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -230,20 +230,22 @@ async fn test_verify_used_code_returns_401() {
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: "used@example.com".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  }).unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash: code_hash.clone(),
+      email: "used@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_used: false,
+    },
+  )
+  .unwrap();
   system_store::mark_magic_link_used(&engine, &ctx, &code_hash).unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .uri(format!("/auth/magic-link/verify?code={}", code))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -253,10 +255,7 @@ async fn test_verify_used_code_returns_401() {
 async fn test_verify_invalid_code_returns_401() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .uri("/auth/magic-link/verify?code=this_is_not_a_real_code")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/auth/magic-link/verify?code=this_is_not_a_real_code").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -274,29 +273,28 @@ async fn test_verify_code_is_single_use() {
   let code = generate_magic_link_code();
   let code_hash = hash_magic_link_code(&code);
   let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
-  system_store::store_magic_link(&engine, &ctx, &aeordb::auth::magic_link::MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: "single-use@example.com".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  }).unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash: code_hash.clone(),
+      email: "single-use@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_used: false,
+    },
+  )
+  .unwrap();
 
   // First use should succeed.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .uri(format!("/auth/magic-link/verify?code={}", code))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
   // Second use should fail.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .uri(format!("/auth/magic-link/verify?code={}", code))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
@@ -342,12 +340,7 @@ async fn test_rate_limiting_blocks_after_threshold() {
       .body(Body::from(r#"{"email":"rate-test@example.com"}"#))
       .unwrap();
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::OK,
-      "request {} should succeed",
-      i + 1
-    );
+    assert_eq!(response.status(), StatusCode::OK, "request {} should succeed", i + 1);
   }
 
   // 4th request should be rate limited.
@@ -400,12 +393,8 @@ async fn test_rate_limiting_tracks_per_key() {
 async fn test_request_magic_link_missing_email_field() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/auth/magic-link")
-    .header("content-type", "application/json")
-    .body(Body::from(r#"{}"#))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/auth/magic-link").header("content-type", "application/json").body(Body::from(r#"{}"#)).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -415,10 +404,7 @@ async fn test_request_magic_link_missing_email_field() {
 async fn test_verify_magic_link_missing_code_param() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .uri("/auth/magic-link/verify")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/auth/magic-link/verify").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);

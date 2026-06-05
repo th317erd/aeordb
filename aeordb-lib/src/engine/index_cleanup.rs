@@ -26,112 +26,111 @@ const MAX_BATCH_SIZE: usize = 100;
 /// Handle for sending delete paths to the background cleanup worker.
 #[derive(Clone)]
 pub struct IndexCleanupSender {
-    tx: mpsc::UnboundedSender<String>,
+  tx: mpsc::UnboundedSender<String>,
 }
 
 impl IndexCleanupSender {
-    /// Queue a file path for background index cleanup.
-    /// Returns immediately — cleanup happens asynchronously.
-    pub fn queue(&self, path: String) {
-        let _ = self.tx.send(path);
-    }
+  /// Queue a file path for background index cleanup.
+  /// Returns immediately — cleanup happens asynchronously.
+  pub fn queue(&self, path: String) {
+    let _ = self.tx.send(path);
+  }
 }
 
 /// Spawn the background index cleanup worker. Returns a sender handle
 /// that can be cloned and shared across request handlers.
 pub fn spawn_index_cleanup_worker(engine: Arc<StorageEngine>) -> IndexCleanupSender {
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(cleanup_loop(rx, engine));
-    IndexCleanupSender { tx }
+  let (tx, rx) = mpsc::unbounded_channel();
+  tokio::spawn(cleanup_loop(rx, engine));
+  IndexCleanupSender { tx }
 }
 
 async fn cleanup_loop(mut rx: mpsc::UnboundedReceiver<String>, engine: Arc<StorageEngine>) {
-    let mut batch: Vec<String> = Vec::new();
+  let mut batch: Vec<String> = Vec::new();
 
-    loop {
-        // If batch is empty, block until we get at least one path
-        if batch.is_empty() {
-            match rx.recv().await {
-                Some(path) => batch.push(path),
-                None => return, // Channel closed, shutdown
-            }
-        }
-
-        // Collect more paths with debounce timeout
-        loop {
-            if batch.len() >= MAX_BATCH_SIZE {
-                break; // Flush immediately at max
-            }
-
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(DEBOUNCE_MS),
-                rx.recv(),
-            ).await {
-                Ok(Some(path)) => batch.push(path),
-                Ok(None) => return, // Channel closed
-                Err(_) => break,    // Timeout — flush
-            }
-        }
-
-        // Flush the batch
-        let paths = std::mem::take(&mut batch);
-        let engine_clone = Arc::clone(&engine);
-
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            process_batch(&engine_clone, &paths);
-        }).await {
-            tracing::warn!("Index cleanup task panicked: {}", e);
-        }
+  loop {
+    // If batch is empty, block until we get at least one path
+    if batch.is_empty() {
+      match rx.recv().await {
+        Some(path) => batch.push(path),
+        None => return, // Channel closed, shutdown
+      }
     }
+
+    // Collect more paths with debounce timeout
+    loop {
+      if batch.len() >= MAX_BATCH_SIZE {
+        break; // Flush immediately at max
+      }
+
+      match tokio::time::timeout(std::time::Duration::from_millis(DEBOUNCE_MS), rx.recv()).await {
+        Ok(Some(path)) => batch.push(path),
+        Ok(None) => return, // Channel closed
+        Err(_) => break,    // Timeout — flush
+      }
+    }
+
+    // Flush the batch
+    let paths = std::mem::take(&mut batch);
+    let engine_clone = Arc::clone(&engine);
+
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+      process_batch(&engine_clone, &paths);
+    })
+    .await
+    {
+      tracing::warn!("Index cleanup task panicked: {}", e);
+    }
+  }
 }
 
 fn process_batch(engine: &StorageEngine, paths: &[String]) {
-    let index_manager = IndexManager::new(engine);
-    let algo = engine.hash_algo();
+  let index_manager = IndexManager::new(engine);
+  let algo = engine.hash_algo();
 
-    for path in paths {
-        let normalized = normalize_path(path);
-        let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+  for path in paths {
+    let normalized = normalize_path(path);
+    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
 
-        let file_key = match crate::engine::directory_ops::file_path_hash(&normalized, &algo) {
-            Ok(key) => key,
-            Err(e) => {
-                tracing::warn!("Index cleanup: failed to hash path '{}': {}", path, e);
-                continue;
-            }
-        };
+    let file_key = match crate::engine::directory_ops::file_path_hash(&normalized, &algo) {
+      Ok(key) => key,
+      Err(e) => {
+        tracing::warn!("Index cleanup: failed to hash path '{}': {}", path, e);
+        continue;
+      }
+    };
 
-        // Remove from parent directory indexes
-        if let Ok(index_names) = index_manager.list_indexes(&parent) {
-            for field_name in &index_names {
-                if let Ok(Some(mut index)) = index_manager.load_index(&parent, field_name) {
-                    index.remove(&file_key);
-                    if let Err(e) = index_manager.save_index(&parent, &index) {
-                        tracing::warn!("Index cleanup: failed to save index '{}' at '{}': {}", field_name, parent, e);
-                    }
-                }
-            }
+    // Remove from parent directory indexes
+    if let Ok(index_names) = index_manager.list_indexes(&parent) {
+      for field_name in &index_names {
+        if let Ok(Some(mut index)) = index_manager.load_index(&parent, field_name) {
+          index.remove(&file_key);
+          if let Err(e) = index_manager.save_index(&parent, &index) {
+            tracing::warn!("Index cleanup: failed to save index '{}' at '{}': {}", field_name, parent, e);
+          }
         }
-
-        // Check ancestor directories for glob-based configs
-        let pipeline = IndexingPipeline::new(engine);
-        if let Ok(Some((_config, config_dir))) = pipeline.find_config_for_path(&normalized) {
-            if config_dir != parent {
-                if let Ok(ancestor_index_names) = index_manager.list_indexes(&config_dir) {
-                    for field_name in &ancestor_index_names {
-                        if let Ok(Some(mut index)) = index_manager.load_index(&config_dir, field_name) {
-                            index.remove(&file_key);
-                            if let Err(e) = index_manager.save_index(&config_dir, &index) {
-                                tracing::warn!("Index cleanup: failed to save ancestor index '{}' at '{}': {}", field_name, config_dir, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+      }
     }
 
-    if !paths.is_empty() {
-        tracing::debug!("Index cleanup: processed {} paths", paths.len());
+    // Check ancestor directories for glob-based configs
+    let pipeline = IndexingPipeline::new(engine);
+    if let Ok(Some((_config, config_dir))) = pipeline.find_config_for_path(&normalized) {
+      if config_dir != parent {
+        if let Ok(ancestor_index_names) = index_manager.list_indexes(&config_dir) {
+          for field_name in &ancestor_index_names {
+            if let Ok(Some(mut index)) = index_manager.load_index(&config_dir, field_name) {
+              index.remove(&file_key);
+              if let Err(e) = index_manager.save_index(&config_dir, &index) {
+                tracing::warn!("Index cleanup: failed to save ancestor index '{}' at '{}': {}", field_name, config_dir, e);
+              }
+            }
+          }
+        }
+      }
     }
+  }
+
+  if !paths.is_empty() {
+    tracing::debug!("Index cleanup: processed {} paths", paths.len());
+  }
 }

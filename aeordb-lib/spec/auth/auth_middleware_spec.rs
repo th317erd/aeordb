@@ -77,11 +77,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 #[tokio::test]
 async fn test_unauthenticated_request_returns_401() {
   let (app, _, _, _temp_dir) = test_app();
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/files/test/file.txt")
-    .body(Body::from("hello"))
-    .unwrap();
+  let request = Request::builder().method("PUT").uri("/files/test/file.txt").body(Body::from("hello")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -149,11 +145,7 @@ async fn test_malformed_bearer_token_returns_401() {
 async fn test_missing_authorization_header_returns_401() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/files/test/file.txt")
-    .body(Body::from("hello"))
-    .unwrap();
+  let request = Request::builder().method("PUT").uri("/files/test/file.txt").body(Body::from("hello")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -163,10 +155,7 @@ async fn test_missing_authorization_header_returns_401() {
 async fn test_health_endpoint_exempt_from_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .uri("/system/health")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/system/health").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -191,7 +180,11 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
   let json = body_json(response.into_body()).await;
-  assert!(json["error"].as_str().unwrap().contains("Invalid API key"), "Expected error to contain 'Invalid API key', got: {}", json["error"]);
+  assert!(
+    json["error"].as_str().unwrap().contains("Invalid API key"),
+    "Expected error to contain 'Invalid API key', got: {}",
+    json["error"]
+  );
 }
 
 #[tokio::test]
@@ -310,11 +303,8 @@ async fn test_list_api_keys_returns_metadata() {
   system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
   let token = admin_token(&jwt_manager);
-  let request = Request::builder()
-    .uri("/auth/keys/admin")
-    .header("authorization", format!("Bearer {}", token))
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().uri("/auth/keys/admin").header("authorization", format!("Bearer {}", token)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -501,11 +491,8 @@ async fn test_list_api_keys_requires_admin_role() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let token = reader_token(&jwt_manager);
 
-  let request = Request::builder()
-    .uri("/auth/keys/admin")
-    .header("authorization", format!("Bearer {}", token))
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().uri("/auth/keys/admin").header("authorization", format!("Bearer {}", token)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -538,9 +525,7 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
 
   // Step 1: Bootstrap root key
-  let plaintext_key = bootstrap_root_key(&engine)
-    .expect("bootstrap should succeed")
-    .expect("should create root key on first run");
+  let plaintext_key = bootstrap_root_key(&engine).expect("bootstrap should succeed").expect("should create root key on first run");
 
   // Step 2: Exchange API key for JWT
   let app = create_app_with_jwt(jwt_manager.clone(), engine.clone());
@@ -573,22 +558,12 @@ async fn test_full_flow_bootstrap_to_token_to_engine_crud() {
 
   // Step 4: Verify the file exists by fetching it
   let app3 = create_app_with_jwt(jwt_manager.clone(), engine.clone());
-  let get_request = Request::builder()
-    .uri("/files/e2e/test.txt")
-    .header("authorization", &bearer)
-    .body(Body::empty())
-    .unwrap();
+  let get_request = Request::builder().uri("/files/e2e/test.txt").header("authorization", &bearer).body(Body::empty()).unwrap();
 
   let get_response = app3.oneshot(get_request).await.unwrap();
   assert_eq!(get_response.status(), StatusCode::OK);
 
-  let body_bytes = get_response
-    .into_body()
-    .collect()
-    .await
-    .unwrap()
-    .to_bytes()
-    .to_vec();
+  let body_bytes = get_response.into_body().collect().await.unwrap().to_bytes().to_vec();
   assert_eq!(String::from_utf8(body_bytes).unwrap(), "e2e test data");
 }
 
@@ -618,11 +593,7 @@ async fn test_sync_scoped_token_blocked_on_files_route() {
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
   let json = body_json(response.into_body()).await;
-  assert!(
-    json["error"].as_str().unwrap().contains("scope"),
-    "Expected scope error, got: {}",
-    json["error"]
-  );
+  assert!(json["error"].as_str().unwrap().contains("scope"), "Expected scope error, got: {}", json["error"]);
 }
 
 #[tokio::test]
@@ -633,11 +604,7 @@ async fn test_sync_scoped_token_blocked_on_admin_route() {
   // /system/users is a root-only admin endpoint. Even though the sub claim
   // is root (nil UUID), the scope must block this call before the handler
   // runs.
-  let request = Request::builder()
-    .uri("/system/users")
-    .header("authorization", format!("Bearer {}", token))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/system/users").header("authorization", format!("Bearer {}", token)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -651,18 +618,10 @@ async fn test_sync_scoped_token_allowed_on_sync_route() {
   // /sync/peers should NOT be rejected by the scope check (it's under /sync/).
   // It may still 404 or whatever the handler does — the important thing is
   // that scope enforcement doesn't fire.
-  let request = Request::builder()
-    .uri("/sync/peers")
-    .header("authorization", format!("Bearer {}", token))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/sync/peers").header("authorization", format!("Bearer {}", token)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
-  assert_ne!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "sync-scoped token must not be 403'd on a /sync/ path"
-  );
+  assert_ne!(response.status(), StatusCode::FORBIDDEN, "sync-scoped token must not be 403'd on a /sync/ path");
 }
 
 #[tokio::test]

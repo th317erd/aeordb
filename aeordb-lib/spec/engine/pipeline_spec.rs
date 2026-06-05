@@ -34,15 +34,13 @@ fn make_simple_config(field_name: &str, index_type: &str) -> PathIndexConfig {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: field_name.to_string(),
-        index_type: index_type.to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: field_name.to_string(),
+      index_type: index_type.to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   }
 }
 
@@ -52,15 +50,13 @@ fn make_config_with_logging(field_name: &str, index_type: &str, logging: bool) -
     parser_memory_limit: None,
     logging,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: field_name.to_string(),
-        index_type: index_type.to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: field_name.to_string(),
+      index_type: index_type.to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   }
 }
 
@@ -216,15 +212,13 @@ fn test_pipeline_indexes_json_file() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/people", &config);
 
@@ -253,15 +247,13 @@ fn test_pipeline_source_path_resolution() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "title".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!(["metadata", "title"])),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "title".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!(["metadata", "title"])),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/docs", &config);
 
@@ -289,15 +281,13 @@ fn test_pipeline_missing_source_skips_field() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "missing_field".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!(["nonexistent", "deeply", "nested"])),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "missing_field".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!(["nonexistent", "deeply", "nested"])),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/items", &config);
 
@@ -352,11 +342,7 @@ fn test_pipeline_non_json_data_skips() {
 
   // Store binary (non-JSON) data via store_file_with_indexing
   let binary_data = vec![0xFF, 0xFE, 0x00, 0x01, 0x02];
-  let result = ops.store_file_with_indexing(&ctx,
-    "/bindata/blob.bin",
-    &binary_data,
-    Some("application/octet-stream"),
-  );
+  let result = ops.store_file_with_indexing(&ctx, "/bindata/blob.bin", &binary_data, Some("application/octet-stream"));
   assert!(result.is_ok(), "Non-JSON data should not cause an error");
 
   // File should still be stored
@@ -382,11 +368,7 @@ fn test_pipeline_type_array_expansion() {
   // PathIndexConfig::deserialize handles this by creating two IndexFieldConfig entries
   let config_json = br#"{"indexes":[{"name":"title","type":["string","trigram"]}]}"#;
   let ops = DirectoryOps::new(&engine);
-  ops.store_file_buffered(&ctx,
-    "/articles/.aeordb-config/indexes.json",
-    &config_json[..],
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/articles/.aeordb-config/indexes.json", &config_json[..], Some("application/json")).unwrap();
 
   let data = br#"{"title":"Hello World"}"#;
   let pipeline = IndexingPipeline::new(&engine);
@@ -432,8 +414,11 @@ fn test_pipeline_logging_creates_log_on_error() {
   let log_result = ops.read_file_buffered("/logged/.aeordb-logs/system/parsing.log");
   assert!(log_result.is_ok(), "Expected parsing.log to be created");
   let log_content = String::from_utf8(log_result.unwrap()).unwrap();
-  assert!(log_content.contains("parser") || log_content.contains("failed") || log_content.contains("no parser"),
-    "Log should contain failure message, got: {}", log_content);
+  assert!(
+    log_content.contains("parser") || log_content.contains("failed") || log_content.contains("no parser"),
+    "Log should contain failure message, got: {}",
+    log_content
+  );
   assert!(log_content.contains("/logged/bad.bin"), "Log should reference the file path");
 }
 
@@ -471,11 +456,7 @@ fn test_system_path_deeply_nested() {
   let ops = DirectoryOps::new(&engine);
 
   let data = br#"{"name":"deep"}"#;
-  ops.store_file_with_indexing(&ctx,
-    "/a/b/c/.aeordb-logs/deep/entry.json",
-    &data[..],
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/a/b/c/.aeordb-logs/deep/entry.json", &data[..], Some("application/json")).unwrap();
 
   // File should be stored
   let stored = ops.read_file_buffered("/a/b/c/.aeordb-logs/deep/entry.json").unwrap();
@@ -531,15 +512,13 @@ fn test_pipeline_run_twice_overwrites_index() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "score".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(1000.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "score".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(1000.0),
+    }],
   };
   store_index_config(&engine, "/scores", &config);
 
@@ -622,15 +601,7 @@ fn test_ancestor_glob_config_indexes_at_config_dir() {
     parser_memory_limit: None,
     logging: false,
     glob: Some("*/session.json".to_string()),
-    indexes: vec![
-      IndexFieldConfig {
-        name: "status".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "status".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/sessions", &config);
 
@@ -662,15 +633,7 @@ fn test_ancestor_glob_config_non_matching_file_skipped() {
     parser_memory_limit: None,
     logging: false,
     glob: Some("*/session.json".to_string()),
-    indexes: vec![
-      IndexFieldConfig {
-        name: "status".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "status".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/sessions", &config);
 
@@ -697,15 +660,7 @@ fn test_ancestor_doublestar_glob_deep_nesting() {
     parser_memory_limit: None,
     logging: false,
     glob: Some("**/*.json".to_string()),
-    indexes: vec![
-      IndexFieldConfig {
-        name: "type".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "type".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/data", &config);
 
@@ -733,15 +688,13 @@ fn test_immediate_parent_non_glob_takes_precedence() {
     parser_memory_limit: None,
     logging: false,
     glob: Some("**/*.json".to_string()),
-    indexes: vec![
-      IndexFieldConfig {
-        name: "global_field".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "global_field".to_string(),
+      index_type: "string".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/projects", &glob_config);
 
@@ -751,15 +704,13 @@ fn test_immediate_parent_non_glob_takes_precedence() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "local_field".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "local_field".to_string(),
+      index_type: "string".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/projects/myapp", &local_config);
 
@@ -794,15 +745,13 @@ fn test_pipeline_fanout_source_indexes_multiple_values() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "tag".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!(["tags", ""])),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "tag".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!(["tags", ""])),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/articles", &config);
 
@@ -835,15 +784,13 @@ fn test_at_filename_field_gets_indexed() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@filename".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "@filename".to_string(),
+      index_type: "trigram".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/files", &config);
 
@@ -877,15 +824,13 @@ fn test_at_size_field_gets_indexed() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@size".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(1_000_000.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "@size".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(1_000_000.0),
+    }],
   };
   store_index_config(&engine, "/sized", &config);
 
@@ -910,15 +855,13 @@ fn test_at_content_type_field_gets_indexed() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@content_type".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "@content_type".to_string(),
+      index_type: "string".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/typed", &config);
 
@@ -943,15 +886,7 @@ fn test_at_created_at_field_gets_indexed() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@created_at".to_string(),
-        index_type: "i64".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "@created_at".to_string(), index_type: "i64".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/timed", &config);
 
@@ -977,15 +912,13 @@ fn test_at_field_unknown_name_silently_skipped() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@nonexistent".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "@nonexistent".to_string(),
+      index_type: "string".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/unknown", &config);
 
@@ -1037,20 +970,8 @@ fn test_at_field_mixed_with_regular_fields() {
     logging: false,
     glob: None,
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "@filename".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(&engine, "/mixed", &config);
@@ -1083,15 +1004,13 @@ fn test_at_field_overwrite_replaces_index_entry() {
     parser_memory_limit: None,
     logging: false,
     glob: None,
-    indexes: vec![
-      IndexFieldConfig {
-        name: "@size".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(1_000_000.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "@size".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(1_000_000.0),
+    }],
   };
   store_index_config(&engine, "/overwrite", &config);
 

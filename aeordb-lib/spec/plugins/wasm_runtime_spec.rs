@@ -112,11 +112,7 @@ fn test_load_invalid_wasm_rejected() {
   assert!(result.is_err(), "should reject invalid WASM bytes");
 
   let error = result.unwrap_err();
-  assert!(
-    matches!(error, WasmRuntimeError::CompilationFailed(_)),
-    "error should be CompilationFailed, got: {:?}",
-    error
-  );
+  assert!(matches!(error, WasmRuntimeError::CompilationFailed(_)), "error should be CompilationFailed, got: {:?}", error);
 }
 
 #[test]
@@ -140,10 +136,7 @@ fn test_call_exported_function() {
   let request = b"hello world";
   let response = runtime.call_handle(request).expect("handle should succeed");
 
-  assert_eq!(
-    response, request,
-    "echo module should return the exact input bytes"
-  );
+  assert_eq!(response, request, "echo module should return the exact input bytes");
 }
 
 #[test]
@@ -152,10 +145,7 @@ fn test_call_with_empty_request() {
   let runtime = WasmPluginRuntime::new(&wasm_bytes).expect("valid module");
 
   let response = runtime.call_handle(b"").expect("handle should succeed");
-  assert!(
-    response.is_empty(),
-    "empty request should produce empty response"
-  );
+  assert!(response.is_empty(), "empty request should produce empty response");
 }
 
 #[test]
@@ -166,11 +156,7 @@ fn test_call_copy_response_module() {
   let request = b"copied data";
   let response = runtime.call_handle(request).expect("handle should succeed");
 
-  assert_eq!(
-    response.as_slice(),
-    request.as_slice(),
-    "copy module should return a copy of the input"
-  );
+  assert_eq!(response.as_slice(), request.as_slice(), "copy module should return a copy of the input");
 }
 
 #[test]
@@ -178,13 +164,8 @@ fn test_call_empty_response_module() {
   let wasm_bytes = wat_to_wasm(empty_response_wat());
   let runtime = WasmPluginRuntime::new(&wasm_bytes).expect("valid module");
 
-  let response = runtime
-    .call_handle(b"something")
-    .expect("handle should succeed");
-  assert!(
-    response.is_empty(),
-    "empty-response module should return empty bytes"
-  );
+  let response = runtime.call_handle(b"something").expect("handle should succeed");
+  assert!(response.is_empty(), "empty-response module should return empty bytes");
 }
 
 #[test]
@@ -192,45 +173,30 @@ fn test_memory_limit_enforced() {
   let wasm_bytes = wat_to_wasm(minimal_echo_wat());
   // Set a very tiny memory limit (1 page = 64KB).
   // Then try to write data larger than the memory.
-  let runtime =
-    WasmPluginRuntime::with_limits(&wasm_bytes, 64 * 1024, 1_000_000).expect("valid module");
+  let runtime = WasmPluginRuntime::with_limits(&wasm_bytes, 64 * 1024, 1_000_000).expect("valid module");
 
   // 64KB of data should be at the boundary.
   let large_request = vec![0xABu8; 65 * 1024];
   let result = runtime.call_handle(&large_request);
-  assert!(
-    result.is_err(),
-    "should fail when request exceeds memory limit"
-  );
+  assert!(result.is_err(), "should fail when request exceeds memory limit");
 }
 
 #[test]
 fn test_fuel_limit_enforced() {
   let wasm_bytes = wat_to_wasm(infinite_loop_wat());
   // Very small fuel budget to ensure the loop gets cut off quickly.
-  let runtime =
-    WasmPluginRuntime::with_limits(&wasm_bytes, 16 * 1024 * 1024, 100).expect("valid module");
+  let runtime = WasmPluginRuntime::with_limits(&wasm_bytes, 16 * 1024 * 1024, 100).expect("valid module");
 
   let result = runtime.call_handle(b"go");
-  assert!(
-    result.is_err(),
-    "should fail when fuel runs out during infinite loop"
-  );
+  assert!(result.is_err(), "should fail when fuel runs out during infinite loop");
 
   match result.unwrap_err() {
     WasmRuntimeError::FuelLimitExceeded => {}
     WasmRuntimeError::Trap(message) => {
       // Some versions of wasmi report fuel exhaustion as a trap.
-      assert!(
-        message.to_lowercase().contains("fuel"),
-        "trap message should mention fuel, got: {}",
-        message
-      );
+      assert!(message.to_lowercase().contains("fuel"), "trap message should mention fuel, got: {}", message);
     }
-    other => panic!(
-      "expected FuelLimitExceeded or fuel-related Trap, got: {:?}",
-      other
-    ),
+    other => panic!("expected FuelLimitExceeded or fuel-related Trap, got: {:?}", other),
   }
 }
 

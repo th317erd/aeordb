@@ -63,9 +63,7 @@ fn test_parse_memory_limit_mb() {
   // through the pipeline's behavior with parser configs.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -97,9 +95,7 @@ fn test_parse_memory_limit_gb() {
   // "1gb" should be parsed without panic
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -123,9 +119,7 @@ fn test_parse_memory_limit_kb() {
   // "512kb" should be parsed without panic
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -149,9 +143,7 @@ fn test_parse_memory_limit_default_on_invalid() {
   // "invalid" should fall back to default (256MB) without panic
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -175,9 +167,7 @@ fn test_parse_memory_limit_plain_number() {
   // "1048576" (raw bytes) should be parsed without panic
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -209,9 +199,7 @@ fn test_parser_envelope_structure() {
   // the log message references the parser name correctly.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -243,19 +231,11 @@ fn test_parser_envelope_data_is_base64() {
   // the pipeline doesn't crash when constructing the envelope for various data types.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
-  let config = PathIndexConfig {
-    parser: Some("/parsers/b64test".to_string()),
-    parser_memory_limit: None,
-    logging: true,
-    glob: None,
-
-    indexes: vec![],
-  };
+  let config =
+    PathIndexConfig { parser: Some("/parsers/b64test".to_string()), parser_memory_limit: None, logging: true, glob: None, indexes: vec![] };
   store_index_config(&engine, "/b64", &config);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
@@ -284,9 +264,7 @@ fn test_parser_envelope_meta_fields() {
   // We verify this by checking the pipeline processes correctly for various paths/types.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -317,9 +295,7 @@ fn test_parser_envelope_filename_extraction() {
   // We verify the pipeline processes the path without issues.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -361,15 +337,7 @@ fn test_parser_not_configured_uses_raw_json() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "title".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/noparserdocs", &config);
 
@@ -403,19 +371,10 @@ fn test_content_type_registry_lookup() {
   ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
   // Store index config with NO explicit parser (should fall back to registry)
-  let config = PathIndexConfig {
-    parser: None,
-    parser_memory_limit: None,
-    logging: true,
-    glob: None,
-
-    indexes: vec![],
-  };
+  let config = PathIndexConfig { parser: None, parser_memory_limit: None, logging: true, glob: None, indexes: vec![] };
   store_index_config(&engine, "/uploads", &config);
 
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
@@ -447,15 +406,7 @@ fn test_content_type_registry_not_found() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/csvdata", &config);
 
@@ -491,15 +442,7 @@ fn test_content_type_json_skips_registry() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "value".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "value".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/jsondata", &config);
 
@@ -530,15 +473,7 @@ fn test_content_type_registry_not_exists() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "key".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "key".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/noreg", &config);
 
@@ -565,9 +500,7 @@ fn test_plugin_mapper_source_detection() {
   // but with logging it should log the failure.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -576,15 +509,13 @@ fn test_plugin_mapper_source_detection() {
     logging: true,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "computed".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!({"plugin": "/plugins/my_mapper", "args": {"mode": "upper"}})),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "computed".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!({"plugin": "/plugins/my_mapper", "args": {"mode": "upper"}})),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/mapped", &config);
 
@@ -606,9 +537,7 @@ fn test_plugin_mapper_source_without_args() {
   // {"plugin": "name"} without args should still work (args defaults to null)
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -617,15 +546,13 @@ fn test_plugin_mapper_source_without_args() {
     logging: true,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "derived".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!({"plugin": "/plugins/no_args_mapper"})),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "derived".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!({"plugin": "/plugins/no_args_mapper"})),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/noargs", &config);
 
@@ -648,15 +575,13 @@ fn test_plugin_mapper_invalid_source_object() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "weird".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!({"not_plugin": "something"})),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "weird".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!({"not_plugin": "something"})),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/invalid_src", &config);
 
@@ -684,15 +609,13 @@ fn test_array_source_still_works() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "nested_val".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!(["info", "status"])),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "nested_val".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!(["info", "status"])),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/arraysrc", &config);
 
@@ -719,15 +642,7 @@ fn test_default_source_uses_field_name() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "email".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "email".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/defaults", &config);
 
@@ -788,15 +703,13 @@ fn test_pipeline_with_none_plugin_manager_mapper_source() {
     logging: true,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "mapped".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!({"plugin": "/plugins/mapper"})),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "mapped".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!({"plugin": "/plugins/mapper"})),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/nopm_mapper", &config);
 
@@ -825,12 +738,7 @@ fn test_full_pipeline_method_exists() {
   let ops = DirectoryOps::new(&engine);
 
   // Call without plugin manager
-  let result = ops.store_file_with_full_pipeline(&ctx,
-    "/test/file.json",
-    br#"{"name":"test"}"#,
-    Some("application/json"),
-    None,
-  );
+  let result = ops.store_file_with_full_pipeline(&ctx, "/test/file.json", br#"{"name":"test"}"#, Some("application/json"), None);
   assert!(result.is_ok(), "store_file_with_full_pipeline should work without plugin manager");
 
   // Verify file was stored
@@ -846,17 +754,10 @@ fn test_full_pipeline_with_plugin_manager() {
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
-  let result = ops.store_file_with_full_pipeline(&ctx,
-    "/test2/data.json",
-    br#"{"value":"hello"}"#,
-    Some("application/json"),
-    Some(&pm),
-  );
+  let result = ops.store_file_with_full_pipeline(&ctx, "/test2/data.json", br#"{"value":"hello"}"#, Some("application/json"), Some(&pm));
   assert!(result.is_ok());
 
   let data = ops.read_file_buffered("/test2/data.json").unwrap();
@@ -877,24 +778,17 @@ fn test_full_pipeline_indexes_json() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "score".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(1000.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "score".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(1000.0),
+    }],
   };
   store_index_config(&engine, "/scored", &config);
 
-  ops.store_file_with_full_pipeline(&ctx,
-    "/scored/player.json",
-    br#"{"score":42}"#,
-    Some("application/json"),
-    None,
-  ).unwrap();
+  ops.store_file_with_full_pipeline(&ctx, "/scored/player.json", br#"{"score":42}"#, Some("application/json"), None).unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/scored", "score").unwrap();
@@ -916,24 +810,13 @@ fn test_full_pipeline_skips_system_paths() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/app", &config);
 
-  ops.store_file_with_full_pipeline(&ctx,
-    "/app/.aeordb-logs/entry.json",
-    br#"{"name":"log_entry"}"#,
-    Some("application/json"),
-    None,
-  ).unwrap();
+  ops
+    .store_file_with_full_pipeline(&ctx, "/app/.aeordb-logs/entry.json", br#"{"name":"log_entry"}"#, Some("application/json"), None)
+    .unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let indexes = index_manager.list_indexes("/app/.aeordb-logs").unwrap();
@@ -949,9 +832,7 @@ fn test_with_plugin_manager_constructor() {
   // Verify IndexingPipeline::with_plugin_manager can be created
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   // This should compile and not panic
@@ -972,9 +853,7 @@ fn test_parser_config_with_no_memory_limit_uses_default() {
   // parser_memory_limit is None, should use 256MB default
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   let config = PathIndexConfig {
@@ -1005,9 +884,7 @@ fn test_explicit_parser_overrides_content_type_registry() {
   let registry = br#"{"application/pdf":"/parsers/registry_pdf"}"#;
   ops.store_file_buffered(&ctx, "/.aeordb-config/parsers.json", registry, Some("application/json")).unwrap();
 
-  let engine_arc = Arc::new(StorageEngine::create(
-    dir.path().join("pm.aeor").to_str().unwrap()
-  ).unwrap());
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
   let pm = PluginManager::new(engine_arc);
 
   // Config with explicit parser (different from registry)
@@ -1049,15 +926,7 @@ fn test_content_type_none_skips_registry() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "data".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig { name: "data".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/notype", &config);
 
@@ -1086,15 +955,13 @@ fn test_source_as_string_value_is_invalid() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "field".to_string(),
-        index_type: "string".to_string(),
-        source: Some(serde_json::json!("just_a_string")),
-        min: None,
-        max: None,
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "field".to_string(),
+      index_type: "string".to_string(),
+      source: Some(serde_json::json!("just_a_string")),
+      min: None,
+      max: None,
+    }],
   };
   store_index_config(&engine, "/strsrc", &config);
 
@@ -1123,13 +990,7 @@ fn test_multiple_fields_mixed_sources() {
 
     indexes: vec![
       // Default source
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
       // Array source
       IndexFieldConfig {
         name: "city".to_string(),

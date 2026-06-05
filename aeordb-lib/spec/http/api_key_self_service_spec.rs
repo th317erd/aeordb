@@ -20,10 +20,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
 }
 
 /// Rebuild app from shared state (for multi-request tests).
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -250,12 +247,7 @@ async fn test_list_own_keys() {
 
   // List them.
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -293,12 +285,7 @@ async fn test_list_keys_filters_by_user() {
   // User B lists keys -- should see zero.
   let auth_b = user_bearer_token(&jwt_manager, user_b);
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys")
-    .header("authorization", &auth_b)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys").header("authorization", &auth_b).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
   let json = body_json(response.into_body()).await;
@@ -307,12 +294,7 @@ async fn test_list_keys_filters_by_user() {
   // User A lists keys -- should see one.
   let auth_a = user_bearer_token(&jwt_manager, user_a);
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys")
-    .header("authorization", &auth_a)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys").header("authorization", &auth_a).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
   let json = body_json(response.into_body()).await;
@@ -346,12 +328,8 @@ async fn test_revoke_own_key() {
 
   // Revoke it.
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/auth/keys/{}", key_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri(format!("/auth/keys/{}", key_id)).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -365,12 +343,8 @@ async fn test_revoke_nonexistent_key() {
   let auth = root_bearer_token(&jwt_manager);
 
   let fake_id = uuid::Uuid::new_v4();
-  let request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/auth/keys/{}", fake_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri(format!("/auth/keys/{}", fake_id)).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -381,12 +355,8 @@ async fn test_revoke_invalid_key_id() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/auth/keys/not-a-uuid")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/auth/keys/not-a-uuid").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -660,11 +630,7 @@ async fn test_unauthenticated_create_rejected() {
 async fn test_unauthenticated_list_rejected() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -675,11 +641,7 @@ async fn test_unauthenticated_revoke_rejected() {
   let (app, _, _, _temp_dir) = test_app();
   let fake_id = uuid::Uuid::new_v4();
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri(format!("/auth/keys/{}", fake_id))
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri(format!("/auth/keys/{}", fake_id)).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

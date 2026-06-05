@@ -1,9 +1,9 @@
 use axum::{
-    Extension,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
+  Extension,
+  extract::State,
+  http::{HeaderMap, StatusCode},
+  response::{IntoResponse, Response},
+  Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,34 +23,34 @@ use crate::engine::user::is_root;
 
 #[derive(Deserialize)]
 pub struct ShareRequest {
-    pub paths: Vec<String>,
-    pub users: Option<Vec<String>>,
-    pub groups: Option<Vec<String>>,
-    pub permissions: String,
+  pub paths: Vec<String>,
+  pub users: Option<Vec<String>>,
+  pub groups: Option<Vec<String>>,
+  pub permissions: String,
 }
 
 #[derive(Deserialize)]
 pub struct SharesQuery {
-    pub path: String,
+  pub path: String,
 }
 
 #[derive(Deserialize)]
 pub struct UnshareRequest {
-    pub path: String,
-    pub group: String,
-    #[serde(default)]
-    pub path_pattern: Option<String>,
+  pub path: String,
+  pub group: String,
+  #[serde(default)]
+  pub path_pattern: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ShareInfo {
-    group: String,
-    allow: String,
-    deny: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_pattern: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    username: Option<String>,
+  group: String,
+  allow: String,
+  deny: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  path_pattern: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  username: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,223 +74,204 @@ struct ShareInfo {
 ///   3. Fallback: empty string — caller may decide to skip the email,
 ///      log a warning, or proceed with a relative URL.
 fn resolve_public_base_url(headers: &HeaderMap) -> Option<String> {
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))?;
-    if host.is_empty() {
-        return None;
-    }
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim())
-        .unwrap_or_else(|| {
-            // Heuristic: localhost without explicit X-Forwarded-Proto is dev.
-            if host.starts_with("localhost") || host.starts_with("127.0.0.1") { "http" } else { "https" }
-        });
-    Some(format!("{}://{}", scheme, host))
+  let host = headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()).or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))?;
+  if host.is_empty() {
+    return None;
+  }
+  let scheme =
+    headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).map(|s| s.split(',').next().unwrap_or(s).trim()).unwrap_or_else(|| {
+      // Heuristic: localhost without explicit X-Forwarded-Proto is dev.
+      if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+        "http"
+      } else {
+        "https"
+      }
+    });
+  Some(format!("{}://{}", scheme, host))
 }
 
 pub async fn share(
-    State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
-    headers: HeaderMap,
-    Json(body): Json<ShareRequest>,
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  headers: HeaderMap,
+  Json(body): Json<ShareRequest>,
 ) -> Response {
-    // Parse and validate caller identity
-    let caller_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return ErrorResponse::new("Invalid user identity")
-                .with_status(StatusCode::FORBIDDEN)
-                .into_response();
-        }
-    };
+  // Parse and validate caller identity
+  let caller_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
+    }
+  };
 
-    // Resolve the caller's display name for notifications
-    let sharer_name = if is_root(&caller_id) {
-        "Root".to_string()
+  // Resolve the caller's display name for notifications
+  let sharer_name = if is_root(&caller_id) {
+    "Root".to_string()
+  } else {
+    crate::engine::system_store::get_user(&state.engine, &caller_id)
+      .ok()
+      .flatten()
+      .map(|u| u.username)
+      .unwrap_or_else(|| "Someone".to_string())
+  };
+
+  // Only root can share for now
+  if !is_root(&caller_id) {
+    return ErrorResponse::new("Only root can share files").with_status(StatusCode::FORBIDDEN).into_response();
+  }
+
+  if body.paths.is_empty() {
+    return ErrorResponse::new("At least one path is required").with_status(StatusCode::BAD_REQUEST).into_response();
+  }
+
+  let has_users = body.users.as_ref().is_some_and(|u| !u.is_empty());
+  let has_groups = body.groups.as_ref().is_some_and(|g| !g.is_empty());
+  if !has_users && !has_groups {
+    return ErrorResponse::new("At least one user or group is required").with_status(StatusCode::BAD_REQUEST).into_response();
+  }
+
+  // Validate the permissions string (must be 8 chars of crudlify pattern)
+  if body.permissions.len() != 8 {
+    return ErrorResponse::new("permissions must be exactly 8 characters (crudlify pattern)")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response();
+  }
+
+  let ops = DirectoryOps::new(&state.engine);
+  let ctx = RequestContext::system();
+
+  let mut shared_count = 0usize;
+  let mut shared_paths: Vec<String> = Vec::new();
+
+  for raw_path in &body.paths {
+    let normalized = normalize_path(raw_path);
+
+    if normalized.starts_with("/.aeordb-") {
+      return ErrorResponse::new("Cannot share system paths").with_status(StatusCode::BAD_REQUEST).into_response();
+    }
+
+    // Determine whether this is a file or directory.
+    // Try reading as a file first; if NotFound, check as directory.
+    let is_file = ops.read_file_buffered(&normalized).is_ok();
+    let is_dir = if !is_file { ops.list_directory(&normalized).is_ok() } else { false };
+
+    if !is_file && !is_dir {
+      return ErrorResponse::new(format!("Path not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
+    }
+
+    // For files: store permission on parent dir with path_pattern = filename
+    // For dirs:  store permission on the dir itself with no path_pattern
+    let (perm_dir, path_pattern) = if is_file {
+      let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+      let fname = file_name(&normalized).unwrap_or("").to_string();
+      (parent, Some(fname))
     } else {
-        crate::engine::system_store::get_user(&state.engine, &caller_id)
-            .ok().flatten()
-            .map(|u| u.username)
-            .unwrap_or_else(|| "Someone".to_string())
+      (normalized.clone(), None)
     };
 
-    // Only root can share for now
-    if !is_root(&caller_id) {
-        return ErrorResponse::new("Only root can share files")
-            .with_status(StatusCode::FORBIDDEN)
-            .into_response();
+    // Read existing .permissions or start empty
+    let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
+      format!("{}.aeordb-permissions", perm_dir)
+    } else {
+      format!("{}/.aeordb-permissions", perm_dir)
+    };
+
+    let mut perms = match ops.read_file_buffered(&perm_file_path) {
+      Ok(data) => match PathPermissions::deserialize(&data) {
+        Ok(p) => p,
+        Err(_) => PathPermissions { links: Vec::new() },
+      },
+      Err(_) => PathPermissions { links: Vec::new() },
+    };
+
+    // Build the list of groups to add links for
+    let mut target_groups: Vec<String> = Vec::new();
+
+    if let Some(ref users) = body.users {
+      for user_id_str in users {
+        target_groups.push(format!("user:{}", user_id_str));
+      }
+    }
+    if let Some(ref groups) = body.groups {
+      for group_name in groups {
+        target_groups.push(group_name.clone());
+      }
     }
 
-    if body.paths.is_empty() {
-        return ErrorResponse::new("At least one path is required")
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
+    // Upsert links
+    for group in &target_groups {
+      let existing = perms.links.iter_mut().find(|link| link.group == *group && link.path_pattern == path_pattern);
+
+      match existing {
+        Some(link) => {
+          // Update existing link
+          link.allow = body.permissions.clone();
+        }
+        None => {
+          // Insert new link
+          perms.links.push(PermissionLink {
+            group: group.clone(),
+            allow: body.permissions.clone(),
+            deny: "........".to_string(),
+            others_allow: None,
+            others_deny: None,
+            path_pattern: path_pattern.clone(),
+          });
+        }
+      }
     }
 
-    let has_users = body.users.as_ref().is_some_and(|u| !u.is_empty());
-    let has_groups = body.groups.as_ref().is_some_and(|g| !g.is_empty());
-    if !has_users && !has_groups {
-        return ErrorResponse::new("At least one user or group is required")
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
+    // Write back the .permissions file
+    let serialized = perms.serialize();
+    if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+      return ErrorResponse::new(format!("Failed to store permissions: {}", e))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
     }
 
-    // Validate the permissions string (must be 8 chars of crudlify pattern)
-    if body.permissions.len() != 8 {
-        return ErrorResponse::new("permissions must be exactly 8 characters (crudlify pattern)")
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
+    // Evict cache for this directory
+    state.engine.permissions_cache.evict(&perm_dir);
+    state.engine.grants_index_cache.evict_all();
+
+    shared_count += 1;
+    shared_paths.push(normalized);
+  }
+
+  // Emit per-recipient SSE events for live notification.
+  // Each user receives one event per shared path (delivered via /events/me).
+  let direct_users: Vec<String> = body.users.clone().unwrap_or_default();
+  for recipient_uid in &direct_users {
+    for path in &shared_paths {
+      let event = crate::engine::engine_event::EngineEvent::for_user(
+        crate::engine::engine_event::EVENT_FILES_SHARED,
+        &claims.sub,
+        recipient_uid,
+        serde_json::json!({
+            "path": path,
+            "permissions": body.permissions,
+            "from": sharer_name,
+        }),
+      );
+      state.event_bus.emit(event);
     }
+  }
 
-    let ops = DirectoryOps::new(&state.engine);
-    let ctx = RequestContext::system();
+  // Spawn background email notification (best-effort)
+  let engine_clone = state.engine.clone();
+  let notify_paths = body.paths.clone();
+  let notify_permissions = body.permissions.clone();
+  let notify_users: Vec<String> = direct_users;
+  let sharer = sharer_name.clone();
+  let public_base_url = resolve_public_base_url(&headers);
+  tokio::spawn(async move {
+    send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions, public_base_url.as_deref()).await;
+  });
 
-    let mut shared_count = 0usize;
-    let mut shared_paths: Vec<String> = Vec::new();
-
-    for raw_path in &body.paths {
-        let normalized = normalize_path(raw_path);
-
-        if normalized.starts_with("/.aeordb-") {
-            return ErrorResponse::new("Cannot share system paths")
-                .with_status(StatusCode::BAD_REQUEST)
-                .into_response();
-        }
-
-        // Determine whether this is a file or directory.
-        // Try reading as a file first; if NotFound, check as directory.
-        let is_file = ops.read_file_buffered(&normalized).is_ok();
-        let is_dir = if !is_file {
-            ops.list_directory(&normalized).is_ok()
-        } else {
-            false
-        };
-
-        if !is_file && !is_dir {
-            return ErrorResponse::new(format!("Path not found: {}", normalized))
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
-
-        // For files: store permission on parent dir with path_pattern = filename
-        // For dirs:  store permission on the dir itself with no path_pattern
-        let (perm_dir, path_pattern) = if is_file {
-            let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-            let fname = file_name(&normalized).unwrap_or("").to_string();
-            (parent, Some(fname))
-        } else {
-            (normalized.clone(), None)
-        };
-
-        // Read existing .permissions or start empty
-        let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-            format!("{}.aeordb-permissions", perm_dir)
-        } else {
-            format!("{}/.aeordb-permissions", perm_dir)
-        };
-
-        let mut perms = match ops.read_file_buffered(&perm_file_path) {
-            Ok(data) => match PathPermissions::deserialize(&data) {
-                Ok(p) => p,
-                Err(_) => PathPermissions { links: Vec::new() },
-            },
-            Err(_) => PathPermissions { links: Vec::new() },
-        };
-
-        // Build the list of groups to add links for
-        let mut target_groups: Vec<String> = Vec::new();
-
-        if let Some(ref users) = body.users {
-            for user_id_str in users {
-                target_groups.push(format!("user:{}", user_id_str));
-            }
-        }
-        if let Some(ref groups) = body.groups {
-            for group_name in groups {
-                target_groups.push(group_name.clone());
-            }
-        }
-
-        // Upsert links
-        for group in &target_groups {
-            let existing = perms.links.iter_mut().find(|link| {
-                link.group == *group && link.path_pattern == path_pattern
-            });
-
-            match existing {
-                Some(link) => {
-                    // Update existing link
-                    link.allow = body.permissions.clone();
-                }
-                None => {
-                    // Insert new link
-                    perms.links.push(PermissionLink {
-                        group: group.clone(),
-                        allow: body.permissions.clone(),
-                        deny: "........".to_string(),
-                        others_allow: None,
-                        others_deny: None,
-                        path_pattern: path_pattern.clone(),
-                    });
-                }
-            }
-        }
-
-        // Write back the .permissions file
-        let serialized = perms.serialize();
-        if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
-            return ErrorResponse::new(format!("Failed to store permissions: {}", e))
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response();
-        }
-
-        // Evict cache for this directory
-        state.engine.permissions_cache.evict(&perm_dir);
-        state.engine.grants_index_cache.evict_all();
-
-        shared_count += 1;
-        shared_paths.push(normalized);
-    }
-
-    // Emit per-recipient SSE events for live notification.
-    // Each user receives one event per shared path (delivered via /events/me).
-    let direct_users: Vec<String> = body.users.clone().unwrap_or_default();
-    for recipient_uid in &direct_users {
-        for path in &shared_paths {
-            let event = crate::engine::engine_event::EngineEvent::for_user(
-                crate::engine::engine_event::EVENT_FILES_SHARED,
-                &claims.sub,
-                recipient_uid,
-                serde_json::json!({
-                    "path": path,
-                    "permissions": body.permissions,
-                    "from": sharer_name,
-                }),
-            );
-            state.event_bus.emit(event);
-        }
-    }
-
-    // Spawn background email notification (best-effort)
-    let engine_clone = state.engine.clone();
-    let notify_paths = body.paths.clone();
-    let notify_permissions = body.permissions.clone();
-    let notify_users: Vec<String> = direct_users;
-    let sharer = sharer_name.clone();
-    let public_base_url = resolve_public_base_url(&headers);
-    tokio::spawn(async move {
-        send_share_notifications(&engine_clone, &sharer, &notify_users, &notify_paths, &notify_permissions, public_base_url.as_deref()).await;
-    });
-
-    Json(serde_json::json!({
-        "shared": shared_count,
-        "paths": shared_paths,
-    }))
-    .into_response()
+  Json(serde_json::json!({
+      "shared": shared_count,
+      "paths": shared_paths,
+  }))
+  .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -299,115 +280,100 @@ pub async fn share(
 
 /// List active shares for a path.
 pub async fn list_shares(
-    State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
-    axum::extract::Query(query): axum::extract::Query<SharesQuery>,
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  axum::extract::Query(query): axum::extract::Query<SharesQuery>,
 ) -> Response {
-    // Share tokens cannot list shares
-    if claims.sub.starts_with("share:") {
-        return ErrorResponse::new("Not available for share links")
-            .with_status(StatusCode::FORBIDDEN).into_response();
+  // Share tokens cannot list shares
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Not available for share links").with_status(StatusCode::FORBIDDEN).into_response();
+  }
+  let normalized = normalize_path(&query.path);
+
+  // Require the caller to have at least Read access on the queried path
+  // (or be root). Without this, a non-root user could probe arbitrary
+  // paths to enumerate who else has been granted access — leaking
+  // both path existence AND usernames of other grantees. 404 (not 403)
+  // so the response shape doesn't reveal existence on its own.
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
     }
-    let normalized = normalize_path(&query.path);
+  };
+  if !crate::engine::user::is_root(&user_id) {
+    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let allowed = resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::Read).unwrap_or(false)
+      || resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::List).unwrap_or(false);
+    if !allowed {
+      return ErrorResponse::new(format!("Not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
+    }
+  }
 
-    // Require the caller to have at least Read access on the queried path
-    // (or be root). Without this, a non-root user could probe arbitrary
-    // paths to enumerate who else has been granted access — leaking
-    // both path existence AND usernames of other grantees. 404 (not 403)
-    // so the response shape doesn't reveal existence on its own.
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return ErrorResponse::new("Invalid user identity")
-                .with_status(StatusCode::FORBIDDEN).into_response();
-        }
-    };
-    if !crate::engine::user::is_root(&user_id) {
-        use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-        let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-        let allowed = resolver
-            .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
-            .unwrap_or(false)
-            || resolver
-                .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
-                .unwrap_or(false);
-        if !allowed {
-            return ErrorResponse::new(format!("Not found: {}", normalized))
-                .with_status(StatusCode::NOT_FOUND).into_response();
-        }
+  let ops = DirectoryOps::new(&state.engine);
+
+  // Determine perm_dir: if path is a file, look at parent
+  let is_file = ops.read_file_buffered(&normalized).is_ok();
+  let perm_dir = if is_file { parent_path(&normalized).unwrap_or_else(|| "/".to_string()) } else { normalized.clone() };
+
+  let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
+    format!("{}.aeordb-permissions", perm_dir)
+  } else {
+    format!("{}/.aeordb-permissions", perm_dir)
+  };
+
+  let perms = match ops.read_file_buffered(&perm_file_path) {
+    Ok(data) => match PathPermissions::deserialize(&data) {
+      Ok(p) => p,
+      Err(_) => PathPermissions { links: Vec::new() },
+    },
+    Err(_) => PathPermissions { links: Vec::new() },
+  };
+
+  // If the query is for a specific file, filter to links with matching path_pattern
+  let file_filter = if is_file { file_name(&normalized).map(|s| s.to_string()) } else { None };
+
+  let mut shares: Vec<ShareInfo> = Vec::new();
+  for link in &perms.links {
+    // If filtering for a specific file, only include matching path_pattern links
+    if let Some(ref filter) = file_filter {
+      match &link.path_pattern {
+        Some(pp) if pp == filter => {}
+        Some(_) => continue,
+        None => {} // directory-wide link still applies
+      }
     }
 
-    let ops = DirectoryOps::new(&state.engine);
-
-    // Determine perm_dir: if path is a file, look at parent
-    let is_file = ops.read_file_buffered(&normalized).is_ok();
-    let perm_dir = if is_file {
-        parent_path(&normalized).unwrap_or_else(|| "/".to_string())
-    } else {
-        normalized.clone()
-    };
-
-    let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-        format!("{}.aeordb-permissions", perm_dir)
-    } else {
-        format!("{}/.aeordb-permissions", perm_dir)
-    };
-
-    let perms = match ops.read_file_buffered(&perm_file_path) {
-        Ok(data) => match PathPermissions::deserialize(&data) {
-            Ok(p) => p,
-            Err(_) => PathPermissions { links: Vec::new() },
-        },
-        Err(_) => PathPermissions { links: Vec::new() },
-    };
-
-    // If the query is for a specific file, filter to links with matching path_pattern
-    let file_filter = if is_file {
-        file_name(&normalized).map(|s| s.to_string())
-    } else {
+    // Resolve username for user:UUID groups
+    let username = if link.group.starts_with("user:") {
+      let uid_str = &link.group[5..];
+      if let Ok(uid) = Uuid::parse_str(uid_str) {
+        match crate::engine::system_store::get_user(&state.engine, &uid) {
+          Ok(Some(user)) => Some(user.username),
+          _ => None,
+        }
+      } else {
         None
+      }
+    } else {
+      None
     };
 
-    let mut shares: Vec<ShareInfo> = Vec::new();
-    for link in &perms.links {
-        // If filtering for a specific file, only include matching path_pattern links
-        if let Some(ref filter) = file_filter {
-            match &link.path_pattern {
-                Some(pp) if pp == filter => {}
-                Some(_) => continue,
-                None => {} // directory-wide link still applies
-            }
-        }
+    shares.push(ShareInfo {
+      group: link.group.clone(),
+      allow: link.allow.clone(),
+      deny: link.deny.clone(),
+      path_pattern: link.path_pattern.clone(),
+      username,
+    });
+  }
 
-        // Resolve username for user:UUID groups
-        let username = if link.group.starts_with("user:") {
-            let uid_str = &link.group[5..];
-            if let Ok(uid) = Uuid::parse_str(uid_str) {
-                match crate::engine::system_store::get_user(&state.engine, &uid) {
-                    Ok(Some(user)) => Some(user.username),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        shares.push(ShareInfo {
-            group: link.group.clone(),
-            allow: link.allow.clone(),
-            deny: link.deny.clone(),
-            path_pattern: link.path_pattern.clone(),
-            username,
-        });
-    }
-
-    Json(serde_json::json!({
-        "path": normalized,
-        "shares": shares,
-    }))
-    .into_response()
+  Json(serde_json::json!({
+      "path": normalized,
+      "shares": shares,
+  }))
+  .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -416,89 +382,73 @@ pub async fn list_shares(
 
 /// Revoke a share by removing a permission link.
 pub async fn unshare(
-    State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
-    Json(body): Json<UnshareRequest>,
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Json(body): Json<UnshareRequest>,
 ) -> Response {
-    // Parse and validate caller identity
-    let caller_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return ErrorResponse::new("Invalid user identity")
-                .with_status(StatusCode::FORBIDDEN)
-                .into_response();
-        }
-    };
-
-    // Only root can unshare for now
-    if !is_root(&caller_id) {
-        return ErrorResponse::new("Only root can revoke shares")
-            .with_status(StatusCode::FORBIDDEN)
-            .into_response();
+  // Parse and validate caller identity
+  let caller_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => {
+      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
     }
+  };
 
-    let normalized = normalize_path(&body.path);
-    let ops = DirectoryOps::new(&state.engine);
-    let ctx = RequestContext::system();
+  // Only root can unshare for now
+  if !is_root(&caller_id) {
+    return ErrorResponse::new("Only root can revoke shares").with_status(StatusCode::FORBIDDEN).into_response();
+  }
 
-    // Determine perm_dir
-    let is_file = ops.read_file_buffered(&normalized).is_ok();
-    let perm_dir = if is_file {
-        parent_path(&normalized).unwrap_or_else(|| "/".to_string())
-    } else {
-        normalized.clone()
-    };
+  let normalized = normalize_path(&body.path);
+  let ops = DirectoryOps::new(&state.engine);
+  let ctx = RequestContext::system();
 
-    let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-        format!("{}.aeordb-permissions", perm_dir)
-    } else {
-        format!("{}/.aeordb-permissions", perm_dir)
-    };
+  // Determine perm_dir
+  let is_file = ops.read_file_buffered(&normalized).is_ok();
+  let perm_dir = if is_file { parent_path(&normalized).unwrap_or_else(|| "/".to_string()) } else { normalized.clone() };
 
-    let mut perms = match ops.read_file_buffered(&perm_file_path) {
-        Ok(data) => match PathPermissions::deserialize(&data) {
-            Ok(p) => p,
-            Err(_) => {
-                return ErrorResponse::new("No permissions found for this path")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .into_response();
-            }
-        },
-        Err(_) => {
-            return ErrorResponse::new("No permissions found for this path")
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
-        }
-    };
+  let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
+    format!("{}.aeordb-permissions", perm_dir)
+  } else {
+    format!("{}/.aeordb-permissions", perm_dir)
+  };
 
-    let original_len = perms.links.len();
-    perms.links.retain(|link| {
-        !(link.group == body.group && link.path_pattern == body.path_pattern)
-    });
-
-    if perms.links.len() == original_len {
-        return ErrorResponse::new("No matching permission link found")
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response();
+  let mut perms = match ops.read_file_buffered(&perm_file_path) {
+    Ok(data) => match PathPermissions::deserialize(&data) {
+      Ok(p) => p,
+      Err(_) => {
+        return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response();
+      }
+    },
+    Err(_) => {
+      return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response();
     }
+  };
 
-    // Write back
-    let serialized = perms.serialize();
-    if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
-        return ErrorResponse::new(format!("Failed to update permissions: {}", e))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
-    }
+  let original_len = perms.links.len();
+  perms.links.retain(|link| !(link.group == body.group && link.path_pattern == body.path_pattern));
 
-    // Evict cache
-    state.engine.permissions_cache.evict(&perm_dir);
-    state.engine.grants_index_cache.evict_all();
+  if perms.links.len() == original_len {
+    return ErrorResponse::new("No matching permission link found").with_status(StatusCode::NOT_FOUND).into_response();
+  }
 
-    Json(serde_json::json!({
-        "revoked": true,
-        "group": body.group,
-    }))
-    .into_response()
+  // Write back
+  let serialized = perms.serialize();
+  if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
+    return ErrorResponse::new(format!("Failed to update permissions: {}", e))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+  }
+
+  // Evict cache
+  state.engine.permissions_cache.evict(&perm_dir);
+  state.engine.grants_index_cache.evict_all();
+
+  Json(serde_json::json!({
+      "revoked": true,
+      "group": body.group,
+  }))
+  .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -508,113 +458,108 @@ pub async fn unshare(
 /// Scan all `.permissions` files and return paths where the calling user
 /// has at least one matching group. Used by the file browser to discover
 /// accessible entry points for non-root users.
-pub async fn shared_with_me(
-    State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
-) -> Response {
-    // Share tokens don't use .permissions — they have scoped key rules
-    if claims.sub.starts_with("share:") {
-        return ErrorResponse::new("Not available for share links")
-            .with_status(StatusCode::FORBIDDEN).into_response();
-    }
+pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
+  // Share tokens don't use .permissions — they have scoped key rules
+  if claims.sub.starts_with("share:") {
+    return ErrorResponse::new("Not available for share links").with_status(StatusCode::FORBIDDEN).into_response();
+  }
 
-    let caller_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => return ErrorResponse::new("Invalid identity")
-            .with_status(StatusCode::FORBIDDEN).into_response(),
+  let caller_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => return ErrorResponse::new("Invalid identity").with_status(StatusCode::FORBIDDEN).into_response(),
+  };
+
+  // Root sees everything — no need for this endpoint
+  if is_root(&caller_id) {
+    return Json(serde_json::json!({ "paths": [] })).into_response();
+  }
+
+  // Get the user's group memberships
+  let user_groups = match state.group_cache.get(&caller_id, &state.engine) {
+    Ok(groups) => groups,
+    Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+  };
+
+  // Scan .permissions files with depth + result guardrails to avoid
+  // unbounded traversal on huge databases.
+  const MAX_SCAN_DEPTH: i32 = 10;
+  const MAX_PERM_FILES: usize = 1_000;
+
+  let ops = DirectoryOps::new(&state.engine);
+  let perm_files = match crate::engine::directory_listing::list_directory_recursive(
+    &state.engine,
+    "/",
+    MAX_SCAN_DEPTH,
+    Some(".aeordb-permissions"),
+    Some(MAX_PERM_FILES),
+  ) {
+    Ok(entries) => entries,
+    Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+  };
+
+  let mut shared_paths: Vec<serde_json::Value> = Vec::new();
+
+  for entry in &perm_files {
+    let data = match ops.read_file_buffered(&entry.path) {
+      Ok(d) => d,
+      Err(_) => continue,
+    };
+    let perms = match PathPermissions::deserialize(&data) {
+      Ok(p) => p,
+      Err(_) => continue,
     };
 
-    // Root sees everything — no need for this endpoint
-    if is_root(&caller_id) {
-        return Json(serde_json::json!({ "paths": [] })).into_response();
-    }
-
-    // Get the user's group memberships
-    let user_groups = match state.group_cache.get(&caller_id, &state.engine) {
-        Ok(groups) => groups,
-        Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+    // Extract the directory path once (strip /.aeordb-permissions suffix)
+    let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
+      entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
+    } else if entry.path == "/.aeordb-permissions" {
+      "/".to_string()
+    } else {
+      continue;
     };
 
-    // Scan .permissions files with depth + result guardrails to avoid
-    // unbounded traversal on huge databases.
-    const MAX_SCAN_DEPTH: i32 = 10;
-    const MAX_PERM_FILES: usize = 1_000;
-
-    let ops = DirectoryOps::new(&state.engine);
-    let perm_files = match crate::engine::directory_listing::list_directory_recursive(
-        &state.engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES),
-    ) {
-        Ok(entries) => entries,
-        Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
-    };
-
-    let mut shared_paths: Vec<serde_json::Value> = Vec::new();
-
-    for entry in &perm_files {
-        let data = match ops.read_file_buffered(&entry.path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let perms = match PathPermissions::deserialize(&data) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        // Extract the directory path once (strip /.aeordb-permissions suffix)
-        let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
-            entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
-        } else if entry.path == "/.aeordb-permissions" {
-            "/".to_string()
+    // Collect EVERY link in this .permissions file that matches the user's
+    // groups — one user may have multiple shares in the same directory
+    // (e.g. share-file-A and share-file-B with different path_patterns).
+    for link in &perms.links {
+      if user_groups.contains(&link.group) {
+        // For file-pattern shares, look up the file's metadata so the
+        // client can render a real preview/listing entry instead of a
+        // placeholder.
+        let metadata = if let Some(ref pattern) = link.path_pattern {
+          let file_path = if dir_path == "/" { format!("/{}", pattern) } else { format!("{}/{}", dir_path, pattern) };
+          ops.get_metadata(&file_path).ok().flatten().map(|fr| {
+            serde_json::json!({
+                "size": fr.total_size,
+                "created_at": fr.created_at,
+                "updated_at": fr.updated_at,
+                "content_type": fr.content_type,
+            })
+          })
         } else {
-            continue;
+          None
         };
 
-        // Collect EVERY link in this .permissions file that matches the user's
-        // groups — one user may have multiple shares in the same directory
-        // (e.g. share-file-A and share-file-B with different path_patterns).
-        for link in &perms.links {
-            if user_groups.contains(&link.group) {
-                // For file-pattern shares, look up the file's metadata so the
-                // client can render a real preview/listing entry instead of a
-                // placeholder.
-                let metadata = if let Some(ref pattern) = link.path_pattern {
-                    let file_path = if dir_path == "/" {
-                        format!("/{}", pattern)
-                    } else {
-                        format!("{}/{}", dir_path, pattern)
-                    };
-                    ops.get_metadata(&file_path).ok().flatten().map(|fr| {
-                        serde_json::json!({
-                            "size": fr.total_size,
-                            "created_at": fr.created_at,
-                            "updated_at": fr.updated_at,
-                            "content_type": fr.content_type,
-                        })
-                    })
-                } else {
-                    None
-                };
-
-                let mut entry_value = serde_json::json!({
-                    "path": dir_path,
-                    "permissions": link.allow,
-                    "path_pattern": link.path_pattern,
-                });
-                if let Some(meta) = metadata {
-                    if let Some(obj) = entry_value.as_object_mut() {
-                        if let Some(meta_obj) = meta.as_object() {
-                            for (k, v) in meta_obj {
-                                obj.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                }
-                shared_paths.push(entry_value);
+        let mut entry_value = serde_json::json!({
+            "path": dir_path,
+            "permissions": link.allow,
+            "path_pattern": link.path_pattern,
+        });
+        if let Some(meta) = metadata {
+          if let Some(obj) = entry_value.as_object_mut() {
+            if let Some(meta_obj) = meta.as_object() {
+              for (k, v) in meta_obj {
+                obj.insert(k.clone(), v.clone());
+              }
             }
+          }
         }
+        shared_paths.push(entry_value);
+      }
     }
+  }
 
-    Json(serde_json::json!({ "paths": shared_paths })).into_response()
+  Json(serde_json::json!({ "paths": shared_paths })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -622,58 +567,56 @@ pub async fn shared_with_me(
 // ---------------------------------------------------------------------------
 
 async fn send_share_notifications(
-    engine: &crate::engine::storage_engine::StorageEngine,
-    sharer_name: &str,
-    user_ids: &[String],
-    paths: &[String],
-    permissions: &str,
-    public_base_url: Option<&str>,
+  engine: &crate::engine::storage_engine::StorageEngine,
+  sharer_name: &str,
+  user_ids: &[String],
+  paths: &[String],
+  permissions: &str,
+  public_base_url: Option<&str>,
 ) {
-    // Load email config — if not configured, silently skip
-    let config = match crate::engine::email_config::load_email_config(engine) {
-        Ok(Some(c)) => c,
-        _ => return,
-    };
+  // Load email config — if not configured, silently skip
+  let config = match crate::engine::email_config::load_email_config(engine) {
+    Ok(Some(c)) => c,
+    _ => return,
+  };
 
-    // Build the View-Files link once. Without a resolved public base URL
-    // the email link would be relative ("/?page=...") and would not work
-    // in any mail client — log a warning so the deployment notices.
-    let base = match public_base_url {
-        Some(b) if !b.is_empty() => b.trim_end_matches('/').to_string(),
-        _ => {
-            tracing::warn!(
-                "Share email link will be relative — could not derive a public base URL from request headers. \
+  // Build the View-Files link once. Without a resolved public base URL
+  // the email link would be relative ("/?page=...") and would not work
+  // in any mail client — log a warning so the deployment notices.
+  let base = match public_base_url {
+    Some(b) if !b.is_empty() => b.trim_end_matches('/').to_string(),
+    _ => {
+      tracing::warn!(
+        "Share email link will be relative — could not derive a public base URL from request headers. \
                  Set X-Forwarded-Proto + X-Forwarded-Host at your reverse proxy, or ensure Host is reachable."
-            );
-            String::new()
-        }
-    };
-    let first_path = paths.first().map(|p| p.as_str()).unwrap_or("/");
-    let encoded_path = url_encode_path(first_path);
-    let portal_url = format!("{}/?page=files&path={}", base, encoded_path);
-
-    for uid_str in user_ids {
-        let uid = match uuid::Uuid::parse_str(uid_str) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        let user = match crate::engine::system_store::get_user(engine, &uid) {
-            Ok(Some(u)) => u,
-            _ => continue,
-        };
-        let email = match user.email {
-            Some(ref e) if !e.is_empty() => e.clone(),
-            _ => continue,
-        };
-
-        let (subject, html, text) = crate::engine::email_template::build_share_notification(
-            sharer_name, paths, permissions, &portal_url,
-        );
-
-        if let Err(e) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
-            tracing::warn!("Failed to notify {}: {}", email, e);
-        }
+      );
+      String::new()
     }
+  };
+  let first_path = paths.first().map(|p| p.as_str()).unwrap_or("/");
+  let encoded_path = url_encode_path(first_path);
+  let portal_url = format!("{}/?page=files&path={}", base, encoded_path);
+
+  for uid_str in user_ids {
+    let uid = match uuid::Uuid::parse_str(uid_str) {
+      Ok(id) => id,
+      Err(_) => continue,
+    };
+    let user = match crate::engine::system_store::get_user(engine, &uid) {
+      Ok(Some(u)) => u,
+      _ => continue,
+    };
+    let email = match user.email {
+      Some(ref e) if !e.is_empty() => e.clone(),
+      _ => continue,
+    };
+
+    let (subject, html, text) = crate::engine::email_template::build_share_notification(sharer_name, paths, permissions, &portal_url);
+
+    if let Err(e) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
+      tracing::warn!("Failed to notify {}: {}", email, e);
+    }
+  }
 }
 
 /// URL-encode a path's reserved characters so it survives a query-string
@@ -682,78 +625,67 @@ async fn send_share_notifications(
 /// percent-encoded. (We don't pull in `url` or `percent-encoding` just
 /// for this — it's a tiny set of bytes to handle.)
 fn url_encode_path(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric()
-            || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{:02X}", b));
-        }
+  let mut out = String::with_capacity(s.len());
+  for &b in s.as_bytes() {
+    let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+    if unreserved {
+      out.push(b as char);
+    } else {
+      out.push_str(&format!("%{:02X}", b));
     }
-    out
+  }
+  out
 }
 
 #[cfg(test)]
 mod url_resolution_tests {
-    use super::*;
-    use axum::http::{HeaderName, HeaderValue};
+  use super::*;
+  use axum::http::{HeaderName, HeaderValue};
 
-    fn make_headers(pairs: &[(&str, &str)]) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        for (k, v) in pairs {
-            h.insert(
-                HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                HeaderValue::from_str(v).unwrap(),
-            );
-        }
-        h
+  fn make_headers(pairs: &[(&str, &str)]) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    for (k, v) in pairs {
+      h.insert(HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
     }
+    h
+  }
 
-    #[test]
-    fn forwarded_headers_take_precedence() {
-        let h = make_headers(&[
-            ("x-forwarded-proto", "https"),
-            ("x-forwarded-host", "aeordb.example.com"),
-            ("host", "internal:6830"),
-        ]);
-        assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
-    }
+  #[test]
+  fn forwarded_headers_take_precedence() {
+    let h = make_headers(&[("x-forwarded-proto", "https"), ("x-forwarded-host", "aeordb.example.com"), ("host", "internal:6830")]);
+    assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
+  }
 
-    #[test]
-    fn host_only_assumes_https() {
-        let h = make_headers(&[("host", "aeordb.example.com")]);
-        assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
-    }
+  #[test]
+  fn host_only_assumes_https() {
+    let h = make_headers(&[("host", "aeordb.example.com")]);
+    assert_eq!(resolve_public_base_url(&h), Some("https://aeordb.example.com".to_string()));
+  }
 
-    #[test]
-    fn localhost_host_assumes_http() {
-        let h = make_headers(&[("host", "localhost:6830")]);
-        assert_eq!(resolve_public_base_url(&h), Some("http://localhost:6830".to_string()));
-    }
+  #[test]
+  fn localhost_host_assumes_http() {
+    let h = make_headers(&[("host", "localhost:6830")]);
+    assert_eq!(resolve_public_base_url(&h), Some("http://localhost:6830".to_string()));
+  }
 
-    #[test]
-    fn forwarded_proto_first_value_wins_when_multiple() {
-        let h = make_headers(&[
-            ("x-forwarded-proto", "https,http"),
-            ("x-forwarded-host", "example.com"),
-        ]);
-        assert_eq!(resolve_public_base_url(&h), Some("https://example.com".to_string()));
-    }
+  #[test]
+  fn forwarded_proto_first_value_wins_when_multiple() {
+    let h = make_headers(&[("x-forwarded-proto", "https,http"), ("x-forwarded-host", "example.com")]);
+    assert_eq!(resolve_public_base_url(&h), Some("https://example.com".to_string()));
+  }
 
-    #[test]
-    fn no_headers_returns_none() {
-        let h = HeaderMap::new();
-        assert_eq!(resolve_public_base_url(&h), None);
-    }
+  #[test]
+  fn no_headers_returns_none() {
+    let h = HeaderMap::new();
+    assert_eq!(resolve_public_base_url(&h), None);
+  }
 
-    #[test]
-    fn encodes_spaces_and_special_chars_in_path() {
-        assert_eq!(url_encode_path("/Pictures/My Folder"), "/Pictures/My%20Folder");
-        assert_eq!(url_encode_path("/a&b"), "/a%26b");
-        assert_eq!(url_encode_path("/q=?#"), "/q%3D%3F%23");
-        assert_eq!(url_encode_path("/safe-chars_.~"), "/safe-chars_.~");
-        assert_eq!(url_encode_path("/"), "/");
-    }
+  #[test]
+  fn encodes_spaces_and_special_chars_in_path() {
+    assert_eq!(url_encode_path("/Pictures/My Folder"), "/Pictures/My%20Folder");
+    assert_eq!(url_encode_path("/a&b"), "/a%26b");
+    assert_eq!(url_encode_path("/q=?#"), "/q%3D%3F%23");
+    assert_eq!(url_encode_path("/safe-chars_.~"), "/safe-chars_.~");
+    assert_eq!(url_encode_path("/"), "/");
+  }
 }

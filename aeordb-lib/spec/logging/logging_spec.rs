@@ -14,31 +14,18 @@ use aeordb::logging::{LogConfig, LogFormat, initialize_logging, request_id_middl
 
 /// Build a minimal router with the request_id middleware for testing.
 fn test_app() -> Router {
-  Router::new()
-    .route("/ping", get(|| async { "pong" }))
-    .layer(axum::middleware::from_fn(request_id_middleware))
+  Router::new().route("/ping", get(|| async { "pong" })).layer(axum::middleware::from_fn(request_id_middleware))
 }
 
 #[tokio::test]
 async fn test_request_id_generated_for_each_request() {
   let app = test_app();
 
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/ping")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response = app.oneshot(Request::builder().uri("/ping").body(Body::empty()).unwrap()).await.unwrap();
 
   assert_eq!(response.status(), StatusCode::OK);
 
-  let request_id = response
-    .headers()
-    .get("x-request-id")
-    .expect("X-Request-Id header should be present");
+  let request_id = response.headers().get("x-request-id").expect("X-Request-Id header should be present");
 
   // Should be a valid UUID v4.
   let id_string = request_id.to_str().unwrap();
@@ -49,42 +36,13 @@ async fn test_request_id_generated_for_each_request() {
 async fn test_request_id_unique_per_request() {
   let app = test_app();
 
-  let response_one = app
-    .clone()
-    .oneshot(
-      Request::builder()
-        .uri("/ping")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response_one = app.clone().oneshot(Request::builder().uri("/ping").body(Body::empty()).unwrap()).await.unwrap();
 
-  let response_two = app
-    .oneshot(
-      Request::builder()
-        .uri("/ping")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response_two = app.oneshot(Request::builder().uri("/ping").body(Body::empty()).unwrap()).await.unwrap();
 
-  let id_one = response_one
-    .headers()
-    .get("x-request-id")
-    .unwrap()
-    .to_str()
-    .unwrap()
-    .to_string();
+  let id_one = response_one.headers().get("x-request-id").unwrap().to_str().unwrap().to_string();
 
-  let id_two = response_two
-    .headers()
-    .get("x-request-id")
-    .unwrap()
-    .to_str()
-    .unwrap()
-    .to_string();
+  let id_two = response_two.headers().get("x-request-id").unwrap().to_str().unwrap().to_string();
 
   assert_ne!(id_one, id_two, "Each request must get a unique request ID");
 }
@@ -95,52 +53,24 @@ async fn test_client_request_id_preserved() {
 
   let client_id = "my-custom-request-id-12345";
 
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/ping")
-        .header("x-request-id", client_id)
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response = app.oneshot(Request::builder().uri("/ping").header("x-request-id", client_id).body(Body::empty()).unwrap()).await.unwrap();
 
   assert_eq!(response.status(), StatusCode::OK);
 
-  let response_id = response
-    .headers()
-    .get("x-request-id")
-    .unwrap()
-    .to_str()
-    .unwrap();
+  let response_id = response.headers().get("x-request-id").unwrap().to_str().unwrap();
 
-  assert_eq!(
-    response_id, client_id,
-    "Client-provided X-Request-Id must be preserved in the response"
-  );
+  assert_eq!(response_id, client_id, "Client-provided X-Request-Id must be preserved in the response");
 }
 
 #[tokio::test]
 async fn test_request_id_present_on_404() {
   let app = test_app();
 
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/nonexistent")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response = app.oneshot(Request::builder().uri("/nonexistent").body(Body::empty()).unwrap()).await.unwrap();
 
   // Even for a 404, the middleware should have added the header.
   let request_id = response.headers().get("x-request-id");
-  assert!(
-    request_id.is_some(),
-    "X-Request-Id should be present even on 404 responses"
-  );
+  assert!(request_id.is_some(), "X-Request-Id should be present even on 404 responses");
 }
 
 #[tokio::test]
@@ -148,31 +78,14 @@ async fn test_request_id_empty_header_generates_new() {
   let app = test_app();
 
   // Send an empty X-Request-Id header — middleware should generate a new one.
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/ping")
-        .header("x-request-id", "")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response = app.oneshot(Request::builder().uri("/ping").header("x-request-id", "").body(Body::empty()).unwrap()).await.unwrap();
 
-  let response_id = response
-    .headers()
-    .get("x-request-id")
-    .unwrap()
-    .to_str()
-    .unwrap();
+  let response_id = response.headers().get("x-request-id").unwrap().to_str().unwrap();
 
   // An empty string was sent; the middleware preserves it since it is a valid
   // header value (the middleware uses the client's value when present).
   // This test documents the behavior.
-  assert!(
-    !response_id.is_empty() || response_id.is_empty(),
-    "Response should have an x-request-id header"
-  );
+  assert!(!response_id.is_empty() || response_id.is_empty(), "Response should have an x-request-id header");
 }
 
 // ---------------------------------------------------------------------------
@@ -192,13 +105,8 @@ fn test_log_config_default() {
 
 #[test]
 fn test_log_config_json_format() {
-  let config = LogConfig {
-    format: LogFormat::Json,
-    level: "debug".to_string(),
-    show_target: false,
-    show_thread: true,
-    show_file_line: true,
-  };
+  let config =
+    LogConfig { format: LogFormat::Json, level: "debug".to_string(), show_target: false, show_thread: true, show_file_line: true };
 
   assert_eq!(config.format, LogFormat::Json);
   assert_eq!(config.level, "debug");
@@ -245,10 +153,7 @@ fn test_info_level_configured_by_default() {
 
 #[test]
 fn test_log_config_custom_level_string() {
-  let config = LogConfig {
-    level: "debug,aeordb::storage=trace".to_string(),
-    ..LogConfig::default()
-  };
+  let config = LogConfig { level: "debug,aeordb::storage=trace".to_string(), ..LogConfig::default() };
 
   assert_eq!(config.level, "debug,aeordb::storage=trace");
 }
@@ -264,23 +169,12 @@ async fn test_request_id_on_real_server_routes() {
   let engine_path = temp_dir.path().join("test.aeordb");
   let app = aeordb::server::create_app(engine_path.to_str().unwrap());
 
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/system/health")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response = app.oneshot(Request::builder().uri("/system/health").body(Body::empty()).unwrap()).await.unwrap();
 
   assert_eq!(response.status(), StatusCode::OK);
 
   let request_id = response.headers().get("x-request-id");
-  assert!(
-    request_id.is_some(),
-    "Health endpoint should include X-Request-Id from middleware"
-  );
+  assert!(request_id.is_some(), "Health endpoint should include X-Request-Id from middleware");
 }
 
 #[tokio::test]
@@ -291,25 +185,12 @@ async fn test_client_request_id_preserved_on_real_server() {
 
   let client_id = "integration-test-id-abc123";
 
-  let response = app
-    .oneshot(
-      Request::builder()
-        .uri("/system/health")
-        .header("x-request-id", client_id)
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+  let response =
+    app.oneshot(Request::builder().uri("/system/health").header("x-request-id", client_id).body(Body::empty()).unwrap()).await.unwrap();
 
   assert_eq!(response.status(), StatusCode::OK);
 
-  let response_id = response
-    .headers()
-    .get("x-request-id")
-    .unwrap()
-    .to_str()
-    .unwrap();
+  let response_id = response.headers().get("x-request-id").unwrap().to_str().unwrap();
 
   assert_eq!(response_id, client_id);
 }
@@ -323,13 +204,8 @@ fn test_initialize_logging_json_format_does_not_panic() {
   // The global subscriber can only be initialized once, so we catch panics.
   // This exercises the LogFormat::Json branch in initialize_logging.
   let result = std::panic::catch_unwind(|| {
-    let config = LogConfig {
-      format: LogFormat::Json,
-      level: "warn".to_string(),
-      show_target: true,
-      show_thread: true,
-      show_file_line: true,
-    };
+    let config =
+      LogConfig { format: LogFormat::Json, level: "warn".to_string(), show_target: true, show_thread: true, show_file_line: true };
     initialize_logging(&config);
   });
 
@@ -356,13 +232,8 @@ fn test_log_config_debug_impl() {
 
 #[test]
 fn test_log_config_clone() {
-  let original = LogConfig {
-    format: LogFormat::Json,
-    level: "trace".to_string(),
-    show_target: false,
-    show_thread: true,
-    show_file_line: true,
-  };
+  let original =
+    LogConfig { format: LogFormat::Json, level: "trace".to_string(), show_target: false, show_thread: true, show_file_line: true };
   let cloned = original.clone();
   assert_eq!(cloned.format, LogFormat::Json);
   assert_eq!(cloned.level, "trace");

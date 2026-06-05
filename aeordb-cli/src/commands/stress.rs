@@ -67,9 +67,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
   }
 
   if let Some(seconds_str) = input.strip_suffix('s') {
-    let seconds: f64 = seconds_str
-      .parse()
-      .map_err(|_| format!("invalid seconds value: '{seconds_str}'"))?;
+    let seconds: f64 = seconds_str.parse().map_err(|_| format!("invalid seconds value: '{seconds_str}'"))?;
     if seconds <= 0.0 {
       return Err(format!("duration must be positive, got: {seconds}"));
     }
@@ -77,9 +75,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
   }
 
   if let Some(minutes_str) = input.strip_suffix('m') {
-    let minutes: f64 = minutes_str
-      .parse()
-      .map_err(|_| format!("invalid minutes value: '{minutes_str}'"))?;
+    let minutes: f64 = minutes_str.parse().map_err(|_| format!("invalid minutes value: '{minutes_str}'"))?;
     if minutes <= 0.0 {
       return Err(format!("duration must be positive, got: {minutes}"));
     }
@@ -87,18 +83,14 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
   }
 
   if let Some(hours_str) = input.strip_suffix('h') {
-    let hours: f64 = hours_str
-      .parse()
-      .map_err(|_| format!("invalid hours value: '{hours_str}'"))?;
+    let hours: f64 = hours_str.parse().map_err(|_| format!("invalid hours value: '{hours_str}'"))?;
     if hours <= 0.0 {
       return Err(format!("duration must be positive, got: {hours}"));
     }
     return Ok(Duration::from_secs_f64(hours * 3600.0));
   }
 
-  Err(format!(
-    "invalid duration format: '{input}'. Expected a suffix of 's', 'm', or 'h' (e.g., '30s', '5m', '1h')"
-  ))
+  Err(format!("invalid duration format: '{input}'. Expected a suffix of 's', 'm', or 'h' (e.g., '30s', '5m', '1h')"))
 }
 
 pub fn parse_file_size(input: &str) -> Result<usize, String> {
@@ -109,9 +101,7 @@ pub fn parse_file_size(input: &str) -> Result<usize, String> {
   }
 
   if let Some(megabytes_str) = input.strip_suffix("mb") {
-    let megabytes: f64 = megabytes_str
-      .parse()
-      .map_err(|_| format!("invalid megabytes value: '{megabytes_str}'"))?;
+    let megabytes: f64 = megabytes_str.parse().map_err(|_| format!("invalid megabytes value: '{megabytes_str}'"))?;
     if megabytes <= 0.0 {
       return Err(format!("file size must be positive, got: {megabytes}mb"));
     }
@@ -119,9 +109,7 @@ pub fn parse_file_size(input: &str) -> Result<usize, String> {
   }
 
   if let Some(kilobytes_str) = input.strip_suffix("kb") {
-    let kilobytes: f64 = kilobytes_str
-      .parse()
-      .map_err(|_| format!("invalid kilobytes value: '{kilobytes_str}'"))?;
+    let kilobytes: f64 = kilobytes_str.parse().map_err(|_| format!("invalid kilobytes value: '{kilobytes_str}'"))?;
     if kilobytes <= 0.0 {
       return Err(format!("file size must be positive, got: {kilobytes}kb"));
     }
@@ -129,9 +117,7 @@ pub fn parse_file_size(input: &str) -> Result<usize, String> {
   }
 
   if let Some(gigabytes_str) = input.strip_suffix("gb") {
-    let gigabytes: f64 = gigabytes_str
-      .parse()
-      .map_err(|_| format!("invalid gigabytes value: '{gigabytes_str}'"))?;
+    let gigabytes: f64 = gigabytes_str.parse().map_err(|_| format!("invalid gigabytes value: '{gigabytes_str}'"))?;
     if gigabytes <= 0.0 {
       return Err(format!("file size must be positive, got: {gigabytes}gb"));
     }
@@ -139,18 +125,14 @@ pub fn parse_file_size(input: &str) -> Result<usize, String> {
   }
 
   if let Some(bytes_str) = input.strip_suffix('b') {
-    let bytes: usize = bytes_str
-      .parse()
-      .map_err(|_| format!("invalid bytes value: '{bytes_str}'"))?;
+    let bytes: usize = bytes_str.parse().map_err(|_| format!("invalid bytes value: '{bytes_str}'"))?;
     if bytes == 0 {
       return Err("file size must be positive".to_string());
     }
     return Ok(bytes);
   }
 
-  Err(format!(
-    "invalid file size format: '{input}'. Expected a suffix of 'b', 'kb', 'mb', or 'gb' (e.g., '512b', '1kb', '10mb')"
-  ))
+  Err(format!("invalid file size format: '{input}'. Expected a suffix of 'b', 'kb', 'mb', or 'gb' (e.g., '512b', '1kb', '10mb')"))
 }
 
 pub fn generate_random_data(size: usize) -> Vec<u8> {
@@ -175,23 +157,16 @@ fn format_duration_millis(duration: Duration) -> String {
   format!("{millis:.1}ms")
 }
 
-
 fn parse_operation_type(input: &str) -> Result<OperationType, String> {
   match input.trim().to_lowercase().as_str() {
     "write" => Ok(OperationType::Write),
     "read" => Ok(OperationType::Read),
     "mixed" => Ok(OperationType::Mixed),
-    other => Err(format!(
-      "invalid operation type: '{other}'. Expected 'write', 'read', or 'mixed'"
-    )),
+    other => Err(format!("invalid operation type: '{other}'. Expected 'write', 'read', or 'mixed'")),
   }
 }
 
-async fn authenticate(
-  client: &reqwest::Client,
-  target: &str,
-  api_key: &str,
-) -> Result<String, String> {
+async fn authenticate(client: &reqwest::Client, target: &str, api_key: &str) -> Result<String, String> {
   let url = format!("{target}/auth/token");
 
   let response = client
@@ -203,42 +178,20 @@ async fn authenticate(
 
   if !response.status().is_success() {
     let status = response.status();
-    let body = response
-      .text()
-      .await
-      .unwrap_or_else(|_| "<unreadable body>".to_string());
-    return Err(format!(
-      "authentication failed with status {status}: {body}"
-    ));
+    let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+    return Err(format!("authentication failed with status {status}: {body}"));
   }
 
-  let body: serde_json::Value = response
-    .json()
-    .await
-    .map_err(|error| format!("failed to parse authentication response: {error}"))?;
+  let body: serde_json::Value = response.json().await.map_err(|error| format!("failed to parse authentication response: {error}"))?;
 
-  body["token"]
-    .as_str()
-    .map(|token| token.to_string())
-    .ok_or_else(|| "authentication response missing 'token' field".to_string())
+  body["token"].as_str().map(|token| token.to_string()).ok_or_else(|| "authentication response missing 'token' field".to_string())
 }
 
-async fn perform_write(
-  client: &reqwest::Client,
-  target: &str,
-  token: &str,
-  path: &str,
-  data: &[u8],
-) -> Result<(), String> {
+async fn perform_write(client: &reqwest::Client, target: &str, token: &str, path: &str, data: &[u8]) -> Result<(), String> {
   let url = format!("{target}/files{path}");
 
-  let response = client
-    .put(&url)
-    .bearer_auth(token)
-    .body(data.to_vec())
-    .send()
-    .await
-    .map_err(|error| format!("write request failed: {error}"))?;
+  let response =
+    client.put(&url).bearer_auth(token).body(data.to_vec()).send().await.map_err(|error| format!("write request failed: {error}"))?;
 
   if !response.status().is_success() {
     let status = response.status();
@@ -248,20 +201,10 @@ async fn perform_write(
   Ok(())
 }
 
-async fn perform_read(
-  client: &reqwest::Client,
-  target: &str,
-  token: &str,
-  path: &str,
-) -> Result<(), String> {
+async fn perform_read(client: &reqwest::Client, target: &str, token: &str, path: &str) -> Result<(), String> {
   let url = format!("{target}/files{path}");
 
-  let response = client
-    .get(&url)
-    .bearer_auth(token)
-    .send()
-    .await
-    .map_err(|error| format!("read request failed: {error}"))?;
+  let response = client.get(&url).bearer_auth(token).send().await.map_err(|error| format!("read request failed: {error}"))?;
 
   if !response.status().is_success() {
     let status = response.status();
@@ -269,50 +212,28 @@ async fn perform_read(
   }
 
   // Consume the body to ensure we measure full latency
-  let _body = response
-    .bytes()
-    .await
-    .map_err(|error| format!("failed to read response body: {error}"))?;
+  let _body = response.bytes().await.map_err(|error| format!("failed to read response body: {error}"))?;
 
   Ok(())
 }
 
 /// Discover existing file paths under a directory prefix by listing the directory.
 /// Returns a list of full file paths suitable for read operations.
-async fn discover_existing_files(
-  client: &reqwest::Client,
-  target: &str,
-  token: &str,
-  path_prefix: &str,
-) -> Result<Vec<String>, String> {
+async fn discover_existing_files(client: &reqwest::Client, target: &str, token: &str, path_prefix: &str) -> Result<Vec<String>, String> {
   // Ensure the path ends with '/' so the server treats it as a directory listing
-  let normalized_prefix = if path_prefix.ends_with('/') {
-    path_prefix.to_string()
-  } else {
-    format!("{path_prefix}/")
-  };
+  let normalized_prefix = if path_prefix.ends_with('/') { path_prefix.to_string() } else { format!("{path_prefix}/") };
   let url = format!("{target}/files{normalized_prefix}");
 
-  let response = client
-    .get(&url)
-    .bearer_auth(token)
-    .send()
-    .await
-    .map_err(|error| format!("directory listing request failed: {error}"))?;
+  let response = client.get(&url).bearer_auth(token).send().await.map_err(|error| format!("directory listing request failed: {error}"))?;
 
   if !response.status().is_success() {
     let status = response.status();
     return Err(format!("directory listing failed with status {status}"));
   }
 
-  let body: serde_json::Value = response
-    .json()
-    .await
-    .map_err(|error| format!("failed to parse directory listing response: {error}"))?;
+  let body: serde_json::Value = response.json().await.map_err(|error| format!("failed to parse directory listing response: {error}"))?;
 
-  let items = body["items"]
-    .as_array()
-    .ok_or_else(|| "directory listing response missing 'items' array".to_string())?;
+  let items = body["items"].as_array().ok_or_else(|| "directory listing response missing 'items' array".to_string())?;
 
   // entry_type 2 = FileRecord; filter out directories and other non-file entries
   let file_paths: Vec<String> = items
@@ -336,16 +257,7 @@ struct WorkerConfiguration {
 }
 
 async fn run_worker(configuration: WorkerConfiguration) -> WorkerResult {
-  let WorkerConfiguration {
-    client,
-    target,
-    token,
-    path_prefix,
-    operation_type,
-    file_size,
-    deadline,
-    written_paths,
-  } = configuration;
+  let WorkerConfiguration { client, target, token, path_prefix, operation_type, file_size, deadline, written_paths } = configuration;
   let mut records = Vec::new();
   let mut random_generator = StdRng::from_entropy();
 
@@ -368,11 +280,7 @@ async fn run_worker(configuration: WorkerConfiguration) -> WorkerResult {
         written_paths.write().await.push(file_path);
       }
 
-      records.push(OperationRecord {
-        operation_type: OperationType::Write,
-        latency,
-        success,
-      });
+      records.push(OperationRecord { operation_type: OperationType::Write, latency, success });
     } else {
       let maybe_path = {
         let paths = written_paths.read().await;
@@ -389,11 +297,7 @@ async fn run_worker(configuration: WorkerConfiguration) -> WorkerResult {
         let result = perform_read(&client, &target, &token, &read_path).await;
         let latency = start.elapsed();
 
-        records.push(OperationRecord {
-          operation_type: OperationType::Read,
-          latency,
-          success: result.is_ok(),
-        });
+        records.push(OperationRecord { operation_type: OperationType::Read, latency, success: result.is_ok() });
       }
       // If no paths available yet, skip this iteration
     }
@@ -428,14 +332,8 @@ fn print_report(
     .collect();
   read_latencies.sort();
 
-  let write_count = all_records
-    .iter()
-    .filter(|record| record.operation_type == OperationType::Write)
-    .count();
-  let read_count = all_records
-    .iter()
-    .filter(|record| record.operation_type == OperationType::Read)
-    .count();
+  let write_count = all_records.iter().filter(|record| record.operation_type == OperationType::Write).count();
+  let read_count = all_records.iter().filter(|record| record.operation_type == OperationType::Read).count();
 
   let operation_label = match operation_type {
     OperationType::Write => "write",
@@ -443,11 +341,7 @@ fn print_report(
     OperationType::Mixed => "mixed",
   };
 
-  let error_percentage = if total_operations > 0 {
-    (error_count as f64 / total_operations as f64) * 100.0
-  } else {
-    0.0
-  };
+  let error_percentage = if total_operations > 0 { (error_count as f64 / total_operations as f64) * 100.0 } else { 0.0 };
 
   let separator = "═".repeat(51);
 
@@ -456,10 +350,7 @@ fn print_report(
   println!("  AeorDB Stress Test Results");
   println!("{separator}");
   println!("  Target:       {target}");
-  println!(
-    "  Duration:     {:.1}s",
-    actual_duration.as_secs_f64()
-  );
+  println!("  Duration:     {:.1}s", actual_duration.as_secs_f64());
   println!("  Concurrency:  {concurrency}");
   println!("  Operation:    {operation_label}");
   println!("  File Size:    {}", format_bytes(file_size as u64));
@@ -474,18 +365,9 @@ fn print_report(
     println!("  Write Throughput:   {write_throughput:.1} ops/sec");
     if !write_latencies.is_empty() {
       println!("  Write Latency:");
-      println!(
-        "    p50:  {}",
-        format_duration_millis(calculate_percentile(&write_latencies, 0.5))
-      );
-      println!(
-        "    p95:  {}",
-        format_duration_millis(calculate_percentile(&write_latencies, 0.95))
-      );
-      println!(
-        "    p99:  {}",
-        format_duration_millis(calculate_percentile(&write_latencies, 0.99))
-      );
+      println!("    p50:  {}", format_duration_millis(calculate_percentile(&write_latencies, 0.5)));
+      println!("    p95:  {}", format_duration_millis(calculate_percentile(&write_latencies, 0.95)));
+      println!("    p99:  {}", format_duration_millis(calculate_percentile(&write_latencies, 0.99)));
     }
   }
 
@@ -496,18 +378,9 @@ fn print_report(
     println!("  Read Throughput:    {read_throughput:.1} ops/sec");
     if !read_latencies.is_empty() {
       println!("  Read Latency:");
-      println!(
-        "    p50:  {}",
-        format_duration_millis(calculate_percentile(&read_latencies, 0.5))
-      );
-      println!(
-        "    p95:  {}",
-        format_duration_millis(calculate_percentile(&read_latencies, 0.95))
-      );
-      println!(
-        "    p99:  {}",
-        format_duration_millis(calculate_percentile(&read_latencies, 0.99))
-      );
+      println!("    p50:  {}", format_duration_millis(calculate_percentile(&read_latencies, 0.5)));
+      println!("    p95:  {}", format_duration_millis(calculate_percentile(&read_latencies, 0.95)));
+      println!("    p99:  {}", format_duration_millis(calculate_percentile(&read_latencies, 0.99)));
     }
   }
 
@@ -543,18 +416,10 @@ pub async fn run(arguments: StressArgs) -> Result<(), String> {
   // For read-only mode, discover existing files before starting the timer.
   // Without this, reads would generate random paths that don't match any files.
   if operation_type == OperationType::Read {
-    println!(
-      "Discovering existing files at '{}'...",
-      arguments.path_prefix
-    );
-    match discover_existing_files(&client, &arguments.target, &token, &arguments.path_prefix)
-      .await
-    {
+    println!("Discovering existing files at '{}'...", arguments.path_prefix);
+    match discover_existing_files(&client, &arguments.target, &token, &arguments.path_prefix).await {
       Ok(paths) if paths.is_empty() => {
-        eprintln!(
-          "Warning: No files found at '{}'. Run a write stress test first.",
-          arguments.path_prefix
-        );
+        eprintln!("Warning: No files found at '{}'. Run a write stress test first.", arguments.path_prefix);
         return Ok(());
       }
       Ok(paths) => {
@@ -562,10 +427,7 @@ pub async fn run(arguments: StressArgs) -> Result<(), String> {
         *written_paths.write().await = paths;
       }
       Err(error) => {
-        eprintln!(
-          "Warning: Failed to list directory '{}': {error}",
-          arguments.path_prefix
-        );
+        eprintln!("Warning: Failed to list directory '{}': {error}", arguments.path_prefix);
         eprintln!("Run a write stress test first to create files.");
         return Ok(());
       }
@@ -610,14 +472,7 @@ pub async fn run(arguments: StressArgs) -> Result<(), String> {
 
   let actual_duration = test_start.elapsed();
 
-  print_report(
-    &arguments.target,
-    actual_duration,
-    arguments.concurrency,
-    operation_type,
-    file_size,
-    &all_records,
-  );
+  print_report(&arguments.target, actual_duration, arguments.concurrency, operation_type, file_size, &all_records);
 
   Ok(())
 }

@@ -1,0 +1,10 @@
+timestamp_utc=20260605T062831Z
+project=/home/wyatt/Projects/kikx-workspace/kikx
+database=.aeordb/kikx.aeordb
+log=/tmp/codex/kikx/aeordb.log
+operation=delete all test sessions and frames while preserving /kikx/agents
+observed=session manifests glob */session.json returned total 0
+observed=frames glob **/frames/*.json returned total 0
+observed=recursive sessions listing still returned 6 ghost entries, but direct DELETE/GET returned 404 for those paths
+observed=AeorDB log contains multiple Corrupt KV page warnings during/around purge
+aeordb_version=aeordb 0.9.5

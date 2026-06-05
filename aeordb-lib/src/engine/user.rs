@@ -62,8 +62,7 @@ impl User {
   }
 
   fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
-    serde_json::from_slice(data)
-      .map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize User: {}", error)))
+    serde_json::from_slice(data).map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize User: {}", error)))
   }
 
   /// Return a string representation of any field (for group query evaluation).
@@ -82,8 +81,12 @@ impl User {
 
 impl JsonVersioned for User {
   const SCHEMA_VERSION: u8 = 0;
-  fn serialize_versioned(&self) -> Vec<u8> { self.serialize() }
-  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self> { Self::deserialize(data) }
+  fn serialize_versioned(&self) -> Vec<u8> {
+    self.serialize()
+  }
+  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self> {
+    Self::deserialize(data)
+  }
 }
 
 /// SECURITY: Validates that a user_id is not the reserved nil UUID (root).

@@ -81,22 +81,12 @@ impl PluginResponse {
   /// Build a JSON response from a serializable body.
   pub fn json<T: Serialize>(status_code: u16, body: &T) -> Result<Self, serde_json::Error> {
     let serialized = serde_json::to_vec(body)?;
-    Ok(Self {
-      status_code,
-      body: serialized,
-      content_type: Some("application/json".to_string()),
-      headers: HashMap::new(),
-    })
+    Ok(Self { status_code, body: serialized, content_type: Some("application/json".to_string()), headers: HashMap::new() })
   }
 
   /// Build a plain-text response.
   pub fn text(status_code: u16, body: impl Into<String>) -> Self {
-    Self {
-      status_code,
-      body: body.into().into_bytes(),
-      content_type: Some("text/plain".to_string()),
-      headers: HashMap::new(),
-    }
+    Self { status_code, body: body.into().into_bytes(), content_type: Some("text/plain".to_string()), headers: HashMap::new() }
   }
 
   /// Build a JSON error response with a `{"error": "<message>"}` body.
@@ -181,61 +171,56 @@ impl std::error::Error for PluginError {}
 /// ```
 #[macro_export]
 macro_rules! aeordb_query_plugin {
-    ($handler_fn:ident) => {
-        #[cfg(target_arch = "wasm32")]
-        #[global_allocator]
-        static ALLOC: std::alloc::System = std::alloc::System;
+  ($handler_fn:ident) => {
+    #[cfg(target_arch = "wasm32")]
+    #[global_allocator]
+    static ALLOC: std::alloc::System = std::alloc::System;
 
-        /// WASM export: allocate `size` bytes in guest memory and return the pointer.
-        /// Used by the host to write request data into guest linear memory.
-        #[no_mangle]
-        pub extern "C" fn alloc(size: i32) -> i32 {
-            let mut buffer = Vec::<u8>::with_capacity(size as usize);
-            let ptr = buffer.as_mut_ptr();
-            std::mem::forget(buffer);
-            ptr as i32
+    /// WASM export: allocate `size` bytes in guest memory and return the pointer.
+    /// Used by the host to write request data into guest linear memory.
+    #[no_mangle]
+    pub extern "C" fn alloc(size: i32) -> i32 {
+      let mut buffer = Vec::<u8>::with_capacity(size as usize);
+      let ptr = buffer.as_mut_ptr();
+      std::mem::forget(buffer);
+      ptr as i32
+    }
+
+    /// WASM export: handle a plugin request.
+    ///
+    /// The host writes request JSON at `(ptr, len)` in guest memory.
+    /// Returns a packed i64: `(response_ptr << 32) | response_len`.
+    #[no_mangle]
+    pub extern "C" fn handle(ptr: i32, len: i32) -> i64 {
+      let request_bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+
+      let request: $crate::PluginRequest = match $crate::serde_json::from_slice(request_bytes) {
+        Ok(req) => req,
+        Err(e) => {
+          let response = $crate::PluginResponse::error(400, &format!("Invalid request: {}", e));
+          return _aeordb_encode_plugin_response(&response);
         }
+      };
 
-        /// WASM export: handle a plugin request.
-        ///
-        /// The host writes request JSON at `(ptr, len)` in guest memory.
-        /// Returns a packed i64: `(response_ptr << 32) | response_len`.
-        #[no_mangle]
-        pub extern "C" fn handle(ptr: i32, len: i32) -> i64 {
-            let request_bytes = unsafe {
-                std::slice::from_raw_parts(ptr as *const u8, len as usize)
-            };
+      let ctx = $crate::context::PluginContext::new();
 
-            let request: $crate::PluginRequest = match $crate::serde_json::from_slice(request_bytes) {
-                Ok(req) => req,
-                Err(e) => {
-                    let response = $crate::PluginResponse::error(
-                        400,
-                        &format!("Invalid request: {}", e),
-                    );
-                    return _aeordb_encode_plugin_response(&response);
-                }
-            };
+      let response = match $handler_fn(ctx, request) {
+        Ok(resp) => resp,
+        Err(e) => $crate::PluginResponse::error(500, &e.to_string()),
+      };
 
-            let ctx = $crate::context::PluginContext::new();
+      _aeordb_encode_plugin_response(&response)
+    }
 
-            let response = match $handler_fn(ctx, request) {
-                Ok(resp) => resp,
-                Err(e) => $crate::PluginResponse::error(500, &e.to_string()),
-            };
-
-            _aeordb_encode_plugin_response(&response)
-        }
-
-        /// Internal helper: serialize a PluginResponse and return packed ptr+len.
-        fn _aeordb_encode_plugin_response(response: &$crate::PluginResponse) -> i64 {
-            let bytes = $crate::serde_json::to_vec(response).unwrap_or_default();
-            let len = bytes.len();
-            let ptr = bytes.as_ptr() as i64;
-            std::mem::forget(bytes);
-            (ptr << 32) | (len as i64)
-        }
-    };
+    /// Internal helper: serialize a PluginResponse and return packed ptr+len.
+    fn _aeordb_encode_plugin_response(response: &$crate::PluginResponse) -> i64 {
+      let bytes = $crate::serde_json::to_vec(response).unwrap_or_default();
+      let len = bytes.len();
+      let ptr = bytes.as_ptr() as i64;
+      std::mem::forget(bytes);
+      (ptr << 32) | (len as i64)
+    }
+  };
 }
 
 /// Prelude module for convenient imports.

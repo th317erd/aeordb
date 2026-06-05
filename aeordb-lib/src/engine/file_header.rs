@@ -59,9 +59,9 @@ pub struct FileHeader {
   pub hot_tail_offset: u64,
   pub kv_block_stage: u8,
   pub resize_target_stage: u8,
-  pub backup_type: u8,        // 0=normal, 1=full export, 2=patch
-  pub base_hash: Vec<u8>,     // source version hash
-  pub target_hash: Vec<u8>,   // destination version hash
+  pub backup_type: u8,      // 0=normal, 1=full export, 2=patch
+  pub base_hash: Vec<u8>,   // source version hash
+  pub target_hash: Vec<u8>, // destination version hash
 }
 
 impl FileHeader {
@@ -225,24 +225,18 @@ impl FileHeader {
 
     // CRC32 verification — must come BEFORE we interpret any later field so
     // a torn write doesn't bleed garbled data into the in-memory header.
-    let stored_crc = u32::from_le_bytes(
-      bytes[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].try_into().unwrap(),
-    );
+    let stored_crc = u32::from_le_bytes(bytes[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].try_into().unwrap());
     let computed_crc = crc32fast::hash(&bytes[..FILE_HEADER_SIZE - HEADER_CRC_SIZE]);
     if stored_crc != computed_crc {
       return Err(EngineError::CorruptEntry {
         offset: 0,
-        reason: format!(
-          "file header CRC mismatch (stored {:08x}, computed {:08x})",
-          stored_crc, computed_crc
-        ),
+        reason: format!("file header CRC mismatch (stored {:08x}, computed {:08x})", stored_crc, computed_crc),
       });
     }
 
     // hash_algo: 2 bytes
     let hash_algo_raw = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw)
-      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
     offset += 2;
 
     // sequence: 8 bytes — v3 A/B slot selector
@@ -405,11 +399,7 @@ pub fn read_active_header(file: &mut File) -> EngineResult<(FileHeader, usize)> 
 /// If we crash between steps 2 and 3, the OLD active slot still wins on the
 /// next read (we wrote the new slot to the INACTIVE one), so the database
 /// rolls back cleanly to the previous consistent state.
-pub fn write_header_to_inactive_slot(
-  file: &mut File,
-  header: &mut FileHeader,
-  active_slot: usize,
-) -> EngineResult<()> {
+pub fn write_header_to_inactive_slot(file: &mut File, header: &mut FileHeader, active_slot: usize) -> EngineResult<()> {
   // Increment sequence — the new slot must win on next read.
   header.sequence = header.sequence.wrapping_add(1);
 

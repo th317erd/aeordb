@@ -17,10 +17,7 @@ impl<'a> RuleEngine<'a> {
   ///
   /// Rules at parent scopes apply to children (inheritance).
   /// Rules are returned ordered from most specific (deepest) to least specific.
-  pub fn collect_applicable_rules(
-    &self,
-    scope_path: &str,
-  ) -> Result<Vec<String>, PluginManagerError> {
+  pub fn collect_applicable_rules(&self, scope_path: &str) -> Result<Vec<String>, PluginManagerError> {
     let all_plugins = self.plugin_manager.list_plugins()?;
 
     let mut applicable: Vec<(usize, String)> = Vec::new();
@@ -33,11 +30,7 @@ impl<'a> RuleEngine<'a> {
       // A rule plugin applies if its path is accessible from the scope_path
       // (i.e., it's at the same level or a parent level).
       if is_scope_accessible(scope_path, &plugin_metadata.path) {
-        let depth = plugin_metadata
-          .path
-          .split('/')
-          .filter(|s| !s.is_empty())
-          .count();
+        let depth = plugin_metadata.path.split('/').filter(|s| !s.is_empty()).count();
         applicable.push((depth, plugin_metadata.path.clone()));
       }
     }
@@ -56,11 +49,7 @@ impl<'a> RuleEngine<'a> {
   /// For now this is a stub that collects applicable rules and combines
   /// their decisions. Actual WASM execution of rule plugins will use the
   /// existing WasmPluginRuntime with a "evaluate_rule" entry point in the future.
-  pub fn evaluate(
-    &self,
-    scope_path: &str,
-    context: &RuleContext,
-  ) -> Result<RuleDecision, PluginManagerError> {
+  pub fn evaluate(&self, scope_path: &str, context: &RuleContext) -> Result<RuleDecision, PluginManagerError> {
     let applicable_rule_paths = self.collect_applicable_rules(scope_path)?;
 
     if applicable_rule_paths.is_empty() {
@@ -70,20 +59,15 @@ impl<'a> RuleEngine<'a> {
     // Evaluate each rule. For now, we attempt to invoke each rule plugin
     // with the serialized context. If invocation fails (e.g., the WASM module
     // doesn't have the right entry point yet), we default to Allow for that rule.
-    let context_bytes = serde_json::to_vec(context)
-      .map_err(|error| PluginManagerError::ExecutionFailed(error.to_string()))?;
+    let context_bytes = serde_json::to_vec(context).map_err(|error| PluginManagerError::ExecutionFailed(error.to_string()))?;
 
     let mut most_restrictive = RuleDecision::Allow;
 
     for rule_path in &applicable_rule_paths {
-      let decision = match self
-        .plugin_manager
-        .invoke_wasm_plugin(rule_path, &context_bytes)
-      {
+      let decision = match self.plugin_manager.invoke_wasm_plugin(rule_path, &context_bytes) {
         Ok(response_bytes) => {
           // Try to parse the response as a RuleDecision.
-          serde_json::from_slice::<RuleDecision>(&response_bytes)
-            .unwrap_or(RuleDecision::Allow)
+          serde_json::from_slice::<RuleDecision>(&response_bytes).unwrap_or(RuleDecision::Allow)
         }
         Err(_) => {
           // If the plugin can't be invoked, default to Allow.

@@ -71,9 +71,12 @@ pub async fn create_own_key(
         parsed
       }
       Err(err) => {
-        return ErrorResponse::new(format!("Invalid rules JSON: {}. Expected an array of {{\"path_pattern\": \"...\", \"permitted\": \"rwld\"}}", err))
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
+        return ErrorResponse::new(format!(
+          "Invalid rules JSON: {}. Expected an array of {{\"path_pattern\": \"...\", \"permitted\": \"rwld\"}}",
+          err
+        ))
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
       }
     }
   } else {
@@ -93,9 +96,11 @@ pub async fn create_own_key(
     Ok(hash) => hash,
     Err(error) => {
       tracing::error!("Failed to hash API key: {}", error);
-      return ErrorResponse::new("Failed to create API key: could not hash the generated key. If this persists, contact your administrator")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(
+        "Failed to create API key: could not hash the generated key. If this persists, contact your administrator",
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
   };
 
@@ -119,9 +124,11 @@ pub async fn create_own_key(
 
   if let Err(error) = store_result {
     tracing::error!("Failed to store API key: {}", error);
-    return ErrorResponse::new("Failed to store API key: could not persist to storage. If this persists, check GET /system/health for system status")
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(
+      "Failed to store API key: could not persist to storage. If this persists, check GET /system/health for system status",
+    )
+    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    .into_response();
   }
 
   let rules_json = serde_json::to_value(&rules).unwrap_or(serde_json::json!([]));
@@ -141,10 +148,7 @@ pub async fn create_own_key(
 }
 
 /// GET /api-keys -- list the calling user's own API keys.
-pub async fn list_own_keys(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-) -> Response {
+pub async fn list_own_keys(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let caller_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
@@ -161,10 +165,7 @@ pub async fn list_own_keys(
         .ok()
         .flatten()
         .map(|u| u.username)
-        .unwrap_or_else(|| {
-          if crate::engine::user::is_root(&caller_id) { "root".to_string() }
-          else { caller_id.to_string() }
-        });
+        .unwrap_or_else(|| if crate::engine::user::is_root(&caller_id) { "root".to_string() } else { caller_id.to_string() });
 
       let own_keys: Vec<serde_json::Value> = keys
         .iter()
@@ -186,9 +187,11 @@ pub async fn list_own_keys(
     }
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);
-      ErrorResponse::new("Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(
+        "Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status",
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response()
     }
   }
 }
@@ -222,20 +225,18 @@ pub async fn revoke_own_key(
     Ok(keys) => keys,
     Err(error) => {
       tracing::error!("Failed to list API keys: {}", error);
-      return ErrorResponse::new("Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(
+        "Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status",
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
   };
 
   let target_key = keys.iter().find(|record| record.key_id == parsed_key_id);
 
   match target_key {
-    None => {
-      ErrorResponse::new(format!("API key not found: {}", parsed_key_id))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
+    None => ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
     Some(record) => {
       // Non-root users can only revoke their own keys.
       if record.user_id != Some(caller_id) && !is_root(&caller_id) {
@@ -256,11 +257,7 @@ pub async fn revoke_own_key(
           )
             .into_response()
         }
-        Ok(false) => {
-          ErrorResponse::new(format!("API key not found: {}", parsed_key_id))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response()
-        }
+        Ok(false) => ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
         Err(error) => {
           tracing::error!("Failed to revoke API key: {}", error);
           ErrorResponse::new("Failed to revoke API key: could not persist revocation to storage. If this persists, check GET /system/health for system status")
@@ -276,16 +273,11 @@ pub async fn revoke_own_key(
 ///
 /// Root: returns all users (user_id + username only — minimal data).
 /// Non-root: returns only the caller (they can only create keys for themselves).
-pub async fn list_key_assignable_users(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-) -> Response {
+pub async fn list_key_assignable_users(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let caller_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid sub claim in JWT")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new("Invalid sub claim in JWT").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -296,25 +288,28 @@ pub async fn list_key_assignable_users(
         let mut items: Vec<serde_json::Value> = users
           .iter()
           .filter(|u| u.is_active)
-          .map(|u| serde_json::json!({
-            "user_id": u.user_id,
-            "username": u.username,
-          }))
+          .map(|u| {
+            serde_json::json!({
+              "user_id": u.user_id,
+              "username": u.username,
+            })
+          })
           .collect();
 
         // Include root itself (not in the user store)
-        items.insert(0, serde_json::json!({
-          "user_id": Uuid::nil(),
-          "username": "root",
-        }));
+        items.insert(
+          0,
+          serde_json::json!({
+            "user_id": Uuid::nil(),
+            "username": "root",
+          }),
+        );
 
         (StatusCode::OK, Json(serde_json::json!({ "items": items }))).into_response()
       }
       Err(e) => {
         tracing::error!("Failed to list users for key assignment: {}", e);
-        ErrorResponse::new("Failed to list users")
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
+        ErrorResponse::new("Failed to list users").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
       }
     }
   } else {
@@ -325,11 +320,15 @@ pub async fn list_key_assignable_users(
       .map(|u| u.username)
       .unwrap_or_else(|| caller_id.to_string());
 
-    (StatusCode::OK, Json(serde_json::json!({
-      "items": [{
-        "user_id": caller_id,
-        "username": username,
-      }]
-    }))).into_response()
+    (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "items": [{
+          "user_id": caller_id,
+          "username": username,
+        }]
+      })),
+    )
+      .into_response()
   }
 }

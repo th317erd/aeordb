@@ -15,9 +15,7 @@ static GLOBAL_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 pub fn initialize_metrics() -> PrometheusHandle {
   GLOBAL_HANDLE
     .get_or_init(|| {
-      metrics_exporter_prometheus::PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install Prometheus metrics recorder")
+      metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder().expect("failed to install Prometheus metrics recorder")
     })
     .clone()
 }

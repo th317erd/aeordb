@@ -5,11 +5,7 @@ use uuid::Uuid;
 fn test_generate_api_key_has_prefix() {
   let key_id = Uuid::new_v4();
   let key = generate_api_key(key_id);
-  assert!(
-    key.starts_with("aeor_k_"),
-    "API key should start with aeor_k_ prefix, got: {}",
-    key
-  );
+  assert!(key.starts_with("aeor_k_"), "API key should start with aeor_k_ prefix, got: {}", key);
 }
 
 #[test]
@@ -17,13 +13,7 @@ fn test_generate_api_key_correct_format() {
   let key_id = Uuid::new_v4();
   let key = generate_api_key(key_id);
   // "aeor_k_" (7 chars) + 16 hex key_id + "_" (1 char) + 64 hex chars = 88 chars
-  assert_eq!(
-    key.len(),
-    88,
-    "API key should be 88 chars (7 prefix + 16 key_id + 1 sep + 64 hex), got: {} (len {})",
-    key,
-    key.len()
-  );
+  assert_eq!(key.len(), 88, "API key should be 88 chars (7 prefix + 16 key_id + 1 sep + 64 hex), got: {} (len {})", key, key.len());
 }
 
 #[test]
@@ -32,12 +22,7 @@ fn test_generate_api_key_embeds_key_id_prefix() {
   let key = generate_api_key(key_id);
   let key_id_prefix = &key_id.simple().to_string()[..16];
   let expected_prefix = format!("aeor_k_{}_", key_id_prefix);
-  assert!(
-    key.starts_with(&expected_prefix),
-    "API key should embed key_id prefix. Expected prefix: {}, got: {}",
-    expected_prefix,
-    key
-  );
+  assert!(key.starts_with(&expected_prefix), "API key should embed key_id prefix. Expected prefix: {}, got: {}", expected_prefix, key);
 }
 
 #[test]
@@ -109,11 +94,7 @@ fn test_hash_is_not_plaintext() {
   let key = generate_api_key(Uuid::new_v4());
   let hash = hash_api_key(&key).expect("should hash");
   assert_ne!(hash, key, "hash should not equal the plaintext key");
-  assert!(
-    hash.starts_with("$argon2"),
-    "hash should be an argon2 formatted string, got: {}",
-    hash
-  );
+  assert!(hash.starts_with("$argon2"), "hash should be an argon2 formatted string, got: {}", hash);
 }
 
 #[test]

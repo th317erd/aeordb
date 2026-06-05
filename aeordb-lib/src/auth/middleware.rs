@@ -16,11 +16,7 @@ use crate::server::state::AppState;
 /// When the auth provider is disabled (NoAuth mode), this middleware
 /// skips JWT validation entirely and injects root claims (nil UUID)
 /// so every request is treated as root.
-pub async fn auth_middleware(
-  State(state): State<AppState>,
-  mut request: Request,
-  next: Next,
-) -> Response {
+pub async fn auth_middleware(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
   // If auth is disabled, inject root claims and skip validation.
   if !state.auth_provider.is_enabled() {
     let now = chrono::Utc::now().timestamp();
@@ -38,26 +34,16 @@ pub async fn auth_middleware(
   }
 
   // Extract token from Authorization header or ?token= query param
-  let authorization_header = request
-    .headers()
-    .get("authorization")
-    .and_then(|value| value.to_str().ok())
-    .map(|value| value.to_string());
+  let authorization_header = request.headers().get("authorization").and_then(|value| value.to_str().ok()).map(|value| value.to_string());
 
-  let token_from_header = authorization_header
-    .as_ref()
-    .filter(|h| h.starts_with("Bearer "))
-    .map(|h| h[7..].to_string());
+  let token_from_header = authorization_header.as_ref().filter(|h| h.starts_with("Bearer ")).map(|h| h[7..].to_string());
 
   let token_from_query = if token_from_header.is_none() {
-    request.uri().query()
-      .and_then(|q| {
-        // Use form_urlencoded for proper percent-decoding of the token value.
-        // This handles tokens that contain URL-encoded characters (e.g. %3D for =).
-        form_urlencoded::parse(q.as_bytes())
-          .find(|(key, _)| key == "token")
-          .map(|(_, value)| value.into_owned())
-      })
+    request.uri().query().and_then(|q| {
+      // Use form_urlencoded for proper percent-decoding of the token value.
+      // This handles tokens that contain URL-encoded characters (e.g. %3D for =).
+      form_urlencoded::parse(q.as_bytes()).find(|(key, _)| key == "token").map(|(_, value)| value.into_owned())
+    })
   } else {
     None
   };
@@ -70,14 +56,9 @@ pub async fn auth_middleware(
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
         "result" => "missing_header"
-      ).increment(1);
-      return (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-          error: "Missing or invalid Authorization header".to_string(),
-          code: None,
-        }),
       )
+      .increment(1);
+      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Missing or invalid Authorization header".to_string(), code: None }))
         .into_response();
     }
   };
@@ -89,15 +70,9 @@ pub async fn auth_middleware(
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
         "result" => "invalid"
-      ).increment(1);
-      return (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-          error: "Invalid or expired token".to_string(),
-          code: None,
-        }),
       )
-        .into_response();
+      .increment(1);
+      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Invalid or expired token".to_string(), code: None })).into_response();
     }
   };
 
@@ -116,13 +91,11 @@ pub async fn auth_middleware(
       metrics::counter!(
         crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
         "result" => "scope_violation"
-      ).increment(1);
+      )
+      .increment(1);
       return (
         StatusCode::FORBIDDEN,
-        Json(ErrorResponse {
-          error: "Token scope 'sync' cannot access this endpoint".to_string(),
-          code: None,
-        }),
+        Json(ErrorResponse { error: "Token scope 'sync' cannot access this endpoint".to_string(), code: None }),
       )
         .into_response();
     }
@@ -132,7 +105,8 @@ pub async fn auth_middleware(
   metrics::counter!(
     crate::metrics::definitions::AUTH_VALIDATIONS_TOTAL,
     "result" => "success"
-  ).increment(1);
+  )
+  .increment(1);
   request.extensions_mut().insert(claims);
   let mut response = next.run(request).await;
 

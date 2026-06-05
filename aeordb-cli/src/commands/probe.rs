@@ -584,39 +584,47 @@ fn throughput_mib_s(bytes: u64, elapsed_seconds: f64) -> f64 {
 //   3. void count + bytes (GC reclaim that may or may not be progressing)
 // ---------------------------------------------------------------------------
 fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
-    let stats = engine.stats();
-    let writer = match engine.writer_read_lock() {
-        Ok(w) => w,
-        Err(e) => { eprintln!("writer lock: {}", e); std::process::exit(1); }
-    };
-    let wal_end = writer.current_offset();
-    let file_size = stats.db_file_size_bytes;
-    let tail_gap: i128 = file_size as i128 - wal_end as i128;
+  let stats = engine.stats();
+  let writer = match engine.writer_read_lock() {
+    Ok(w) => w,
+    Err(e) => {
+      eprintln!("writer lock: {}", e);
+      std::process::exit(1);
+    }
+  };
+  let wal_end = writer.current_offset();
+  let file_size = stats.db_file_size_bytes;
+  let tail_gap: i128 = file_size as i128 - wal_end as i128;
 
-    println!("=== growth-stats ===");
-    println!("file size:           {} bytes ({:.2} GiB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
-    println!("wal end (writer):    {} bytes", wal_end);
-    println!("tail gap:            {} bytes ({})",
-        tail_gap,
-        if tail_gap == 0 { "clean" }
-        else if tail_gap > 0 { "BYTES PAST FRONTIER — unrecovered tail" }
-        else { "writer ahead of file (impossible?)" }
-    );
-    println!();
-    println!("entries (total appended): {}", stats.entry_count);
-    println!("kv entries (live):        {}", stats.kv_entries);
-    println!("kv size bytes:            {}", stats.kv_size_bytes);
-    println!();
-    println!("by type:");
-    println!("  file records:    {}", stats.file_count);
-    println!("  directories:     {}", stats.directory_count);
-    println!("  chunks:          {}", stats.chunk_count);
-    println!("  snapshots:       {}", stats.snapshot_count);
-    println!("  forks:           {}", stats.fork_count);
-    println!("  voids:           {}  ({} bytes)", stats.void_count, stats.void_space_bytes);
-    println!();
-    println!("created_at: {}", stats.created_at);
-    println!("updated_at: {}", stats.updated_at);
+  println!("=== growth-stats ===");
+  println!("file size:           {} bytes ({:.2} GiB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+  println!("wal end (writer):    {} bytes", wal_end);
+  println!(
+    "tail gap:            {} bytes ({})",
+    tail_gap,
+    if tail_gap == 0 {
+      "clean"
+    } else if tail_gap > 0 {
+      "BYTES PAST FRONTIER — unrecovered tail"
+    } else {
+      "writer ahead of file (impossible?)"
+    }
+  );
+  println!();
+  println!("entries (total appended): {}", stats.entry_count);
+  println!("kv entries (live):        {}", stats.kv_entries);
+  println!("kv size bytes:            {}", stats.kv_size_bytes);
+  println!();
+  println!("by type:");
+  println!("  file records:    {}", stats.file_count);
+  println!("  directories:     {}", stats.directory_count);
+  println!("  chunks:          {}", stats.chunk_count);
+  println!("  snapshots:       {}", stats.snapshot_count);
+  println!("  forks:           {}", stats.fork_count);
+  println!("  voids:           {}  ({} bytes)", stats.void_count, stats.void_space_bytes);
+  println!();
+  println!("created_at: {}", stats.created_at);
+  println!("updated_at: {}", stats.updated_at);
 }
 
 // ---------------------------------------------------------------------------
@@ -639,89 +647,94 @@ fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
 //                              flushed, or a system/internal file.
 // ---------------------------------------------------------------------------
 fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
-    use std::collections::HashSet;
-    use std::io::{BufRead, BufReader};
-    use std::fs::File;
+  use std::collections::HashSet;
+  use std::io::{BufRead, BufReader};
+  use std::fs::File;
 
-    let file = match File::open(tsv_path) {
-        Ok(f) => f,
-        Err(e) => { eprintln!("open checkpoint {}: {}", tsv_path, e); std::process::exit(1); }
+  let file = match File::open(tsv_path) {
+    Ok(f) => f,
+    Err(e) => {
+      eprintln!("open checkpoint {}: {}", tsv_path, e);
+      std::process::exit(1);
+    }
+  };
+
+  // Reconstruct the worker's view: + adds, - removes. Match `load_checkpoint`
+  // in aeordb-cli/src/bin/soak-worker.rs.
+  let mut committed: HashSet<String> = HashSet::new();
+  let mut lines = 0u64;
+  let mut adds = 0u64;
+  let mut dels = 0u64;
+  for line in BufReader::new(file).lines().map_while(Result::ok) {
+    lines += 1;
+    if let Some(rest) = line.strip_prefix("+\t") {
+      committed.insert(rest.to_string());
+      adds += 1;
+    } else if let Some(rest) = line.strip_prefix("-\t") {
+      committed.remove(rest);
+      dels += 1;
+    }
+  }
+
+  let algo = engine.hash_algo();
+  let mut present = 0u64;
+  let mut missing: Vec<String> = Vec::new();
+  for path in &committed {
+    let hash = match aeordb::engine::file_path_hash(path, &algo) {
+      Ok(h) => h,
+      Err(_) => {
+        missing.push(path.clone());
+        continue;
+      }
     };
-
-    // Reconstruct the worker's view: + adds, - removes. Match `load_checkpoint`
-    // in aeordb-cli/src/bin/soak-worker.rs.
-    let mut committed: HashSet<String> = HashSet::new();
-    let mut lines = 0u64;
-    let mut adds = 0u64;
-    let mut dels = 0u64;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        lines += 1;
-        if let Some(rest) = line.strip_prefix("+\t") {
-            committed.insert(rest.to_string());
-            adds += 1;
-        } else if let Some(rest) = line.strip_prefix("-\t") {
-            committed.remove(rest);
-            dels += 1;
-        }
+    match engine.has_entry(&hash) {
+      Ok(true) => present += 1,
+      Ok(false) => missing.push(path.clone()),
+      Err(_) => missing.push(path.clone()),
     }
+  }
 
-    let algo = engine.hash_algo();
-    let mut present = 0u64;
-    let mut missing: Vec<String> = Vec::new();
-    for path in &committed {
-        let hash = match aeordb::engine::file_path_hash(path, &algo) {
-            Ok(h) => h,
-            Err(_) => { missing.push(path.clone()); continue; }
-        };
-        match engine.has_entry(&hash) {
-            Ok(true) => present += 1,
-            Ok(false) => missing.push(path.clone()),
-            Err(_) => missing.push(path.clone()),
-        }
+  // Also gather "present-in-DB but not-in-checkpoint" — a weaker signal,
+  // but useful for spotting in-flight writes that landed before the
+  // checkpoint flush.
+  let mut extras: Vec<String> = Vec::new();
+  let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+  let hash_length = engine.hash_algo().hash_length();
+  let mut db_paths = HashSet::new();
+  for (hash, value) in &entries {
+    let version = match engine.get_entry_including_deleted(hash) {
+      Ok(Some(e)) => e.0.entry_version,
+      _ => continue,
+    };
+    if let Ok(record) = aeordb::engine::file_record::FileRecord::deserialize(value, hash_length, version) {
+      db_paths.insert(record.path);
     }
+  }
+  for p in &db_paths {
+    if !committed.contains(p) && !p.starts_with("/.aeordb-system") {
+      extras.push(p.clone());
+    }
+  }
 
-    // Also gather "present-in-DB but not-in-checkpoint" — a weaker signal,
-    // but useful for spotting in-flight writes that landed before the
-    // checkpoint flush.
-    let mut extras: Vec<String> = Vec::new();
-    let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
-    let hash_length = engine.hash_algo().hash_length();
-    let mut db_paths = HashSet::new();
-    for (hash, value) in &entries {
-        let version = match engine.get_entry_including_deleted(hash) {
-            Ok(Some(e)) => e.0.entry_version,
-            _ => continue,
-        };
-        if let Ok(record) = aeordb::engine::file_record::FileRecord::deserialize(value, hash_length, version) {
-            db_paths.insert(record.path);
-        }
-    }
-    for p in &db_paths {
-        if !committed.contains(p) && !p.starts_with("/.aeordb-system") {
-            extras.push(p.clone());
-        }
-    }
+  println!("=== diff-checkpoint ===");
+  println!("checkpoint:              {}", tsv_path);
+  println!("lines parsed:            {}  (+: {}, -: {})", lines, adds, dels);
+  println!("committed intent (net):  {}", committed.len());
+  println!("present in db:           {}", present);
+  println!("MISSING from db:         {}  {}", missing.len(), if missing.is_empty() { "" } else { "← SILENT DATA LOSS" });
+  println!("extras in db (not in checkpoint, non-system): {}", extras.len());
 
-    println!("=== diff-checkpoint ===");
-    println!("checkpoint:              {}", tsv_path);
-    println!("lines parsed:            {}  (+: {}, -: {})", lines, adds, dels);
-    println!("committed intent (net):  {}", committed.len());
-    println!("present in db:           {}", present);
-    println!("MISSING from db:         {}  {}", missing.len(),
-        if missing.is_empty() { "" } else { "← SILENT DATA LOSS" });
-    println!("extras in db (not in checkpoint, non-system): {}", extras.len());
-
-    if !missing.is_empty() {
-        println!();
-        println!("Missing paths (up to 30):");
-        for p in missing.iter().take(30) {
-            println!("  {}", p);
-        }
-        if missing.len() > 30 {
-            println!("  ... ({} more)", missing.len() - 30);
-        }
-        std::process::exit(3);  // distinct exit code for soak orchestrators
+  if !missing.is_empty() {
+    println!();
+    println!("Missing paths (up to 30):");
+    for p in missing.iter().take(30) {
+      println!("  {}", p);
     }
+    if missing.len() > 30 {
+      println!("  ... ({} more)", missing.len() - 30);
+    }
+    std::process::exit(3); // distinct exit code for soak orchestrators
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -733,31 +746,36 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
 // frontier. Reads raw bytes — no parsing.
 // ---------------------------------------------------------------------------
 fn dump_wal_tail(path: &str, n: usize) {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => { eprintln!("open {}: {}", path, e); std::process::exit(1); }
-    };
-    let total = match file.metadata().map(|m| m.len()) {
-        Ok(v) => v,
-        Err(e) => { eprintln!("metadata: {}", e); std::process::exit(1); }
-    };
-    let from = total.saturating_sub(n as u64);
-    if let Err(e) = file.seek(SeekFrom::Start(from)) {
-        eprintln!("seek: {}", e); std::process::exit(1);
+  use std::io::{Read, Seek, SeekFrom};
+  let mut file = match std::fs::File::open(path) {
+    Ok(f) => f,
+    Err(e) => {
+      eprintln!("open {}: {}", path, e);
+      std::process::exit(1);
     }
-    let mut buf = vec![0u8; n];
-    let read = file.read(&mut buf).unwrap_or(0);
-    buf.truncate(read);
+  };
+  let total = match file.metadata().map(|m| m.len()) {
+    Ok(v) => v,
+    Err(e) => {
+      eprintln!("metadata: {}", e);
+      std::process::exit(1);
+    }
+  };
+  let from = total.saturating_sub(n as u64);
+  if let Err(e) = file.seek(SeekFrom::Start(from)) {
+    eprintln!("seek: {}", e);
+    std::process::exit(1);
+  }
+  let mut buf = vec![0u8; n];
+  let read = file.read(&mut buf).unwrap_or(0);
+  buf.truncate(read);
 
-    println!("=== wal-tail-bytes (last {} of {}, starting offset {}) ===", read, total, from);
-    // 16 bytes per row, offset | hex | ascii
-    for (i, chunk) in buf.chunks(16).enumerate() {
-        let off = from + (i as u64 * 16);
-        let hex: String = chunk.iter().map(|b| format!("{:02x} ", b)).collect();
-        let ascii: String = chunk.iter()
-            .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
-            .collect();
-        println!("{:012x}  {:<48}  |{}|", off, hex, ascii);
-    }
+  println!("=== wal-tail-bytes (last {} of {}, starting offset {}) ===", read, total, from);
+  // 16 bytes per row, offset | hex | ascii
+  for (i, chunk) in buf.chunks(16).enumerate() {
+    let off = from + (i as u64 * 16);
+    let hex: String = chunk.iter().map(|b| format!("{:02x} ", b)).collect();
+    let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
+    println!("{:012x}  {:<48}  |{}|", off, hex, ascii);
+  }
 }

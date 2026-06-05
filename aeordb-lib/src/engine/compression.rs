@@ -36,10 +36,7 @@ pub fn compress(data: &[u8], algorithm: CompressionAlgorithm) -> EngineResult<Ve
 pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> EngineResult<Vec<u8>> {
   match algorithm {
     CompressionAlgorithm::None => Ok(data.to_vec()),
-    CompressionAlgorithm::Zstd => {
-      zstd::decode_all(data)
-        .map_err(EngineError::IoError)
-    }
+    CompressionAlgorithm::Zstd => zstd::decode_all(data).map_err(EngineError::IoError),
   }
 }
 

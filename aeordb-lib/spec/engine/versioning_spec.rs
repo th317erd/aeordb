@@ -588,11 +588,8 @@ fn test_snapshot_serialization_roundtrip() {
 
 #[test]
 fn test_fork_serialization_roundtrip() {
-  let original = aeordb::engine::version_manager::ForkInfo {
-    name: "test-fork".to_string(),
-    root_hash: vec![0xCD; 32],
-    created_at: 9876543210000,
-  };
+  let original =
+    aeordb::engine::version_manager::ForkInfo { name: "test-fork".to_string(), root_hash: vec![0xCD; 32], created_at: 9876543210000 };
 
   let serialized = original.serialize(32).unwrap();
   let deserialized = aeordb::engine::version_manager::ForkInfo::deserialize(&serialized, 32, 0).unwrap();

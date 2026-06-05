@@ -18,10 +18,8 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
   let hash_algo = HashAlgorithm::Blake3_256;
   let entry_type = EntryType::Chunk;
 
-  let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)
-    .expect("Failed to compute hash");
-  let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
+  let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo).expect("Failed to compute hash");
+  let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -39,8 +37,7 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
 
   let serialized = header.serialize();
   let mut cursor = Cursor::new(&serialized);
-  let deserialized = EntryHeader::deserialize(&mut cursor)
-    .expect("Failed to deserialize header");
+  let deserialized = EntryHeader::deserialize(&mut cursor).expect("Failed to deserialize header");
 
   assert_eq!(deserialized.entry_version, header.entry_version);
   assert_eq!(deserialized.entry_type, header.entry_type);
@@ -59,13 +56,11 @@ fn test_entry_header_with_blake3() {
   let value = b"world";
   let hash_algo = HashAlgorithm::Blake3_256;
 
-  let hash = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo)
-    .expect("Failed to compute hash");
+  let hash = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo).expect("Failed to compute hash");
 
   assert_eq!(hash.len(), 32);
   // Hash should be deterministic
-  let hash_again = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo)
-    .expect("Failed to compute hash");
+  let hash_again = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo).expect("Failed to compute hash");
   assert_eq!(hash, hash_again);
 }
 
@@ -75,8 +70,7 @@ fn test_entry_header_hash_verification_passes() {
   let value = b"test-value";
   let hash_algo = HashAlgorithm::Blake3_256;
 
-  let hash = EntryHeader::compute_hash(EntryType::FileRecord, key, value, hash_algo)
-    .expect("Failed to compute hash");
+  let hash = EntryHeader::compute_hash(EntryType::FileRecord, key, value, hash_algo).expect("Failed to compute hash");
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -101,8 +95,7 @@ fn test_entry_header_hash_verification_fails_on_tamper() {
   let value = b"test-value";
   let hash_algo = HashAlgorithm::Blake3_256;
 
-  let hash = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo)
-    .expect("Failed to compute hash");
+  let hash = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo).expect("Failed to compute hash");
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -148,7 +141,7 @@ fn test_entry_type_roundtrip() {
 #[test]
 fn test_entry_type_invalid_value() {
   assert!(EntryType::from_u8(0x00).is_err());
-  assert!(EntryType::from_u8(0x09).is_err());  // 0x08 is Symlink (valid)
+  assert!(EntryType::from_u8(0x09).is_err()); // 0x08 is Symlink (valid)
   assert!(EntryType::from_u8(0xFF).is_err());
 }
 
@@ -177,8 +170,7 @@ fn test_hash_algorithm_from_u16() {
 fn test_file_header_serialize_deserialize_roundtrip() {
   let header = FileHeader::new(HashAlgorithm::Blake3_256);
   let serialized = header.serialize();
-  let deserialized = FileHeader::deserialize(&serialized)
-    .expect("Failed to deserialize file header");
+  let deserialized = FileHeader::deserialize(&serialized).expect("Failed to deserialize file header");
 
   assert_eq!(deserialized.header_version, header.header_version);
   assert_eq!(deserialized.hash_algo, header.hash_algo);
@@ -244,10 +236,8 @@ fn test_void_entry_format() {
   let value = vec![0u8; 100];
   let hash_algo = HashAlgorithm::Blake3_256;
 
-  let hash = EntryHeader::compute_hash(EntryType::Void, key, &value, hash_algo)
-    .expect("Failed to compute hash");
-  let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
+  let hash = EntryHeader::compute_hash(EntryType::Void, key, &value, hash_algo).expect("Failed to compute hash");
+  let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: CURRENT_ENTRY_VERSION,
@@ -270,8 +260,7 @@ fn test_void_entry_format() {
   // Roundtrip
   let serialized = header.serialize();
   let mut cursor = Cursor::new(&serialized);
-  let deserialized = EntryHeader::deserialize(&mut cursor)
-    .expect("Failed to deserialize void entry header");
+  let deserialized = EntryHeader::deserialize(&mut cursor).expect("Failed to deserialize void entry header");
   assert_eq!(deserialized.entry_type, EntryType::Void);
   assert_eq!(deserialized.key_length, 0);
   assert_eq!(deserialized.value_length, 100);
@@ -312,10 +301,8 @@ fn test_entry_header_deserialize_version_zero_is_valid() {
   let hash_algo = HashAlgorithm::Blake3_256;
   let entry_type = EntryType::Chunk;
 
-  let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)
-    .expect("Failed to compute hash");
-  let total_length =
-    EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
+  let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo).expect("Failed to compute hash");
+  let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len()).unwrap();
 
   let header = EntryHeader {
     entry_version: 0,
@@ -373,10 +360,8 @@ fn test_entry_header_different_entry_types_produce_different_hashes() {
   let value = b"same-value";
   let hash_algo = HashAlgorithm::Blake3_256;
 
-  let hash_chunk = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo)
-    .expect("Failed to compute hash");
-  let hash_file = EntryHeader::compute_hash(EntryType::FileRecord, key, value, hash_algo)
-    .expect("Failed to compute hash");
+  let hash_chunk = EntryHeader::compute_hash(EntryType::Chunk, key, value, hash_algo).expect("Failed to compute hash");
+  let hash_file = EntryHeader::compute_hash(EntryType::FileRecord, key, value, hash_algo).expect("Failed to compute hash");
 
   // Different entry types should produce different hashes because entry_type
   // is included in the hash input
@@ -397,8 +382,7 @@ fn test_file_header_with_nonzero_fields() {
   header.head_hash = vec![0xAB; 32];
 
   let serialized = header.serialize();
-  let deserialized = FileHeader::deserialize(&serialized)
-    .expect("Failed to deserialize file header");
+  let deserialized = FileHeader::deserialize(&serialized).expect("Failed to deserialize file header");
 
   assert_eq!(deserialized.kv_block_offset, 1024);
   assert_eq!(deserialized.kv_block_length, 4096);

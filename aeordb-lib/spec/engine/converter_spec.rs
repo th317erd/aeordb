@@ -1,8 +1,6 @@
 use aeordb::engine::scalar_converter::{
-  ScalarConverter,
-  HashConverter, U8Converter, U16Converter, U32Converter, U64Converter,
-  I64Converter, F64Converter, StringConverter, TimestampConverter,
-  serialize_converter, deserialize_converter,
+  ScalarConverter, HashConverter, U8Converter, U16Converter, U32Converter, U64Converter, I64Converter, F64Converter, StringConverter,
+  TimestampConverter, serialize_converter, deserialize_converter,
 };
 
 // ============================================================================
@@ -35,10 +33,10 @@ fn test_hash_converter_range() {
 #[test]
 fn test_hash_converter_deterministic() {
   let converter = HashConverter;
-  let hash = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+  let hash = vec![
+    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ];
   let first = converter.to_scalar(&hash);
   let second = converter.to_scalar(&hash);
   assert_eq!(first, second, "same input must produce same scalar");
@@ -249,9 +247,7 @@ fn test_i64_converter_preserves_order() {
   assert!(converter.is_order_preserving());
 
   let values: Vec<i64> = vec![-1000, -100, -1, 0, 1, 100, 1000];
-  let scalars: Vec<f64> = values.iter()
-    .map(|value| converter.to_scalar(&value.to_be_bytes()))
-    .collect();
+  let scalars: Vec<f64> = values.iter().map(|value| converter.to_scalar(&value.to_be_bytes())).collect();
 
   for window in scalars.windows(2) {
     assert!(window[0] < window[1], "scalars should be monotonically increasing: {} >= {}", window[0], window[1]);
@@ -264,9 +260,7 @@ fn test_i64_converter_full_range_extremes_ordered() {
   let converter = I64Converter::new();
 
   let values: Vec<i64> = vec![i64::MIN, -1_000_000_000, 0, 1_000_000_000, i64::MAX];
-  let scalars: Vec<f64> = values.iter()
-    .map(|value| converter.to_scalar(&value.to_be_bytes()))
-    .collect();
+  let scalars: Vec<f64> = values.iter().map(|value| converter.to_scalar(&value.to_be_bytes())).collect();
 
   for window in scalars.windows(2) {
     assert!(window[0] <= window[1], "scalars should be non-decreasing: {} > {}", window[0], window[1]);
@@ -461,8 +455,10 @@ fn test_converter_serialization_roundtrip() {
   ];
 
   let test_values: Vec<Vec<u8>> = vec![
-    vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    vec![
+      0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
     vec![100],
     30000u16.to_be_bytes().to_vec(),
     2000000u32.to_be_bytes().to_vec(),
@@ -475,24 +471,20 @@ fn test_converter_serialization_roundtrip() {
 
   for (index, converter) in converters.iter().enumerate() {
     let serialized = serialize_converter(converter.as_ref());
-    let deserialized = deserialize_converter(&serialized)
-      .unwrap_or_else(|error| panic!("roundtrip failed for {}: {:?}", converter.name(), error));
+    let deserialized =
+      deserialize_converter(&serialized).unwrap_or_else(|error| panic!("roundtrip failed for {}: {:?}", converter.name(), error));
 
-    assert_eq!(
-      deserialized.name(), converter.name(),
-      "name mismatch after roundtrip for converter index {}", index
-    );
-    assert_eq!(
-      deserialized.is_order_preserving(), converter.is_order_preserving(),
-      "order_preserving mismatch for {}", converter.name()
-    );
+    assert_eq!(deserialized.name(), converter.name(), "name mismatch after roundtrip for converter index {}", index);
+    assert_eq!(deserialized.is_order_preserving(), converter.is_order_preserving(), "order_preserving mismatch for {}", converter.name());
 
     let original_scalar = converter.to_scalar(&test_values[index]);
     let roundtrip_scalar = deserialized.to_scalar(&test_values[index]);
     assert!(
       (original_scalar - roundtrip_scalar).abs() < 1e-15,
       "scalar mismatch for {}: original={}, roundtrip={}",
-      converter.name(), original_scalar, roundtrip_scalar
+      converter.name(),
+      original_scalar,
+      roundtrip_scalar
     );
   }
 }

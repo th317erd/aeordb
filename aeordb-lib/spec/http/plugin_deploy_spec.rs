@@ -99,12 +99,8 @@ async fn test_deploy_wasm_plugin_returns_200() {
   let auth = bearer_token(&jwt_manager);
   let wasm_bytes = minimal_wasm_bytes();
 
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/myfunc")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/plugins/myfunc").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -126,12 +122,7 @@ async fn test_deploy_invalid_wasm_returns_400() {
   let auth = bearer_token(&jwt_manager);
 
   let garbage = vec![0x00, 0x61, 0x73, 0x6d, 0xFF, 0xFF, 0xFF, 0xFF];
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/badfunc")
-    .header("authorization", &auth)
-    .body(Body::from(garbage))
-    .unwrap();
+  let request = Request::builder().method("PUT").uri("/plugins/badfunc").header("authorization", &auth).body(Body::from(garbage)).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -170,12 +161,7 @@ async fn test_deploy_empty_body_returns_400() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/empty")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("PUT").uri("/plugins/empty").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -189,12 +175,8 @@ async fn test_invoke_deployed_plugin_returns_result() {
 
   // Deploy
   let app = rebuild_app(&jwt_manager, &engine);
-  let deploy_request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/echo")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let deploy_request =
+    Request::builder().method("PUT").uri("/plugins/echo").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   let deploy_response = app.oneshot(deploy_request).await.unwrap();
   assert_eq!(deploy_response.status(), StatusCode::OK);
 
@@ -204,33 +186,20 @@ async fn test_invoke_deployed_plugin_returns_result() {
   // Since that is NOT a valid PluginResponse, the fallback path kicks in
   // and returns the raw bytes as application/octet-stream.
   let app = rebuild_app(&jwt_manager, &engine);
-  let invoke_request = Request::builder()
-    .method("POST")
-    .uri("/plugins/echo/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("hello plugin"))
-    .unwrap();
+  let invoke_request =
+    Request::builder().method("POST").uri("/plugins/echo/invoke").header("authorization", &auth).body(Body::from("hello plugin")).unwrap();
   let invoke_response = app.oneshot(invoke_request).await.unwrap();
   assert_eq!(invoke_response.status(), StatusCode::OK);
 
   // The response should be the serialized PluginRequest envelope (echoed back).
   let response_bytes = body_bytes(invoke_response.into_body()).await;
-  let echoed: serde_json::Value =
-    serde_json::from_slice(&response_bytes).expect("response should be valid JSON");
+  let echoed: serde_json::Value = serde_json::from_slice(&response_bytes).expect("response should be valid JSON");
   // The original body bytes are in the "arguments" field.
-  let arguments: Vec<u8> = echoed["arguments"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|v| v.as_u64().unwrap() as u8)
-    .collect();
+  let arguments: Vec<u8> = echoed["arguments"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect();
   assert_eq!(arguments, b"hello plugin");
   // Metadata should contain the name and path.
   assert_eq!(echoed["metadata"]["name"], "echo");
-  assert_eq!(
-    echoed["metadata"]["path"],
-    "/plugins/echo"
-  );
+  assert_eq!(echoed["metadata"]["path"], "/plugins/echo");
   assert_eq!(echoed["metadata"]["plugin_path"], "echo");
 }
 
@@ -239,12 +208,8 @@ async fn test_invoke_nonexistent_plugin_returns_404() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/plugins/missing/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("data"))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/plugins/missing/invoke").header("authorization", &auth).body(Body::from("data")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -258,31 +223,18 @@ async fn test_list_deployed_plugins() {
 
   // Deploy two plugins
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/func_a")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes.clone()))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/plugins/func_a").header("authorization", &auth).body(Body::from(wasm_bytes.clone())).unwrap();
   app.oneshot(request).await.unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/func_b")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/plugins/func_b").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   app.oneshot(request).await.unwrap();
 
   // List
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/plugins")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/plugins").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -300,40 +252,22 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let list_request = Request::builder()
-    .method("GET")
-    .uri("/plugins")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let list_request = Request::builder().method("GET").uri("/plugins").header("authorization", &auth).body(Body::empty()).unwrap();
   let list_response = app.clone().oneshot(list_request).await.unwrap();
   assert_eq!(list_response.status(), StatusCode::OK);
   let list_json = body_json(list_response.into_body()).await;
-  let plugins = list_json["items"]
-    .as_array()
-    .expect("should have items array");
-  let extract_bundle = BUNDLED_PLUGINS
-    .iter()
-    .find(|plugin| plugin.path == "extract")
-    .expect("extract bundle metadata");
-  let extract = plugins
-    .iter()
-    .find(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract")
-    .expect("extract bundled plugin listed");
+  let plugins = list_json["items"].as_array().expect("should have items array");
+  let extract_bundle = BUNDLED_PLUGINS.iter().find(|plugin| plugin.path == "extract").expect("extract bundle metadata");
+  let extract =
+    plugins.iter().find(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract").expect("extract bundled plugin listed");
   assert_eq!(extract["plugin_id"], extract_bundle.plugin_id);
   assert_eq!(extract["version"], "0.1.0");
   assert_eq!(extract["author"], "AeorDB");
   assert!(extract["checksum"].as_str().unwrap().starts_with("blake3:"));
   assert!(extract["updated_at"].is_string());
 
-  let jq_bundle = BUNDLED_PLUGINS
-    .iter()
-    .find(|plugin| plugin.path == "jq")
-    .expect("jq bundle metadata");
-  let jq = plugins
-    .iter()
-    .find(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq")
-    .expect("jq bundled plugin listed");
+  let jq_bundle = BUNDLED_PLUGINS.iter().find(|plugin| plugin.path == "jq").expect("jq bundle metadata");
+  let jq = plugins.iter().find(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq").expect("jq bundled plugin listed");
   assert_eq!(jq["plugin_id"], jq_bundle.plugin_id);
   assert_eq!(jq["version"], "0.1.0");
   assert_eq!(jq["author"], "AeorDB");
@@ -342,12 +276,7 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
 
   let ops = DirectoryOps::new(engine.as_ref());
   ops
-    .store_file_buffered(
-      &RequestContext::system(),
-      "/docs/defaults.txt",
-      b"one\r\ntwo\r\nthree\r\n",
-      Some("text/plain"),
-    )
+    .store_file_buffered(&RequestContext::system(), "/docs/defaults.txt", b"one\r\ntwo\r\nthree\r\n", Some("text/plain"))
     .expect("store text fixture");
   ops
     .store_file_buffered(
@@ -402,10 +331,7 @@ async fn test_bundled_plugins_reinstall_when_id_matches_and_version_allows() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let manager = PluginManager::new(engine.clone());
-  let original = manager
-    .get_plugin("extract")
-    .expect("read bundled extract")
-    .expect("extract should be installed");
+  let original = manager.get_plugin("extract").expect("read bundled extract").expect("extract should be installed");
 
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy_request = Request::builder()
@@ -417,26 +343,14 @@ async fn test_bundled_plugins_reinstall_when_id_matches_and_version_allows() {
   let deploy_response = app.oneshot(deploy_request).await.unwrap();
   assert_eq!(deploy_response.status(), StatusCode::OK);
 
-  let replaced = manager
-    .get_plugin("extract")
-    .expect("read replaced extract")
-    .expect("extract should still exist");
-  assert_ne!(
-    blake3::hash(&replaced.wasm_bytes),
-    blake3::hash(&original.wasm_bytes)
-  );
+  let replaced = manager.get_plugin("extract").expect("read replaced extract").expect("extract should still exist");
+  assert_ne!(blake3::hash(&replaced.wasm_bytes), blake3::hash(&original.wasm_bytes));
   assert_eq!(replaced.plugin_id, original.plugin_id);
   assert_eq!(replaced.version.as_deref(), Some("0.1.0"));
 
   let _restarted_app = rebuild_app(&jwt_manager, &engine);
-  let after_restart = manager
-    .get_plugin("extract")
-    .expect("read extract after restart")
-    .expect("extract should still exist");
-  assert_eq!(
-    blake3::hash(&after_restart.wasm_bytes),
-    blake3::hash(&original.wasm_bytes)
-  );
+  let after_restart = manager.get_plugin("extract").expect("read extract after restart").expect("extract should still exist");
+  assert_eq!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&original.wasm_bytes));
   assert_eq!(after_restart.plugin_id, replaced.plugin_id);
   assert_eq!(after_restart.author.as_deref(), Some("AeorDB"));
   assert_eq!(after_restart.version.as_deref(), Some("0.1.0"));
@@ -446,38 +360,19 @@ async fn test_bundled_plugins_reinstall_when_id_matches_and_version_allows() {
 async fn test_bundled_plugins_do_not_reinstall_when_plugin_id_differs() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let manager = PluginManager::new(engine.clone());
-  let original = manager
-    .get_plugin("extract")
-    .expect("read bundled extract")
-    .expect("extract should be installed");
+  let original = manager.get_plugin("extract").expect("read bundled extract").expect("extract should be installed");
 
-  manager
-    .remove_plugin("extract")
-    .expect("remove bundled extract before user replacement");
+  manager.remove_plugin("extract").expect("remove bundled extract before user replacement");
   let replacement = manager
-    .deploy_plugin(
-      "user-extract",
-      "extract",
-      aeordb::plugins::PluginType::Wasm,
-      minimal_wasm_bytes(),
-    )
+    .deploy_plugin("user-extract", "extract", aeordb::plugins::PluginType::Wasm, minimal_wasm_bytes())
     .expect("deploy user replacement");
   assert_ne!(replacement.plugin_id, original.plugin_id);
 
   let _restarted_app = rebuild_app(&jwt_manager, &engine);
-  let after_restart = manager
-    .get_plugin("extract")
-    .expect("read extract after restart")
-    .expect("extract should still exist");
+  let after_restart = manager.get_plugin("extract").expect("read extract after restart").expect("extract should still exist");
   assert_eq!(after_restart.plugin_id, replacement.plugin_id);
-  assert_eq!(
-    blake3::hash(&after_restart.wasm_bytes),
-    blake3::hash(&replacement.wasm_bytes)
-  );
-  assert_ne!(
-    blake3::hash(&after_restart.wasm_bytes),
-    blake3::hash(&original.wasm_bytes)
-  );
+  assert_eq!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&replacement.wasm_bytes));
+  assert_ne!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&original.wasm_bytes));
 }
 
 #[tokio::test]
@@ -485,10 +380,7 @@ async fn test_bundled_plugins_do_not_downgrade_same_id_newer_version() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let manager = PluginManager::new(engine.clone());
-  let original = manager
-    .get_plugin("extract")
-    .expect("read bundled extract")
-    .expect("extract should be installed");
+  let original = manager.get_plugin("extract").expect("read bundled extract").expect("extract should be installed");
 
   let app = rebuild_app(&jwt_manager, &engine);
   let deploy_request = Request::builder()
@@ -500,32 +392,17 @@ async fn test_bundled_plugins_do_not_downgrade_same_id_newer_version() {
   let deploy_response = app.oneshot(deploy_request).await.unwrap();
   assert_eq!(deploy_response.status(), StatusCode::OK);
 
-  let replacement = manager
-    .get_plugin("extract")
-    .expect("read replaced extract")
-    .expect("extract should still exist");
+  let replacement = manager.get_plugin("extract").expect("read replaced extract").expect("extract should still exist");
   assert_eq!(replacement.plugin_id, original.plugin_id);
   assert_eq!(replacement.version.as_deref(), Some("999.0.0"));
-  assert_ne!(
-    blake3::hash(&replacement.wasm_bytes),
-    blake3::hash(&original.wasm_bytes)
-  );
+  assert_ne!(blake3::hash(&replacement.wasm_bytes), blake3::hash(&original.wasm_bytes));
 
   let _restarted_app = rebuild_app(&jwt_manager, &engine);
-  let after_restart = manager
-    .get_plugin("extract")
-    .expect("read extract after restart")
-    .expect("extract should still exist");
+  let after_restart = manager.get_plugin("extract").expect("read extract after restart").expect("extract should still exist");
   assert_eq!(after_restart.plugin_id, replacement.plugin_id);
   assert_eq!(after_restart.version.as_deref(), Some("999.0.0"));
-  assert_eq!(
-    blake3::hash(&after_restart.wasm_bytes),
-    blake3::hash(&replacement.wasm_bytes)
-  );
-  assert_ne!(
-    blake3::hash(&after_restart.wasm_bytes),
-    blake3::hash(&original.wasm_bytes)
-  );
+  assert_eq!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&replacement.wasm_bytes));
+  assert_ne!(blake3::hash(&after_restart.wasm_bytes), blake3::hash(&original.wasm_bytes));
 }
 
 #[tokio::test]
@@ -536,22 +413,13 @@ async fn test_remove_deployed_plugin() {
 
   // Deploy
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/removeme")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let request =
+    Request::builder().method("PUT").uri("/plugins/removeme").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   app.oneshot(request).await.unwrap();
 
   // Remove
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/plugins/removeme")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri("/plugins/removeme").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -560,12 +428,8 @@ async fn test_remove_deployed_plugin() {
 
   // Verify it is gone
   let app = rebuild_app(&jwt_manager, &engine);
-  let request = Request::builder()
-    .method("POST")
-    .uri("/plugins/removeme/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("data"))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/plugins/removeme/invoke").header("authorization", &auth).body(Body::from("data")).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
@@ -590,11 +454,7 @@ async fn test_deploy_requires_auth() {
 async fn test_list_plugins_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/plugins")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/plugins").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -617,10 +477,7 @@ fn plugin_response_wasm_bytes() -> Vec<u8> {
   let len = response_bytes.len();
 
   // Build the data segment hex string for embedding in WAT.
-  let hex_escaped: String = response_bytes
-    .iter()
-    .map(|b| format!("\\{:02x}", b))
-    .collect();
+  let hex_escaped: String = response_bytes.iter().map(|b| format!("\\{:02x}", b)).collect();
 
   // Place the response data at offset 4096 to avoid being overwritten when the
   // runtime writes request bytes at offset 0.
@@ -656,33 +513,18 @@ async fn test_invoke_plugin_response_status_code_propagated() {
 
   // Deploy
   let app = rebuild_app(&jwt_manager, &engine);
-  let deploy = Request::builder()
-    .method("PUT")
-    .uri("/plugins/resp")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let deploy = Request::builder().method("PUT").uri("/plugins/resp").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
 
   // Invoke
   let app = rebuild_app(&jwt_manager, &engine);
-  let invoke = Request::builder()
-    .method("POST")
-    .uri("/plugins/resp/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("ignored"))
-    .unwrap();
+  let invoke =
+    Request::builder().method("POST").uri("/plugins/resp/invoke").header("authorization", &auth).body(Body::from("ignored")).unwrap();
   let response = app.oneshot(invoke).await.unwrap();
 
   assert_eq!(response.status(), StatusCode::CREATED); // 201
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "text/plain"
-  );
-  assert_eq!(
-    response.headers().get("x-custom").unwrap().to_str().unwrap(),
-    "yes"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "text/plain");
+  assert_eq!(response.headers().get("x-custom").unwrap().to_str().unwrap(), "yes");
 
   let body = body_bytes(response.into_body()).await;
   assert_eq!(body, b"Hi");
@@ -700,30 +542,18 @@ async fn test_invoke_plugin_fallback_for_non_plugin_response() {
 
   // Deploy
   let app = rebuild_app(&jwt_manager, &engine);
-  let deploy = Request::builder()
-    .method("PUT")
-    .uri("/plugins/echo2")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let deploy = Request::builder().method("PUT").uri("/plugins/echo2").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
 
   // Invoke
   let app = rebuild_app(&jwt_manager, &engine);
-  let invoke = Request::builder()
-    .method("POST")
-    .uri("/plugins/echo2/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("raw data"))
-    .unwrap();
+  let invoke =
+    Request::builder().method("POST").uri("/plugins/echo2/invoke").header("authorization", &auth).body(Body::from("raw data")).unwrap();
   let response = app.oneshot(invoke).await.unwrap();
 
   // Fallback path: 200 OK with octet-stream
   assert_eq!(response.status(), StatusCode::OK);
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "application/octet-stream"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "application/octet-stream");
 }
 
 #[tokio::test]
@@ -735,22 +565,13 @@ async fn test_invoke_plugin_metadata_includes_function_name() {
   let wasm_bytes = minimal_wasm_bytes();
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let deploy = Request::builder()
-    .method("PUT")
-    .uri("/plugins/meta")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let deploy = Request::builder().method("PUT").uri("/plugins/meta").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
 
   // Invoke with a specific function_name segment
   let app = rebuild_app(&jwt_manager, &engine);
-  let invoke = Request::builder()
-    .method("POST")
-    .uri("/plugins/meta/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("test"))
-    .unwrap();
+  let invoke =
+    Request::builder().method("POST").uri("/plugins/meta/invoke").header("authorization", &auth).body(Body::from("test")).unwrap();
   let response = app.oneshot(invoke).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
@@ -769,32 +590,19 @@ async fn test_invoke_plugin_empty_body() {
   let wasm_bytes = minimal_wasm_bytes();
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let deploy = Request::builder()
-    .method("PUT")
-    .uri("/plugins/emptybody")
-    .header("authorization", &auth)
-    .body(Body::from(wasm_bytes))
-    .unwrap();
+  let deploy =
+    Request::builder().method("PUT").uri("/plugins/emptybody").header("authorization", &auth).body(Body::from(wasm_bytes)).unwrap();
   assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
 
   let app = rebuild_app(&jwt_manager, &engine);
-  let invoke = Request::builder()
-    .method("POST")
-    .uri("/plugins/emptybody/invoke")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let invoke =
+    Request::builder().method("POST").uri("/plugins/emptybody/invoke").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(invoke).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
 
   let bytes = body_bytes(response.into_body()).await;
   let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-  let arguments: Vec<u8> = echoed["arguments"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|v| v.as_u64().unwrap() as u8)
-    .collect();
+  let arguments: Vec<u8> = echoed["arguments"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect();
   assert!(arguments.is_empty());
 }
 
@@ -802,11 +610,7 @@ async fn test_invoke_plugin_empty_body() {
 async fn test_invoke_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/plugins/func/invoke")
-    .body(Body::from("data"))
-    .unwrap();
+  let request = Request::builder().method("POST").uri("/plugins/func/invoke").body(Body::from("data")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -816,11 +620,7 @@ async fn test_invoke_requires_auth() {
 async fn test_remove_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/plugins/func")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri("/plugins/func").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

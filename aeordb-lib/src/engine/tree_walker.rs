@@ -21,19 +21,14 @@ pub struct VersionTree {
 }
 
 impl Default for VersionTree {
-    fn default() -> Self {
-        Self::new()
-    }
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl VersionTree {
   pub fn new() -> Self {
-    VersionTree {
-      files: HashMap::new(),
-      directories: HashMap::new(),
-      chunks: HashSet::new(),
-      symlinks: HashMap::new(),
-    }
+    VersionTree { files: HashMap::new(), directories: HashMap::new(), chunks: HashSet::new(), symlinks: HashMap::new() }
   }
 }
 
@@ -43,10 +38,7 @@ impl VersionTree {
 /// Uses a visited set for cycle detection: if corrupted data creates a
 /// circular reference (directory A contains directory B which contains A),
 /// the walk terminates that branch instead of recursing infinitely.
-pub fn walk_version_tree(
-  engine: &StorageEngine,
-  root_hash: &[u8],
-) -> EngineResult<VersionTree> {
+pub fn walk_version_tree(engine: &StorageEngine, root_hash: &[u8]) -> EngineResult<VersionTree> {
   let mut tree = VersionTree::new();
   let mut visited = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
@@ -59,12 +51,7 @@ pub fn walk_version_tree(
 /// because system paths are not propagated to root.
 ///
 /// Adds entries into the provided tree.
-pub fn walk_subtree(
-  engine: &StorageEngine,
-  start_path: &str,
-  start_dir_hash: &[u8],
-  tree: &mut VersionTree,
-) -> EngineResult<()> {
+pub fn walk_subtree(engine: &StorageEngine, start_path: &str, start_dir_hash: &[u8], tree: &mut VersionTree) -> EngineResult<()> {
   let mut visited = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
   walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut visited)
@@ -80,23 +67,15 @@ pub fn walk_subtree(
 /// Credential subdirectories (`api-keys`, `refresh-tokens`, `magic-links`)
 /// are excluded — they're tied to the issuing node's identity and must not
 /// replicate.
-pub fn augment_with_system_subtrees(
-  engine: &crate::engine::StorageEngine,
-  tree: &mut VersionTree,
-) {
+pub fn augment_with_system_subtrees(engine: &crate::engine::StorageEngine, tree: &mut VersionTree) {
   use crate::engine::directory_ops::{directory_path_hash, file_path_hash};
   use crate::engine::file_record::FileRecord;
 
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
 
-  let system_dirs = [
-    "/.aeordb-system/users",
-    "/.aeordb-system/groups",
-    "/.aeordb-system/snapshots",
-    "/.aeordb-system/config",
-    "/.aeordb-config",
-  ];
+  let system_dirs =
+    ["/.aeordb-system/users", "/.aeordb-system/groups", "/.aeordb-system/snapshots", "/.aeordb-system/config", "/.aeordb-config"];
   let system_single_files: &[&str] = &["/.aeordb-system/email-config.json"];
 
   for sys_path in &system_dirs {
@@ -128,8 +107,14 @@ pub fn augment_with_system_subtrees(
     let (record, content_hash) = match engine.get_entry_including_deleted(&key) {
       Ok(Some((header, _key, raw))) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
         Ok(record) => {
-          let serialized = match record.serialize(hash_length) { Ok(s) => s, Err(_) => continue };
-          match algo.compute_hash(&serialized) { Ok(h) => (record, h), Err(_) => continue }
+          let serialized = match record.serialize(hash_length) {
+            Ok(s) => s,
+            Err(_) => continue,
+          };
+          match algo.compute_hash(&serialized) {
+            Ok(h) => (record, h),
+            Err(_) => continue,
+          }
         }
         Err(_) => continue,
       },
@@ -166,10 +151,7 @@ fn walk_directory(
   };
 
   // Store the directory itself
-  tree.directories.insert(
-    current_path.to_string(),
-    (dir_hash.to_vec(), dir_data.clone()),
-  );
+  tree.directories.insert(current_path.to_string(), (dir_hash.to_vec(), dir_data.clone()));
 
   // Empty directory — no children to parse
   if dir_data.is_empty() {
@@ -184,11 +166,7 @@ fn walk_directory(
   };
 
   for child in &children {
-    let child_path = if current_path == "/" {
-      format!("/{}", child.name)
-    } else {
-      format!("{}/{}", current_path, child.name)
-    };
+    let child_path = if current_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", current_path, child.name) };
 
     let child_entry_type = EntryType::from_u8(child.entry_type)?;
 
@@ -208,20 +186,14 @@ fn walk_directory(
             tree.chunks.insert(chunk_hash.clone());
           }
 
-          tree.files.insert(
-            child_path.clone(),
-            (child.hash.clone(), file_record),
-          );
+          tree.files.insert(child_path.clone(), (child.hash.clone(), file_record));
         }
       }
       EntryType::Symlink => {
         // Must include deleted entries — see comment on get_entry_including_deleted above.
         if let Some((header, _key, value)) = engine.get_entry_including_deleted(&child.hash)? {
           let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)?;
-          tree.symlinks.insert(
-            child_path.clone(),
-            (child.hash.clone(), symlink_record),
-          );
+          tree.symlinks.insert(child_path.clone(), (child.hash.clone(), symlink_record));
         }
       }
       _ => {
@@ -256,8 +228,12 @@ pub struct TreeDiff {
 
 impl TreeDiff {
   pub fn is_empty(&self) -> bool {
-    self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
-      && self.symlinks_added.is_empty() && self.symlinks_modified.is_empty() && self.symlinks_deleted.is_empty()
+    self.added.is_empty()
+      && self.modified.is_empty()
+      && self.deleted.is_empty()
+      && self.symlinks_added.is_empty()
+      && self.symlinks_modified.is_empty()
+      && self.symlinks_deleted.is_empty()
   }
 }
 
@@ -293,11 +269,7 @@ pub fn diff_trees(base: &VersionTree, target: &VersionTree) -> TreeDiff {
   }
 
   // New chunks: chunks in target tree but not in base tree
-  let new_chunks: HashSet<Vec<u8>> = target
-    .chunks
-    .difference(&base.chunks)
-    .cloned()
-    .collect();
+  let new_chunks: HashSet<Vec<u8>> = target.chunks.difference(&base.chunks).cloned().collect();
 
   // Changed directories
   let changed_directories = diff_directories(&base.directories, &target.directories);
@@ -326,16 +298,7 @@ pub fn diff_trees(base: &VersionTree, target: &VersionTree) -> TreeDiff {
     }
   }
 
-  TreeDiff {
-    added,
-    modified,
-    deleted,
-    new_chunks,
-    changed_directories,
-    symlinks_added,
-    symlinks_modified,
-    symlinks_deleted,
-  }
+  TreeDiff { added, modified, deleted, new_chunks, changed_directories, symlinks_added, symlinks_modified, symlinks_deleted }
 }
 
 /// Find directories that changed between base and target.

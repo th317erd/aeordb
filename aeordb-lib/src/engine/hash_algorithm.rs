@@ -4,20 +4,20 @@ use crate::engine::errors::{EngineError, EngineResult};
 #[repr(u16)]
 pub enum HashAlgorithm {
   Blake3_256 = 0x0001,
-  Sha256     = 0x0002,
-  Sha512     = 0x0003,
-  Sha3_256   = 0x0004,
-  Sha3_512   = 0x0005,
+  Sha256 = 0x0002,
+  Sha512 = 0x0003,
+  Sha3_256 = 0x0004,
+  Sha3_512 = 0x0005,
 }
 
 impl HashAlgorithm {
   pub fn hash_length(&self) -> usize {
     match self {
       HashAlgorithm::Blake3_256 => 32,
-      HashAlgorithm::Sha256     => 32,
-      HashAlgorithm::Sha512     => 64,
-      HashAlgorithm::Sha3_256   => 32,
-      HashAlgorithm::Sha3_512   => 64,
+      HashAlgorithm::Sha256 => 32,
+      HashAlgorithm::Sha512 => 64,
+      HashAlgorithm::Sha3_256 => 32,
+      HashAlgorithm::Sha3_512 => 64,
     }
   }
 
@@ -38,7 +38,7 @@ impl HashAlgorithm {
       0x0003 => Some(HashAlgorithm::Sha512),
       0x0004 => Some(HashAlgorithm::Sha3_256),
       0x0005 => Some(HashAlgorithm::Sha3_512),
-      _      => None,
+      _ => None,
     }
   }
 

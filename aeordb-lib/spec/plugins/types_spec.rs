@@ -1,7 +1,4 @@
-use aeordb::plugins::types::{
-  PluginType, RuleDecision, RuleContext, PluginMetadata,
-  serialize_for_ffi, deserialize_from_ffi,
-};
+use aeordb::plugins::types::{PluginType, RuleDecision, RuleContext, PluginMetadata, serialize_for_ffi, deserialize_from_ffi};
 
 // ---------------------------------------------------------------------------
 // PluginType Display
@@ -49,11 +46,7 @@ fn test_plugin_type_from_str_unknown_returns_error() {
   let result: Result<PluginType, String> = "javascript".parse();
   assert!(result.is_err());
   let error_message = result.unwrap_err();
-  assert!(
-    error_message.contains("unknown plugin type"),
-    "Error should mention 'unknown plugin type', got: {}",
-    error_message,
-  );
+  assert!(error_message.contains("unknown plugin type"), "Error should mention 'unknown plugin type', got: {}", error_message,);
 }
 
 // ---------------------------------------------------------------------------

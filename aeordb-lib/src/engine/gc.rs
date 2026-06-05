@@ -8,8 +8,7 @@ use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
 use crate::engine::engine_counters::CountersSnapshot;
 use crate::engine::kv_store::{
-    KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY,
-    KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
+  KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
 };
 use crate::engine::request_context::RequestContext;
 use crate::engine::rss_sampler::PhaseSampler;
@@ -63,8 +62,7 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
 
   if timing {
-    eprintln!("[gc-timing] mark: {} roots ({} snapshots + {} forks + HEAD)",
-      roots.len(), snapshots.len(), forks.len());
+    eprintln!("[gc-timing] mark: {} roots ({} snapshots + {} forks + HEAD)", roots.len(), snapshots.len(), forks.len());
   }
 
   let bfs_start = std::time::Instant::now();
@@ -88,14 +86,18 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   // Mark system table entries as live
   let sys_start = std::time::Instant::now();
   mark_system_entries(engine, hash_length, &mut live)?;
-  if timing { eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed()); }
+  if timing {
+    eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed());
+  }
 
   // Mark task queue entries as live -- task records use deterministic hashes
   // ("::aeordb:task:{id}") that are NOT in the directory tree, so
   // mark_system_entries does not cover them.
   let task_start = std::time::Instant::now();
   mark_task_entries(engine, &mut live)?;
-  if timing { eprintln!("[gc-timing] mark.tasks: {:?}", task_start.elapsed()); }
+  if timing {
+    eprintln!("[gc-timing] mark.tasks: {:?}", task_start.elapsed());
+  }
 
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
@@ -111,8 +113,7 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
   del_mem.finish();
   if timing {
-    eprintln!("[gc-timing] mark.deletion-pass: {:?} (kv_entries={}, deletions={})",
-      del_start.elapsed(), all_entries.len(), deletion_count);
+    eprintln!("[gc-timing] mark.deletion-pass: {:?} (kv_entries={}, deletions={})", del_start.elapsed(), all_entries.len(), deletion_count);
     eprintln!("[gc-timing] mark TOTAL: {:?} (live={})", mark_start.elapsed(), live.len());
   }
 
@@ -225,16 +226,10 @@ fn walk_versions_bfs(
           };
 
           for child in &children {
-            let child_path = if path == "/" {
-              format!("/{}", child.name)
-            } else {
-              format!("{}/{}", path, child.name)
-            };
+            let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path, child.name) };
             let child_type = EntryType::from_u8(child.entry_type)?;
             match child_type {
-              EntryType::DirectoryIndex
-              | EntryType::FileRecord
-              | EntryType::Symlink => {
+              EntryType::DirectoryIndex | EntryType::FileRecord | EntryType::Symlink => {
                 next_frontier.push((child.hash.clone(), child_path));
               }
               _ => {
@@ -273,8 +268,16 @@ fn walk_versions_bfs(
     if timing {
       eprintln!(
         "[gc-timing]   level {}: frontier={} → dedup {:?} (dups={} leaves_skip={} miss={}) → sort {:?} → read {} entries in {:?} → next={}",
-        level, frontier_size, dedup_elapsed, visited_dups, leaves_skipped, not_in_kv,
-        sort_elapsed, read_count, read_elapsed, next_frontier.len(),
+        level,
+        frontier_size,
+        dedup_elapsed,
+        visited_dups,
+        leaves_skipped,
+        not_in_kv,
+        sort_elapsed,
+        read_count,
+        read_elapsed,
+        next_frontier.len(),
       );
     }
 
@@ -332,11 +335,7 @@ fn collect_btree_children(
 /// the merkle hash. Missing any of those silently breaks `JsonStore.get`
 /// after the next sweep, which is how every api-key / user / group
 /// disappeared on the prior GC run.
-fn mark_system_entries(
-  engine: &StorageEngine,
-  hash_length: usize,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
+fn mark_system_entries(engine: &StorageEngine, hash_length: usize, live: &mut HashSet<Vec<u8>>) -> EngineResult<()> {
   let system_prefixes = ["/.aeordb-system", "/.aeordb-config"];
 
   for prefix in &system_prefixes {
@@ -372,7 +371,9 @@ fn mark_entry_recursive(
   let debug = std::env::var("AEORDB_GC_DEBUG_SYSTEM").is_ok();
 
   if !live.insert(hash.to_vec()) {
-    if debug { eprintln!("[gc-rec]   hash={} path={:?} already-live, skip", hex::encode(&hash[..8.min(hash.len())]), path); }
+    if debug {
+      eprintln!("[gc-rec]   hash={} path={:?} already-live, skip", hex::encode(&hash[..8.min(hash.len())]), path);
+    }
     return Ok(());
   }
 
@@ -381,7 +382,9 @@ fn mark_entry_recursive(
   let entry = match engine.get_entry_including_deleted(hash)? {
     Some(entry) => entry,
     None => {
-      if debug { eprintln!("[gc-rec]   hash={} path={:?} NOT-FOUND", hex::encode(&hash[..8.min(hash.len())]), path); }
+      if debug {
+        eprintln!("[gc-rec]   hash={} path={:?} NOT-FOUND", hex::encode(&hash[..8.min(hash.len())]), path);
+      }
       return Ok(());
     }
   };
@@ -401,7 +404,15 @@ fn mark_entry_recursive(
     value
   };
 
-  if debug { eprintln!("[gc-rec]   hash={} path={:?} type={:?} value_len={}", hex::encode(&hash[..8.min(hash.len())]), path, header.entry_type, value.len()); }
+  if debug {
+    eprintln!(
+      "[gc-rec]   hash={} path={:?} type={:?} value_len={}",
+      hex::encode(&hash[..8.min(hash.len())]),
+      path,
+      header.entry_type,
+      value.len()
+    );
+  }
 
   match header.entry_type {
     EntryType::DirectoryIndex => {
@@ -409,7 +420,9 @@ fn mark_entry_recursive(
       let path_key = engine.compute_hash(format!("dir:{}", path).as_bytes())?;
       live.insert(path_key);
 
-      if value.is_empty() { return Ok(()); }
+      if value.is_empty() {
+        return Ok(());
+      }
 
       let children = if is_btree_format(&value) {
         collect_btree_children(engine, &value, hash_length, live)?
@@ -417,11 +430,7 @@ fn mark_entry_recursive(
         deserialize_child_entries(&value, hash_length, header.entry_version)?
       };
       for child in &children {
-        let child_path = if path == "/" {
-          format!("/{}", child.name)
-        } else {
-          format!("{}/{}", path, child.name)
-        };
+        let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path, child.name) };
         mark_entry_recursive(engine, &child.hash, &child_path, hash_length, live)?;
       }
     }
@@ -453,10 +462,7 @@ fn mark_entry_recursive(
 /// Task records use deterministic blake3 hashes on "::aeordb:task:{id}" keys
 /// and are stored as EntryType::FileRecord, so they would be swept by GC
 /// unless explicitly marked.
-fn mark_task_entries(
-  engine: &StorageEngine,
-  live: &mut HashSet<Vec<u8>>,
-) -> EngineResult<()> {
+fn mark_task_entries(engine: &StorageEngine, live: &mut HashSet<Vec<u8>>) -> EngineResult<()> {
   let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
   live.insert(registry_key.clone());
 
@@ -494,11 +500,7 @@ fn mark_task_entries(
 /// reconstructs the index from the on-disk entry headers, so no committed
 /// data is lost — only the sweep progress is discarded and garbage entries
 /// that were not yet overwritten will persist until the next GC run.
-pub fn gc_sweep(
-  engine: &StorageEngine,
-  live: &HashSet<Vec<u8>>,
-  dry_run: bool,
-) -> EngineResult<(usize, u64)> {
+pub fn gc_sweep(engine: &StorageEngine, live: &HashSet<Vec<u8>>, dry_run: bool) -> EngineResult<(usize, u64)> {
   let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let all_entries = engine.iter_kv_entries()?;
 
@@ -589,11 +591,9 @@ pub fn gc_sweep(
   let flush_elapsed = flush_start.elapsed();
 
   if timing {
-    eprintln!("[gc-timing]   sweep.reverify: {:?} (kept {} of {})",
-      reverify_elapsed, verified_hashes.len(), garbage_candidates.len());
+    eprintln!("[gc-timing]   sweep.reverify: {:?} (kept {} of {})", reverify_elapsed, verified_hashes.len(), garbage_candidates.len());
     eprintln!("[gc-timing]   sweep.kv_remove: {:?}", kv_remove_elapsed);
-    eprintln!("[gc-timing]   sweep.void_register: {:?} ({} voids)",
-      void_register_elapsed, freed_regions.len());
+    eprintln!("[gc-timing]   sweep.void_register: {:?} ({} voids)", void_register_elapsed, freed_regions.len());
     eprintln!("[gc-timing]   sweep.hot_tail_flush: {:?}", flush_elapsed);
   }
 
@@ -610,17 +610,16 @@ pub fn gc_sweep(
 /// modifying the database.
 ///
 /// GC should not be run concurrently with writes -- see [`gc_sweep`] for details.
-pub fn run_gc(
-  engine: &StorageEngine,
-  ctx: &RequestContext,
-  dry_run: bool,
-) -> EngineResult<GcResult> {
+pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> EngineResult<GcResult> {
   let start = std::time::Instant::now();
 
   // Emit GC started event
-  ctx.emit(EVENT_GC_STARTED, serde_json::json!({
-    "dry_run": dry_run,
-  }));
+  ctx.emit(
+    EVENT_GC_STARTED,
+    serde_json::json!({
+      "dry_run": dry_run,
+    }),
+  );
 
   // Begin GC recheck tracking before any version-forest reads. From this
   // point on, every successful write hash is recorded so the sweep phase can
@@ -629,7 +628,11 @@ pub fn run_gc(
   // end_gc_recheck on exit, even on `?`-propagated errors.
   struct RecheckGuard<'a>(&'a StorageEngine, bool);
   impl<'a> Drop for RecheckGuard<'a> {
-    fn drop(&mut self) { if self.1 { self.0.end_gc_recheck(); } }
+    fn drop(&mut self) {
+      if self.1 {
+        self.0.end_gc_recheck();
+      }
+    }
   }
   if !dry_run {
     engine.begin_gc_recheck();
@@ -653,11 +656,8 @@ pub fn run_gc(
 
     // Clean up old pre-GC snapshots — keep last 3
     if let Ok(snapshots) = vm.list_snapshots() {
-      let mut pre_gc_snapshots: Vec<String> = snapshots
-        .iter()
-        .filter(|s| s.name.starts_with("_aeordb_pre_gc_"))
-        .map(|s| s.name.clone())
-        .collect();
+      let mut pre_gc_snapshots: Vec<String> =
+        snapshots.iter().filter(|s| s.name.starts_with("_aeordb_pre_gc_")).map(|s| s.name.clone()).collect();
       pre_gc_snapshots.sort();
       pre_gc_snapshots.reverse(); // newest first (timestamp suffix sorts lexicographically)
 
@@ -684,7 +684,9 @@ pub fn run_gc(
       Ok(_) => {}
       Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
     }
-    if _gc_timing { eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed()); }
+    if _gc_timing {
+      eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed());
+    }
   }
 
   let snapshot_count = vm.list_snapshots()?.len();
@@ -732,8 +734,7 @@ pub fn run_gc(
   let (garbage_entries, reclaimed_bytes) = gc_sweep(engine, &live, dry_run)?;
   sweep_mem.finish();
   if std::env::var("AEORDB_GC_TIMING").is_ok() {
-    eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})",
-      sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
+    eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})", sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
   }
 
   // Reconcile counters from authoritative KV state after sweep
@@ -744,24 +745,20 @@ pub fn run_gc(
 
   let duration_ms = start.elapsed().as_millis() as u64;
 
-  let result = GcResult {
-    versions_scanned,
-    live_entries,
-    garbage_entries,
-    reclaimed_bytes,
-    duration_ms,
-    dry_run,
-  };
+  let result = GcResult { versions_scanned, live_entries, garbage_entries, reclaimed_bytes, duration_ms, dry_run };
 
   // Emit GC event
-  ctx.emit(EVENT_GC_COMPLETED, serde_json::json!({
-    "versions_scanned": result.versions_scanned,
-    "live_entries": result.live_entries,
-    "garbage_entries": result.garbage_entries,
-    "reclaimed_bytes": result.reclaimed_bytes,
-    "duration_ms": result.duration_ms,
-    "dry_run": result.dry_run,
-  }));
+  ctx.emit(
+    EVENT_GC_COMPLETED,
+    serde_json::json!({
+      "versions_scanned": result.versions_scanned,
+      "live_entries": result.live_entries,
+      "garbage_entries": result.garbage_entries,
+      "reclaimed_bytes": result.reclaimed_bytes,
+      "duration_ms": result.duration_ms,
+      "dry_run": result.dry_run,
+    }),
+  );
 
   Ok(result)
 }
@@ -791,25 +788,29 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
           }
         }
       }
-      KV_TYPE_DIRECTORY => { directories += 1; }
-      KV_TYPE_SYMLINK => { symlinks += 1; }
+      KV_TYPE_DIRECTORY => {
+        directories += 1;
+      }
+      KV_TYPE_SYMLINK => {
+        symlinks += 1;
+      }
       KV_TYPE_CHUNK => {
         chunks += 1;
         if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
           chunk_data_size += value.len() as u64;
         }
       }
-      KV_TYPE_SNAPSHOT => { snapshots += 1; }
-      KV_TYPE_FORK => { forks += 1; }
+      KV_TYPE_SNAPSHOT => {
+        snapshots += 1;
+      }
+      KV_TYPE_FORK => {
+        forks += 1;
+      }
       _ => {}
     }
   }
 
-  let void_space = if let Ok(vm) = engine.void_manager.read() {
-    vm.total_void_space()
-  } else {
-    0
-  };
+  let void_space = if let Ok(vm) = engine.void_manager.read() { vm.total_void_space() } else { 0 };
 
   // Preserve current throughput counters (they are monotonic, not reconciled)
   let current = engine.counters().snapshot();

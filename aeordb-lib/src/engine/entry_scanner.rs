@@ -183,34 +183,21 @@ impl Iterator for EntryScanner {
         Err(error) => {
           // Corrupt entry header — can't use total_length to skip.
           // Scan forward looking for the next valid entry magic bytes.
-          tracing::warn!(
-            "Corrupt entry header at offset {}: {}. Scanning for next valid entry...",
-            entry_offset,
-            error
-          );
+          tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
 
           match self.scan_for_next_magic(entry_offset + 1) {
             Some((next_offset, skipped_bytes)) => {
-              tracing::warn!(
-                "Found next valid entry at offset {} (skipped {} bytes from {})",
-                next_offset, skipped_bytes, entry_offset,
-              );
+              tracing::warn!("Found next valid entry at offset {} (skipped {} bytes from {})", next_offset, skipped_bytes, entry_offset,);
               self.record_skipped_region(entry_offset, skipped_bytes as usize);
               self.current_offset = next_offset;
 
               if self.report_errors {
-                return Some(Err(EngineError::CorruptEntry {
-                  offset: entry_offset,
-                  reason: format!("Corrupt header: {}", error),
-                }));
+                return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
               }
               continue;
             }
             None => {
-              tracing::warn!(
-                "No valid entry found after offset {}. Stopping scan.",
-                entry_offset,
-              );
+              tracing::warn!("No valid entry found after offset {}. Stopping scan.", entry_offset,);
               self.record_skipped_region(entry_offset, (self.file_length - entry_offset) as usize);
               return None;
             }
@@ -226,7 +213,11 @@ impl Iterator for EntryScanner {
       if payload_size > max_payload {
         tracing::warn!(
           "Corrupt entry at offset {}: key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({}). Skipping.",
-          entry_offset, header.key_length, header.value_length, header.total_length, header_size,
+          entry_offset,
+          header.key_length,
+          header.value_length,
+          header.total_length,
+          header_size,
         );
         self.current_offset = entry_offset + header.total_length as u64;
 
@@ -245,18 +236,12 @@ impl Iterator for EntryScanner {
       // Read key
       let mut key = vec![0u8; header.key_length as usize];
       if let Err(error) = self.file.read_exact(&mut key) {
-        tracing::warn!(
-          "IO error reading key at offset {}: {}. Skipping entry.",
-          entry_offset, error
-        );
+        tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
         self.current_offset = entry_offset + header.total_length as u64;
 
         if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: format!("IO error reading key: {}", error),
-          }));
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading key: {}", error) }));
         }
         continue;
       }
@@ -264,35 +249,23 @@ impl Iterator for EntryScanner {
       // Read value
       let mut value = vec![0u8; header.value_length as usize];
       if let Err(error) = self.file.read_exact(&mut value) {
-        tracing::warn!(
-          "IO error reading value at offset {}: {}. Skipping entry.",
-          entry_offset, error
-        );
+        tracing::warn!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
         self.current_offset = entry_offset + header.total_length as u64;
 
         if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: format!("IO error reading value: {}", error),
-          }));
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {}", error) }));
         }
         continue;
       }
 
       // Verify hash integrity
       if !header.verify(&key, &value) {
-        tracing::warn!(
-          "Hash verification failed for entry at offset {}. Skipping.",
-          entry_offset
-        );
+        tracing::warn!("Hash verification failed for entry at offset {}. Skipping.", entry_offset);
         self.current_offset = entry_offset + header.total_length as u64;
 
         if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: "Hash verification failed".to_string(),
-          }));
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
         }
         continue;
       }
@@ -300,12 +273,7 @@ impl Iterator for EntryScanner {
       // Advance to next entry using total_length
       self.current_offset = entry_offset + header.total_length as u64;
 
-      return Some(Ok(ScannedEntry {
-        offset: entry_offset,
-        header,
-        key,
-        value,
-      }));
+      return Some(Ok(ScannedEntry { offset: entry_offset, header, key, value }));
     }
   }
 }

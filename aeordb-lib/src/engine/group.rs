@@ -64,8 +64,7 @@ impl Group {
   }
 
   fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
-    serde_json::from_slice(data)
-      .map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize Group: {}", error)))
+    serde_json::from_slice(data).map_err(|error| EngineError::JsonParseError(format!("Failed to deserialize Group: {}", error)))
   }
 
   /// Evaluate whether a user is a member of this group by running
@@ -75,10 +74,8 @@ impl Group {
     if self.query_field == "tags" {
       return match self.query_operator.as_str() {
         "has" => user.tags.iter().any(|t| t == &self.query_value),
-        "has_any" => self.query_value.split(',')
-          .any(|v| user.tags.iter().any(|t| t == v.trim())),
-        "has_all" => self.query_value.split(',')
-          .all(|v| user.tags.iter().any(|t| t == v.trim())),
+        "has_any" => self.query_value.split(',').any(|v| user.tags.iter().any(|t| t == v.trim())),
+        "has_all" => self.query_value.split(',').all(|v| user.tags.iter().any(|t| t == v.trim())),
         // Allow standard operators too (they match against comma-joined tags)
         _ => {
           let joined = user.tags.join(",");
@@ -111,6 +108,10 @@ impl Group {
 
 impl JsonVersioned for Group {
   const SCHEMA_VERSION: u8 = 0;
-  fn serialize_versioned(&self) -> Vec<u8> { self.serialize() }
-  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self> { Self::deserialize(data) }
+  fn serialize_versioned(&self) -> Vec<u8> {
+    self.serialize()
+  }
+  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self> {
+    Self::deserialize(data)
+  }
 }

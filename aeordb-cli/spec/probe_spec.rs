@@ -110,10 +110,8 @@ fn probe_command_supports_explicit_growth_stats_flag() {
     engine.shutdown().expect("shutdown engine");
   }
 
-  let output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
-    .args(["probe", "-D", db_path_str, "--growth-stats"])
-    .output()
-    .expect("run aeordb probe");
+  let output =
+    Command::new(env!("CARGO_BIN_EXE_aeordb")).args(["probe", "-D", db_path_str, "--growth-stats"]).output().expect("run aeordb probe");
 
   assert!(
     output.status.success(),

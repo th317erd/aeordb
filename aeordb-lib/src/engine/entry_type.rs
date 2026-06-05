@@ -3,14 +3,14 @@ use crate::engine::errors::EngineError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EntryType {
-  Chunk          = 0x01,
-  FileRecord     = 0x02,
+  Chunk = 0x01,
+  FileRecord = 0x02,
   DirectoryIndex = 0x03,
   DeletionRecord = 0x04,
-  Snapshot       = 0x05,
-  Void           = 0x06,
-  Fork           = 0x07,
-  Symlink        = 0x08,
+  Snapshot = 0x05,
+  Void = 0x06,
+  Fork = 0x07,
+  Symlink = 0x08,
 }
 
 impl EntryType {
@@ -24,7 +24,7 @@ impl EntryType {
       0x06 => Ok(EntryType::Void),
       0x07 => Ok(EntryType::Fork),
       0x08 => Ok(EntryType::Symlink),
-      _    => Err(EngineError::InvalidEntryType(value)),
+      _ => Err(EngineError::InvalidEntryType(value)),
     }
   }
 
@@ -35,8 +35,8 @@ impl EntryType {
   /// Map this entry type to the corresponding KV store type constant.
   pub fn to_kv_type(self) -> u8 {
     use crate::engine::kv_store::{
-      KV_TYPE_CHUNK, KV_TYPE_DELETION, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD,
-      KV_TYPE_FORK, KV_TYPE_SNAPSHOT, KV_TYPE_SYMLINK, KV_TYPE_VOID,
+      KV_TYPE_CHUNK, KV_TYPE_DELETION, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD, KV_TYPE_FORK, KV_TYPE_SNAPSHOT, KV_TYPE_SYMLINK,
+      KV_TYPE_VOID,
     };
     match self {
       EntryType::Chunk => KV_TYPE_CHUNK,

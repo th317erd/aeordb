@@ -1,8 +1,6 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
-use aeordb::engine::query_engine::{
-    QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, ExplainMode, ExplainResult,
-};
+use aeordb::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, ExplainMode, ExplainResult};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -43,41 +41,17 @@ fn setup_users_engine(dir: &tempfile::TempDir) -> StorageEngine {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(&engine, "/users", &config);
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/alice.json",
-    &make_user_json("Alice", 30),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/alice.json", &make_user_json("Alice", 30), Some("application/json")).unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/bob.json",
-    &make_user_json("Bob", 25),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/bob.json", &make_user_json("Bob", 25), Some("application/json")).unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/charlie.json",
-    &make_user_json("Charlie", 40),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/charlie.json", &make_user_json("Charlie", 40), Some("application/json")).unwrap();
 
   engine
 }
@@ -91,10 +65,7 @@ fn test_execute_explain_plan_mode() {
   let query = Query {
     path: "/users/".to_string(),
     field_queries: vec![],
-    node: Some(QueryNode::Field(FieldQuery {
-      field_name: "age".to_string(),
-      operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()),
-    })),
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()) })),
     limit: Some(10),
     offset: None,
     order_by: vec![],
@@ -128,10 +99,7 @@ fn test_execute_explain_analyze_mode() {
   let query = Query {
     path: "/users/".to_string(),
     field_queries: vec![],
-    node: Some(QueryNode::Field(FieldQuery {
-      field_name: "age".to_string(),
-      operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()),
-    })),
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()) })),
     limit: Some(10),
     offset: None,
     order_by: vec![],
@@ -173,11 +141,7 @@ fn test_explain_result_serializes() {
 
 #[test]
 fn test_explain_result_serializes_without_optional_fields() {
-  let result = ExplainResult {
-    plan: serde_json::json!({"type": "test"}),
-    execution: None,
-    results: None,
-  };
+  let result = ExplainResult { plan: serde_json::json!({"type": "test"}), execution: None, results: None };
 
   let json = serde_json::to_value(&result).unwrap();
   assert!(json.is_object());
@@ -197,14 +161,8 @@ fn test_explain_plan_shows_query_tree_structure() {
     path: "/users/".to_string(),
     field_queries: vec![],
     node: Some(QueryNode::Or(vec![
-      QueryNode::Field(FieldQuery {
-        field_name: "age".to_string(),
-        operation: QueryOp::Eq(25u64.to_be_bytes().to_vec()),
-      }),
-      QueryNode::Field(FieldQuery {
-        field_name: "age".to_string(),
-        operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()),
-      }),
+      QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Eq(25u64.to_be_bytes().to_vec()) }),
+      QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()) }),
     ])),
     limit: None,
     offset: None,
@@ -235,10 +193,7 @@ fn test_explain_plan_shows_index_info() {
   let query = Query {
     path: "/users/".to_string(),
     field_queries: vec![],
-    node: Some(QueryNode::Field(FieldQuery {
-      field_name: "age".to_string(),
-      operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()),
-    })),
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()) })),
     limit: None,
     offset: None,
     order_by: vec![],
@@ -301,10 +256,7 @@ fn test_explain_analyze_returns_actual_results() {
   let query = Query {
     path: "/users/".to_string(),
     field_queries: vec![],
-    node: Some(QueryNode::Field(FieldQuery {
-      field_name: "age".to_string(),
-      operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()),
-    })),
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Eq(30u64.to_be_bytes().to_vec()) })),
     limit: None,
     offset: None,
     order_by: vec![],

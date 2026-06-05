@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aeordb::engine::{
-  DirectoryOps, EntryType, RequestContext, StorageEngine,
-  VersionManager,
-};
+use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine, VersionManager};
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::server::create_temp_engine_for_tests;
@@ -269,8 +266,7 @@ fn test_run_gc_end_to_end() {
   // HEAD + v1 + v2 + experiment + _aeordb_pre_gc_*. (Previously 6 when
   // delete_file emitted an auto-pre-delete snapshot; that behavior was
   // removed.) Use >= to avoid being brittle to similar future shifts.
-  assert!(result.versions_scanned >= 5,
-    "expected at least 5 versions scanned, got {}", result.versions_scanned);
+  assert!(result.versions_scanned >= 5, "expected at least 5 versions scanned, got {}", result.versions_scanned);
   assert!(result.live_entries > 0);
   assert!(result.garbage_entries > 0);
   assert!(result.reclaimed_bytes > 0);
@@ -326,11 +322,9 @@ fn test_gc_snapshot_still_walkable_after_sweep() {
   let tree_after = walk_version_tree(&engine, &snapshot_hash).unwrap();
 
   // GC must not remove any entries that walk_version_tree could reach before
-  assert_eq!(tree_before.files.len(), tree_after.files.len(),
-    "v1 snapshot should have same file count before and after GC");
+  assert_eq!(tree_before.files.len(), tree_after.files.len(), "v1 snapshot should have same file count before and after GC");
   for path in tree_before.files.keys() {
-    assert!(tree_after.files.contains_key(path),
-      "v1 snapshot should still have file '{}' after GC", path);
+    assert!(tree_after.files.contains_key(path), "v1 snapshot should still have file '{}' after GC", path);
   }
 
   // v1 snapshot should at minimum have readme.txt and config.json
@@ -351,8 +345,12 @@ fn test_gc_in_place_overwrite_creates_voids() {
   run_gc(&engine, &ctx, false).unwrap();
 
   let stats_after = engine.stats();
-  assert!(stats_after.void_count >= void_count_before,
-    "GC should create voids (before={}, after={})", void_count_before, stats_after.void_count);
+  assert!(
+    stats_after.void_count >= void_count_before,
+    "GC should create voids (before={}, after={})",
+    void_count_before,
+    stats_after.void_count
+  );
 }
 
 // ─── Edge cases ─────────────────────────────────────────────────────────────

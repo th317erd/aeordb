@@ -18,101 +18,75 @@ use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_test
 // ---------------------------------------------------------------------------
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
-    let jwt_manager = Arc::new(JwtManager::generate());
-    let (engine, temp_dir) = create_temp_engine_for_tests();
-    let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
-    (app, jwt_manager, engine, temp_dir)
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, temp_dir) = create_temp_engine_for_tests();
+  let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
+  (app, jwt_manager, engine, temp_dir)
 }
 
 fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
-    create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
+  create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
 fn root_bearer_token(jwt_manager: &JwtManager) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let claims = TokenClaims {
-        sub: "00000000-0000-0000-0000-000000000000".to_string(),
-        iss: "aeordb".to_string(),
-        iat: now,
-        exp: now + DEFAULT_EXPIRY_SECONDS,
-        scope: None,
-        permissions: None,
-        key_id: None,
-    };
-    let token = jwt_manager.create_token(&claims).expect("create token");
-    format!("Bearer {}", token)
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "00000000-0000-0000-0000-000000000000".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
 }
 
 fn non_root_bearer_token(jwt_manager: &JwtManager) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let claims = TokenClaims {
-        sub: uuid::Uuid::new_v4().to_string(),
-        iss: "aeordb".to_string(),
-        iat: now,
-        exp: now + DEFAULT_EXPIRY_SECONDS,
-        scope: None,
-        permissions: None,
-        key_id: None,
-    };
-    let token = jwt_manager.create_token(&claims).expect("create token");
-    format!("Bearer {}", token)
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: uuid::Uuid::new_v4().to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
 }
 
 async fn body_json(body: Body) -> serde_json::Value {
-    let bytes = body.collect().await.unwrap().to_bytes().to_vec();
-    serde_json::from_slice(&bytes).expect("valid JSON response body")
+  let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+  serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
 /// Seed a conflict into the engine for testing.
 fn seed_conflict(engine: &StorageEngine, path: &str) {
-    let ctx = RequestContext::system();
-    let ops = DirectoryOps::new(engine);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine);
 
-    // Store winner at the real path
-    ops.store_file_buffered(&ctx, path, b"winner-content", Some("text/plain"))
-        .unwrap();
+  // Store winner at the real path
+  ops.store_file_buffered(&ctx, path, b"winner-content", Some("text/plain")).unwrap();
 
-    // Store loser at a temp path
-    let loser_path = format!("/tmp/loser{}", path);
-    ops.store_file_buffered(&ctx, &loser_path, b"loser-content", Some("text/plain"))
-        .unwrap();
+  // Store loser at a temp path
+  let loser_path = format!("/tmp/loser{}", path);
+  ops.store_file_buffered(&ctx, &loser_path, b"loser-content", Some("text/plain")).unwrap();
 
-    let algo = engine.hash_algo();
-    let winner_hash = aeordb::engine::directory_ops::file_identity_hash(
-        path,
-        Some("text/plain"),
-        &[],
-        &algo,
-    )
-    .unwrap();
-    let loser_hash = aeordb::engine::directory_ops::file_identity_hash(
-        &loser_path,
-        Some("text/plain"),
-        &[],
-        &algo,
-    )
-    .unwrap();
+  let algo = engine.hash_algo();
+  let winner_hash = aeordb::engine::directory_ops::file_identity_hash(path, Some("text/plain"), &[], &algo).unwrap();
+  let loser_hash = aeordb::engine::directory_ops::file_identity_hash(&loser_path, Some("text/plain"), &[], &algo).unwrap();
 
-    let conflict = ConflictEntry {
-        path: path.to_string(),
-        conflict_type: ConflictType::ConcurrentModify,
-        winner: ConflictVersion {
-            hash: winner_hash,
-            virtual_time: 200,
-            node_id: 1,
-            size: 14,
-            content_type: Some("text/plain".to_string()),
-        },
-        loser: ConflictVersion {
-            hash: loser_hash,
-            virtual_time: 100,
-            node_id: 2,
-            size: 13,
-            content_type: Some("text/plain".to_string()),
-        },
-    };
+  let conflict = ConflictEntry {
+    path: path.to_string(),
+    conflict_type: ConflictType::ConcurrentModify,
+    winner: ConflictVersion { hash: winner_hash, virtual_time: 200, node_id: 1, size: 14, content_type: Some("text/plain".to_string()) },
+    loser: ConflictVersion { hash: loser_hash, virtual_time: 100, node_id: 2, size: 13, content_type: Some("text/plain".to_string()) },
+  };
 
-    conflict_store::store_conflict(engine, &ctx, &conflict).unwrap();
+  conflict_store::store_conflict(engine, &ctx, &conflict).unwrap();
 }
 
 // ===========================================================================
@@ -121,21 +95,16 @@ fn seed_conflict(engine: &StorageEngine, path: &str) {
 
 #[tokio::test]
 async fn test_list_conflicts_empty() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request = Request::builder().method("GET").uri("/sync/conflicts").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    assert!(json["items"].as_array().unwrap().is_empty());
+  let json = body_json(response.into_body()).await;
+  assert!(json["items"].as_array().unwrap().is_empty());
 }
 
 // ===========================================================================
@@ -144,26 +113,21 @@ async fn test_list_conflicts_empty() {
 
 #[tokio::test]
 async fn test_list_conflicts() {
-    let (_app, jwt_manager, engine, _temp_dir) = test_app();
-    seed_conflict(&engine, "/docs/a.txt");
-    seed_conflict(&engine, "/docs/b.txt");
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  seed_conflict(&engine, "/docs/a.txt");
+  seed_conflict(&engine, "/docs/b.txt");
 
-    let auth = root_bearer_token(&jwt_manager);
-    let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let app = rebuild_app(&jwt_manager, &engine);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request = Request::builder().method("GET").uri("/sync/conflicts").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    let arr = json["items"].as_array().unwrap();
-    assert_eq!(arr.len(), 2);
+  let json = body_json(response.into_body()).await;
+  let arr = json["items"].as_array().unwrap();
+  assert_eq!(arr.len(), 2);
 }
 
 // ===========================================================================
@@ -172,25 +136,21 @@ async fn test_list_conflicts() {
 
 #[tokio::test]
 async fn test_get_conflict() {
-    let (_app, jwt_manager, engine, _temp_dir) = test_app();
-    seed_conflict(&engine, "/docs/target.txt");
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  seed_conflict(&engine, "/docs/target.txt");
 
-    let auth = root_bearer_token(&jwt_manager);
-    let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let app = rebuild_app(&jwt_manager, &engine);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts/docs/target.txt")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/sync/conflicts/docs/target.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    assert_eq!(json["path"], "/docs/target.txt");
-    assert_eq!(json["conflict_type"], "ConcurrentModify");
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["path"], "/docs/target.txt");
+  assert_eq!(json["conflict_type"], "ConcurrentModify");
 }
 
 // ===========================================================================
@@ -199,18 +159,14 @@ async fn test_get_conflict() {
 
 #[tokio::test]
 async fn test_get_conflict_not_found() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts/nonexistent.txt")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/sync/conflicts/nonexistent.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
@@ -219,35 +175,27 @@ async fn test_get_conflict_not_found() {
 
 #[tokio::test]
 async fn test_dismiss_conflict() {
-    let (_app, jwt_manager, engine, _temp_dir) = test_app();
-    seed_conflict(&engine, "/docs/dismiss.txt");
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  seed_conflict(&engine, "/docs/dismiss.txt");
 
-    let auth = root_bearer_token(&jwt_manager);
-    let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let app = rebuild_app(&jwt_manager, &engine);
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/sync/dismiss/docs/dismiss.txt")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/sync/dismiss/docs/dismiss.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    assert_eq!(json["dismissed"], true);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["dismissed"], true);
 
-    // Verify it's gone
-    let app2 = rebuild_app(&jwt_manager, &engine);
-    let request2 = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts/docs/dismiss.txt")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
-    let response2 = app2.oneshot(request2).await.unwrap();
-    assert_eq!(response2.status(), StatusCode::NOT_FOUND);
+  // Verify it's gone
+  let app2 = rebuild_app(&jwt_manager, &engine);
+  let request2 =
+    Request::builder().method("GET").uri("/sync/conflicts/docs/dismiss.txt").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response2 = app2.oneshot(request2).await.unwrap();
+  assert_eq!(response2.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
@@ -256,18 +204,14 @@ async fn test_dismiss_conflict() {
 
 #[tokio::test]
 async fn test_dismiss_conflict_not_found() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/sync/dismiss/nonexistent.txt")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/sync/dismiss/nonexistent.txt").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
@@ -276,22 +220,22 @@ async fn test_dismiss_conflict_not_found() {
 
 #[tokio::test]
 async fn test_resolve_conflict_invalid_pick() {
-    let (_app, jwt_manager, engine, _temp_dir) = test_app();
-    seed_conflict(&engine, "/docs/invalid-pick.txt");
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  seed_conflict(&engine, "/docs/invalid-pick.txt");
 
-    let auth = root_bearer_token(&jwt_manager);
-    let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let app = rebuild_app(&jwt_manager, &engine);
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/sync/resolve/docs/invalid-pick.txt")
-        .header("authorization", &auth)
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pick": "neither"}"#))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/sync/resolve/docs/invalid-pick.txt")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"pick": "neither"}"#))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 // ===========================================================================
@@ -300,19 +244,19 @@ async fn test_resolve_conflict_invalid_pick() {
 
 #[tokio::test]
 async fn test_resolve_conflict_not_found() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/sync/resolve/nonexistent.txt")
-        .header("authorization", &auth)
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pick": "winner"}"#))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/sync/resolve/nonexistent.txt")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"pick": "winner"}"#))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
@@ -321,16 +265,12 @@ async fn test_resolve_conflict_not_found() {
 
 #[tokio::test]
 async fn test_conflicts_no_auth_returns_401() {
-    let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+  let (app, _jwt_manager, _engine, _temp_dir) = test_app();
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .body(Body::empty())
-        .unwrap();
+  let request = Request::builder().method("GET").uri("/sync/conflicts").body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ===========================================================================
@@ -339,18 +279,13 @@ async fn test_conflicts_no_auth_returns_401() {
 
 #[tokio::test]
 async fn test_conflicts_non_root_returns_403() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = non_root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = non_root_bearer_token(&jwt_manager);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request = Request::builder().method("GET").uri("/sync/conflicts").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 // ===========================================================================
@@ -359,40 +294,28 @@ async fn test_conflicts_non_root_returns_403() {
 
 #[tokio::test]
 async fn test_all_conflict_endpoints_require_auth() {
-    let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+  let (app, _jwt_manager, _engine, _temp_dir) = test_app();
 
-    // GET /admin/conflicts
-    let r = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+  // GET /admin/conflicts
+  let r = Request::builder().method("GET").uri("/sync/conflicts").body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 
-    // GET /admin/conflicts/path
-    let r = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts/some/path")
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+  // GET /admin/conflicts/path
+  let r = Request::builder().method("GET").uri("/sync/conflicts/some/path").body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 
-    // POST /admin/conflict-resolve/path
-    let r = Request::builder()
-        .method("POST")
-        .uri("/sync/resolve/some/path")
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pick":"winner"}"#))
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+  // POST /admin/conflict-resolve/path
+  let r = Request::builder()
+    .method("POST")
+    .uri("/sync/resolve/some/path")
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"pick":"winner"}"#))
+    .unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 
-    // POST /admin/conflict-dismiss/path
-    let r = Request::builder()
-        .method("POST")
-        .uri("/sync/dismiss/some/path")
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+  // POST /admin/conflict-dismiss/path
+  let r = Request::builder().method("POST").uri("/sync/dismiss/some/path").body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 }
 
 // ===========================================================================
@@ -401,45 +324,30 @@ async fn test_all_conflict_endpoints_require_auth() {
 
 #[tokio::test]
 async fn test_all_conflict_endpoints_forbid_non_root() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
-    let auth = non_root_bearer_token(&jwt_manager);
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = non_root_bearer_token(&jwt_manager);
 
-    // GET /admin/conflicts
-    let r = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
+  // GET /admin/conflicts
+  let r = Request::builder().method("GET").uri("/sync/conflicts").header("authorization", &auth).body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
 
-    // GET /admin/conflicts/path
-    let r = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts/some/path")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
+  // GET /admin/conflicts/path
+  let r = Request::builder().method("GET").uri("/sync/conflicts/some/path").header("authorization", &auth).body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
 
-    // POST /admin/conflict-resolve/path
-    let r = Request::builder()
-        .method("POST")
-        .uri("/sync/resolve/some/path")
-        .header("authorization", &auth)
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pick":"winner"}"#))
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
+  // POST /admin/conflict-resolve/path
+  let r = Request::builder()
+    .method("POST")
+    .uri("/sync/resolve/some/path")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"pick":"winner"}"#))
+    .unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
 
-    // POST /admin/conflict-dismiss/path
-    let r = Request::builder()
-        .method("POST")
-        .uri("/sync/dismiss/some/path")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
+  // POST /admin/conflict-dismiss/path
+  let r = Request::builder().method("POST").uri("/sync/dismiss/some/path").header("authorization", &auth).body(Body::empty()).unwrap();
+  assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
 }
 
 // ===========================================================================
@@ -448,28 +356,23 @@ async fn test_all_conflict_endpoints_forbid_non_root() {
 
 #[tokio::test]
 async fn test_conflicts_expired_token_returns_401() {
-    let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
 
-    let now = chrono::Utc::now().timestamp();
-    let claims = TokenClaims {
-        sub: "00000000-0000-0000-0000-000000000000".to_string(),
-        iss: "aeordb".to_string(),
-        iat: now - 7200,
-        exp: now - 3600,
-        scope: None,
-        permissions: None,
-        key_id: None,
-    };
-    let token = jwt_manager.create_token(&claims).expect("create token");
-    let auth = format!("Bearer {}", token);
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "00000000-0000-0000-0000-000000000000".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now - 7200,
+    exp: now - 3600,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  let auth = format!("Bearer {}", token);
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/sync/conflicts")
-        .header("authorization", &auth)
-        .body(Body::empty())
-        .unwrap();
+  let request = Request::builder().method("GET").uri("/sync/conflicts").header("authorization", &auth).body(Body::empty()).unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

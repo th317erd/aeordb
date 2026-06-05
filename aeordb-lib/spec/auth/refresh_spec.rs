@@ -17,9 +17,7 @@ use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLimiter>, tempfile::TempDir) {
@@ -41,11 +39,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-  rate_limiter: &Arc<RateLimiter>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>, rate_limiter: &Arc<RateLimiter>) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
@@ -110,10 +104,7 @@ async fn test_auth_token_endpoint_returns_refresh_token() {
   assert!(json["token"].is_string(), "should contain a JWT");
   assert!(json["refresh_token"].is_string(), "should contain a refresh token");
   let refresh_token = json["refresh_token"].as_str().unwrap();
-  assert!(
-    refresh_token.starts_with("aeor_r_"),
-    "refresh token should have correct prefix"
-  );
+  assert!(refresh_token.starts_with("aeor_r_"), "refresh token should have correct prefix");
 }
 
 #[tokio::test]
@@ -124,24 +115,26 @@ async fn test_refresh_returns_new_jwt() {
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  system_store::store_refresh_token(&engine, &ctx, &aeordb::auth::refresh::RefreshTokenRecord {
-    token_hash: token_hash.clone(),
-    user_subject: "test-user".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_revoked: false,
-    key_id: None,
-  }).unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash: token_hash.clone(),
+      user_subject: "test-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -160,24 +153,26 @@ async fn test_refresh_rotates_refresh_token() {
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  system_store::store_refresh_token(&engine, &ctx, &aeordb::auth::refresh::RefreshTokenRecord {
-    token_hash: token_hash.clone(),
-    user_subject: "rotate-user".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_revoked: false,
-    key_id: None,
-  }).unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash: token_hash.clone(),
+      user_subject: "rotate-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -197,14 +192,19 @@ async fn test_old_refresh_token_rejected_after_rotation() {
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  system_store::store_refresh_token(&engine, &ctx, &aeordb::auth::refresh::RefreshTokenRecord {
-    token_hash: token_hash.clone(),
-    user_subject: "rotation-user".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_revoked: false,
-    key_id: None,
-  }).unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash: token_hash.clone(),
+      user_subject: "rotation-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
 
   // First refresh succeeds and rotates.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -212,10 +212,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -226,10 +223,7 @@ async fn test_old_refresh_token_rejected_after_rotation() {
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -243,24 +237,26 @@ async fn test_expired_refresh_token_rejected() {
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
-  system_store::store_refresh_token(&engine, &ctx, &aeordb::auth::refresh::RefreshTokenRecord {
-    token_hash: token_hash.clone(),
-    user_subject: "expired-user".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_revoked: false,
-    key_id: None,
-  }).unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash: token_hash.clone(),
+      user_subject: "expired-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
   let request = Request::builder()
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -286,12 +282,8 @@ async fn test_invalid_refresh_token_rejected() {
 async fn test_refresh_missing_body_field() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/auth/refresh")
-    .header("content-type", "application/json")
-    .body(Body::from(r#"{}"#))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/auth/refresh").header("content-type", "application/json").body(Body::from(r#"{}"#)).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -323,10 +315,7 @@ async fn test_full_refresh_flow_from_api_key() {
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      initial_refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, initial_refresh_token)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -350,14 +339,19 @@ async fn test_revoked_refresh_token_rejected() {
   let refresh_token = generate_refresh_token();
   let token_hash = hash_refresh_token(&refresh_token);
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS);
-  system_store::store_refresh_token(&engine, &ctx, &aeordb::auth::refresh::RefreshTokenRecord {
-    token_hash: token_hash.clone(),
-    user_subject: "revoke-test-user".to_string(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_revoked: false,
-    key_id: None,
-  }).unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash: token_hash.clone(),
+      user_subject: "revoke-test-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at,
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
 
   system_store::revoke_refresh_token(&engine, &ctx, &token_hash).unwrap();
 
@@ -366,10 +360,7 @@ async fn test_revoked_refresh_token_rejected() {
     .method("POST")
     .uri("/auth/refresh")
     .header("content-type", "application/json")
-    .body(Body::from(format!(
-      r#"{{"refresh_token":"{}"}}"#,
-      refresh_token
-    )))
+    .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, refresh_token)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();

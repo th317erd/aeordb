@@ -6,16 +6,8 @@ fn test_display_io_error() {
   let engine_error = EngineError::IoError(io_error);
   let display_text = format!("{}", engine_error);
 
-  assert!(
-    display_text.contains("IO error"),
-    "expected 'IO error' prefix, got: {}",
-    display_text
-  );
-  assert!(
-    display_text.contains("access denied"),
-    "expected underlying message, got: {}",
-    display_text
-  );
+  assert!(display_text.contains("IO error"), "expected 'IO error' prefix, got: {}", display_text);
+  assert!(display_text.contains("access denied"), "expected underlying message, got: {}", display_text);
 }
 
 #[test]
@@ -68,10 +60,7 @@ fn test_display_invalid_hash_algorithm_low_value() {
 
 #[test]
 fn test_display_corrupt_entry() {
-  let engine_error = EngineError::CorruptEntry {
-    offset: 1024,
-    reason: "checksum mismatch".to_string(),
-  };
+  let engine_error = EngineError::CorruptEntry { offset: 1024, reason: "checksum mismatch".to_string() };
   let display_text = format!("{}", engine_error);
 
   assert_eq!(display_text, "Corrupt entry at offset 1024: checksum mismatch");
@@ -79,10 +68,7 @@ fn test_display_corrupt_entry() {
 
 #[test]
 fn test_display_corrupt_entry_zero_offset() {
-  let engine_error = EngineError::CorruptEntry {
-    offset: 0,
-    reason: "truncated header".to_string(),
-  };
+  let engine_error = EngineError::CorruptEntry { offset: 0, reason: "truncated header".to_string() };
   let display_text = format!("{}", engine_error);
 
   assert_eq!(display_text, "Corrupt entry at offset 0: truncated header");
@@ -117,10 +103,7 @@ fn test_display_range_query_not_supported() {
   let engine_error = EngineError::RangeQueryNotSupported("json_flatten".to_string());
   let display_text = format!("{}", engine_error);
 
-  assert_eq!(
-    display_text,
-    "Range query not supported: converter 'json_flatten' is not order-preserving"
-  );
+  assert_eq!(display_text, "Range query not supported: converter 'json_flatten' is not order-preserving");
 }
 
 #[test]
@@ -148,10 +131,7 @@ fn test_error_source_io_error() {
   let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
   let engine_error = EngineError::IoError(io_error);
 
-  assert!(
-    engine_error.source().is_some(),
-    "IoError variant should return a source"
-  );
+  assert!(engine_error.source().is_some(), "IoError variant should return a source");
 }
 
 #[test]
@@ -175,11 +155,7 @@ fn test_error_source_non_io_variants_return_none() {
   ];
 
   for variant in &variants {
-    assert!(
-      variant.source().is_none(),
-      "non-IoError variant {:?} should return None for source()",
-      variant
-    );
+    assert!(variant.source().is_none(), "non-IoError variant {:?} should return None for source()", variant);
   }
 }
 

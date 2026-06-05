@@ -73,8 +73,6 @@ pub fn serialize_for_ffi<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json:
 }
 
 /// Deserialize a value from JSON bytes received via FFI.
-pub fn deserialize_from_ffi<T: for<'de> Deserialize<'de>>(
-  bytes: &[u8],
-) -> Result<T, serde_json::Error> {
+pub fn deserialize_from_ffi<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, serde_json::Error> {
   serde_json::from_slice(bytes)
 }

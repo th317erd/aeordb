@@ -1,9 +1,7 @@
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::kv_store::{
-  KVEntry, KVStore,
-  KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION,
-  KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD, KV_TYPE_FORK, KV_TYPE_VERSION,
-  KV_FLAG_PENDING, KV_FLAG_DELETED,
+  KVEntry, KVStore, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD,
+  KV_TYPE_FORK, KV_TYPE_VERSION, KV_FLAG_PENDING, KV_FLAG_DELETED,
 };
 
 fn make_hash(value: u8) -> Vec<u8> {
@@ -13,21 +11,11 @@ fn make_hash(value: u8) -> Vec<u8> {
 }
 
 fn make_entry(hash_byte: u8, offset: u64) -> KVEntry {
-  KVEntry {
-    type_flags: KV_TYPE_CHUNK,
-    hash: make_hash(hash_byte),
-    offset,
-    total_length: 64,
-        }
+  KVEntry { type_flags: KV_TYPE_CHUNK, hash: make_hash(hash_byte), offset, total_length: 64 }
 }
 
 fn make_entry_with_type(hash_byte: u8, offset: u64, type_flags: u8) -> KVEntry {
-  KVEntry {
-    type_flags,
-    hash: make_hash(hash_byte),
-    offset,
-    total_length: 64,
-        }
+  KVEntry { type_flags, hash: make_hash(hash_byte), offset, total_length: 64 }
 }
 
 fn make_blake3_hash(data: &[u8]) -> Vec<u8> {
@@ -209,12 +197,7 @@ fn test_nvt_accelerated_lookup() {
   for index in 0..100u32 {
     let hash = make_blake3_hash(&index.to_le_bytes());
     hashes.push(hash.clone());
-    store.insert(KVEntry {
-      type_flags: KV_TYPE_CHUNK,
-      hash,
-      offset: index as u64 * 1000,
-      total_length: 64,
-        });
+    store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: index as u64 * 1000, total_length: 64 });
   }
 
   // Verify all 100 entries can be found via NVT-accelerated lookup
@@ -239,8 +222,7 @@ fn test_serialize_deserialize_roundtrip() {
   store.insert(make_entry_with_type(0xA0, 1000, KV_TYPE_DIRECTORY));
 
   let serialized = store.serialize();
-  let deserialized = KVStore::deserialize(&serialized)
-    .expect("deserialization should succeed");
+  let deserialized = KVStore::deserialize(&serialized).expect("deserialization should succeed");
 
   assert_eq!(deserialized.len(), 3);
   assert_eq!(deserialized.version(), 1);
@@ -263,8 +245,7 @@ fn test_serialize_deserialize_roundtrip() {
 fn test_serialize_deserialize_empty() {
   let store = KVStore::new(HashAlgorithm::Blake3_256, 8);
   let serialized = store.serialize();
-  let deserialized = KVStore::deserialize(&serialized)
-    .expect("empty store deserialization should succeed");
+  let deserialized = KVStore::deserialize(&serialized).expect("empty store deserialization should succeed");
   assert_eq!(deserialized.len(), 0);
 }
 
@@ -276,12 +257,7 @@ fn test_rebuild_nvt() {
 
   for index in 0..50u32 {
     let hash = make_blake3_hash(&index.to_le_bytes());
-    store.insert(KVEntry {
-      type_flags: KV_TYPE_CHUNK,
-      hash,
-      offset: index as u64 * 100,
-      total_length: 64,
-        });
+    store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: index as u64 * 100, total_length: 64 });
   }
 
   // Force rebuild
@@ -294,9 +270,7 @@ fn test_rebuild_nvt() {
   }
 
   // Verify NVT bucket entries sum to total entries
-  let total_in_nvt: u32 = (0..store.nvt().bucket_count())
-    .map(|index| store.nvt().get_bucket(index).entry_count)
-    .sum();
+  let total_in_nvt: u32 = (0..store.nvt().bucket_count()).map(|index| store.nvt().get_bucket(index).entry_count).sum();
   assert_eq!(total_in_nvt, 50, "NVT total entries should match store length");
 }
 
@@ -310,12 +284,7 @@ fn test_bulk_insert_1000_entries() {
   for index in 0..1000u32 {
     let hash = make_blake3_hash(&index.to_le_bytes());
     hashes.push(hash.clone());
-    store.insert(KVEntry {
-      type_flags: KV_TYPE_CHUNK,
-      hash,
-      offset: index as u64 * 512,
-      total_length: 64,
-        });
+    store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: index as u64 * 512, total_length: 64 });
   }
 
   assert_eq!(store.len(), 1000);
@@ -356,12 +325,7 @@ fn test_type_flags_encoding() {
 #[test]
 fn test_pending_flag() {
   let mut store = KVStore::new(HashAlgorithm::Blake3_256, 8);
-  store.insert(KVEntry {
-    type_flags: KV_TYPE_CHUNK | KV_FLAG_PENDING,
-    hash: make_hash(0xAA),
-    offset: 100,
-    total_length: 64,
-        });
+  store.insert(KVEntry { type_flags: KV_TYPE_CHUNK | KV_FLAG_PENDING, hash: make_hash(0xAA), offset: 100, total_length: 64 });
 
   let found = store.get(&make_hash(0xAA)).unwrap();
   assert!(found.is_pending());
@@ -372,12 +336,7 @@ fn test_pending_flag() {
 #[test]
 fn test_deleted_flag() {
   let mut store = KVStore::new(HashAlgorithm::Blake3_256, 8);
-  store.insert(KVEntry {
-    type_flags: KV_TYPE_FILE_RECORD | KV_FLAG_DELETED,
-    hash: make_hash(0xBB),
-    offset: 200,
-    total_length: 64,
-        });
+  store.insert(KVEntry { type_flags: KV_TYPE_FILE_RECORD | KV_FLAG_DELETED, hash: make_hash(0xBB), offset: 200, total_length: 64 });
 
   let found = store.get(&make_hash(0xBB)).unwrap();
   assert!(found.is_deleted());
@@ -389,21 +348,11 @@ fn test_deleted_flag() {
 fn test_insert_duplicate_hash_updates() {
   let mut store = KVStore::new(HashAlgorithm::Blake3_256, 8);
 
-  store.insert(KVEntry {
-    type_flags: KV_TYPE_CHUNK,
-    hash: make_hash(0xAA),
-    offset: 100,
-    total_length: 64,
-        });
+  store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: make_hash(0xAA), offset: 100, total_length: 64 });
   assert_eq!(store.len(), 1);
 
   // Insert same hash with different offset — should update, not add
-  store.insert(KVEntry {
-    type_flags: KV_TYPE_FILE_RECORD,
-    hash: make_hash(0xAA),
-    offset: 999,
-    total_length: 64,
-        });
+  store.insert(KVEntry { type_flags: KV_TYPE_FILE_RECORD, hash: make_hash(0xAA), offset: 999, total_length: 64 });
   assert_eq!(store.len(), 1, "duplicate insert should update, not add");
 
   let found = store.get(&make_hash(0xAA)).unwrap();
@@ -427,7 +376,7 @@ fn test_deserialize_invalid_version() {
   data.extend_from_slice(&1u16.to_le_bytes());
   data.extend_from_slice(&0u64.to_le_bytes());
   data.extend_from_slice(&0u32.to_le_bytes()); // nvt length = 0
-  // (would still fail because nvt data is missing, but version check comes first)
+                                               // (would still fail because nvt data is missing, but version check comes first)
 
   let result = KVStore::deserialize(&data);
   assert!(result.is_err(), "version 0 should fail");
@@ -450,7 +399,7 @@ fn test_deserialize_truncated_entries() {
   data.push(1); // version
   data.extend_from_slice(&1u16.to_le_bytes()); // BLAKE3
   data.extend_from_slice(&100u64.to_le_bytes()); // claims 100 entries
-  // but no actual entry data
+                                                 // but no actual entry data
 
   let result = KVStore::deserialize(&data);
   assert!(result.is_err(), "truncated entries should fail");
@@ -459,12 +408,7 @@ fn test_deserialize_truncated_entries() {
 #[test]
 fn test_update_flags_preserves_type() {
   let mut store = KVStore::new(HashAlgorithm::Blake3_256, 8);
-  store.insert(KVEntry {
-    type_flags: KV_TYPE_SNAPSHOT,
-    hash: make_hash(0xCC),
-    offset: 300,
-    total_length: 64,
-        });
+  store.insert(KVEntry { type_flags: KV_TYPE_SNAPSHOT, hash: make_hash(0xCC), offset: 300, total_length: 64 });
 
   store.update_flags(&make_hash(0xCC), KV_FLAG_PENDING | KV_FLAG_DELETED);
   let found = store.get(&make_hash(0xCC)).unwrap();

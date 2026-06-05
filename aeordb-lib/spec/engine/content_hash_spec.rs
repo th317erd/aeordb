@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aeordb::engine::{
-  DirectoryOps, StorageEngine,
-  directory_content_hash,
-};
+use aeordb::engine::{DirectoryOps, StorageEngine, directory_content_hash};
 use aeordb::engine::directory_entry::deserialize_child_entries;
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::tree_walker::{walk_version_tree, diff_trees};
@@ -73,10 +70,7 @@ fn test_snapshot_preserves_state() {
 
   assert!(tree.files.contains_key("/original.txt"), "snapshot must contain /original.txt");
   assert!(tree.files.contains_key("/keep.txt"), "snapshot must contain /keep.txt");
-  assert!(
-    !tree.files.contains_key("/added-later.txt"),
-    "snapshot must NOT contain /added-later.txt which was added after the snapshot"
-  );
+  assert!(!tree.files.contains_key("/added-later.txt"), "snapshot must NOT contain /added-later.txt which was added after the snapshot");
 }
 
 // ─── 4. Two snapshots have different trees ────────────────────────────────
@@ -150,11 +144,7 @@ fn test_child_entry_uses_content_hash() {
   // follow the link if so.
   let root_path_key = algo.compute_hash(b"dir:/").unwrap();
   let (_h, _k, raw) = engine.get_entry(&root_path_key).unwrap().unwrap();
-  let root_value = if raw.len() == hash_length {
-    engine.get_entry(&raw).unwrap().unwrap().2
-  } else {
-    raw
-  };
+  let root_value = if raw.len() == hash_length { engine.get_entry(&raw).unwrap().unwrap().2 } else { raw };
   let children = deserialize_child_entries(&root_value, hash_length, 0).unwrap();
 
   let subdir_child = children.iter().find(|c| c.name == "subdir").expect("must find subdir child");
@@ -162,10 +152,7 @@ fn test_child_entry_uses_content_hash() {
 
   // The hash should be a content hash, not the path hash
   let subdir_path_key = algo.compute_hash(b"dir:/subdir").unwrap();
-  assert_ne!(
-    subdir_child.hash, subdir_path_key,
-    "ChildEntry.hash for directory must be content hash, not path hash"
-  );
+  assert_ne!(subdir_child.hash, subdir_path_key, "ChildEntry.hash for directory must be content hash, not path hash");
 
   // Verify the content hash entry exists and contains the same data
   let content_entry = engine.get_entry(&subdir_child.hash).unwrap();
@@ -194,10 +181,7 @@ fn test_snapshot_directory_tree_immutable_after_delete() {
   // Current HEAD tree should NOT have alpha in its directory structure
   let current_head = engine.head_hash().unwrap();
   let current_tree = walk_version_tree(&engine, &current_head).unwrap();
-  assert!(
-    !current_tree.files.contains_key("/alpha.txt"),
-    "deleted file must not appear in current tree"
-  );
+  assert!(!current_tree.files.contains_key("/alpha.txt"), "deleted file must not appear in current tree");
   assert!(current_tree.files.contains_key("/beta.txt"));
 
   // The snapshot's directory structure is immutable -- it still lists alpha
@@ -279,10 +263,7 @@ fn test_content_hash_differs_from_path_hash() {
   let path_hash = algo.compute_hash(b"dir:/").unwrap();
   let content_hash = directory_content_hash(&[], &algo).unwrap();
 
-  assert_ne!(
-    path_hash, content_hash,
-    "content hash (dirc: prefix) must differ from path hash (dir: prefix)"
-  );
+  assert_ne!(path_hash, content_hash, "content hash (dirc: prefix) must differ from path hash (dir: prefix)");
 }
 
 // ─── 12. Empty root directory initial HEAD is content hash ────────────────
@@ -365,10 +346,7 @@ fn test_deep_nesting_content_hash_propagation() {
   // Walk the snapshot -- should only contain the one deep file
   let tree = walk_version_tree(&engine, &snap.root_hash).unwrap();
   assert!(tree.files.contains_key("/a/b/c/deep.txt"));
-  assert!(
-    !tree.files.contains_key("/a/b/c/another.txt"),
-    "file added after snapshot must not appear in snapshot tree"
-  );
+  assert!(!tree.files.contains_key("/a/b/c/another.txt"), "file added after snapshot must not appear in snapshot tree");
 }
 
 // ─── 16. Snapshot after add reflects only post-add state ──────────────────
@@ -433,11 +411,7 @@ fn test_path_and_content_entries_have_same_data() {
   let hash_length = algo.hash_length();
   let path_key = algo.compute_hash(b"dir:/").unwrap();
   let (_h1, _k1, raw) = engine.get_entry(&path_key).unwrap().unwrap();
-  let path_value = if raw.len() == hash_length {
-    engine.get_entry(&raw).unwrap().unwrap().2
-  } else {
-    raw
-  };
+  let path_value = if raw.len() == hash_length { engine.get_entry(&raw).unwrap().unwrap().2 } else { raw };
 
   // Get the content-based entry (HEAD)
   let head = engine.head_hash().unwrap();
@@ -489,10 +463,7 @@ fn test_create_directory_then_snapshot() {
   let tree = walk_version_tree(&engine, &snapshot.root_hash).unwrap();
   assert!(tree.directories.contains_key("/empty-dir"), "snapshot must contain /empty-dir");
   assert!(tree.files.contains_key("/file.txt"));
-  assert!(
-    !tree.files.contains_key("/empty-dir/new-file.txt"),
-    "file added after snapshot must not appear"
-  );
+  assert!(!tree.files.contains_key("/empty-dir/new-file.txt"), "file added after snapshot must not appear");
 }
 
 // ─── 21. Content hash uses dirc: prefix (collision avoidance) ─────────────
@@ -503,7 +474,7 @@ fn test_content_hash_uses_distinct_prefix() {
 
   // Ensure "dirc:" prefix is used (not "dir:") to avoid collisions
   // with path hashes that look like "dir:/some/path"
-  let content_of_slash = b"/";  // data that starts with "/"
+  let content_of_slash = b"/"; // data that starts with "/"
   let content_hash = directory_content_hash(content_of_slash, &algo).unwrap();
   let path_hash = algo.compute_hash(b"dir:/").unwrap();
 
@@ -566,10 +537,7 @@ fn test_identical_content_produces_same_root_hash() {
   // (Note: HEAD hasn't changed, so root_hash should be the same)
   let snap_2 = vm.create_snapshot(&ctx, "second", HashMap::new()).unwrap();
 
-  assert_eq!(
-    snap_1.root_hash, snap_2.root_hash,
-    "snapshots of identical state must have the same root hash"
-  );
+  assert_eq!(snap_1.root_hash, snap_2.root_hash, "snapshots of identical state must have the same root hash");
 }
 
 // ─── 25. Content hash entry is immutable across directory mutations ───────
@@ -646,18 +614,14 @@ fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
     let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist");
     pre_heal.push(v.clone());
     // Compare against canonical for that path.
-    let canonical = ops.canonical_directory_content_hash(p).unwrap()
-      .expect("canonical must be reachable from HEAD");
+    let canonical = ops.canonical_directory_content_hash(p).unwrap().expect("canonical must be reachable from HEAD");
     if v.len() == hash_length && v != canonical {
       stale_count += 1;
     }
   }
 
   // We need at least one stale ancestor for this test to be meaningful.
-  assert!(
-    stale_count >= 1,
-    "expected at least one stale ancestor dir_key after restore; got 0 (test setup didn't reproduce the bug)"
-  );
+  assert!(stale_count >= 1, "expected at least one stale ancestor dir_key after restore; got 0 (test setup didn't reproduce the bug)");
 
   // Now trigger the heal by listing the DEEPEST descendant. The new
   // ancestor-walk heal should fix /, /a, /a/b, /a/b/c, /a/b/c/d in one shot.
@@ -668,12 +632,8 @@ fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
     let key = directory_path_hash(p, &algo).unwrap();
     let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist post-heal");
     if v.len() == hash_length {
-      let canonical = ops.canonical_directory_content_hash(p).unwrap()
-        .expect("canonical reachable post-heal");
-      assert_eq!(
-        v, canonical,
-        "ancestor {} dir_key must point at canonical after list_directory heal", p
-      );
+      let canonical = ops.canonical_directory_content_hash(p).unwrap().expect("canonical reachable post-heal");
+      assert_eq!(v, canonical, "ancestor {} dir_key must point at canonical after list_directory heal", p);
     }
   }
 }

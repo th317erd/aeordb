@@ -45,19 +45,16 @@ const DEPLOY_FILES: &[&str] = &[".aeordb-functions"];
 /// 2. Map the HTTP method + path to a CrudlifyOp.
 /// 3. Call PermissionResolver::check_permission.
 /// 4. If denied, return 403 Forbidden. Otherwise, continue.
-pub async fn permission_middleware(
-  State(state): State<AppState>,
-  mut request: Request,
-  next: Next,
-) -> Response {
+pub async fn permission_middleware(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
   let request_path = request.uri().path().to_string();
   // Only enforce path-level CRUD permissions for actual file operations.
-  // Administrative routes under /files/ (query, download, mkdir, share,
+  // Administrative routes under /files/ (query, fetch, download, mkdir, share,
   // share-link, share-links) are protected by their own handler-level
   // auth checks and must not be treated as file paths.
   let is_files_route = request_path.starts_with("/files/")
     && request_path != "/files/query"
     && request_path != "/files/search"
+    && request_path != "/files/fetch"
     && request_path != "/files/download"
     && request_path != "/files/mkdir"
     && request_path != "/files/copy"
@@ -80,10 +77,9 @@ pub async fn permission_middleware(
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
       if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {
-        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis()
-          && !key_record.rules.is_empty() {
-            request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
-          }
+        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis() && !key_record.rules.is_empty() {
+          request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
+        }
       }
     }
     return next.run(request).await;
@@ -99,14 +95,7 @@ pub async fn permission_middleware(
     Some(claims) => claims.clone(),
     None => {
       // No claims means auth middleware didn't run or failed -- deny.
-      return (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-          error: "Authentication required".to_string(),
-          code: None,
-        }),
-      )
-        .into_response();
+      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Authentication required".to_string(), code: None })).into_response();
     }
   };
 
@@ -119,20 +108,9 @@ pub async fn permission_middleware(
   // `/files/.aeordb-system/...` has engine_path = `.aeordb-system/...`
   // (without the leading slash). Construct the canonical absolute form for
   // the check.
-  let abs_check_path = if engine_path.starts_with('/') {
-    engine_path.to_string()
-  } else {
-    format!("/{}", engine_path)
-  };
+  let abs_check_path = if engine_path.starts_with('/') { engine_path.to_string() } else { format!("/{}", engine_path) };
   if crate::engine::directory_ops::is_system_path(&abs_check_path) {
-    return (
-      StatusCode::NOT_FOUND,
-      Json(ErrorResponse {
-        error: format!("Not found: /{}", engine_path),
-        code: None,
-      }),
-    )
-      .into_response();
+    return (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("Not found: /{}", engine_path), code: None })).into_response();
   }
 
   // Parse user_id from claims.sub.
@@ -149,14 +127,7 @@ pub async fn permission_middleware(
           sub = %claims.sub,
           "Rejecting request: sub is not a valid UUID"
         );
-        return (
-          StatusCode::FORBIDDEN,
-          Json(ErrorResponse {
-            error: "Invalid user identity".to_string(),
-            code: None,
-          }),
-        )
-          .into_response();
+        return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Invalid user identity".to_string(), code: None })).into_response();
       }
     }
   };
@@ -172,51 +143,24 @@ pub async fn permission_middleware(
       Ok(Some(record)) => record,
       Ok(None) => {
         // Key not found in DB — token is stale
-        return (
-          StatusCode::UNAUTHORIZED,
-          Json(ErrorResponse {
-            error: "API key not found".to_string(),
-            code: None,
-          }),
-        )
-          .into_response();
+        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response();
       }
       Err(error) => {
         tracing::error!("Failed to load API key {}: {}", key_id, error);
-        return (
-          StatusCode::INTERNAL_SERVER_ERROR,
-          Json(ErrorResponse {
-            error: "Failed to verify API key".to_string(),
-            code: None,
-          }),
-        )
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to verify API key".to_string(), code: None }))
           .into_response();
       }
     };
 
     // Check if key is revoked.
     if key_record.is_revoked {
-      return (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-          error: "API key has been revoked".to_string(),
-          code: None,
-        }),
-      )
-        .into_response();
+      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key has been revoked".to_string(), code: None })).into_response();
     }
 
     // Check if key is expired.
     let now_millis = chrono::Utc::now().timestamp_millis();
     if key_record.expires_at <= now_millis {
-      return (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-          error: "API key expired".to_string(),
-          code: None,
-        }),
-      )
-        .into_response();
+      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key expired".to_string(), code: None })).into_response();
     }
 
     // If key has rules, enforce them.
@@ -247,19 +191,11 @@ pub async fn permission_middleware(
         match match_rules(&key_record.rules, &match_path) {
           Some(rule) => {
             if !check_operation_permitted(&rule.permitted, flag_char) {
-              return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
-              )
-                .into_response();
+              return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Not found: {}", engine_path)}))).into_response();
             }
           }
           None => {
-            return (
-              StatusCode::NOT_FOUND,
-              Json(serde_json::json!({"error": format!("Not found: {}", engine_path)})),
-            )
-              .into_response();
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Not found: {}", engine_path)}))).into_response();
           }
         }
       }
@@ -280,13 +216,7 @@ pub async fn permission_middleware(
       let key_record = state.api_key_cache.get(&key_id.to_string(), &state.engine);
       if let Ok(Some(record)) = key_record {
         if record.rules.is_empty() {
-          return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-              error: "Share key has no permission rules".to_string(),
-              code: None,
-            }),
-          )
+          return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Share key has no permission rules".to_string(), code: None }))
             .into_response();
         }
       }
@@ -295,10 +225,7 @@ pub async fn permission_middleware(
   }
 
   // Check permission (normal user flow).
-  let resolver = PermissionResolver::new(
-    &state.engine,
-    &state.group_cache,
-  );
+  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
 
   let user_uuid = user_id.unwrap();
 
@@ -312,10 +239,8 @@ pub async fn permission_middleware(
     Ok(v) => v,
     Err(error) => {
       tracing::error!(user_id = %user_uuid, path = %engine_path, "Permission check failed: {}", error);
-      return (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }),
-      ).into_response();
+      return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }))
+        .into_response();
     }
   };
 
@@ -329,9 +254,7 @@ pub async fn permission_middleware(
   if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List) {
     let has_descendant = resolver.has_descendant_grants(&user_uuid, engine_path).unwrap_or(false);
     if has_descendant {
-      let children = resolver
-        .accessible_child_names(&user_uuid, engine_path)
-        .unwrap_or_default();
+      let children = resolver.accessible_child_names(&user_uuid, engine_path).unwrap_or_default();
       let allowed_children: std::collections::HashSet<String> = children.into_iter().collect();
       request.extensions_mut().insert(FilteredListing { allowed_children });
       return next.run(request).await;
@@ -344,14 +267,7 @@ pub async fn permission_middleware(
     operation = ?operation,
     "Permission denied"
   );
-  (
-    StatusCode::FORBIDDEN,
-    Json(ErrorResponse {
-      error: "Permission denied".to_string(),
-      code: None,
-    }),
-  )
-    .into_response()
+  (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Permission denied".to_string(), code: None })).into_response()
 }
 
 /// Map an HTTP method and path to a CrudlifyOp.

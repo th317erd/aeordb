@@ -265,21 +265,13 @@ async fn main() {
       };
 
       // Merge: CLI flag > config file > built-in default.
-      let merged_port = port
-        .or(file_config.server.port)
-        .unwrap_or(6830);
+      let merged_port = port.or(file_config.server.port).unwrap_or(6830);
 
-      let merged_host = host
-        .or(file_config.server.host)
-        .unwrap_or_else(|| "0.0.0.0".to_string());
+      let merged_host = host.or(file_config.server.host).unwrap_or_else(|| "0.0.0.0".to_string());
 
-      let merged_database = database
-        .or(file_config.storage.database)
-        .unwrap_or_else(|| "data.aeordb".to_string());
+      let merged_database = database.or(file_config.storage.database).unwrap_or_else(|| "data.aeordb".to_string());
 
-      let merged_log_format = log_format
-        .or(file_config.server.log_format)
-        .unwrap_or_else(|| "pretty".to_string());
+      let merged_log_format = log_format.or(file_config.server.log_format).unwrap_or_else(|| "pretty".to_string());
 
       // Auth: CLI --auth overrides config auth.mode.
       let merged_auth: Option<String> = auth.or(file_config.auth.mode);
@@ -289,35 +281,22 @@ async fn main() {
 
       // CORS: CLI --cors-origins overrides config server.cors.origins.
       // Config origins (Vec<String>) are joined with commas for the server layer.
-      let merged_cors: Option<String> = cors_origins.or_else(|| {
-        file_config.server.cors
-          .and_then(|cors| cors.origins)
-          .map(|origins| origins.join(","))
-      });
+      let merged_cors: Option<String> =
+        cors_origins.or_else(|| file_config.server.cors.and_then(|cors| cors.origins).map(|origins| origins.join(",")));
 
       // TLS: CLI flags override config values.
-      let merged_tls_cert: Option<String> = tls_cert.or_else(|| {
-        file_config.server.tls.as_ref().and_then(|tls| tls.cert.clone())
-      });
-      let merged_tls_key: Option<String> = tls_key.or_else(|| {
-        file_config.server.tls.as_ref().and_then(|tls| tls.key.clone())
-      });
+      let merged_tls_cert: Option<String> = tls_cert.or_else(|| file_config.server.tls.as_ref().and_then(|tls| tls.cert.clone()));
+      let merged_tls_key: Option<String> = tls_key.or_else(|| file_config.server.tls.as_ref().and_then(|tls| tls.key.clone()));
 
       // JWT expiry: CLI --jwt-expiry overrides config auth.jwt_expiry_seconds.
-      let merged_jwt_expiry = jwt_expiry
-        .or(file_config.auth.jwt_expiry_seconds)
-        .unwrap_or(3600);
+      let merged_jwt_expiry = jwt_expiry.or(file_config.auth.jwt_expiry_seconds).unwrap_or(3600);
 
       // Chunk size: CLI --chunk-size overrides config storage.chunk_size.
-      let merged_chunk_size = chunk_size
-        .or(file_config.storage.chunk_size)
-        .unwrap_or(262144);
+      let merged_chunk_size = chunk_size.or(file_config.storage.chunk_size).unwrap_or(262144);
 
       // Parse --peers into a Vec<String>.
-      let peer_list: Vec<String> = peers
-        .as_deref()
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
-        .unwrap_or_default();
+      let peer_list: Vec<String> =
+        peers.as_deref().map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default();
 
       // Validate --join requires --join-token.
       if join.is_some() && join_token.is_none() {
@@ -341,7 +320,8 @@ async fn main() {
         join_url: join.as_deref(),
         join_token: join_token.as_deref(),
         advertise_url: advertise_url.as_deref(),
-      }).await;
+      })
+      .await;
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

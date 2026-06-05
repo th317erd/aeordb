@@ -51,12 +51,7 @@ fn test_no_rules_means_allow() {
 fn test_deploy_rule_plugin() {
   let (plugin_manager, _temp_dir) = test_manager();
 
-  let result = plugin_manager.deploy_plugin(
-    "test-rule",
-    "mydb/public/users",
-    PluginType::Rule,
-    dummy_wasm_bytes(),
-  );
+  let result = plugin_manager.deploy_plugin("test-rule", "mydb/public/users", PluginType::Rule, dummy_wasm_bytes());
 
   assert!(result.is_ok());
   let record = result.unwrap();
@@ -69,29 +64,13 @@ fn test_rule_collected_from_hierarchy() {
   let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a rule at the database level.
-  plugin_manager
-    .deploy_plugin(
-      "db-level-rule",
-      "mydb",
-      PluginType::Rule,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("db-level-rule", "mydb", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   // Deploy a rule at the schema level.
-  plugin_manager
-    .deploy_plugin(
-      "schema-level-rule",
-      "mydb/public",
-      PluginType::Rule,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("schema-level-rule", "mydb/public", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
-  let applicable = engine
-    .collect_applicable_rules("mydb/public/users")
-    .unwrap();
+  let applicable = engine.collect_applicable_rules("mydb/public/users").unwrap();
 
   // Both rules should apply (schema-level first since it's more specific).
   assert_eq!(applicable.len(), 2);
@@ -103,21 +82,12 @@ fn test_rule_collected_from_hierarchy() {
 fn test_rule_inherits_to_child_scopes() {
   let (plugin_manager, _temp_dir) = test_manager();
 
-  plugin_manager
-    .deploy_plugin(
-      "parent-rule",
-      "mydb",
-      PluginType::Rule,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("parent-rule", "mydb", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
 
   // Rule at "mydb" should apply to "mydb/public/users".
-  let applicable = engine
-    .collect_applicable_rules("mydb/public/users")
-    .unwrap();
+  let applicable = engine.collect_applicable_rules("mydb/public/users").unwrap();
   assert_eq!(applicable.len(), 1);
   assert_eq!(applicable[0], "mydb");
 }
@@ -126,63 +96,33 @@ fn test_rule_inherits_to_child_scopes() {
 fn test_rule_does_not_apply_to_sibling_scopes() {
   let (plugin_manager, _temp_dir) = test_manager();
 
-  plugin_manager
-    .deploy_plugin(
-      "sibling-rule",
-      "mydb/private",
-      PluginType::Rule,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("sibling-rule", "mydb/private", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
 
   // Rule at "mydb/private" should NOT apply to "mydb/public/users".
-  let applicable = engine
-    .collect_applicable_rules("mydb/public/users")
-    .unwrap();
+  let applicable = engine.collect_applicable_rules("mydb/public/users").unwrap();
   assert!(applicable.is_empty());
 }
 
 #[test]
 fn test_allow_decision_passes() {
-  assert_eq!(
-    combine_decisions(RuleDecision::Allow, RuleDecision::Allow),
-    RuleDecision::Allow
-  );
+  assert_eq!(combine_decisions(RuleDecision::Allow, RuleDecision::Allow), RuleDecision::Allow);
 }
 
 #[test]
 fn test_deny_decision_blocks() {
-  assert_eq!(
-    combine_decisions(RuleDecision::Allow, RuleDecision::Deny),
-    RuleDecision::Deny
-  );
-  assert_eq!(
-    combine_decisions(RuleDecision::Deny, RuleDecision::Allow),
-    RuleDecision::Deny
-  );
-  assert_eq!(
-    combine_decisions(RuleDecision::Deny, RuleDecision::Deny),
-    RuleDecision::Deny
-  );
+  assert_eq!(combine_decisions(RuleDecision::Allow, RuleDecision::Deny), RuleDecision::Deny);
+  assert_eq!(combine_decisions(RuleDecision::Deny, RuleDecision::Allow), RuleDecision::Deny);
+  assert_eq!(combine_decisions(RuleDecision::Deny, RuleDecision::Deny), RuleDecision::Deny);
 }
 
 #[test]
 fn test_most_restrictive_rule_wins() {
   // Deny > Redact > Allow
-  assert_eq!(
-    combine_decisions(RuleDecision::Redact, RuleDecision::Allow),
-    RuleDecision::Redact
-  );
-  assert_eq!(
-    combine_decisions(RuleDecision::Deny, RuleDecision::Redact),
-    RuleDecision::Deny
-  );
-  assert_eq!(
-    combine_decisions(RuleDecision::Allow, RuleDecision::Redact),
-    RuleDecision::Redact
-  );
+  assert_eq!(combine_decisions(RuleDecision::Redact, RuleDecision::Allow), RuleDecision::Redact);
+  assert_eq!(combine_decisions(RuleDecision::Deny, RuleDecision::Redact), RuleDecision::Deny);
+  assert_eq!(combine_decisions(RuleDecision::Allow, RuleDecision::Redact), RuleDecision::Redact);
 }
 
 #[test]
@@ -200,14 +140,7 @@ fn test_evaluate_with_deployed_rules_does_not_crash() {
   let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a rule that returns an empty response (which defaults to Allow).
-  plugin_manager
-    .deploy_plugin(
-      "eval-rule",
-      "mydb/public",
-      PluginType::Rule,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("eval-rule", "mydb/public", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
   let context = sample_context();
@@ -222,19 +155,10 @@ fn test_non_rule_plugins_ignored_by_rule_engine() {
   let (plugin_manager, _temp_dir) = test_manager();
 
   // Deploy a regular WASM plugin (not a rule).
-  plugin_manager
-    .deploy_plugin(
-      "regular-plugin",
-      "mydb/public",
-      PluginType::Wasm,
-      dummy_wasm_bytes(),
-    )
-    .unwrap();
+  plugin_manager.deploy_plugin("regular-plugin", "mydb/public", PluginType::Wasm, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
-  let applicable = engine
-    .collect_applicable_rules("mydb/public/users")
-    .unwrap();
+  let applicable = engine.collect_applicable_rules("mydb/public/users").unwrap();
   assert!(applicable.is_empty(), "non-rule plugins should be ignored");
 }
 

@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use aeordb::engine::{
-  RequestContext,
-  StorageEngine, User, ROOT_USER_ID,
-  validate_user_id, is_root, SAFE_QUERY_FIELDS,
-};
+use aeordb::engine::{RequestContext, StorageEngine, User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 use aeordb::engine::system_store;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -137,9 +133,7 @@ fn test_store_and_get_user() {
   let user = User::new("alice", Some("alice@example.com"));
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
-  let retrieved = system_store::get_user(&engine, &user.user_id)
-    .expect("get user")
-    .expect("user should exist");
+  let retrieved = system_store::get_user(&engine, &user.user_id).expect("get user").expect("user should exist");
 
   assert_eq!(retrieved.user_id, user.user_id);
   assert_eq!(retrieved.username, "alice");
@@ -150,8 +144,7 @@ fn test_store_and_get_user() {
 fn test_get_user_not_found() {
   let (engine, _temp_dir) = setup();
 
-  let result = system_store::get_user(&engine, &uuid::Uuid::new_v4())
-    .expect("get user should not error");
+  let result = system_store::get_user(&engine, &uuid::Uuid::new_v4()).expect("get user should not error");
   assert!(result.is_none());
 }
 
@@ -163,9 +156,7 @@ fn test_get_user_by_username() {
   let user = User::new("lookup_user", Some("lookup@example.com"));
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
-  let retrieved = system_store::get_user_by_username(&engine, "lookup_user")
-    .expect("get by username")
-    .expect("user should exist");
+  let retrieved = system_store::get_user_by_username(&engine, "lookup_user").expect("get by username").expect("user should exist");
 
   assert_eq!(retrieved.user_id, user.user_id);
   assert_eq!(retrieved.username, "lookup_user");
@@ -175,8 +166,7 @@ fn test_get_user_by_username() {
 fn test_get_user_by_username_not_found() {
   let (engine, _temp_dir) = setup();
 
-  let result = system_store::get_user_by_username(&engine, "nonexistent")
-    .expect("should not error");
+  let result = system_store::get_user_by_username(&engine, "nonexistent").expect("should not error");
   assert!(result.is_none());
 }
 
@@ -219,9 +209,7 @@ fn test_update_user() {
   user.updated_at = chrono::Utc::now().timestamp_millis();
   system_store::update_user(&engine, &ctx, &user).expect("update user");
 
-  let retrieved = system_store::get_user(&engine, &user.user_id)
-    .expect("get user")
-    .expect("user should exist");
+  let retrieved = system_store::get_user(&engine, &user.user_id).expect("get user").expect("user should exist");
 
   assert_eq!(retrieved.username, "updated");
   assert_eq!(retrieved.email, Some("updated@example.com".to_string()));
@@ -237,8 +225,7 @@ fn test_delete_user() {
 
   system_store::delete_user(&engine, &ctx, &user.user_id).expect("delete user");
 
-  let result = system_store::get_user(&engine, &user.user_id)
-    .expect("get user should not error");
+  let result = system_store::get_user(&engine, &user.user_id).expect("get user should not error");
   assert!(result.is_none());
 }
 
@@ -265,8 +252,7 @@ fn test_delete_user_removes_username_lookup() {
 
   system_store::delete_user(&engine, &ctx, &user.user_id).expect("delete user");
 
-  let result = system_store::get_user_by_username(&engine, "lookupdelete")
-    .expect("should not error");
+  let result = system_store::get_user_by_username(&engine, "lookupdelete").expect("should not error");
   assert!(result.is_none());
 }
 
@@ -325,9 +311,7 @@ fn test_auto_group_created_on_user_creation() {
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
-  let group = system_store::get_group(&engine, &group_name)
-    .expect("get group")
-    .expect("auto-group should exist");
+  let group = system_store::get_group(&engine, &group_name).expect("get group").expect("auto-group should exist");
 
   assert_eq!(group.name, group_name);
   assert_eq!(group.query_field, "user_id");
@@ -346,17 +330,11 @@ fn test_auto_group_deleted_on_user_deletion() {
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
-  assert!(
-    system_store::get_group(&engine, &group_name).unwrap().is_some(),
-    "auto-group should exist before deletion"
-  );
+  assert!(system_store::get_group(&engine, &group_name).unwrap().is_some(), "auto-group should exist before deletion");
 
   system_store::delete_user(&engine, &ctx, &user.user_id).expect("delete user");
 
-  assert!(
-    system_store::get_group(&engine, &group_name).unwrap().is_none(),
-    "auto-group should be deleted when user is deleted"
-  );
+  assert!(system_store::get_group(&engine, &group_name).unwrap().is_none(), "auto-group should be deleted when user is deleted");
 }
 
 #[test]
@@ -368,9 +346,7 @@ fn test_auto_group_membership() {
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
   let group_name = format!("user:{}", user.user_id);
-  let group = system_store::get_group(&engine, &group_name)
-    .unwrap()
-    .expect("auto-group should exist");
+  let group = system_store::get_group(&engine, &group_name).unwrap().expect("auto-group should exist");
 
   // The user should be a member of their own auto-group.
   assert!(group.evaluate_membership(&user));
@@ -392,9 +368,7 @@ fn test_store_user_with_no_email() {
   let user = User::new("noemail", None);
   system_store::store_user(&engine, &ctx, &user).expect("store user");
 
-  let retrieved = system_store::get_user(&engine, &user.user_id)
-    .unwrap()
-    .expect("user should exist");
+  let retrieved = system_store::get_user(&engine, &user.user_id).unwrap().expect("user should exist");
   assert_eq!(retrieved.email, None);
 }
 

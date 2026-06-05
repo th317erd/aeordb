@@ -3,8 +3,7 @@ use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::{FieldIndex, IndexManager};
 use aeordb::engine::query_engine::QueryResult;
 use aeordb::engine::scalar_converter::{
-  HashConverter, U8Converter, U16Converter, U32Converter, U64Converter,
-  I64Converter, F64Converter, StringConverter, TimestampConverter,
+  HashConverter, U8Converter, U16Converter, U32Converter, U64Converter, I64Converter, F64Converter, StringConverter, TimestampConverter,
   ScalarConverter,
 };
 use aeordb::engine::file_record::FileRecord;
@@ -33,10 +32,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
-  format!(
-    r#"{{"name":"{}","age":{},"email":"{}"}}"#,
-    name, age, email,
-  ).into_bytes()
+  format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
 
 // =============================================================================
@@ -150,20 +146,15 @@ fn test_index_manager_save_load_with_strategy() {
 
   // list_indexes should show "age.u64" (new format)
   let indexes = index_manager.list_indexes("/users").unwrap();
-  assert!(indexes.contains(&"age.u64".to_string()),
-    "Expected 'age.u64' in indexes, got: {:?}", indexes);
+  assert!(indexes.contains(&"age.u64".to_string()), "Expected 'age.u64' in indexes, got: {:?}", indexes);
 
   // load_index_by_strategy should find it
-  let loaded = index_manager.load_index_by_strategy("/users", "age", "u64")
-    .unwrap()
-    .expect("Index should be loadable by strategy");
+  let loaded = index_manager.load_index_by_strategy("/users", "age", "u64").unwrap().expect("Index should be loadable by strategy");
   assert_eq!(loaded.field_name, "age");
   assert_eq!(loaded.len(), 1);
 
   // load_index (generic) should also find it via scanning
-  let loaded_generic = index_manager.load_index("/users", "age")
-    .unwrap()
-    .expect("Index should be loadable generically");
+  let loaded_generic = index_manager.load_index("/users", "age").unwrap().expect("Index should be loadable generically");
   assert_eq!(loaded_generic.field_name, "age");
   assert_eq!(loaded_generic.len(), 1);
 }
@@ -180,9 +171,7 @@ fn test_index_manager_save_load_string_strategy() {
 
   index_manager.save_index("/users", &index).unwrap();
 
-  let loaded = index_manager.load_index_by_strategy("/users", "name", "string")
-    .unwrap()
-    .expect("String index should load by strategy");
+  let loaded = index_manager.load_index_by_strategy("/users", "name", "string").unwrap().expect("String index should load by strategy");
   assert_eq!(loaded.field_name, "name");
   assert_eq!(loaded.len(), 1);
 }
@@ -209,9 +198,7 @@ fn test_index_manager_backward_compat() {
   ops.store_file_buffered(&ctx, "/data/.aeordb-indexes/score.idx", &data, Some("application/octet-stream")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
-  let loaded = index_manager.load_index("/data", "score")
-    .unwrap()
-    .expect("Legacy strategy-less index should still load");
+  let loaded = index_manager.load_index("/data", "score").unwrap().expect("Legacy strategy-less index should still load");
   assert_eq!(loaded.field_name, "score");
 }
 
@@ -270,13 +257,10 @@ fn test_load_indexes_for_field_multiple_strategies() {
 
   // load_indexes_for_field should return both
   let all_indexes = index_manager.load_indexes_for_field("/users", "name").unwrap();
-  assert_eq!(all_indexes.len(), 2,
-    "Expected 2 indexes for 'name', got {}", all_indexes.len());
+  assert_eq!(all_indexes.len(), 2, "Expected 2 indexes for 'name', got {}", all_indexes.len());
 
   // Verify both strategies are represented
-  let strategies: Vec<&str> = all_indexes.iter()
-    .map(|idx| idx.converter.strategy())
-    .collect();
+  let strategies: Vec<&str> = all_indexes.iter().map(|idx| idx.converter.strategy()).collect();
   assert!(strategies.contains(&"string"), "Missing 'string' strategy");
   assert!(strategies.contains(&"hash"), "Missing 'hash' strategy");
 }
@@ -321,19 +305,10 @@ fn test_load_indexes_for_field_only_matches_correct_field() {
 
 #[test]
 fn test_query_result_has_score_and_matched_by() {
-  let file_record = FileRecord::new(
-    "/test/file.json".to_string(),
-    Some("application/json".to_string()),
-    42,
-    vec![],
-  );
+  let file_record = FileRecord::new("/test/file.json".to_string(), Some("application/json".to_string()), 42, vec![]);
 
-  let result = QueryResult {
-    file_hash: vec![0xAA; 32],
-    file_record,
-    score: 0.85,
-    matched_by: vec!["trigram".to_string(), "phonetic".to_string()],
-  };
+  let result =
+    QueryResult { file_hash: vec![0xAA; 32], file_record, score: 0.85, matched_by: vec!["trigram".to_string(), "phonetic".to_string()] };
 
   assert_eq!(result.score, 0.85);
   assert_eq!(result.matched_by.len(), 2);
@@ -344,19 +319,9 @@ fn test_query_result_has_score_and_matched_by() {
 #[test]
 fn test_query_result_default_score_is_one() {
   // When constructed with default score (as the query engine does)
-  let file_record = FileRecord::new(
-    "/test/file.json".to_string(),
-    None,
-    0,
-    vec![],
-  );
+  let file_record = FileRecord::new("/test/file.json".to_string(), None, 0, vec![]);
 
-  let result = QueryResult {
-    file_hash: vec![0x00; 32],
-    file_record,
-    score: 1.0,
-    matched_by: vec![],
-  };
+  let result = QueryResult { file_hash: vec![0x00; 32], file_record, score: 1.0, matched_by: vec![] };
 
   assert_eq!(result.score, 1.0);
   assert!(result.matched_by.is_empty());
@@ -365,12 +330,7 @@ fn test_query_result_default_score_is_one() {
 #[test]
 fn test_query_result_score_zero() {
   let file_record = FileRecord::new("/t".to_string(), None, 0, vec![]);
-  let result = QueryResult {
-    file_hash: vec![0x00; 32],
-    file_record,
-    score: 0.0,
-    matched_by: vec![],
-  };
+  let result = QueryResult { file_hash: vec![0x00; 32], file_record, score: 0.0, matched_by: vec![] };
   assert_eq!(result.score, 0.0);
 }
 
@@ -381,11 +341,7 @@ fn test_query_result_matched_by_multiple_entries() {
     file_hash: vec![0x00; 32],
     file_record,
     score: 0.95,
-    matched_by: vec![
-      "exact".to_string(),
-      "trigram".to_string(),
-      "dmetaphone".to_string(),
-    ],
+    matched_by: vec!["exact".to_string(), "trigram".to_string(), "dmetaphone".to_string()],
   };
   assert_eq!(result.matched_by.len(), 3);
 }
@@ -444,20 +400,8 @@ fn test_expand_value_in_indexing_pipeline() {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
     ],
   };
   store_index_config(&engine, "/users", &config);
@@ -468,13 +412,11 @@ fn test_expand_value_in_indexing_pipeline() {
   let index_manager = IndexManager::new(&engine);
 
   // Verify "name" index has an entry
-  let name_index = index_manager.load_index("/users", "name").unwrap()
-    .expect("name index should exist");
+  let name_index = index_manager.load_index("/users", "name").unwrap().expect("name index should exist");
   assert_eq!(name_index.len(), 1, "name index should have 1 entry");
 
   // Verify "age" index has an entry
-  let age_index = index_manager.load_index("/users", "age").unwrap()
-    .expect("age index should exist");
+  let age_index = index_manager.load_index("/users", "age").unwrap().expect("age index should exist");
   assert_eq!(age_index.len(), 1, "age index should have 1 entry");
 }
 
@@ -491,15 +433,13 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
@@ -510,8 +450,7 @@ fn test_expand_value_in_indexing_pipeline_multiple_files() {
   ops.store_file_with_indexing(&ctx, "/users/bob.json", &data2, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
-  let age_index = index_manager.load_index("/users", "age").unwrap()
-    .expect("age index should exist");
+  let age_index = index_manager.load_index("/users", "age").unwrap().expect("age index should exist");
   assert_eq!(age_index.len(), 2, "age index should have 2 entries after storing 2 files");
 }
 
@@ -528,15 +467,13 @@ fn test_expand_value_overwrite_file_updates_index() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
@@ -548,8 +485,7 @@ fn test_expand_value_overwrite_file_updates_index() {
   ops.store_file_with_indexing(&ctx, "/users/alice.json", &data2, Some("application/json")).unwrap();
 
   let index_manager = IndexManager::new(&engine);
-  let age_index = index_manager.load_index("/users", "age").unwrap()
-    .expect("age index should exist");
+  let age_index = index_manager.load_index("/users", "age").unwrap().expect("age index should exist");
   // Should still have 1 entry (old removed, new inserted)
   assert_eq!(age_index.len(), 1, "age index should have 1 entry after overwrite");
 }
@@ -585,9 +521,7 @@ fn test_create_index_via_manager_sets_correct_strategy() {
   assert_eq!(index.converter.strategy(), "f64");
 
   // Verify it can be loaded by strategy
-  let loaded = index_manager.load_index_by_strategy("/metrics", "value", "f64")
-    .unwrap()
-    .expect("Should load by strategy");
+  let loaded = index_manager.load_index_by_strategy("/metrics", "value", "f64").unwrap().expect("Should load by strategy");
   assert_eq!(loaded.field_name, "value");
 }
 
@@ -652,12 +586,7 @@ fn test_insert_expanded_preserves_sorted_order() {
 
   // Verify sorted order
   for window in index.entries.windows(2) {
-    assert!(
-      window[0].scalar <= window[1].scalar,
-      "Entries not sorted: {} > {}",
-      window[0].scalar,
-      window[1].scalar,
-    );
+    assert!(window[0].scalar <= window[1].scalar, "Entries not sorted: {} > {}", window[0].scalar, window[1].scalar,);
   }
 }
 
@@ -675,9 +604,7 @@ fn test_save_and_reload_preserves_entries_with_strategy() {
 
   index_manager.save_index("/game", &index).unwrap();
 
-  let loaded = index_manager.load_index_by_strategy("/game", "score", "u64")
-    .unwrap()
-    .expect("Index should load");
+  let loaded = index_manager.load_index_by_strategy("/game", "score", "u64").unwrap().expect("Index should load");
   assert_eq!(loaded.len(), 3);
   assert_eq!(loaded.field_name, "score");
 }

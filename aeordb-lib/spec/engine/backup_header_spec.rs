@@ -208,11 +208,7 @@ fn test_open_patch_returns_patch_database_variant() {
     Err(e) => e,
     Ok(_) => panic!("Expected error but open succeeded"),
   };
-  assert!(
-    matches!(err, EngineError::PatchDatabase(_)),
-    "Expected PatchDatabase error variant, got: {:?}",
-    err
-  );
+  assert!(matches!(err, EngineError::PatchDatabase(_)), "Expected PatchDatabase error variant, got: {:?}", err);
 }
 
 #[test]

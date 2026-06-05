@@ -9,10 +9,10 @@ const SIGNING_KEY_MIN_LENGTH: usize = 32;
 /// The JWT signing key is stored at `/.aeordb-system/config/jwt_signing_key` and must
 /// be at least 32 bytes (an Ed25519 seed).
 pub fn has_signing_key(engine: &StorageEngine) -> bool {
-    match system_store::get_config(engine, "jwt_signing_key") {
-        Ok(Some(key_bytes)) if key_bytes.len() >= SIGNING_KEY_MIN_LENGTH => true,
-        _ => false,
-    }
+  match system_store::get_config(engine, "jwt_signing_key") {
+    Ok(Some(key_bytes)) if key_bytes.len() >= SIGNING_KEY_MIN_LENGTH => true,
+    _ => false,
+  }
 }
 
 /// Check if this node is ready to serve client HTTP traffic.
@@ -25,10 +25,10 @@ pub fn has_signing_key(engine: &StorageEngine) -> bool {
 /// In standalone mode, this always returns true because the signing key is
 /// generated locally during bootstrap and is always available.
 pub fn is_ready_for_traffic(engine: &StorageEngine, is_cluster_mode: bool) -> bool {
-    if !is_cluster_mode {
-        return true;
-    }
-    has_signing_key(engine)
+  if !is_cluster_mode {
+    return true;
+  }
+  has_signing_key(engine)
 }
 
 /// Determine the cluster mode by inspecting system store.
@@ -37,8 +37,8 @@ pub fn is_ready_for_traffic(engine: &StorageEngine, is_cluster_mode: bool) -> bo
 /// `"standalone"`. This is a heuristic based on persisted peer state — if
 /// the node was started with `--peers`, those configs will have been stored.
 pub fn get_cluster_mode(engine: &StorageEngine) -> String {
-    match system_store::get_peer_configs(engine) {
-        Ok(peers) if !peers.is_empty() => "cluster".to_string(),
-        _ => "standalone".to_string(),
-    }
+  match system_store::get_peer_configs(engine) {
+    Ok(peers) if !peers.is_empty() => "cluster".to_string(),
+    _ => "standalone".to_string(),
+  }
 }

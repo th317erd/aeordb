@@ -56,9 +56,7 @@ pub struct NoAuthProvider {
 
 impl NoAuthProvider {
   pub fn new() -> Self {
-    Self {
-      dummy_jwt_manager: JwtManager::generate(),
-    }
+    Self { dummy_jwt_manager: JwtManager::generate() }
   }
 }
 
@@ -126,12 +124,8 @@ impl FileAuthProvider {
   /// Panics if the JWT signing key cannot be created or persisted -- this is
   /// a server-startup operation and the process cannot continue without it.
   pub fn new(engine: Arc<StorageEngine>) -> Self {
-    let jwt_manager = load_or_create_jwt_manager(&engine)
-      .expect("fatal: unable to load or create JWT signing key during initialization");
-    Self {
-      engine,
-      jwt_manager,
-    }
+    let jwt_manager = load_or_create_jwt_manager(&engine).expect("fatal: unable to load or create JWT signing key during initialization");
+    Self { engine, jwt_manager }
   }
 
   /// Create a FileAuthProvider for a separate identity file.
@@ -142,25 +136,21 @@ impl FileAuthProvider {
     // Create parent directory if needed.
     if let Some(parent) = file_path.parent() {
       if !parent.exists() {
-        std::fs::create_dir_all(parent)
-          .map_err(|error| format!("Failed to create identity directory: {}", error))?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("Failed to create identity directory: {}", error))?;
       }
     }
 
     let engine = if file_path.exists() {
-      StorageEngine::open(path)
-        .map_err(|error| format!("Failed to open identity file: {}", error))?
+      StorageEngine::open(path).map_err(|error| format!("Failed to open identity file: {}", error))?
     } else {
-      StorageEngine::create(path)
-        .map_err(|error| format!("Failed to create identity file: {}", error))?
+      StorageEngine::create(path).map_err(|error| format!("Failed to create identity file: {}", error))?
     };
 
     let engine = Arc::new(engine);
     let provider = Self::new(engine.clone());
 
     // Bootstrap a root key if none exist.
-    let bootstrap_key = crate::auth::bootstrap_root_key(&engine)
-      .map_err(|error| format!("Failed to bootstrap root key: {}", error))?;
+    let bootstrap_key = crate::auth::bootstrap_root_key(&engine).map_err(|error| format!("Failed to bootstrap root key: {}", error))?;
 
     Ok((provider, bootstrap_key))
   }
@@ -209,15 +199,17 @@ fn load_or_create_jwt_manager(engine: &StorageEngine) -> std::result::Result<Jwt
   match system_store::get_config(engine, SIGNING_KEY_CONFIG) {
     Ok(Some(key_bytes)) => {
       // Key bytes ARE present. They MUST parse. Don't fall through.
-      return JwtManager::from_bytes(&key_bytes).map_err(|e| format!(
-        "JWT signing key is present at /.aeordb-system/config/{} but failed to parse: {:?}. \
+      return JwtManager::from_bytes(&key_bytes).map_err(|e| {
+        format!(
+          "JWT signing key is present at /.aeordb-system/config/{} but failed to parse: {:?}. \
          This indicates corruption. Refusing to regenerate the key automatically — \
          doing so would invalidate every outstanding JWT and refresh token in the cluster. \
          If you intend to reset the signing key, run emergency-reset (which also wipes \
          /.aeordb-system/refresh-tokens) or remove the corrupt config entry manually \
          before restart.",
-        SIGNING_KEY_CONFIG, e
-      ));
+          SIGNING_KEY_CONFIG, e
+        )
+      });
     }
     Ok(None) => {
       // First-run bootstrap path — fall through to generate-and-persist.

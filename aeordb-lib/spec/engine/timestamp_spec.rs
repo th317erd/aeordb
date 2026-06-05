@@ -18,9 +18,7 @@ fn test_timestamp_iso8601_utc() {
   let input = b"2026-04-07T15:30:00Z";
   let result = converter.parse_timestamp(input);
   // 2026-04-07T15:30:00Z in millis
-  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00Z")
-    .unwrap()
-    .timestamp_millis();
+  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00Z").unwrap().timestamp_millis();
   assert_eq!(result, expected);
 }
 
@@ -41,10 +39,7 @@ fn test_timestamp_iso8601_no_tz() {
   let input = b"2026-04-07T15:30:00";
   let result = converter.parse_timestamp(input);
   // Should be treated as UTC
-  let expected = chrono::NaiveDateTime::parse_from_str("2026-04-07T15:30:00", "%Y-%m-%dT%H:%M:%S")
-    .unwrap()
-    .and_utc()
-    .timestamp_millis();
+  let expected = chrono::NaiveDateTime::parse_from_str("2026-04-07T15:30:00", "%Y-%m-%dT%H:%M:%S").unwrap().and_utc().timestamp_millis();
   assert_eq!(result, expected);
 }
 
@@ -53,9 +48,7 @@ fn test_timestamp_iso8601_fractional() {
   let converter = TimestampConverter::new();
   let input = b"2026-04-07T15:30:00.123Z";
   let result = converter.parse_timestamp(input);
-  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00.123Z")
-    .unwrap()
-    .timestamp_millis();
+  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00.123Z").unwrap().timestamp_millis();
   assert_eq!(result, expected);
   // The millis portion should be 123
   assert_eq!(result % 1000, 123);
@@ -66,12 +59,8 @@ fn test_timestamp_date_only() {
   let converter = TimestampConverter::new();
   let input = b"2026-04-07";
   let result = converter.parse_timestamp(input);
-  let expected = chrono::NaiveDate::parse_from_str("2026-04-07", "%Y-%m-%d")
-    .unwrap()
-    .and_hms_opt(0, 0, 0)
-    .unwrap()
-    .and_utc()
-    .timestamp_millis();
+  let expected =
+    chrono::NaiveDate::parse_from_str("2026-04-07", "%Y-%m-%d").unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
   assert_eq!(result, expected);
 }
 
@@ -119,12 +108,7 @@ fn test_timestamp_scalar_ordering() {
   let later = b"2026-04-07T15:30:00Z" as &[u8];
   let scalar_early = converter.to_scalar(earlier);
   let scalar_late = converter.to_scalar(later);
-  assert!(
-    scalar_early < scalar_late,
-    "Earlier date should produce lower scalar: {} vs {}",
-    scalar_early,
-    scalar_late
-  );
+  assert!(scalar_early < scalar_late, "Earlier date should produce lower scalar: {} vs {}", scalar_early, scalar_late);
 }
 
 #[test]
@@ -148,25 +132,12 @@ fn test_file_header_timestamps_millis() {
   // As of 2024, millis since epoch are ~1.7 trillion.
   // Seconds since epoch are ~1.7 billion.
   // If created_at > 1_000_000_000_000, it's definitely millis (not seconds).
-  assert!(
-    header.created_at > 1_000_000_000_000,
-    "created_at should be in milliseconds, got: {}",
-    header.created_at
-  );
-  assert!(
-    header.updated_at > 1_000_000_000_000,
-    "updated_at should be in milliseconds, got: {}",
-    header.updated_at
-  );
+  assert!(header.created_at > 1_000_000_000_000, "created_at should be in milliseconds, got: {}", header.created_at);
+  assert!(header.updated_at > 1_000_000_000_000, "updated_at should be in milliseconds, got: {}", header.updated_at);
 
   // Should be close to now (within 5 seconds)
   let now_millis = chrono::Utc::now().timestamp_millis();
-  assert!(
-    (header.created_at - now_millis).abs() < 5_000,
-    "created_at should be close to now: {} vs {}",
-    header.created_at,
-    now_millis
-  );
+  assert!((header.created_at - now_millis).abs() < 5_000, "created_at should be close to now: {} vs {}", header.created_at, now_millis);
 }
 
 #[test]
@@ -182,23 +153,13 @@ fn test_file_record_timestamps_millis() {
   writer.append_entry(EntryType::FileRecord, b"key", b"value", 0).unwrap();
 
   let header = writer.file_header();
-  assert!(
-    header.updated_at > 1_000_000_000_000,
-    "updated_at after write should be in milliseconds, got: {}",
-    header.updated_at
-  );
+  assert!(header.updated_at > 1_000_000_000_000, "updated_at after write should be in milliseconds, got: {}", header.updated_at);
 
   // Read the entry back and check its timestamp. v3 layout: data starts at
   // HEADER_REGION_SIZE (= FILE_HEADER_SIZE * 2 = 512), not the single
   // 256-byte slot offset.
-  let (_entry_header, _key, _value) = writer
-    .read_entry_at(aeordb::engine::file_header::HEADER_REGION_SIZE as u64)
-    .unwrap();
-  assert!(
-    _entry_header.timestamp > 1_000_000_000_000,
-    "entry timestamp should be in milliseconds, got: {}",
-    _entry_header.timestamp
-  );
+  let (_entry_header, _key, _value) = writer.read_entry_at(aeordb::engine::file_header::HEADER_REGION_SIZE as u64).unwrap();
+  assert!(_entry_header.timestamp > 1_000_000_000_000, "entry timestamp should be in milliseconds, got: {}", _entry_header.timestamp);
 }
 
 #[test]
@@ -214,11 +175,7 @@ fn test_event_timestamp_millis() {
   let (entry_header, _key, _value) = writer.read_entry_at(offset).unwrap();
 
   let now_millis = chrono::Utc::now().timestamp_millis();
-  assert!(
-    entry_header.timestamp > 1_000_000_000_000,
-    "event timestamp should be in milliseconds, got: {}",
-    entry_header.timestamp
-  );
+  assert!(entry_header.timestamp > 1_000_000_000_000, "event timestamp should be in milliseconds, got: {}", entry_header.timestamp);
   assert!(
     (entry_header.timestamp - now_millis).abs() < 5_000,
     "event timestamp should be close to now: {} vs {}",
@@ -244,9 +201,7 @@ fn test_timestamp_whitespace_trimmed() {
   let converter = TimestampConverter::new();
   let input = b"  2026-04-07T15:30:00Z  ";
   let result = converter.parse_timestamp(input);
-  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00Z")
-    .unwrap()
-    .timestamp_millis();
+  let expected = chrono::DateTime::parse_from_rfc3339("2026-04-07T15:30:00Z").unwrap().timestamp_millis();
   assert_eq!(result, expected);
 }
 

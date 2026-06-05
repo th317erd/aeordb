@@ -38,9 +38,7 @@ fn test_deploy_plugin_stores_in_database() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  let record = manager
-    .deploy_plugin("my_plugin", "db/schema/table", PluginType::Wasm, wasm_bytes.clone())
-    .expect("deploy should succeed");
+  let record = manager.deploy_plugin("my_plugin", "db/schema/table", PluginType::Wasm, wasm_bytes.clone()).expect("deploy should succeed");
 
   assert_eq!(record.name, "my_plugin");
   assert_eq!(record.path, "db/schema/table");
@@ -85,14 +83,9 @@ fn test_get_deployed_plugin() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  manager
-    .deploy_plugin("my_plugin", "db/schema/table", PluginType::Wasm, wasm_bytes.clone())
-    .expect("deploy should succeed");
+  manager.deploy_plugin("my_plugin", "db/schema/table", PluginType::Wasm, wasm_bytes.clone()).expect("deploy should succeed");
 
-  let retrieved = manager
-    .get_plugin("db/schema/table")
-    .expect("get should not error")
-    .expect("plugin should exist");
+  let retrieved = manager.get_plugin("db/schema/table").expect("get should not error").expect("plugin should exist");
 
   assert_eq!(retrieved.name, "my_plugin");
   assert_eq!(retrieved.path, "db/schema/table");
@@ -105,12 +98,8 @@ fn test_list_deployed_plugins() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  manager
-    .deploy_plugin("plugin_a", "db/schema/alpha", PluginType::Wasm, wasm_bytes.clone())
-    .expect("deploy alpha");
-  manager
-    .deploy_plugin("plugin_b", "db/schema/beta", PluginType::Wasm, wasm_bytes.clone())
-    .expect("deploy beta");
+  manager.deploy_plugin("plugin_a", "db/schema/alpha", PluginType::Wasm, wasm_bytes.clone()).expect("deploy alpha");
+  manager.deploy_plugin("plugin_b", "db/schema/beta", PluginType::Wasm, wasm_bytes.clone()).expect("deploy beta");
 
   let plugins = manager.list_plugins().expect("list should succeed");
   assert_eq!(plugins.len(), 2);
@@ -127,18 +116,12 @@ fn test_remove_deployed_plugin() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  manager
-    .deploy_plugin("doomed", "db/schema/doomed", PluginType::Wasm, wasm_bytes)
-    .expect("deploy");
+  manager.deploy_plugin("doomed", "db/schema/doomed", PluginType::Wasm, wasm_bytes).expect("deploy");
 
-  let removed = manager
-    .remove_plugin("db/schema/doomed")
-    .expect("remove should not error");
+  let removed = manager.remove_plugin("db/schema/doomed").expect("remove should not error");
   assert!(removed, "should return true when plugin existed");
 
-  let after = manager
-    .get_plugin("db/schema/doomed")
-    .expect("get should not error");
+  let after = manager.get_plugin("db/schema/doomed").expect("get should not error");
   assert!(after.is_none(), "plugin should no longer exist");
 }
 
@@ -147,13 +130,9 @@ fn test_deploy_duplicate_path_overwrites() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  let first = manager
-    .deploy_plugin("v1", "db/schema/func", PluginType::Wasm, wasm_bytes.clone())
-    .expect("first deploy");
+  let first = manager.deploy_plugin("v1", "db/schema/func", PluginType::Wasm, wasm_bytes.clone()).expect("first deploy");
 
-  let second = manager
-    .deploy_plugin("v2", "db/schema/func", PluginType::Wasm, wasm_bytes.clone())
-    .expect("second deploy");
+  let second = manager.deploy_plugin("v2", "db/schema/func", PluginType::Wasm, wasm_bytes.clone()).expect("second deploy");
 
   // Should reuse the same plugin_id.
   assert_eq!(first.plugin_id, second.plugin_id);
@@ -171,9 +150,7 @@ fn test_deploy_duplicate_path_overwrites() {
 fn test_get_nonexistent_plugin_returns_none() {
   let (manager, _temp_dir) = test_manager();
 
-  let result = manager
-    .get_plugin("nonexistent/path")
-    .expect("get should not error");
+  let result = manager.get_plugin("nonexistent/path").expect("get should not error");
   assert!(result.is_none());
 }
 
@@ -182,9 +159,7 @@ fn test_remove_nonexistent_plugin_returns_false() {
   let _ctx = RequestContext::system();
   let (manager, _temp_dir) = test_manager();
 
-  let removed = manager
-    .remove_plugin("nonexistent/path")
-    .expect("remove should not error");
+  let removed = manager.remove_plugin("nonexistent/path").expect("remove should not error");
   assert!(!removed, "should return false when plugin did not exist");
 }
 
@@ -214,13 +189,9 @@ fn test_invoke_wasm_plugin() {
   let (manager, _temp_dir) = test_manager();
   let wasm_bytes = minimal_wasm_bytes();
 
-  manager
-    .deploy_plugin("echo", "db/schema/echo", PluginType::Wasm, wasm_bytes)
-    .expect("deploy");
+  manager.deploy_plugin("echo", "db/schema/echo", PluginType::Wasm, wasm_bytes).expect("deploy");
 
-  let response = manager
-    .invoke_wasm_plugin("db/schema/echo", b"hello")
-    .expect("invoke should succeed");
+  let response = manager.invoke_wasm_plugin("db/schema/echo", b"hello").expect("invoke should succeed");
 
   assert_eq!(response, b"hello");
 }

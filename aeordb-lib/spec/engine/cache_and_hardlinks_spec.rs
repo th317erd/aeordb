@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use aeordb::engine::{
-  Cache, DirectoryOps, GroupLoader, PathPermissions, PermissionLink,
-  PermissionsLoader, RequestContext, StorageEngine,
-  directory_path_hash, file_path_hash,
+  Cache, DirectoryOps, GroupLoader, PathPermissions, PermissionLink, PermissionsLoader, RequestContext, StorageEngine, directory_path_hash,
+  file_path_hash,
 };
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -53,9 +52,7 @@ fn test_cache_get_loads_on_miss_and_caches() {
   let (engine, _temp_dir) = test_engine();
 
   // Write a .aeordb-permissions file at /test/
-  let permissions = PathPermissions {
-    links: vec![member_link("testers", ".r..l...", "........")],
-  };
+  let permissions = PathPermissions { links: vec![member_link("testers", ".r..l...", "........")] };
   write_permissions(&engine, "/test", &permissions);
 
   let cache = Cache::new(PermissionsLoader);
@@ -97,9 +94,7 @@ fn test_cache_reflects_updated_data_after_eviction() {
   let (engine, _temp_dir) = test_engine();
 
   // Write v1 permissions
-  let perm_v1 = PathPermissions {
-    links: vec![member_link("team_v1", ".r......", "........")],
-  };
+  let perm_v1 = PathPermissions { links: vec![member_link("team_v1", ".r......", "........")] };
   write_permissions(&engine, "/", &perm_v1);
 
   let cache = Cache::new(PermissionsLoader);
@@ -107,9 +102,7 @@ fn test_cache_reflects_updated_data_after_eviction() {
   assert_eq!(result.unwrap().links[0].group, "team_v1");
 
   // Write v2 permissions (overwrites v1)
-  let perm_v2 = PathPermissions {
-    links: vec![member_link("team_v2", "crudlify", "........")],
-  };
+  let perm_v2 = PathPermissions { links: vec![member_link("team_v2", "crudlify", "........")] };
   write_permissions(&engine, "/", &perm_v2);
 
   // Without eviction, stale data
@@ -131,12 +124,8 @@ fn test_cache_evict_single_key_leaves_others() {
   let (engine, _temp_dir) = test_engine();
 
   // Write permissions at /a/ and /b/
-  let perm_a = PathPermissions {
-    links: vec![member_link("team_a", "crudlify", "........")],
-  };
-  let perm_b = PathPermissions {
-    links: vec![member_link("team_b", ".r..l...", "........")],
-  };
+  let perm_a = PathPermissions { links: vec![member_link("team_a", "crudlify", "........")] };
+  let perm_b = PathPermissions { links: vec![member_link("team_b", ".r..l...", "........")] };
   write_permissions(&engine, "/a", &perm_a);
   write_permissions(&engine, "/b", &perm_b);
 
@@ -147,9 +136,7 @@ fn test_cache_evict_single_key_leaves_others() {
   cache.get(&"/b".to_string(), &engine).unwrap();
 
   // Update /a/ on disk
-  let perm_a_v2 = PathPermissions {
-    links: vec![member_link("team_a_v2", "crudlify", "........")],
-  };
+  let perm_a_v2 = PathPermissions { links: vec![member_link("team_a_v2", "crudlify", "........")] };
   write_permissions(&engine, "/a", &perm_a_v2);
 
   // Evict only /a/
@@ -157,29 +144,19 @@ fn test_cache_evict_single_key_leaves_others() {
 
   // /a/ should reload and see the update
   let result_a = cache.get(&"/a".to_string(), &engine).unwrap();
-  assert_eq!(
-    result_a.unwrap().links[0].group, "team_a_v2",
-    "/a/ should have reloaded after eviction"
-  );
+  assert_eq!(result_a.unwrap().links[0].group, "team_a_v2", "/a/ should have reloaded after eviction");
 
   // /b/ should still be cached (stale is fine since we didn't update it)
   let result_b = cache.get(&"/b".to_string(), &engine).unwrap();
-  assert_eq!(
-    result_b.unwrap().links[0].group, "team_b",
-    "/b/ should still be cached"
-  );
+  assert_eq!(result_b.unwrap().links[0].group, "team_b", "/b/ should still be cached");
 }
 
 #[test]
 fn test_cache_evict_all_clears_everything() {
   let (engine, _temp_dir) = test_engine();
 
-  let perm_a = PathPermissions {
-    links: vec![member_link("original_a", ".r......", "........")],
-  };
-  let perm_b = PathPermissions {
-    links: vec![member_link("original_b", ".r......", "........")],
-  };
+  let perm_a = PathPermissions { links: vec![member_link("original_a", ".r......", "........")] };
+  let perm_b = PathPermissions { links: vec![member_link("original_b", ".r......", "........")] };
   write_permissions(&engine, "/a", &perm_a);
   write_permissions(&engine, "/b", &perm_b);
 
@@ -190,12 +167,8 @@ fn test_cache_evict_all_clears_everything() {
   cache.get(&"/b".to_string(), &engine).unwrap();
 
   // Update both on disk
-  write_permissions(&engine, "/a", &PathPermissions {
-    links: vec![member_link("updated_a", "crudlify", "........")],
-  });
-  write_permissions(&engine, "/b", &PathPermissions {
-    links: vec![member_link("updated_b", "crudlify", "........")],
-  });
+  write_permissions(&engine, "/a", &PathPermissions { links: vec![member_link("updated_a", "crudlify", "........")] });
+  write_permissions(&engine, "/b", &PathPermissions { links: vec![member_link("updated_b", "crudlify", "........")] });
 
   // evict_all
   cache.evict_all();
@@ -243,18 +216,12 @@ fn test_directory_hard_links_read_write() {
   // List the root directory — should contain "mydir/"
   let root_entries = ops.list_directory("/").unwrap();
   let dir_names: Vec<&str> = root_entries.iter().map(|e| e.name.as_str()).collect();
-  assert!(
-    dir_names.contains(&"mydir") || dir_names.contains(&"mydir/"),
-    "Root directory should contain mydir/, got: {:?}", dir_names
-  );
+  assert!(dir_names.contains(&"mydir") || dir_names.contains(&"mydir/"), "Root directory should contain mydir/, got: {:?}", dir_names);
 
   // List /mydir/ — should contain "testfile.json"
   let mydir_entries = ops.list_directory("/mydir/").unwrap();
   let file_names: Vec<&str> = mydir_entries.iter().map(|e| e.name.as_str()).collect();
-  assert!(
-    file_names.contains(&"testfile.json"),
-    "/mydir/ should contain testfile.json, got: {:?}", file_names
-  );
+  assert!(file_names.contains(&"testfile.json"), "/mydir/ should contain testfile.json, got: {:?}", file_names);
 
   // The directory hard link should be readable via the engine's get_entry.
   // directory_path_hash uses the normalized path (no trailing slash).
@@ -397,25 +364,20 @@ fn test_kv_expansion_online() {
   assert!(
     stats_after.kv_size_bytes >= initial_kv_size,
     "KV block size should not shrink: before={}, after={}",
-    initial_kv_size, stats_after.kv_size_bytes
+    initial_kv_size,
+    stats_after.kv_size_bytes
   );
 
   // Verify ALL data is still readable after expansion
   for (i, path) in stored_paths.iter().enumerate() {
     let data = ops.read_file_buffered(path).unwrap();
     let expected = format!("data for file {}", i);
-    assert_eq!(
-      std::str::from_utf8(&data).unwrap(), &expected,
-      "File {} should be readable after KV expansion", path
-    );
+    assert_eq!(std::str::from_utf8(&data).unwrap(), &expected, "File {} should be readable after KV expansion", path);
   }
 
   // Verify directory listing shows all files
   let entries = ops.list_directory("/expand/").unwrap();
-  assert_eq!(
-    entries.len(), 1600,
-    "Directory listing should show all 1600 files, got {}", entries.len()
-  );
+  assert_eq!(entries.len(), 1600, "Directory listing should show all 1600 files, got {}", entries.len());
 }
 
 #[test]
@@ -425,9 +387,7 @@ fn test_kv_expansion_preserves_system_data() {
   let ops = DirectoryOps::new(&engine);
 
   // Write a permissions file (system data) before expansion
-  let perms = PathPermissions {
-    links: vec![member_link("team", "crudlify", "........")],
-  };
+  let perms = PathPermissions { links: vec![member_link("team", "crudlify", "........")] };
   write_permissions(&engine, "/", &perms);
 
   // Trigger expansion with many files

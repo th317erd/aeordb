@@ -3,9 +3,7 @@ mod tests {
   use std::time::Duration;
 
   // Import the functions under test from the crate
-  use aeordb_cli::commands::stress::{
-    calculate_percentile, generate_random_data, parse_duration, parse_file_size,
-  };
+  use aeordb_cli::commands::stress::{calculate_percentile, generate_random_data, parse_duration, parse_file_size};
 
   // ─── parse_duration ───────────────────────────────────────────────
 
@@ -26,18 +24,12 @@ mod tests {
 
   #[test]
   fn test_parse_duration_fractional_seconds() {
-    assert_eq!(
-      parse_duration("1.5s").unwrap(),
-      Duration::from_millis(1500)
-    );
+    assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
   }
 
   #[test]
   fn test_parse_duration_fractional_minutes() {
-    assert_eq!(
-      parse_duration("0.5m").unwrap(),
-      Duration::from_secs(30)
-    );
+    assert_eq!(parse_duration("0.5m").unwrap(), Duration::from_secs(30));
   }
 
   #[test]
@@ -234,21 +226,13 @@ mod tests {
   #[test]
   fn test_percentile_single_element() {
     let latencies = vec![Duration::from_millis(42)];
-    assert_eq!(
-      calculate_percentile(&latencies, 0.5),
-      Duration::from_millis(42)
-    );
-    assert_eq!(
-      calculate_percentile(&latencies, 0.99),
-      Duration::from_millis(42)
-    );
+    assert_eq!(calculate_percentile(&latencies, 0.5), Duration::from_millis(42));
+    assert_eq!(calculate_percentile(&latencies, 0.99), Duration::from_millis(42));
   }
 
   #[test]
   fn test_percentile_p50_of_sorted_list() {
-    let latencies: Vec<Duration> = (1..=100)
-      .map(Duration::from_millis)
-      .collect();
+    let latencies: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
 
     let p50 = calculate_percentile(&latencies, 0.5);
     assert_eq!(p50, Duration::from_millis(51)); // index 50 → value 51ms
@@ -256,9 +240,7 @@ mod tests {
 
   #[test]
   fn test_percentile_p95_of_sorted_list() {
-    let latencies: Vec<Duration> = (1..=100)
-      .map(Duration::from_millis)
-      .collect();
+    let latencies: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
 
     let p95 = calculate_percentile(&latencies, 0.95);
     assert_eq!(p95, Duration::from_millis(96)); // index 95 → value 96ms
@@ -266,9 +248,7 @@ mod tests {
 
   #[test]
   fn test_percentile_p99_of_sorted_list() {
-    let latencies: Vec<Duration> = (1..=100)
-      .map(Duration::from_millis)
-      .collect();
+    let latencies: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
 
     let p99 = calculate_percentile(&latencies, 0.99);
     assert_eq!(p99, Duration::from_millis(100)); // index 99 → value 100ms
@@ -276,15 +256,8 @@ mod tests {
 
   #[test]
   fn test_percentile_p0_returns_first() {
-    let latencies = vec![
-      Duration::from_millis(10),
-      Duration::from_millis(20),
-      Duration::from_millis(30),
-    ];
-    assert_eq!(
-      calculate_percentile(&latencies, 0.0),
-      Duration::from_millis(10)
-    );
+    let latencies = vec![Duration::from_millis(10), Duration::from_millis(20), Duration::from_millis(30)];
+    assert_eq!(calculate_percentile(&latencies, 0.0), Duration::from_millis(10));
   }
 
   #[test]

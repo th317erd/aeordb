@@ -12,9 +12,8 @@ use crate::engine::index_store::{FieldIndex, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::nvt_ops::NVTMask;
 use crate::engine::scalar_converter::{
-    ScalarConverter, TrigramConverter,
-    CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64,
-    CONVERTER_TYPE_I64, CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
+  ScalarConverter, TrigramConverter, CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64, CONVERTER_TYPE_I64,
+  CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
 };
 use crate::engine::storage_engine::StorageEngine;
 
@@ -124,29 +123,26 @@ pub enum FuzzyAlgorithm {
 
 impl Default for FuzzyOptions {
   fn default() -> Self {
-    FuzzyOptions {
-      fuzziness: Fuzziness::Auto,
-      algorithm: FuzzyAlgorithm::DamerauLevenshtein,
-    }
+    FuzzyOptions { fuzziness: Fuzziness::Auto, algorithm: FuzzyAlgorithm::DamerauLevenshtein }
   }
 }
 
 /// Sort direction for ORDER BY clauses.
 #[derive(Debug, Clone)]
 pub enum SortDirection {
-    /// Ascending order (smallest first).
-    Asc,
-    /// Descending order (largest first).
-    Desc,
+  /// Ascending order (smallest first).
+  Asc,
+  /// Descending order (largest first).
+  Desc,
 }
 
 /// A single sort field in an ORDER BY clause.
 #[derive(Debug, Clone)]
 pub struct SortField {
-    /// Field name to sort by. Prefix with `@` for built-in fields (`@score`, `@path`, `@hash`, `@size`, `@created_at`, `@updated_at`).
-    pub field: String,
-    /// Sort direction.
-    pub direction: SortDirection,
+  /// Field name to sort by. Prefix with `@` for built-in fields (`@score`, `@path`, `@hash`, `@size`, `@created_at`, `@updated_at`).
+  pub field: String,
+  /// Sort direction.
+  pub direction: SortDirection,
 }
 
 /// Default limit applied when no explicit limit is provided.
@@ -158,40 +154,40 @@ pub const DEFAULT_QUERY_LIMIT: usize = 20;
 /// for the queried path.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryMeta {
-    /// Reindexing progress as a fraction (0.0 to 1.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reindexing: Option<f64>,
-    /// Estimated time remaining in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reindexing_eta: Option<i64>,
-    /// Number of files indexed so far.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reindexing_indexed: Option<usize>,
-    /// Total number of files to index.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reindexing_total: Option<usize>,
-    /// Timestamp (ms since epoch) when the index became stale.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reindexing_stale_since: Option<i64>,
+  /// Reindexing progress as a fraction (0.0 to 1.0).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reindexing: Option<f64>,
+  /// Estimated time remaining in milliseconds.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reindexing_eta: Option<i64>,
+  /// Number of files indexed so far.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reindexing_indexed: Option<usize>,
+  /// Total number of files to index.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reindexing_total: Option<usize>,
+  /// Timestamp (ms since epoch) when the index became stale.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reindexing_stale_since: Option<i64>,
 }
 
 /// Paginated query response wrapping results with cursor-based pagination metadata.
 #[derive(Debug)]
 pub struct PaginatedResult {
-    /// Matching file results for this page.
-    pub results: Vec<QueryResult>,
-    /// Total number of matches across all pages (if `include_total` was set).
-    pub total_count: Option<u64>,
-    /// True if more results exist beyond this page.
-    pub has_more: bool,
-    /// Opaque cursor to pass as `after` to fetch the next page.
-    pub next_cursor: Option<String>,
-    /// Opaque cursor to pass as `before` to fetch the previous page.
-    pub prev_cursor: Option<String>,
-    /// True if the default limit was applied because no explicit limit was provided.
-    pub default_limit_hit: bool,
-    /// Reindexing status metadata, if applicable.
-    pub meta: Option<QueryMeta>,
+  /// Matching file results for this page.
+  pub results: Vec<QueryResult>,
+  /// Total number of matches across all pages (if `include_total` was set).
+  pub total_count: Option<u64>,
+  /// True if more results exist beyond this page.
+  pub has_more: bool,
+  /// Opaque cursor to pass as `after` to fetch the next page.
+  pub next_cursor: Option<String>,
+  /// Opaque cursor to pass as `before` to fetch the previous page.
+  pub prev_cursor: Option<String>,
+  /// True if the default limit was applied because no explicit limit was provided.
+  pub default_limit_hit: bool,
+  /// Reindexing status metadata, if applicable.
+  pub meta: Option<QueryMeta>,
 }
 
 /// A query condition on a single indexed field.
@@ -230,15 +226,13 @@ pub enum QueryStrategy {
 }
 
 /// EXPLAIN mode for query introspection.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ExplainMode {
   #[default]
   Off,
-  Plan,     // plan only, no execution
-  Analyze,  // plan + execution + results
+  Plan,    // plan only, no execution
+  Analyze, // plan + execution + results
 }
-
 
 /// Result of an EXPLAIN query.
 #[derive(Debug, Clone, Serialize)]
@@ -285,67 +279,67 @@ pub struct Query {
 /// Aggregation query specifying which statistics to compute over the result set.
 #[derive(Debug, Clone, Default)]
 pub struct AggregateQuery {
-    /// Whether to count matching entries.
-    pub count: bool,
-    /// Fields to sum.
-    pub sum: Vec<String>,
-    /// Fields to average.
-    pub avg: Vec<String>,
-    /// Fields to find the minimum value of.
-    pub min: Vec<String>,
-    /// Fields to find the maximum value of.
-    pub max: Vec<String>,
-    /// Fields to group results by before aggregating.
-    pub group_by: Vec<String>,
+  /// Whether to count matching entries.
+  pub count: bool,
+  /// Fields to sum.
+  pub sum: Vec<String>,
+  /// Fields to average.
+  pub avg: Vec<String>,
+  /// Fields to find the minimum value of.
+  pub min: Vec<String>,
+  /// Fields to find the maximum value of.
+  pub max: Vec<String>,
+  /// Fields to group results by before aggregating.
+  pub group_by: Vec<String>,
 }
 
 /// Result of an aggregation query, containing computed statistics and optional group-by results.
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregateResult {
-    /// Total count of matching entries (if `count` was requested).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<u64>,
-    /// Sum of each requested field.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub sum: HashMap<String, f64>,
-    /// Average of each requested field.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub avg: HashMap<String, f64>,
-    /// Minimum value of each requested field.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub min: HashMap<String, serde_json::Value>,
-    /// Maximum value of each requested field.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub max: HashMap<String, serde_json::Value>,
-    /// Per-group aggregation results when `group_by` was specified.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub groups: Option<Vec<GroupResult>>,
-    /// True if more groups exist beyond the limit.
-    pub has_more: bool,
-    /// True if the default limit was applied (no explicit limit provided).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub default_limit_hit: bool,
+  /// Total count of matching entries (if `count` was requested).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub count: Option<u64>,
+  /// Sum of each requested field.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub sum: HashMap<String, f64>,
+  /// Average of each requested field.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub avg: HashMap<String, f64>,
+  /// Minimum value of each requested field.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub min: HashMap<String, serde_json::Value>,
+  /// Maximum value of each requested field.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub max: HashMap<String, serde_json::Value>,
+  /// Per-group aggregation results when `group_by` was specified.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub groups: Option<Vec<GroupResult>>,
+  /// True if more groups exist beyond the limit.
+  pub has_more: bool,
+  /// True if the default limit was applied (no explicit limit provided).
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub default_limit_hit: bool,
 }
 
 /// A single group in a GROUP BY aggregation result.
 #[derive(Debug, Clone, Serialize)]
 pub struct GroupResult {
-    /// Group key values (one entry per `group_by` field).
-    pub key: HashMap<String, serde_json::Value>,
-    /// Number of entries in this group.
-    pub count: u64,
-    /// Sum of requested fields within this group.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub sum: HashMap<String, f64>,
-    /// Average of requested fields within this group.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub avg: HashMap<String, f64>,
-    /// Minimum values of requested fields within this group.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub min: HashMap<String, serde_json::Value>,
-    /// Maximum values of requested fields within this group.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub max: HashMap<String, serde_json::Value>,
+  /// Group key values (one entry per `group_by` field).
+  pub key: HashMap<String, serde_json::Value>,
+  /// Number of entries in this group.
+  pub count: u64,
+  /// Sum of requested fields within this group.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub sum: HashMap<String, f64>,
+  /// Average of requested fields within this group.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub avg: HashMap<String, f64>,
+  /// Minimum values of requested fields within this group.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub min: HashMap<String, serde_json::Value>,
+  /// Maximum values of requested fields within this group.
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub max: HashMap<String, serde_json::Value>,
 }
 
 /// A single query result containing the matched file and relevance metadata.
@@ -378,11 +372,7 @@ pub fn should_use_bitmap_compositing(node: &QueryNode) -> bool {
 /// Currently unused -- retained for future bitmap pruning optimization.
 /// TODO: Wire into execute_tier2 when NVT-based pre-filtering is implemented.
 #[allow(dead_code)]
-fn field_query_to_mask(
-  field_index: &mut FieldIndex,
-  query: &FieldQuery,
-  bucket_count: usize,
-) -> EngineResult<NVTMask> {
+fn field_query_to_mask(field_index: &mut FieldIndex, query: &FieldQuery, bucket_count: usize) -> EngineResult<NVTMask> {
   field_index.ensure_nvt_current();
   let converter = field_index.nvt.converter();
   match &query.operation {
@@ -422,9 +412,7 @@ fn field_query_to_mask(
     }
     // Fuzzy ops are handled by the recheck path, not NVT masks.
     QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
-      Err(EngineError::NotFound(
-        "Fuzzy operations do not support NVT mask generation".to_string(),
-      ))
+      Err(EngineError::NotFound("Fuzzy operations do not support NVT mask generation".to_string()))
     }
   }
 }
@@ -434,22 +422,14 @@ fn field_query_to_mask(
 /// execute_tier2. See the execute_tier2 doc comment.
 /// TODO: Wire into execute_tier2 when NVT-based pre-filtering is implemented.
 #[allow(dead_code)]
-fn evaluate_node_as_mask(
-  node: &QueryNode,
-  path: &str,
-  index_manager: &IndexManager,
-  bucket_count: usize,
-) -> EngineResult<NVTMask> {
+fn evaluate_node_as_mask(node: &QueryNode, path: &str, index_manager: &IndexManager, bucket_count: usize) -> EngineResult<NVTMask> {
   match node {
     QueryNode::Field(field_query) => {
       let loaded = index_manager.load_index(path, &field_query.field_name)?;
       let mut index = match loaded {
         Some(index) => index,
         None => {
-          return Err(EngineError::NotFound(format!(
-            "Index not found for field '{}' at path '{}'",
-            field_query.field_name, path,
-          )));
+          return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_query.field_name, path,)));
         }
       };
       field_query_to_mask(&mut index, field_query, bucket_count)
@@ -489,43 +469,38 @@ fn evaluate_node_as_mask(
 // Cursor encoding/decoding for cursor-based pagination
 // ---------------------------------------------------------------------------
 
-fn encode_cursor(
-    result: &QueryResult,
-    order_by: &[SortField],
-    version_hash: &[u8],
-) -> String {
-    let mut cursor = serde_json::Map::new();
+fn encode_cursor(result: &QueryResult, order_by: &[SortField], version_hash: &[u8]) -> String {
+  let mut cursor = serde_json::Map::new();
 
-    for sf in order_by {
-        if sf.field.starts_with('@') {
-            let value = match sf.field.as_str() {
-                "@score" => serde_json::json!(result.score),
-                "@path" => serde_json::json!(result.file_record.path),
-                "@size" => serde_json::json!(result.file_record.total_size),
-                "@created_at" => serde_json::json!(result.file_record.created_at),
-                "@updated_at" => serde_json::json!(result.file_record.updated_at),
-                "@hash" => {
-                    let h = if result.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&result.file_record.chunk_hashes[0]) };
-                    serde_json::json!(h)
-                }
-                _ => serde_json::Value::Null,
-            };
-            cursor.insert(sf.field.clone(), value);
+  for sf in order_by {
+    if sf.field.starts_with('@') {
+      let value = match sf.field.as_str() {
+        "@score" => serde_json::json!(result.score),
+        "@path" => serde_json::json!(result.file_record.path),
+        "@size" => serde_json::json!(result.file_record.total_size),
+        "@created_at" => serde_json::json!(result.file_record.created_at),
+        "@updated_at" => serde_json::json!(result.file_record.updated_at),
+        "@hash" => {
+          let h = if result.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&result.file_record.chunk_hashes[0]) };
+          serde_json::json!(h)
         }
+        _ => serde_json::Value::Null,
+      };
+      cursor.insert(sf.field.clone(), value);
     }
+  }
 
-    cursor.insert("_hash".to_string(), serde_json::json!(hex::encode(&result.file_hash)));
-    cursor.insert("_version".to_string(), serde_json::json!(hex::encode(version_hash)));
+  cursor.insert("_hash".to_string(), serde_json::json!(hex::encode(&result.file_hash)));
+  cursor.insert("_version".to_string(), serde_json::json!(hex::encode(version_hash)));
 
-    let json = serde_json::Value::Object(cursor);
-    base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json).unwrap_or_default())
+  let json = serde_json::Value::Object(cursor);
+  base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json).unwrap_or_default())
 }
 
 fn decode_cursor(cursor: &str) -> EngineResult<serde_json::Value> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(cursor)
-        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor: {}", e)))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor JSON: {}", e)))
+  let bytes =
+    base64::engine::general_purpose::STANDARD.decode(cursor).map_err(|e| EngineError::JsonParseError(format!("Invalid cursor: {}", e)))?;
+  serde_json::from_slice(&bytes).map_err(|e| EngineError::JsonParseError(format!("Invalid cursor JSON: {}", e)))
 }
 
 /// Executes queries against the index system.
@@ -586,20 +561,14 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Count total before pagination
-    let total_count = if query.include_total {
-      Some(all_results.len() as u64)
-    } else {
-      None
-    };
+    let total_count = if query.include_total { Some(all_results.len() as u64) } else { None };
 
     // Apply cursor-based pagination (after sorting, before offset)
     if let Some(ref cursor_str) = query.after {
       let cursor_data = decode_cursor(cursor_str)?;
-      let cursor_hash = cursor_data.get("_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
-      let cursor_hash_bytes = hex::decode(cursor_hash)
-        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
+      let cursor_hash =
+        cursor_data.get("_hash").and_then(|v| v.as_str()).ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
+      let cursor_hash_bytes = hex::decode(cursor_hash).map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
 
       if let Some(pos) = all_results.iter().position(|r| r.file_hash == cursor_hash_bytes) {
         all_results = all_results.into_iter().skip(pos + 1).collect();
@@ -608,11 +577,9 @@ impl<'a> QueryEngine<'a> {
 
     if let Some(ref cursor_str) = query.before {
       let cursor_data = decode_cursor(cursor_str)?;
-      let cursor_hash = cursor_data.get("_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
-      let cursor_hash_bytes = hex::decode(cursor_hash)
-        .map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
+      let cursor_hash =
+        cursor_data.get("_hash").and_then(|v| v.as_str()).ok_or_else(|| EngineError::JsonParseError("Cursor missing _hash".to_string()))?;
+      let cursor_hash_bytes = hex::decode(cursor_hash).map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
 
       if let Some(pos) = all_results.iter().position(|r| r.file_hash == cursor_hash_bytes) {
         all_results.truncate(pos);
@@ -640,31 +607,15 @@ impl<'a> QueryEngine<'a> {
     // Build cursors
     let version_hash = self.engine.head_hash().unwrap_or_default();
 
-    let next_cursor = if has_more {
-      all_results.last().map(|last| {
-        encode_cursor(last, &query.order_by, &version_hash)
-      })
-    } else {
-      None
-    };
+    let next_cursor = if has_more { all_results.last().map(|last| encode_cursor(last, &query.order_by, &version_hash)) } else { None };
 
     let prev_cursor = if offset > 0 || query.after.is_some() {
-      all_results.first().map(|first| {
-        encode_cursor(first, &query.order_by, &version_hash)
-      })
+      all_results.first().map(|first| encode_cursor(first, &query.order_by, &version_hash))
     } else {
       None
     };
 
-    Ok(PaginatedResult {
-      results: all_results,
-      total_count,
-      has_more,
-      next_cursor,
-      prev_cursor,
-      default_limit_hit,
-      meta: None,
-    })
+    Ok(PaginatedResult { results: all_results, total_count, has_more, next_cursor, prev_cursor, default_limit_hit, meta: None })
   }
 
   /// Execute an EXPLAIN query, returning plan info and optionally execution metrics + results.
@@ -675,11 +626,7 @@ impl<'a> QueryEngine<'a> {
     let plan = self.build_plan(query, &index_manager)?;
 
     if query.explain == ExplainMode::Plan {
-      return Ok(ExplainResult {
-        plan,
-        execution: None,
-        results: None,
-      });
+      return Ok(ExplainResult { plan, execution: None, results: None });
     }
 
     // Analyze mode: execute and time it
@@ -713,11 +660,7 @@ impl<'a> QueryEngine<'a> {
       "results_returned": result_count,
     });
 
-    Ok(ExplainResult {
-      plan,
-      execution: Some(execution),
-      results: results_json,
-    })
+    Ok(ExplainResult { plan, execution: Some(execution), results: results_json })
   }
 
   /// Build a query execution plan without running the query.
@@ -727,29 +670,35 @@ impl<'a> QueryEngine<'a> {
     // Analyze the query node tree
     if let Some(ref node) = query.node {
       plan.insert("query_tree".to_string(), self.explain_node(node, &query.path, index_manager)?);
-      plan.insert("bitmap_compositing".to_string(),
-        serde_json::json!(should_use_bitmap_compositing(node)));
+      plan.insert("bitmap_compositing".to_string(), serde_json::json!(should_use_bitmap_compositing(node)));
     }
 
     if !query.order_by.is_empty() {
-      let sort_fields: Vec<serde_json::Value> = query.order_by.iter().map(|sf| {
-        serde_json::json!({
-          "field": sf.field,
-          "direction": match sf.direction { SortDirection::Asc => "asc", SortDirection::Desc => "desc" },
+      let sort_fields: Vec<serde_json::Value> = query
+        .order_by
+        .iter()
+        .map(|sf| {
+          serde_json::json!({
+            "field": sf.field,
+            "direction": match sf.direction { SortDirection::Asc => "asc", SortDirection::Desc => "desc" },
+          })
         })
-      }).collect();
+        .collect();
       plan.insert("order_by".to_string(), serde_json::json!(sort_fields));
     }
 
     if let Some(ref agg) = query.aggregate {
-      plan.insert("aggregate".to_string(), serde_json::json!({
-        "count": agg.count,
-        "sum": agg.sum,
-        "avg": agg.avg,
-        "min": agg.min,
-        "max": agg.max,
-        "group_by": agg.group_by,
-      }));
+      plan.insert(
+        "aggregate".to_string(),
+        serde_json::json!({
+          "count": agg.count,
+          "sum": agg.sum,
+          "avg": agg.avg,
+          "min": agg.min,
+          "max": agg.max,
+          "group_by": agg.group_by,
+        }),
+      );
     }
 
     plan.insert("limit".to_string(), serde_json::json!(query.limit.unwrap_or(DEFAULT_QUERY_LIMIT)));
@@ -777,21 +726,24 @@ impl<'a> QueryEngine<'a> {
           QueryOp::Match(_) => "match",
         };
 
-        let indexes = index_manager.load_indexes_for_field(path, &fq.field_name)
-          .unwrap_or_default();
-        let index_info: Vec<serde_json::Value> = indexes.iter().map(|idx| {
-          serde_json::json!({
-            "strategy": idx.converter.strategy(),
-            "type": idx.converter.name(),
-            "entries": idx.entries.len(),
-            "order_preserving": idx.converter.is_order_preserving(),
-            "values_stored": idx.values.len(),
+        let indexes = index_manager.load_indexes_for_field(path, &fq.field_name).unwrap_or_default();
+        let index_info: Vec<serde_json::Value> = indexes
+          .iter()
+          .map(|idx| {
+            serde_json::json!({
+              "strategy": idx.converter.strategy(),
+              "type": idx.converter.name(),
+              "entries": idx.entries.len(),
+              "order_preserving": idx.converter.is_order_preserving(),
+              "values_stored": idx.values.len(),
+            })
           })
-        }).collect();
+          .collect();
 
-        let needs_recheck = matches!(&fq.operation,
-          QueryOp::Contains(_) | QueryOp::Similar(_, _) |
-          QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_));
+        let needs_recheck = matches!(
+          &fq.operation,
+          QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
+        );
 
         Ok(serde_json::json!({
           "type": "field",
@@ -802,15 +754,13 @@ impl<'a> QueryEngine<'a> {
         }))
       }
       QueryNode::And(children) => {
-        let child_plans: Vec<serde_json::Value> = children.iter()
-          .map(|c| self.explain_node(c, path, index_manager))
-          .collect::<EngineResult<Vec<_>>>()?;
+        let child_plans: Vec<serde_json::Value> =
+          children.iter().map(|c| self.explain_node(c, path, index_manager)).collect::<EngineResult<Vec<_>>>()?;
         Ok(serde_json::json!({"type": "and", "children": child_plans}))
       }
       QueryNode::Or(children) => {
-        let child_plans: Vec<serde_json::Value> = children.iter()
-          .map(|c| self.explain_node(c, path, index_manager))
-          .collect::<EngineResult<Vec<_>>>()?;
+        let child_plans: Vec<serde_json::Value> =
+          children.iter().map(|c| self.explain_node(c, path, index_manager)).collect::<EngineResult<Vec<_>>>()?;
         Ok(serde_json::json!({"type": "or", "children": child_plans}))
       }
       QueryNode::Not(child) => {
@@ -830,9 +780,7 @@ impl<'a> QueryEngine<'a> {
       return Ok(Vec::new());
     } else {
       // Legacy path: wrap flat field_queries as an implicit AND.
-      let leaves: Vec<QueryNode> = query.field_queries.iter()
-        .map(|fq| QueryNode::Field(fq.clone()))
-        .collect();
+      let leaves: Vec<QueryNode> = query.field_queries.iter().map(|fq| QueryNode::Field(fq.clone())).collect();
       if leaves.len() == 1 {
         leaves.into_iter().next().unwrap()
       } else {
@@ -874,12 +822,7 @@ impl<'a> QueryEngine<'a> {
   /// Sort results by the specified order_by fields.
   /// Supports virtual @fields (score, path, size, created_at, updated_at) and
   /// indexed fields with order-preserving converters.
-  fn sort_results(
-    &self,
-    results: &mut Vec<QueryResult>,
-    order_by: &[SortField],
-    path: &str,
-  ) -> EngineResult<()> {
+  fn sort_results(&self, results: &mut Vec<QueryResult>, order_by: &[SortField], path: &str) -> EngineResult<()> {
     if order_by.is_empty() || results.is_empty() {
       return Ok(());
     }
@@ -898,30 +841,18 @@ impl<'a> QueryEngine<'a> {
 
     for sf in order_by {
       if sf.field.starts_with('@') {
-        sort_fields.push(SortData {
-          values: HashMap::new(),
-          is_virtual: true,
-          field: sf.field.clone(),
-          direction: sf.direction.clone(),
-        });
+        sort_fields.push(SortData { values: HashMap::new(), is_virtual: true, field: sf.field.clone(), direction: sf.direction.clone() });
       } else {
         let indexes = index_manager.load_indexes_for_field(path, &sf.field)?;
-        let index = indexes.into_iter()
-          .find(|idx| idx.converter.is_order_preserving())
-          .ok_or_else(|| {
-            EngineError::NotFound(format!(
-              "Cannot sort by field '{}' — no order-preserving index found. \
+        let index = indexes.into_iter().find(|idx| idx.converter.is_order_preserving()).ok_or_else(|| {
+          EngineError::NotFound(format!(
+            "Cannot sort by field '{}' — no order-preserving index found. \
                Use a string, numeric, or timestamp index type.",
-              sf.field
-            ))
-          })?;
+            sf.field
+          ))
+        })?;
 
-        sort_fields.push(SortData {
-          values: index.values,
-          is_virtual: false,
-          field: sf.field.clone(),
-          direction: sf.direction.clone(),
-        });
+        sort_fields.push(SortData { values: index.values, is_virtual: false, field: sf.field.clone(), direction: sf.direction.clone() });
       }
     }
 
@@ -967,27 +898,15 @@ impl<'a> QueryEngine<'a> {
   /// NOT, which requires the full universe). The bitmap mask computation was
   /// removed as it was unused -- when bitmap pruning is needed for large
   /// datasets, re-introduce evaluate_node_as_mask here as a pre-filter.
-  fn execute_tier2(
-    &self,
-    node: &QueryNode,
-    path: &str,
-    index_manager: &IndexManager,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  fn execute_tier2(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
     self.evaluate_node(node, path, index_manager)
   }
 
   /// Tier 1: Recursively evaluate a QueryNode tree using direct scalar lookups,
   /// returning matching file hashes.
-  fn evaluate_node(
-    &self,
-    node: &QueryNode,
-    path: &str,
-    index_manager: &IndexManager,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  fn evaluate_node(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
     match node {
-      QueryNode::Field(field_query) => {
-        self.evaluate_field_query(field_query, path, index_manager)
-      }
+      QueryNode::Field(field_query) => self.evaluate_field_query(field_query, path, index_manager),
       QueryNode::And(children) => {
         if children.is_empty() {
           return Ok(HashSet::new());
@@ -1024,12 +943,7 @@ impl<'a> QueryEngine<'a> {
   }
 
   /// Evaluate a single FieldQuery leaf against the index (or virtual field scan).
-  fn evaluate_field_query(
-    &self,
-    field_query: &FieldQuery,
-    path: &str,
-    index_manager: &IndexManager,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  fn evaluate_field_query(&self, field_query: &FieldQuery, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
     // Virtual fields (prefixed with '@') bypass index lookup entirely.
     // They scan all files under the path and filter by file metadata.
     if field_query.field_name.starts_with('@') {
@@ -1040,37 +954,16 @@ impl<'a> QueryEngine<'a> {
     let mut index = match index {
       Some(index) => index,
       None => {
-        return Err(EngineError::NotFound(format!(
-          "Index not found for field '{}' at path '{}'",
-          field_query.field_name, path,
-        )));
+        return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_query.field_name, path,)));
       }
     };
 
     let matching_entries = match &field_query.operation {
-      QueryOp::Eq(value) => {
-        index.lookup_exact(value)
-          .into_iter()
-          .map(|entry| entry.file_hash.clone())
-          .collect::<HashSet<Vec<u8>>>()
-      }
-      QueryOp::Gt(value) => {
-        index.lookup_gt(value)?
-          .into_iter()
-          .map(|entry| entry.file_hash.clone())
-          .collect::<HashSet<Vec<u8>>>()
-      }
-      QueryOp::Lt(value) => {
-        index.lookup_lt(value)?
-          .into_iter()
-          .map(|entry| entry.file_hash.clone())
-          .collect::<HashSet<Vec<u8>>>()
-      }
+      QueryOp::Eq(value) => index.lookup_exact(value).into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>(),
+      QueryOp::Gt(value) => index.lookup_gt(value)?.into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>(),
+      QueryOp::Lt(value) => index.lookup_lt(value)?.into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>(),
       QueryOp::Between(min, max) => {
-        index.lookup_range(min, max)?
-          .into_iter()
-          .map(|entry| entry.file_hash.clone())
-          .collect::<HashSet<Vec<u8>>>()
+        index.lookup_range(min, max)?.into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>()
       }
       QueryOp::In(values) => {
         let mut result = HashSet::new();
@@ -1083,9 +976,7 @@ impl<'a> QueryEngine<'a> {
       }
       // Fuzzy ops are handled by execute_with_recheck, not here.
       QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
-        return Err(EngineError::NotFound(
-          "Fuzzy operations should use the recheck execution path".to_string(),
-        ));
+        return Err(EngineError::NotFound("Fuzzy operations should use the recheck execution path".to_string()));
       }
     };
 
@@ -1094,11 +985,7 @@ impl<'a> QueryEngine<'a> {
 
   /// Collect all file hashes from all indexed fields at a path.
   /// Used as the "universe" for NOT operations.
-  fn collect_all_hashes(
-    &self,
-    path: &str,
-    index_manager: &IndexManager,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  fn collect_all_hashes(&self, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
     let field_names = index_manager.list_indexes(path)?;
     let mut all_hashes = HashSet::new();
     for field_name in &field_names {
@@ -1117,17 +1004,12 @@ impl<'a> QueryEngine<'a> {
   /// `@size`, `@created_at`, `@updated_at`, `@hash`) are derived from FileRecord
   /// metadata and do not require indexes. This is an O(n) scan over all
   /// files in the directory tree.
-  fn evaluate_virtual_field_query(
-    &self,
-    field_query: &FieldQuery,
-    path: &str,
-  ) -> EngineResult<HashSet<Vec<u8>>> {
+  fn evaluate_virtual_field_query(&self, field_query: &FieldQuery, path: &str) -> EngineResult<HashSet<Vec<u8>>> {
     let field_name = field_query.field_name.as_str();
 
     // Validate the virtual field name up front.
     match field_name {
-      "@path" | "@filename" | "@extension" | "@content_type"
-      | "@size" | "@created_at" | "@updated_at" | "@hash" => {}
+      "@path" | "@filename" | "@extension" | "@content_type" | "@size" | "@created_at" | "@updated_at" | "@hash" => {}
       unknown => {
         return Err(EngineError::InvalidInput(format!(
           "Unknown virtual field '{}'. Supported: @path, @filename, @extension, \
@@ -1155,9 +1037,7 @@ impl<'a> QueryEngine<'a> {
 
       // Load the full FileRecord from the entry hash.
       let file_record = match self.engine.get_entry(&entry.hash) {
-        Ok(Some((header, _key, value))) => {
-          FileRecord::deserialize(&value, hash_length, header.entry_version)?
-        }
+        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
         Ok(None) => continue,
         Err(_) => continue,
       };
@@ -1172,16 +1052,9 @@ impl<'a> QueryEngine<'a> {
   }
 
   /// Check whether a single FileRecord matches a virtual field operation.
-  fn virtual_field_matches(
-    &self,
-    field_name: &str,
-    file_record: &FileRecord,
-    operation: &QueryOp,
-  ) -> EngineResult<bool> {
+  fn virtual_field_matches(&self, field_name: &str, file_record: &FileRecord, operation: &QueryOp) -> EngineResult<bool> {
     match field_name {
-      "@path" => {
-        self.virtual_string_matches(&file_record.path, operation)
-      }
+      "@path" => self.virtual_string_matches(&file_record.path, operation),
       "@filename" => {
         let filename = file_record.path.rsplit('/').next().unwrap_or("");
         self.virtual_string_matches(filename, operation)
@@ -1198,41 +1071,25 @@ impl<'a> QueryEngine<'a> {
         self.virtual_string_matches(content_type, operation)
       }
       "@hash" => {
-        let hash_hex = if file_record.chunk_hashes.is_empty() {
-          String::new()
-        } else {
-          hex::encode(&file_record.chunk_hashes[0])
-        };
+        let hash_hex = if file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&file_record.chunk_hashes[0]) };
         self.virtual_string_matches(&hash_hex, operation)
       }
-      "@size" => {
-        self.virtual_u64_matches(file_record.total_size, operation)
-      }
-      "@created_at" => {
-        self.virtual_i64_matches(file_record.created_at, operation)
-      }
-      "@updated_at" => {
-        self.virtual_i64_matches(file_record.updated_at, operation)
-      }
+      "@size" => self.virtual_u64_matches(file_record.total_size, operation),
+      "@created_at" => self.virtual_i64_matches(file_record.created_at, operation),
+      "@updated_at" => self.virtual_i64_matches(file_record.updated_at, operation),
       _ => Ok(false),
     }
   }
 
   /// Apply a query operation against a string value (for virtual fields).
   /// Supports Eq (exact match), Contains (substring), and In (set membership).
-  fn virtual_string_matches(
-    &self,
-    value: &str,
-    operation: &QueryOp,
-  ) -> EngineResult<bool> {
+  fn virtual_string_matches(&self, value: &str, operation: &QueryOp) -> EngineResult<bool> {
     match operation {
       QueryOp::Eq(query_bytes) => {
         let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
         Ok(value == query_str)
       }
-      QueryOp::Contains(query_str) => {
-        Ok(value.contains(query_str.as_str()))
-      }
+      QueryOp::Contains(query_str) => Ok(value.contains(query_str.as_str())),
       QueryOp::In(values) => {
         for query_bytes in values {
           let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
@@ -1296,21 +1153,15 @@ impl<'a> QueryEngine<'a> {
         let similarity = crate::engine::fuzzy::trigram_similarity(value, query_str);
         Ok(contains || similarity >= 0.3)
       }
-      other => {
-        Err(EngineError::InvalidInput(format!(
-          "Operation '{:?}' is not supported for string virtual fields",
-          std::mem::discriminant(other),
-        )))
-      }
+      other => Err(EngineError::InvalidInput(format!(
+        "Operation '{:?}' is not supported for string virtual fields",
+        std::mem::discriminant(other),
+      ))),
     }
   }
 
   /// Apply a query operation against a u64 value (for virtual @size field).
-  fn virtual_u64_matches(
-    &self,
-    value: u64,
-    operation: &QueryOp,
-  ) -> EngineResult<bool> {
+  fn virtual_u64_matches(&self, value: u64, operation: &QueryOp) -> EngineResult<bool> {
     match operation {
       QueryOp::Eq(query_bytes) => {
         let query_value = bytes_to_u64(query_bytes);
@@ -1337,21 +1188,15 @@ impl<'a> QueryEngine<'a> {
         }
         Ok(false)
       }
-      other => {
-        Err(EngineError::InvalidInput(format!(
-          "Operation '{:?}' is not supported for numeric virtual fields",
-          std::mem::discriminant(other),
-        )))
-      }
+      other => Err(EngineError::InvalidInput(format!(
+        "Operation '{:?}' is not supported for numeric virtual fields",
+        std::mem::discriminant(other),
+      ))),
     }
   }
 
   /// Apply a query operation against an i64 value (for virtual @created_at, @updated_at fields).
-  fn virtual_i64_matches(
-    &self,
-    value: i64,
-    operation: &QueryOp,
-  ) -> EngineResult<bool> {
+  fn virtual_i64_matches(&self, value: i64, operation: &QueryOp) -> EngineResult<bool> {
     match operation {
       QueryOp::Eq(query_bytes) => {
         let query_value = bytes_to_i64(query_bytes);
@@ -1378,12 +1223,10 @@ impl<'a> QueryEngine<'a> {
         }
         Ok(false)
       }
-      other => {
-        Err(EngineError::InvalidInput(format!(
-          "Operation '{:?}' is not supported for numeric virtual fields",
-          std::mem::discriminant(other),
-        )))
-      }
+      other => Err(EngineError::InvalidInput(format!(
+        "Operation '{:?}' is not supported for numeric virtual fields",
+        std::mem::discriminant(other),
+      ))),
     }
   }
 
@@ -1401,9 +1244,7 @@ impl<'a> QueryEngine<'a> {
           QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
         )
       }
-      QueryNode::And(children) | QueryNode::Or(children) => {
-        children.iter().any(|c| self.node_has_fuzzy_ops(c))
-      }
+      QueryNode::And(children) | QueryNode::Or(children) => children.iter().any(|c| self.node_has_fuzzy_ops(c)),
       QueryNode::Not(child) => self.node_has_fuzzy_ops(child),
     }
   }
@@ -1411,11 +1252,7 @@ impl<'a> QueryEngine<'a> {
   /// Execute a query containing fuzzy operations with a recheck phase.
   /// Currently supports single-field fuzzy queries (the common case).
   /// Values are loaded from the index's values map instead of re-reading files.
-  fn execute_with_recheck_internal(
-    &self,
-    query: &Query,
-    effective_node: &QueryNode,
-  ) -> EngineResult<Vec<QueryResult>> {
+  fn execute_with_recheck_internal(&self, query: &Query, effective_node: &QueryNode) -> EngineResult<Vec<QueryResult>> {
     let index_manager = IndexManager::new(self.engine);
     let hash_length = self.engine.hash_algo().hash_length();
     let ops = DirectoryOps::new(self.engine);
@@ -1424,16 +1261,12 @@ impl<'a> QueryEngine<'a> {
     let field_query = match effective_node {
       QueryNode::Field(fq) => fq,
       _ => {
-        return Err(EngineError::NotFound(
-          "Fuzzy operations currently support single-field queries only".to_string(),
-        ));
+        return Err(EngineError::NotFound("Fuzzy operations currently support single-field queries only".to_string()));
       }
     };
 
     // Get candidates AND values from the appropriate index
-    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(
-      field_query, &query.path, &index_manager,
-    )?;
+    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(field_query, &query.path, &index_manager)?;
 
     // Recheck phase: get field value from index, compute score
     let mut results = Vec::new();
@@ -1456,9 +1289,7 @@ impl<'a> QueryEngine<'a> {
 
       // Load the FileRecord for the result
       let file_record = match self.engine.get_entry(&file_hash) {
-        Ok(Some((header, _key, value))) => {
-          FileRecord::deserialize(&value, hash_length, header.entry_version)?
-        }
+        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
         _ => continue,
       };
 
@@ -1496,10 +1327,7 @@ impl<'a> QueryEngine<'a> {
         let mut index = match index_manager.load_index_by_strategy(path, &field_query.field_name, "trigram")? {
           Some(idx) => idx,
           None => {
-            return Err(EngineError::NotFound(format!(
-              "Trigram index not found for field '{}' at '{}'",
-              field_query.field_name, path,
-            )));
+            return Err(EngineError::NotFound(format!("Trigram index not found for field '{}' at '{}'", field_query.field_name, path,)));
           }
         };
 
@@ -1517,9 +1345,7 @@ impl<'a> QueryEngine<'a> {
           // interior/core trigrams shared by any word regardless of boundaries.
           // The recheck phase verifies the actual substring match.
           let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
-          let interior_trigrams: Vec<&Vec<u8>> = trigrams.iter()
-            .filter(|t| !t.contains(&b' '))
-            .collect();
+          let interior_trigrams: Vec<&Vec<u8>> = trigrams.iter().filter(|t| !t.contains(&b' ')).collect();
 
           // AND: intersect interior trigram lookups for substring matching
           let search_trigrams = if interior_trigrams.is_empty() {
@@ -1578,9 +1404,7 @@ impl<'a> QueryEngine<'a> {
       QueryOp::Phonetic(query_str) => {
         // Use phonetic indexes for candidates
         // Tokenize query on whitespace — match any word's phonetic code
-        let query_words: Vec<&str> = query_str.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
+        let query_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
 
         let mut candidates = HashSet::new();
         let strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
@@ -1594,8 +1418,9 @@ impl<'a> QueryEngine<'a> {
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
                 "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
-                "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(word)
-                  .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word)),
+                "dmetaphone_alt" => {
+                  crate::engine::phonetic::dmetaphone_alt(word).unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word))
+                }
                 _ => continue,
               };
 
@@ -1616,10 +1441,7 @@ impl<'a> QueryEngine<'a> {
         }
 
         if !found_any_index {
-          return Err(EngineError::NotFound(format!(
-            "No phonetic index found for field '{}' at '{}'",
-            field_query.field_name, path,
-          )));
+          return Err(EngineError::NotFound(format!("No phonetic index found for field '{}' at '{}'", field_query.field_name, path,)));
         }
 
         Ok((candidates, all_values))
@@ -1642,9 +1464,7 @@ impl<'a> QueryEngine<'a> {
         }
 
         // Try phonetic indexes (tokenize query on whitespace)
-        let query_words: Vec<&str> = query_str.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
+        let query_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
         let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         for strategy in &phonetic_strategies {
           if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
@@ -1652,11 +1472,14 @@ impl<'a> QueryEngine<'a> {
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
                 "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
-                "dmetaphone_alt" => crate::engine::phonetic::dmetaphone_alt(word)
-                  .unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word)),
+                "dmetaphone_alt" => {
+                  crate::engine::phonetic::dmetaphone_alt(word).unwrap_or_else(|| crate::engine::phonetic::dmetaphone_primary(word))
+                }
                 _ => continue,
               };
-              if code.is_empty() { continue; }
+              if code.is_empty() {
+                continue;
+              }
               let scalar = index.converter.to_scalar(code.as_bytes());
               let entries = index.lookup_by_scalar(scalar);
               for entry in entries {
@@ -1678,20 +1501,13 @@ impl<'a> QueryEngine<'a> {
 
         Ok((candidates, all_values))
       }
-      _ => {
-        Err(EngineError::NotFound("Not a fuzzy operation".to_string()))
-      }
+      _ => Err(EngineError::NotFound("Not a fuzzy operation".to_string())),
     }
   }
 
   /// Load a file's FileRecord and raw data from its hash.
   /// Used as a fallback for native JSON files whose values are not in the index.
-  fn load_file_with_data(
-    &self,
-    file_hash: &[u8],
-    hash_length: usize,
-    ops: &DirectoryOps,
-  ) -> EngineResult<Option<(FileRecord, Vec<u8>)>> {
+  fn load_file_with_data(&self, file_hash: &[u8], hash_length: usize, ops: &DirectoryOps) -> EngineResult<Option<(FileRecord, Vec<u8>)>> {
     match self.engine.get_entry(file_hash) {
       Ok(Some((header, _key, value))) => {
         let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
@@ -1741,12 +1557,8 @@ impl<'a> QueryEngine<'a> {
       }
       QueryOp::Phonetic(query_str) => {
         // Tokenize both query and field value — match if ANY word pair shares a code
-        let q_words: Vec<&str> = query_str.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
-        let v_words: Vec<&str> = field_value.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
+        let q_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
+        let v_words: Vec<&str> = field_value.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
 
         let mut strategies = Vec::new();
 
@@ -1767,7 +1579,10 @@ impl<'a> QueryEngine<'a> {
 
             let q_dm_alt = crate::engine::phonetic::dmetaphone_alt(qw);
             if let Some(ref q_alt) = q_dm_alt {
-              if !q_alt.is_empty() && (q_alt == &v_dm || Some(q_alt) == v_dm_alt.as_ref()) && !strategies.contains(&"dmetaphone_alt".to_string()) {
+              if !q_alt.is_empty()
+                && (q_alt == &v_dm || Some(q_alt) == v_dm_alt.as_ref())
+                && !strategies.contains(&"dmetaphone_alt".to_string())
+              {
                 strategies.push("dmetaphone_alt".to_string());
               }
             }
@@ -1780,36 +1595,34 @@ impl<'a> QueryEngine<'a> {
           Ok((0.0, String::new()))
         }
       }
-      QueryOp::Fuzzy(query_str, options) => {
-        match options.algorithm {
-          FuzzyAlgorithm::DamerauLevenshtein => {
-            let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
-            let max_edits = match options.fuzziness {
-              Fuzziness::Auto => crate::engine::fuzzy::auto_fuzziness(query_str.len()),
-              Fuzziness::Fixed(n) => n,
-            };
-            if distance <= max_edits {
-              let max_len = query_str.len().max(field_value.len()).max(1);
-              let score = 1.0 - (distance as f64 / max_len as f64);
-              Ok((score, "trigram".to_string()))
-            } else {
-              Ok((0.0, "trigram".to_string()))
-            }
-          }
-          FuzzyAlgorithm::JaroWinkler => {
-            let score = crate::engine::fuzzy::jaro_winkler(query_str, field_value);
-            let threshold = match options.fuzziness {
-              Fuzziness::Auto => 0.8,
-              Fuzziness::Fixed(n) => 1.0 - (n as f64 / query_str.len().max(1) as f64),
-            };
-            if score >= threshold {
-              Ok((score, "trigram".to_string()))
-            } else {
-              Ok((0.0, "trigram".to_string()))
-            }
+      QueryOp::Fuzzy(query_str, options) => match options.algorithm {
+        FuzzyAlgorithm::DamerauLevenshtein => {
+          let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
+          let max_edits = match options.fuzziness {
+            Fuzziness::Auto => crate::engine::fuzzy::auto_fuzziness(query_str.len()),
+            Fuzziness::Fixed(n) => n,
+          };
+          if distance <= max_edits {
+            let max_len = query_str.len().max(field_value.len()).max(1);
+            let score = 1.0 - (distance as f64 / max_len as f64);
+            Ok((score, "trigram".to_string()))
+          } else {
+            Ok((0.0, "trigram".to_string()))
           }
         }
-      }
+        FuzzyAlgorithm::JaroWinkler => {
+          let score = crate::engine::fuzzy::jaro_winkler(query_str, field_value);
+          let threshold = match options.fuzziness {
+            Fuzziness::Auto => 0.8,
+            Fuzziness::Fixed(n) => 1.0 - (n as f64 / query_str.len().max(1) as f64),
+          };
+          if score >= threshold {
+            Ok((score, "trigram".to_string()))
+          } else {
+            Ok((0.0, "trigram".to_string()))
+          }
+        }
+      },
       QueryOp::Match(query_str) => {
         let mut max_score = 0.0f64;
         let mut strategies = Vec::new();
@@ -1823,24 +1636,24 @@ impl<'a> QueryEngine<'a> {
         // Trigram similarity
         let trig_score = crate::engine::fuzzy::trigram_similarity(query_str, field_value);
         if trig_score > 0.3 {
-          if trig_score > max_score { max_score = trig_score; }
+          if trig_score > max_score {
+            max_score = trig_score;
+          }
           strategies.push("trigram".to_string());
         }
 
         // Phonetic matching (tokenize both sides)
-        let q_words: Vec<&str> = query_str.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
-        let v_words: Vec<&str> = field_value.split_whitespace()
-          .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-          .collect();
+        let q_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
+        let v_words: Vec<&str> = field_value.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
 
         'soundex_check: for qw in &q_words {
           for vw in &v_words {
             let qs = crate::engine::phonetic::soundex(qw);
             let vs = crate::engine::phonetic::soundex(vw);
             if !qs.is_empty() && qs == vs {
-              if 1.0 > max_score { max_score = 1.0; }
+              if 1.0 > max_score {
+                max_score = 1.0;
+              }
               strategies.push("soundex".to_string());
               break 'soundex_check;
             }
@@ -1853,7 +1666,9 @@ impl<'a> QueryEngine<'a> {
             let vd = crate::engine::phonetic::dmetaphone_primary(vw);
             let vda = crate::engine::phonetic::dmetaphone_alt(vw);
             if !qd.is_empty() && (qd == vd || Some(&qd) == vda.as_ref()) {
-              if 1.0 > max_score { max_score = 1.0; }
+              if 1.0 > max_score {
+                max_score = 1.0;
+              }
               strategies.push("dmetaphone".to_string());
               break 'dm_check;
             }
@@ -1866,7 +1681,9 @@ impl<'a> QueryEngine<'a> {
         if distance <= max_edits {
           let max_len = query_str.len().max(field_value.len()).max(1);
           let dl_score = 1.0 - (distance as f64 / max_len as f64);
-          if dl_score > max_score { max_score = dl_score; }
+          if dl_score > max_score {
+            max_score = dl_score;
+          }
           strategies.push("fuzzy".to_string());
         }
 
@@ -1883,132 +1700,102 @@ impl<'a> QueryEngine<'a> {
   /// Execute an aggregation query, computing statistics (count, sum, avg, min, max)
   /// over the matching result set, optionally grouped by one or more fields.
   pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
-    let agg = query.aggregate.as_ref().ok_or_else(|| {
-        EngineError::NotFound("No aggregate query specified".to_string())
-    })?;
+    let agg = query.aggregate.as_ref().ok_or_else(|| EngineError::NotFound("No aggregate query specified".to_string()))?;
 
     // Run the filter to get matching file hashes
     let result_hashes = self.execute_internal(query)?;
-    let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter()
-        .map(|r| r.file_hash.clone())
-        .collect();
+    let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter().map(|r| r.file_hash.clone()).collect();
 
     let index_manager = IndexManager::new(self.engine);
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
     let explicit_limit = query.limit.is_some();
 
     // COUNT
-    let count = if agg.count {
-        Some(result_hash_set.len() as u64)
-    } else {
-        None
-    };
+    let count = if agg.count { Some(result_hash_set.len() as u64) } else { None };
 
     // Collect all aggregate field names
     let mut agg_fields: HashSet<&str> = HashSet::new();
-    for f in &agg.sum { agg_fields.insert(f); }
-    for f in &agg.avg { agg_fields.insert(f); }
-    for f in &agg.min { agg_fields.insert(f); }
-    for f in &agg.max { agg_fields.insert(f); }
+    for f in &agg.sum {
+      agg_fields.insert(f);
+    }
+    for f in &agg.avg {
+      agg_fields.insert(f);
+    }
+    for f in &agg.min {
+      agg_fields.insert(f);
+    }
+    for f in &agg.max {
+      agg_fields.insert(f);
+    }
 
     // Load indexes for aggregate fields
     let mut field_indexes: FieldIndexMap = HashMap::new();
     for field_name in &agg_fields {
-        let indexes = index_manager.load_indexes_for_field(&query.path, field_name)?;
-        let index = indexes.into_iter().next().ok_or_else(|| {
-            EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name))
-        })?;
-        let type_tag = index.converter.type_tag();
-        field_indexes.insert(field_name.to_string(), (index.values, type_tag));
+      let indexes = index_manager.load_indexes_for_field(&query.path, field_name)?;
+      let index =
+        indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name)))?;
+      let type_tag = index.converter.type_tag();
+      field_indexes.insert(field_name.to_string(), (index.values, type_tag));
     }
 
     // Validate SUM/AVG fields are numeric
     for field_name in &agg.sum {
-        if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
-            if !is_numeric_type(*type_tag) {
-                return Err(EngineError::NotFound(format!(
-                    "Cannot compute SUM on field '{}' -- requires numeric index type", field_name
-                )));
-            }
+      if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if !is_numeric_type(*type_tag) {
+          return Err(EngineError::NotFound(format!("Cannot compute SUM on field '{}' -- requires numeric index type", field_name)));
         }
+      }
     }
     for field_name in &agg.avg {
-        if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
-            if !is_numeric_type(*type_tag) {
-                return Err(EngineError::NotFound(format!(
-                    "Cannot compute AVG on field '{}' -- requires numeric index type", field_name
-                )));
-            }
+      if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if !is_numeric_type(*type_tag) {
+          return Err(EngineError::NotFound(format!("Cannot compute AVG on field '{}' -- requires numeric index type", field_name)));
         }
+      }
     }
 
     // If no GROUP BY, compute flat aggregates
     if agg.group_by.is_empty() {
-        let ComputedAggregates { sum, avg, min, max } = compute_aggregates(
-            &result_hash_set, agg, &field_indexes,
-        );
+      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&result_hash_set, agg, &field_indexes);
 
-        return Ok(AggregateResult {
-            count,
-            sum,
-            avg,
-            min,
-            max,
-            groups: None,
-            has_more: false,
-            default_limit_hit: false,
-        });
+      return Ok(AggregateResult { count, sum, avg, min, max, groups: None, has_more: false, default_limit_hit: false });
     }
 
     // GROUP BY: load group field indexes
     let mut group_field_data: GroupFieldEntries = Vec::new();
     for gf in &agg.group_by {
-        let indexes = index_manager.load_indexes_for_field(&query.path, gf)?;
-        let index = indexes.into_iter().next().ok_or_else(|| {
-            EngineError::NotFound(format!("No index found for group_by field '{}'", gf))
-        })?;
-        let type_tag = index.converter.type_tag();
-        group_field_data.push((gf.clone(), index.values, type_tag));
+      let indexes = index_manager.load_indexes_for_field(&query.path, gf)?;
+      let index = indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for group_by field '{}'", gf)))?;
+      let type_tag = index.converter.type_tag();
+      group_field_data.push((gf.clone(), index.values, type_tag));
     }
 
     // Bucket results by group key
     let mut groups: GroupBuckets = HashMap::new();
 
     for file_hash in &result_hash_set {
-        // Build group key from all group_by fields
-        let mut key_map = HashMap::new();
-        let mut key_parts: Vec<String> = Vec::new();
+      // Build group key from all group_by fields
+      let mut key_map = HashMap::new();
+      let mut key_parts: Vec<String> = Vec::new();
 
-        for (field_name, values, type_tag) in &group_field_data {
-            let value = values.get(file_hash.as_slice())
-                .map(|bytes| bytes_to_json_value(bytes, *type_tag))
-                .unwrap_or(serde_json::Value::Null);
-            key_parts.push(format!("{}={}", field_name, value));
-            key_map.insert(field_name.clone(), value);
-        }
+      for (field_name, values, type_tag) in &group_field_data {
+        let value = values.get(file_hash.as_slice()).map(|bytes| bytes_to_json_value(bytes, *type_tag)).unwrap_or(serde_json::Value::Null);
+        key_parts.push(format!("{}={}", field_name, value));
+        key_map.insert(field_name.clone(), value);
+      }
 
-        let group_key = key_parts.join("|");
-        groups.entry(group_key)
-            .or_insert_with(|| (key_map, Vec::new()))
-            .1.push(file_hash.clone());
+      let group_key = key_parts.join("|");
+      groups.entry(group_key).or_insert_with(|| (key_map, Vec::new())).1.push(file_hash.clone());
     }
 
     // Compute aggregates per group
     let mut group_results: Vec<GroupResult> = Vec::new();
 
     for (key_map, group_hashes) in groups.values() {
-        let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
-        let ComputedAggregates { sum, avg, min, max } =
-            compute_aggregates(&group_hash_set, agg, &field_indexes);
+      let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
+      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&group_hash_set, agg, &field_indexes);
 
-        group_results.push(GroupResult {
-            key: key_map.clone(),
-            count: group_hashes.len() as u64,
-            sum,
-            avg,
-            min,
-            max,
-        });
+      group_results.push(GroupResult { key: key_map.clone(), count: group_hashes.len() as u64, sum, avg, min, max });
     }
 
     // Sort groups by count descending (most populated first)
@@ -2020,14 +1807,14 @@ impl<'a> QueryEngine<'a> {
     let default_limit_hit = !explicit_limit && has_more;
 
     Ok(AggregateResult {
-        count,
-        sum: HashMap::new(),
-        avg: HashMap::new(),
-        min: HashMap::new(),
-        max: HashMap::new(),
-        groups: Some(group_results),
-        has_more,
-        default_limit_hit,
+      count,
+      sum: HashMap::new(),
+      avg: HashMap::new(),
+      min: HashMap::new(),
+      max: HashMap::new(),
+      groups: Some(group_results),
+      has_more,
+      default_limit_hit,
     })
   }
 }
@@ -2038,173 +1825,191 @@ impl<'a> QueryEngine<'a> {
 
 /// Parse raw value bytes into a numeric f64, using the converter type to determine format.
 pub fn bytes_to_f64(bytes: &[u8], type_tag: u8) -> Option<f64> {
-    match type_tag {
-        CONVERTER_TYPE_U8 => {
-            if !bytes.is_empty() { Some(bytes[0] as f64) }
-            else { None }
-        }
-        CONVERTER_TYPE_U16 => {
-            if bytes.len() >= 2 { Some(u16::from_be_bytes([bytes[0], bytes[1]]) as f64) }
-            else { None }
-        }
-        CONVERTER_TYPE_U32 => {
-            if bytes.len() >= 4 { Some(u32::from_be_bytes(bytes[..4].try_into().ok()?) as f64) }
-            else { None }
-        }
-        CONVERTER_TYPE_U64 => {
-            if bytes.len() >= 8 { Some(u64::from_be_bytes(bytes[..8].try_into().ok()?) as f64) }
-            else { None }
-        }
-        CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
-            if bytes.len() >= 8 { Some(i64::from_be_bytes(bytes[..8].try_into().ok()?) as f64) }
-            else { None }
-        }
-        CONVERTER_TYPE_F64 => {
-            if bytes.len() >= 8 { Some(f64::from_be_bytes(bytes[..8].try_into().ok()?)) }
-            else { None }
-        }
-        _ => None,
+  match type_tag {
+    CONVERTER_TYPE_U8 => {
+      if !bytes.is_empty() {
+        Some(bytes[0] as f64)
+      } else {
+        None
+      }
     }
+    CONVERTER_TYPE_U16 => {
+      if bytes.len() >= 2 {
+        Some(u16::from_be_bytes([bytes[0], bytes[1]]) as f64)
+      } else {
+        None
+      }
+    }
+    CONVERTER_TYPE_U32 => {
+      if bytes.len() >= 4 {
+        Some(u32::from_be_bytes(bytes[..4].try_into().ok()?) as f64)
+      } else {
+        None
+      }
+    }
+    CONVERTER_TYPE_U64 => {
+      if bytes.len() >= 8 {
+        Some(u64::from_be_bytes(bytes[..8].try_into().ok()?) as f64)
+      } else {
+        None
+      }
+    }
+    CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
+      if bytes.len() >= 8 {
+        Some(i64::from_be_bytes(bytes[..8].try_into().ok()?) as f64)
+      } else {
+        None
+      }
+    }
+    CONVERTER_TYPE_F64 => {
+      if bytes.len() >= 8 {
+        Some(f64::from_be_bytes(bytes[..8].try_into().ok()?))
+      } else {
+        None
+      }
+    }
+    _ => None,
+  }
 }
 
 /// Parse raw value bytes into a JSON value for display (MIN/MAX, GROUP BY keys).
 pub fn bytes_to_json_value(bytes: &[u8], type_tag: u8) -> serde_json::Value {
-    match type_tag {
-        CONVERTER_TYPE_U8 => {
-            if !bytes.is_empty() { serde_json::json!(bytes[0]) }
-            else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_U16 => {
-            if bytes.len() >= 2 { serde_json::json!(u16::from_be_bytes([bytes[0], bytes[1]])) }
-            else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_U32 => {
-            if bytes.len() >= 4 {
-                serde_json::json!(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
-            } else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_U64 => {
-            if bytes.len() >= 8 {
-                serde_json::json!(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
-            } else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
-            if bytes.len() >= 8 {
-                serde_json::json!(i64::from_be_bytes(bytes[..8].try_into().unwrap()))
-            } else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_F64 => {
-            if bytes.len() >= 8 {
-                serde_json::json!(f64::from_be_bytes(bytes[..8].try_into().unwrap()))
-            } else { serde_json::Value::Null }
-        }
-        CONVERTER_TYPE_STRING => {
-            serde_json::json!(String::from_utf8_lossy(bytes).to_string())
-        }
-        _ => {
-            // Unknown type -- try as UTF-8 string, fall back to hex
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                serde_json::json!(s)
-            } else {
-                serde_json::json!(hex::encode(bytes))
-            }
-        }
+  match type_tag {
+    CONVERTER_TYPE_U8 => {
+      if !bytes.is_empty() {
+        serde_json::json!(bytes[0])
+      } else {
+        serde_json::Value::Null
+      }
     }
+    CONVERTER_TYPE_U16 => {
+      if bytes.len() >= 2 {
+        serde_json::json!(u16::from_be_bytes([bytes[0], bytes[1]]))
+      } else {
+        serde_json::Value::Null
+      }
+    }
+    CONVERTER_TYPE_U32 => {
+      if bytes.len() >= 4 {
+        serde_json::json!(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
+      } else {
+        serde_json::Value::Null
+      }
+    }
+    CONVERTER_TYPE_U64 => {
+      if bytes.len() >= 8 {
+        serde_json::json!(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
+      } else {
+        serde_json::Value::Null
+      }
+    }
+    CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
+      if bytes.len() >= 8 {
+        serde_json::json!(i64::from_be_bytes(bytes[..8].try_into().unwrap()))
+      } else {
+        serde_json::Value::Null
+      }
+    }
+    CONVERTER_TYPE_F64 => {
+      if bytes.len() >= 8 {
+        serde_json::json!(f64::from_be_bytes(bytes[..8].try_into().unwrap()))
+      } else {
+        serde_json::Value::Null
+      }
+    }
+    CONVERTER_TYPE_STRING => {
+      serde_json::json!(String::from_utf8_lossy(bytes).to_string())
+    }
+    _ => {
+      // Unknown type -- try as UTF-8 string, fall back to hex
+      if let Ok(s) = std::str::from_utf8(bytes) {
+        serde_json::json!(s)
+      } else {
+        serde_json::json!(hex::encode(bytes))
+      }
+    }
+  }
 }
 
 /// Check if a converter type supports numeric aggregation (SUM/AVG).
 pub fn is_numeric_type(type_tag: u8) -> bool {
-    matches!(type_tag,
-        CONVERTER_TYPE_U8 | CONVERTER_TYPE_U16 | CONVERTER_TYPE_U32 | CONVERTER_TYPE_U64 |
-        CONVERTER_TYPE_I64 | CONVERTER_TYPE_F64
-    )
+  matches!(
+    type_tag,
+    CONVERTER_TYPE_U8 | CONVERTER_TYPE_U16 | CONVERTER_TYPE_U32 | CONVERTER_TYPE_U64 | CONVERTER_TYPE_I64 | CONVERTER_TYPE_F64
+  )
 }
 
 /// Shared aggregation computation: iterates the hash set, computes SUM, AVG, MIN, MAX.
-fn compute_aggregates(
-    hash_set: &HashSet<Vec<u8>>,
-    agg: &AggregateQuery,
-    field_indexes: &FieldIndexMap,
-) -> ComputedAggregates {
-    let mut sum_map: HashMap<String, f64> = HashMap::new();
-    let mut avg_counts: HashMap<String, (f64, u64)> = HashMap::new();
-    let mut min_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
-    let mut max_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
+fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_indexes: &FieldIndexMap) -> ComputedAggregates {
+  let mut sum_map: HashMap<String, f64> = HashMap::new();
+  let mut avg_counts: HashMap<String, (f64, u64)> = HashMap::new();
+  let mut min_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
+  let mut max_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
 
-    for file_hash in hash_set {
-        // SUM
-        for field_name in &agg.sum {
-            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
-                if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    if let Some(num) = bytes_to_f64(bytes, *type_tag) {
-                        *sum_map.entry(field_name.clone()).or_insert(0.0) += num;
-                    }
-                }
-            }
+  for file_hash in hash_set {
+    // SUM
+    for field_name in &agg.sum {
+      if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if let Some(bytes) = values.get(file_hash.as_slice()) {
+          if let Some(num) = bytes_to_f64(bytes, *type_tag) {
+            *sum_map.entry(field_name.clone()).or_insert(0.0) += num;
+          }
         }
-
-        // AVG (accumulate sum + count)
-        for field_name in &agg.avg {
-            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
-                if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    if let Some(num) = bytes_to_f64(bytes, *type_tag) {
-                        let entry = avg_counts.entry(field_name.clone()).or_insert((0.0, 0));
-                        entry.0 += num;
-                        entry.1 += 1;
-                    }
-                }
-            }
-        }
-
-        // MIN
-        for field_name in &agg.min {
-            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
-                if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    let should_replace = match min_map.get(field_name.as_str()) {
-                        None => true,
-                        Some((_, current_bytes)) => bytes.as_slice() < current_bytes.as_slice(),
-                    };
-                    if should_replace {
-                        min_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
-                    }
-                }
-            }
-        }
-
-        // MAX
-        for field_name in &agg.max {
-            if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
-                if let Some(bytes) = values.get(file_hash.as_slice()) {
-                    let should_replace = match max_map.get(field_name.as_str()) {
-                        None => true,
-                        Some((_, current_bytes)) => bytes.as_slice() > current_bytes.as_slice(),
-                    };
-                    if should_replace {
-                        max_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
-                    }
-                }
-            }
-        }
+      }
     }
 
-    let avg_map: HashMap<String, f64> = avg_counts.into_iter()
-        .map(|(k, (sum, count))| (k, if count > 0 { sum / count as f64 } else { 0.0 }))
-        .collect();
-
-    let min_display: HashMap<String, serde_json::Value> = min_map.into_iter()
-        .map(|(k, (v, _))| (k, v))
-        .collect();
-
-    let max_display: HashMap<String, serde_json::Value> = max_map.into_iter()
-        .map(|(k, (v, _))| (k, v))
-        .collect();
-
-    ComputedAggregates {
-        sum: sum_map,
-        avg: avg_map,
-        min: min_display,
-        max: max_display,
+    // AVG (accumulate sum + count)
+    for field_name in &agg.avg {
+      if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if let Some(bytes) = values.get(file_hash.as_slice()) {
+          if let Some(num) = bytes_to_f64(bytes, *type_tag) {
+            let entry = avg_counts.entry(field_name.clone()).or_insert((0.0, 0));
+            entry.0 += num;
+            entry.1 += 1;
+          }
+        }
+      }
     }
+
+    // MIN
+    for field_name in &agg.min {
+      if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if let Some(bytes) = values.get(file_hash.as_slice()) {
+          let should_replace = match min_map.get(field_name.as_str()) {
+            None => true,
+            Some((_, current_bytes)) => bytes.as_slice() < current_bytes.as_slice(),
+          };
+          if should_replace {
+            min_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
+          }
+        }
+      }
+    }
+
+    // MAX
+    for field_name in &agg.max {
+      if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
+        if let Some(bytes) = values.get(file_hash.as_slice()) {
+          let should_replace = match max_map.get(field_name.as_str()) {
+            None => true,
+            Some((_, current_bytes)) => bytes.as_slice() > current_bytes.as_slice(),
+          };
+          if should_replace {
+            max_map.insert(field_name.clone(), (bytes_to_json_value(bytes, *type_tag), bytes.clone()));
+          }
+        }
+      }
+    }
+  }
+
+  let avg_map: HashMap<String, f64> =
+    avg_counts.into_iter().map(|(k, (sum, count))| (k, if count > 0 { sum / count as f64 } else { 0.0 })).collect();
+
+  let min_display: HashMap<String, serde_json::Value> = min_map.into_iter().map(|(k, (v, _))| (k, v)).collect();
+
+  let max_display: HashMap<String, serde_json::Value> = max_map.into_iter().map(|(k, (v, _))| (k, v)).collect();
+
+  ComputedAggregates { sum: sum_map, avg: avg_map, min: min_display, max: max_display }
 }
 
 /// Chainable query builder.
@@ -2239,10 +2044,7 @@ impl<'a> QueryBuilder<'a> {
 
   /// Start building a field query.
   pub fn field(self, name: &str) -> FieldQueryBuilder<'a> {
-    FieldQueryBuilder {
-      parent: self,
-      field_name: name.to_string(),
-    }
+    FieldQueryBuilder { parent: self, field_name: name.to_string() }
   }
 
   /// Set a result limit.
@@ -2259,10 +2061,7 @@ impl<'a> QueryBuilder<'a> {
 
   /// Add a sort field.
   pub fn order_by(mut self, field: &str, direction: SortDirection) -> Self {
-    self.order_by_fields.push(SortField {
-      field: field.to_string(),
-      direction,
-    });
+    self.order_by_fields.push(SortField { field: field.to_string(), direction });
     self
   }
 
@@ -2324,11 +2123,7 @@ impl<'a> QueryBuilder<'a> {
     let sub = QueryBuilder::new(self.engine, &self.path);
     let built = build_fn(sub);
     if !built.nodes.is_empty() {
-      let inner = if built.nodes.len() == 1 {
-        built.nodes.into_iter().next().unwrap()
-      } else {
-        QueryNode::And(built.nodes)
-      };
+      let inner = if built.nodes.len() == 1 { built.nodes.into_iter().next().unwrap() } else { QueryNode::And(built.nodes) };
       self.nodes.push(QueryNode::Not(Box::new(inner)));
     }
     self
@@ -2404,46 +2199,34 @@ pub struct FieldQueryBuilder<'a> {
 impl<'a> FieldQueryBuilder<'a> {
   /// Exact match (raw bytes).
   pub fn eq(mut self, value: &[u8]) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Eq(value.to_vec()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Eq(value.to_vec()) }));
     self.parent
   }
 
   /// Greater than (raw bytes).
   pub fn gt(mut self, value: &[u8]) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Gt(value.to_vec()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Gt(value.to_vec()) }));
     self.parent
   }
 
   /// Less than (raw bytes).
   pub fn lt(mut self, value: &[u8]) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Lt(value.to_vec()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Lt(value.to_vec()) }));
     self.parent
   }
 
   /// Range: between min and max (inclusive, raw bytes).
   pub fn between(mut self, min: &[u8], max: &[u8]) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Between(min.to_vec(), max.to_vec()),
-    }));
+    self
+      .parent
+      .nodes
+      .push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Between(min.to_vec(), max.to_vec()) }));
     self.parent
   }
 
   /// Match any of the given values (raw bytes).
   pub fn in_values(mut self, values: Vec<Vec<u8>>) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::In(values),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::In(values) }));
     self.parent
   }
 
@@ -2526,17 +2309,13 @@ impl<'a> FieldQueryBuilder<'a> {
 
   /// Match any of the given u64 values.
   pub fn in_u64(self, values: &[u64]) -> QueryBuilder<'a> {
-    let byte_values = values.iter()
-      .map(|v| v.to_be_bytes().to_vec())
-      .collect();
+    let byte_values = values.iter().map(|v| v.to_be_bytes().to_vec()).collect();
     self.in_values(byte_values)
   }
 
   /// Match any of the given string values.
   pub fn in_str(self, values: &[&str]) -> QueryBuilder<'a> {
-    let byte_values = values.iter()
-      .map(|v| v.as_bytes().to_vec())
-      .collect();
+    let byte_values = values.iter().map(|v| v.as_bytes().to_vec()).collect();
     self.in_values(byte_values)
   }
 
@@ -2544,28 +2323,22 @@ impl<'a> FieldQueryBuilder<'a> {
 
   /// Substring match via trigram index + recheck.
   pub fn contains(mut self, value: &str) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Contains(value.to_string()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Contains(value.to_string()) }));
     self.parent
   }
 
   /// Trigram similarity match with threshold.
   pub fn similar(mut self, value: &str, threshold: f64) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Similar(value.to_string(), threshold),
-    }));
+    self
+      .parent
+      .nodes
+      .push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Similar(value.to_string(), threshold) }));
     self.parent
   }
 
   /// Phonetic code match (soundex / double metaphone).
   pub fn phonetic(mut self, value: &str) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Phonetic(value.to_string()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Phonetic(value.to_string()) }));
     self.parent
   }
 
@@ -2580,19 +2353,16 @@ impl<'a> FieldQueryBuilder<'a> {
 
   /// Fuzzy match with custom options.
   pub fn fuzzy_with(mut self, value: &str, options: FuzzyOptions) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Fuzzy(value.to_string(), options),
-    }));
+    self
+      .parent
+      .nodes
+      .push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Fuzzy(value.to_string(), options) }));
     self.parent
   }
 
   /// Composite match: run all matching indexes and score-fuse.
   pub fn match_query(mut self, value: &str) -> QueryBuilder<'a> {
-    self.parent.nodes.push(QueryNode::Field(FieldQuery {
-      field_name: self.field_name,
-      operation: QueryOp::Match(value.to_string()),
-    }));
+    self.parent.nodes.push(QueryNode::Field(FieldQuery { field_name: self.field_name, operation: QueryOp::Match(value.to_string()) }));
     self.parent
   }
 }
@@ -2605,10 +2375,7 @@ impl<'a> FieldQueryBuilder<'a> {
 /// Returns 0 if the byte slice is not exactly 8 bytes.
 fn bytes_to_u64(bytes: &[u8]) -> u64 {
   if bytes.len() == 8 {
-    u64::from_be_bytes([
-      bytes[0], bytes[1], bytes[2], bytes[3],
-      bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
+    u64::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
   } else {
     0
   }
@@ -2620,10 +2387,7 @@ fn bytes_to_i64(bytes: &[u8]) -> i64 {
   if bytes.len() == 8 {
     // json_value_to_bytes casts i64 as u64 before encoding to big-endian bytes,
     // so we decode as u64 and reinterpret as i64.
-    u64::from_be_bytes([
-      bytes[0], bytes[1], bytes[2], bytes[3],
-      bytes[4], bytes[5], bytes[6], bytes[7],
-    ]) as i64
+    u64::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]) as i64
   } else {
     0
   }

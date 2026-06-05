@@ -19,10 +19,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -47,10 +44,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
-  format!(
-    r#"{{"name":"{}","age":{},"email":"{}"}}"#,
-    name, age, email,
-  ).into_bytes()
+  format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
@@ -76,41 +70,28 @@ fn setup_users(engine: &StorageEngine) {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/myapp/users", &config);
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/alice.json",
-    &make_user_json("Alice", 30, "alice@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/alice.json", &make_user_json("Alice", 30, "alice@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/bob.json",
-    &make_user_json("Bob", 25, "bob@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/bob.json", &make_user_json("Bob", 25, "bob@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/charlie.json",
-    &make_user_json("Charlie", 40, "charlie@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(
+      &ctx,
+      "/myapp/users/charlie.json",
+      &make_user_json("Charlie", 40, "charlie@test.com"),
+      Some("application/json"),
+    )
+    .unwrap();
 }
 
 async fn query_with_explain(
@@ -149,12 +130,8 @@ async fn test_explain_plan_returns_plan() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]),
-    serde_json::json!(true),
-  ).await;
+  let json =
+    query_with_explain(app, &auth, serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]), serde_json::json!(true)).await;
 
   // Should have plan, no execution, no results
   assert!(json.get("plan").is_some(), "should have 'plan'");
@@ -169,12 +146,8 @@ async fn test_explain_analyze_returns_plan_and_results() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]),
-    serde_json::json!("analyze"),
-  ).await;
+  let json =
+    query_with_explain(app, &auth, serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]), serde_json::json!("analyze")).await;
 
   // Should have plan, execution, and results
   assert!(json.get("plan").is_some(), "should have 'plan'");
@@ -189,12 +162,7 @@ async fn test_explain_shows_indexes() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!({ "field": "age", "op": "eq", "value": 30 }),
-    serde_json::json!(true),
-  ).await;
+  let json = query_with_explain(app, &auth, serde_json::json!({ "field": "age", "op": "eq", "value": 30 }), serde_json::json!(true)).await;
 
   let plan = json.get("plan").unwrap();
   let tree = plan.get("query_tree").unwrap();
@@ -214,12 +182,7 @@ async fn test_explain_shows_operation() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!({ "field": "age", "op": "gt", "value": 20 }),
-    serde_json::json!(true),
-  ).await;
+  let json = query_with_explain(app, &auth, serde_json::json!({ "field": "age", "op": "gt", "value": 20 }), serde_json::json!(true)).await;
 
   let plan = json.get("plan").unwrap();
   let tree = plan.get("query_tree").unwrap();
@@ -234,12 +197,7 @@ async fn test_explain_shows_recheck_false_for_exact() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!({ "field": "age", "op": "eq", "value": 30 }),
-    serde_json::json!(true),
-  ).await;
+  let json = query_with_explain(app, &auth, serde_json::json!({ "field": "age", "op": "eq", "value": 30 }), serde_json::json!(true)).await;
 
   let tree = json["plan"]["query_tree"].clone();
   assert_eq!(tree["recheck"], false, "exact query should not need recheck");
@@ -262,7 +220,8 @@ async fn test_explain_shows_bitmap_compositing_for_or() {
       ]
     }),
     serde_json::json!(true),
-  ).await;
+  )
+  .await;
 
   let plan = json.get("plan").unwrap();
   assert_eq!(plan["bitmap_compositing"], true, "OR query should use bitmap compositing");
@@ -338,12 +297,8 @@ async fn test_explain_analyze_timing() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]),
-    serde_json::json!("analyze"),
-  ).await;
+  let json =
+    query_with_explain(app, &auth, serde_json::json!([{ "field": "age", "op": "gt", "value": 20 }]), serde_json::json!("analyze")).await;
 
   let execution = json.get("execution").unwrap();
   assert!(execution.get("total_duration_ms").is_some(), "should have total_duration_ms");
@@ -391,12 +346,8 @@ async fn test_explain_plan_string_mode() {
   let auth = bearer_token(&jwt_manager);
 
   // "plan" string should also trigger plan mode
-  let json = query_with_explain(
-    app,
-    &auth,
-    serde_json::json!([{ "field": "age", "op": "eq", "value": 30 }]),
-    serde_json::json!("plan"),
-  ).await;
+  let json =
+    query_with_explain(app, &auth, serde_json::json!([{ "field": "age", "op": "eq", "value": 30 }]), serde_json::json!("plan")).await;
 
   assert!(json.get("plan").is_some());
   assert!(json.get("execution").is_none());
@@ -479,7 +430,8 @@ async fn test_explain_and_query_tree() {
       { "field": "name", "op": "eq", "value": "Alice" }
     ]),
     serde_json::json!(true),
-  ).await;
+  )
+  .await;
 
   let tree = &json["plan"]["query_tree"];
   assert_eq!(tree["type"], "and");
@@ -503,7 +455,8 @@ async fn test_explain_not_query_tree() {
       "not": { "field": "age", "op": "eq", "value": 30 }
     }),
     serde_json::json!(true),
-  ).await;
+  )
+  .await;
 
   let tree = &json["plan"]["query_tree"];
   assert_eq!(tree["type"], "not");
