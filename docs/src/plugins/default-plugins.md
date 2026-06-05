@@ -1,19 +1,29 @@
 # Default Plugins
 
-AeorDB ships first-party WASM query plugins under `aeordb-plugins/`. These plugins use the same SDK and deployment path as user plugins, so they can be replaced or extended without adding native API surface.
+AeorDB ships first-party WASM query plugins under `aeordb-plugins/`. Release WASM builds for these plugins are embedded into the AeorDB server binary and installed at startup into user-accessible plugin paths.
 
-Build a default plugin before deploying it:
+On startup, AeorDB installs these bundled plugins if they are missing or if the stored WASM checksum differs from the embedded copy:
+
+| Plugin | Public invoke path |
+|--------|--------------------|
+| `extract` | `POST /plugins/extract/invoke` |
+| `jq` | `POST /plugins/jq/invoke` |
+
+If you change a default plugin's source, rebuild its WASM and refresh the embedded copy before rebuilding AeorDB:
 
 ```bash
 cd aeordb-plugins/extract-plugin
 cargo build --target wasm32-unknown-unknown --release
+cp target/wasm32-unknown-unknown/release/aeordb_extract_plugin.wasm \
+  ../../aeordb-lib/src/plugins/bundled/extract.wasm
+
+cd ../jq-plugin
+cargo build --target wasm32-unknown-unknown --release
+cp target/wasm32-unknown-unknown/release/aeordb_jq_plugin.wasm \
+  ../../aeordb-lib/src/plugins/bundled/jq.wasm
 ```
 
-Deploy the resulting `.wasm` with the normal plugin deployment API or CLI, then invoke it through:
-
-```text
-POST /plugins/{name}/invoke
-```
+User-deployed plugins still use the normal plugin deployment API. The bundled plugin paths are restored to the embedded versions on startup when their checksums differ.
 
 ## `extract`
 

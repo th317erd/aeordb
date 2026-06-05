@@ -4,9 +4,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
+use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 
 /// Create a fresh app with a shared JwtManager.
@@ -27,6 +29,23 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
     sub: "test-admin".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
+/// Create a root Bearer token value (including "Bearer " prefix).
+fn root_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: Uuid::nil().to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
@@ -239,7 +258,121 @@ async fn test_list_deployed_plugins() {
 
   let json = body_json(response.into_body()).await;
   let plugins = json["items"].as_array().expect("should have items array");
-  assert_eq!(plugins.len(), 2);
+  assert_eq!(plugins.len(), 4);
+  assert!(plugins.iter().any(|plugin| plugin["path"] == "extract"));
+  assert!(plugins.iter().any(|plugin| plugin["path"] == "jq"));
+  assert!(plugins.iter().any(|plugin| plugin["path"] == "func_a"));
+  assert!(plugins.iter().any(|plugin| plugin["path"] == "func_b"));
+}
+
+#[tokio::test]
+async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let list_request = Request::builder()
+    .method("GET")
+    .uri("/plugins")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let list_response = app.clone().oneshot(list_request).await.unwrap();
+  assert_eq!(list_response.status(), StatusCode::OK);
+  let list_json = body_json(list_response.into_body()).await;
+  let plugins = list_json["items"].as_array().expect("should have items array");
+  assert!(plugins.iter().any(|plugin| plugin["name"] == "extract" && plugin["path"] == "extract"));
+  assert!(plugins.iter().any(|plugin| plugin["name"] == "jq" && plugin["path"] == "jq"));
+
+  let ops = DirectoryOps::new(engine.as_ref());
+  ops
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/docs/defaults.txt",
+      b"one\r\ntwo\r\nthree\r\n",
+      Some("text/plain"),
+    )
+    .expect("store text fixture");
+  ops
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/docs/defaults.json",
+      br#"{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"skip"},{"role":"user","content":"world"}]}"#,
+      Some("application/json"),
+    )
+    .expect("store JSON fixture");
+
+  let extract_request = Request::builder()
+    .method("POST")
+    .uri("/plugins/extract/invoke")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(
+      serde_json::to_vec(&serde_json::json!({
+        "file": "/docs/defaults.txt",
+        "mode": "lines",
+        "start": 2,
+        "end": 2
+      }))
+      .unwrap(),
+    ))
+    .unwrap();
+  let extract_response = app.clone().oneshot(extract_request).await.unwrap();
+  assert_eq!(extract_response.status(), StatusCode::OK);
+  let extract_json = body_json(extract_response.into_body()).await;
+  assert_eq!(extract_json["text"], "two\r\n");
+
+  let jq_request = Request::builder()
+    .method("POST")
+    .uri("/plugins/jq/invoke")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(
+      serde_json::to_vec(&serde_json::json!({
+        "file": "/docs/defaults.json",
+        "expr": ".messages[] | select(.role == \"user\") | .content"
+      }))
+      .unwrap(),
+    ))
+    .unwrap();
+  let jq_response = app.oneshot(jq_request).await.unwrap();
+  assert_eq!(jq_response.status(), StatusCode::OK);
+  let jq_json = body_json(jq_response.into_body()).await;
+  assert_eq!(jq_json["outputs"], serde_json::json!(["hello", "world"]));
+}
+
+#[tokio::test]
+async fn test_bundled_plugins_reinstall_when_checksum_differs() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let manager = PluginManager::new(engine.clone());
+  let original = manager
+    .get_plugin("extract")
+    .expect("read bundled extract")
+    .expect("extract should be installed");
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let deploy_request = Request::builder()
+    .method("PUT")
+    .uri("/plugins/extract")
+    .header("authorization", &auth)
+    .body(Body::from(minimal_wasm_bytes()))
+    .unwrap();
+  let deploy_response = app.oneshot(deploy_request).await.unwrap();
+  assert_eq!(deploy_response.status(), StatusCode::OK);
+
+  let replaced = manager
+    .get_plugin("extract")
+    .expect("read replaced extract")
+    .expect("extract should still exist");
+  assert_ne!(blake3::hash(&replaced.wasm_bytes), blake3::hash(&original.wasm_bytes));
+
+  let _restarted_app = rebuild_app(&jwt_manager, &engine);
+  let restored = manager
+    .get_plugin("extract")
+    .expect("read restored extract")
+    .expect("extract should be restored");
+  assert_eq!(blake3::hash(&restored.wasm_bytes), blake3::hash(&original.wasm_bytes));
+  assert_eq!(restored.plugin_id, replaced.plugin_id);
 }
 
 #[tokio::test]

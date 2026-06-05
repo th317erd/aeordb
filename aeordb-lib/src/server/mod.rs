@@ -331,6 +331,10 @@ fn create_app_with_all_and_task_queue_inner(
   task_queue: Option<Arc<TaskQueue>>,
   cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Router {
+  if let Err(error) = plugin_manager.install_bundled_plugins() {
+    tracing::warn!("Failed to install bundled plugins: {}", error);
+  }
+
   let group_cache = Arc::new(Cache::new(GroupLoader));
   let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));

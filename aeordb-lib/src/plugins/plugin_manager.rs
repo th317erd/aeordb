@@ -13,6 +13,29 @@ use crate::engine::RequestContext;
 use crate::engine::StorageEngine;
 use crate::engine::system_store;
 
+/// A first-party plugin embedded into the AeorDB binary.
+#[derive(Debug, Clone, Copy)]
+pub struct BundledPlugin {
+  pub name: &'static str,
+  pub path: &'static str,
+  pub wasm_bytes: &'static [u8],
+}
+
+/// WASM query plugins installed into user-accessible `/plugins/{name}` paths
+/// when the server starts.
+pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
+  BundledPlugin {
+    name: "extract",
+    path: "extract",
+    wasm_bytes: include_bytes!("bundled/extract.wasm"),
+  },
+  BundledPlugin {
+    name: "jq",
+    path: "jq",
+    wasm_bytes: include_bytes!("bundled/jq.wasm"),
+  },
+];
+
 /// Persistent record for a deployed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRecord {
@@ -99,6 +122,39 @@ impl PluginManager {
       engine,
       cache: Mutex::new(PluginCache::new()),
     }
+  }
+
+  /// Install or update all bundled first-party plugins.
+  ///
+  /// Bundled plugins are stored at their public plugin path, so `extract`
+  /// becomes available at `/plugins/extract/invoke`. Existing records are left
+  /// untouched when their WASM bytes match the embedded copy. If a user replaced
+  /// a bundled plugin path with different bytes, startup restores the bundled
+  /// version.
+  pub fn install_bundled_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
+    let mut installed_or_updated = Vec::new();
+
+    for bundled in BUNDLED_PLUGINS {
+      let should_install = match self.get_plugin(bundled.path)? {
+        Some(existing) => {
+          existing.plugin_type != PluginType::Wasm
+            || blake3::hash(&existing.wasm_bytes) != blake3::hash(bundled.wasm_bytes)
+        }
+        None => true,
+      };
+
+      if should_install {
+        let record = self.deploy_plugin(
+          bundled.name,
+          bundled.path,
+          PluginType::Wasm,
+          bundled.wasm_bytes.to_vec(),
+        )?;
+        installed_or_updated.push(record.to_metadata());
+      }
+    }
+
+    Ok(installed_or_updated)
   }
 
   /// Deploy (or overwrite) a plugin at the given path.
