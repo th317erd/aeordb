@@ -321,6 +321,10 @@ name = "e2e_parser_spec"
 path = "spec/engine/e2e_parser_spec.rs"
 
 [[test]]
+name = "default_plugins_spec"
+path = "spec/engine/default_plugins_spec.rs"
+
+[[test]]
 name = "index_values_spec"
 path = "spec/engine/index_values_spec.rs"
 

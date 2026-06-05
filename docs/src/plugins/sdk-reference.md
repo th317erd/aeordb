@@ -35,7 +35,7 @@ Import everything you need with:
 use aeordb_plugin_sdk::prelude::*;
 ```
 
-This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `ExtractRequest`, `ExtractedText`, `QueryResult`, `AggregateResult`, `SortDirection`.
+This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `json`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `ExtractRequest`, `ExtractedText`, `QueryResult`, `AggregateResult`, `SortDirection`.
 
 ---
 
@@ -109,6 +109,54 @@ Error enum for the plugin system.
 | `Internal(String)` | A generic internal error |
 
 All variants carry a `String` message. `PluginError` implements `Display`, `Debug`, and `Error`.
+
+---
+
+## `json`
+
+The SDK re-exports `serde_json` directly and also provides `aeordb_plugin_sdk::json` helpers for common plugin request parsing, serialization, and recursive value merging.
+
+Types and macros re-exported from `serde_json`:
+
+| Item | Description |
+|------|-------------|
+| `json!` | Build a JSON value inline |
+| `Value` | Dynamic JSON value |
+| `Map` | JSON object map |
+| `Number` | JSON number |
+
+Helper functions:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `parse_bytes` | `<T: DeserializeOwned>(&[u8]) -> Result<T, PluginError>` | Parse raw JSON bytes into a typed value |
+| `parse_str` | `<T: DeserializeOwned>(&str) -> Result<T, PluginError>` | Parse a JSON string into a typed value |
+| `parse_request` | `<T: DeserializeOwned>(&PluginRequest) -> Result<T, PluginError>` | Parse `PluginRequest.arguments` into a typed value |
+| `to_value` | `<T: Serialize>(&T) -> Result<Value, PluginError>` | Serialize into `serde_json::Value` |
+| `to_bytes` | `<T: Serialize>(&T) -> Result<Vec<u8>, PluginError>` | Serialize into compact JSON bytes |
+| `to_string` | `<T: Serialize>(&T) -> Result<String, PluginError>` | Serialize into a compact JSON string |
+| `merge_into` | `(&mut Value, Value)` | Recursively merge one JSON value into another |
+| `merged` | `(Value, Value) -> Value` | Return a merged copy |
+| `merge_all` | `(Value, impl IntoIterator<Item = Value>) -> Value` | Apply overlays left to right |
+
+Merge semantics are recursive for object/object branches. Arrays, scalars, and `null` replace the existing value. This is not JSON Merge Patch; `null` is preserved as a value and does not delete a key.
+
+```rust
+use aeordb_plugin_sdk::prelude::*;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Args {
+    file: String,
+    options: json::Value,
+}
+
+let args: Args = json::parse_request(&request)?;
+let options = json::merged(
+    json::json!({"max_bytes": 65536, "format": {"pretty": false}}),
+    args.options,
+);
+```
 
 ---
 

@@ -38,6 +38,7 @@
 //! ```
 
 pub mod context;
+pub mod json;
 pub mod parser;
 pub mod query_builder;
 
@@ -240,6 +241,7 @@ macro_rules! aeordb_query_plugin {
 /// Prelude module for convenient imports.
 pub mod prelude {
   pub use super::{PluginError, PluginRequest, PluginResponse};
+  pub use super::json;
   pub use super::parser::{ParserInput, FileMeta};
   pub use super::context::{PluginContext, FileData, DirEntry, FileMetadata, ExtractRequest, ExtractedText};
   pub use super::query_builder::{QueryResult, AggregateResult, SortDirection};

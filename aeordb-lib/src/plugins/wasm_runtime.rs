@@ -23,7 +23,7 @@ use crate::engine::storage_engine::StorageEngine;
 const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default fuel budget for execution metering.
-const DEFAULT_FUEL_LIMIT: u64 = 1_000_000;
+const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
 
 /// Fixed offset in guest memory where host function responses are written.
 /// The guest SDK reads response data from this offset.

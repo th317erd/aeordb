@@ -35,6 +35,7 @@
 
 - [Parser Plugins](./plugins/parsers.md)
 - [Query Plugins](./plugins/query-plugins.md)
+- [Default Plugins](./plugins/default-plugins.md)
 - [Plugin SDK Reference](./plugins/sdk-reference.md)
 
 # Operations

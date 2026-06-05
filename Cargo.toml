@@ -7,6 +7,8 @@ members = [
 ]
 exclude = [
     "aeordb-plugins/echo-plugin",
+    "aeordb-plugins/extract-plugin",
+    "aeordb-plugins/jq-plugin",
 ]
 resolver = "2"
 
