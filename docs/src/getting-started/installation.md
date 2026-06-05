@@ -14,24 +14,24 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ## Build from Source
 
-Clone the repository and build in release mode:
+Clone the repository and install the release binary locally:
 
 ```bash
 git clone https://github.com/AeorDB/aeordb.git
 cd aeordb
-cargo build --release
+./scripts/install-local.sh
 ```
 
-The binary is located at:
+The binary is installed at:
 
 ```
-target/release/aeordb
+~/.local/bin/aeordb
 ```
 
 ## Verify the Build
 
 ```bash
-./target/release/aeordb --help
+aeordb --help
 ```
 
 You should see:
@@ -53,14 +53,21 @@ Commands:
   help             Print this message or the help of the given subcommand(s)
 ```
 
-## Optional: Add to PATH
+## Optional: Install an Existing Binary
+
+If you already have a built release binary, install it without rebuilding:
 
 ```bash
-# Copy to a location in your PATH
-sudo cp target/release/aeordb /usr/local/bin/aeordb
+./scripts/install-local.sh --from /path/to/aeordb
+```
 
-# Or symlink
-sudo ln -s "$(pwd)/target/release/aeordb" /usr/local/bin/aeordb
+## Optional: Add to PATH
+
+The install script uses `~/.local/bin`, which is usually already on `PATH`.
+If your shell cannot find `aeordb` after installation:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## No External Dependencies
