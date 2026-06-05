@@ -202,6 +202,10 @@ name = "directory_ops_spec"
 path = "spec/engine/directory_ops_spec.rs"
 
 [[test]]
+name = "sdk_bulk_write_spec"
+path = "spec/engine/sdk_bulk_write_spec.rs"
+
+[[test]]
 name = "versioning_spec"
 path = "spec/engine/versioning_spec.rs"
 

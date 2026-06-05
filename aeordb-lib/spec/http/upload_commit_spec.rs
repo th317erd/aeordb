@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{DirectoryOps, StorageEngine};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -129,6 +129,49 @@ async fn test_commit_single_file() {
 
   let bytes = body_bytes(resp.into_body()).await;
   assert_eq!(bytes, data);
+}
+
+#[tokio::test]
+async fn test_commit_compressed_chunk_uses_decompressed_size_and_mime() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+
+  let data = "plain text payload that should compress well\n".repeat(80).into_bytes();
+  assert!(data.len() > 500);
+  let chunk_hash = upload_chunk(rebuild_app(&jwt, &engine), &token, &data).await;
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/compressed.txt",
+          "chunks": [chunk_hash]
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+
+  let json = body_json(resp.into_body()).await;
+  assert_eq!(json["files"][0]["size"].as_u64().unwrap(), data.len() as u64);
+
+  let metadata = DirectoryOps::new(&engine).get_metadata("/test/compressed.txt").unwrap().unwrap();
+  assert_eq!(metadata.total_size, data.len() as u64);
+  assert_eq!(metadata.content_type.as_deref(), Some("text/plain"));
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(Request::get("/files/test/compressed.txt").header("Authorization", &token).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+  assert_eq!(body_bytes(resp.into_body()).await, data);
 }
 
 // ===========================================================================

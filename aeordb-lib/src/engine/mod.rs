@@ -55,6 +55,7 @@ pub mod kv_store;
 pub mod lifecycle_config;
 pub mod lost_found;
 pub mod merge;
+pub mod merge_patch;
 pub mod metrics_pulse;
 pub mod native_parsers;
 pub mod nvt;
@@ -94,7 +95,7 @@ pub use cache::{Cache, CacheLoader};
 pub use cache_loaders::{PermissionsLoader, GroupLoader, ApiKeyLoader, IndexConfigLoader};
 pub use engine_counters::{EngineCounters, CountersSnapshot};
 pub use api_key_rules::{KeyRule, match_rules, check_operation_permitted, validate_rules, parse_rules_from_json, operation_to_flag_char};
-pub use batch_commit::{commit_files, CommitFile, CommitResult, CommittedFile};
+pub use batch_commit::{commit_buffered_files, commit_files, BufferedFile, CommitFile, CommitResult, CommittedFile};
 pub use append_writer::AppendWriter;
 pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
 pub use content_type::detect_content_type;
@@ -144,6 +145,7 @@ pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{
   DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash,
   symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, is_system_path, DEFAULT_CHUNK_SIZE,
+  JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult, JsonMergedFile,
 };
 pub use indexing_pipeline::IndexingPipeline;
 pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
@@ -159,6 +161,7 @@ pub use health::{
   check_auth, compute_overall_status, full_health_check,
 };
 pub use merge::{three_way_merge, MergeResult, MergeOp, ConflictEntry, ConflictType, ConflictVersion};
+pub use merge_patch::{apply_merge_patch, MergeDepth};
 pub use sync_apply::apply_merge_operations;
 pub use sync_api::{
   compute_sync_diff, get_needed_chunks, apply_sync_chunks, list_conflicts_typed, file_history, file_restore_from_version, SyncDiff,

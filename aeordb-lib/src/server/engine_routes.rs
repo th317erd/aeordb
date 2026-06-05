@@ -2145,7 +2145,7 @@ async fn do_merge_patch(
   merge_q: MergePatchQuery,
   body: Body,
 ) -> Response {
-  use crate::server::json_merge_patch::{apply_merge_patch, MergeDepth};
+  use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 
   if is_system_path(&path) {
     return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();

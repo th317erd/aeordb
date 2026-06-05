@@ -1,4 +1,5 @@
 use crate::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
+use crate::engine::batch_commit::{commit_buffered_files, BufferedFile, CommitResult};
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::entry_header::FLAG_SYSTEM;
@@ -9,6 +10,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::index_store::IndexManager;
+use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
@@ -282,6 +284,32 @@ pub struct DirectoryOps<'a> {
   engine: &'a StorageEngine,
 }
 
+#[derive(Debug, Clone)]
+pub struct JsonMergeFileResult {
+  pub file_record: FileRecord,
+  pub created: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonMergeFilePatch {
+  pub path: String,
+  pub patch: serde_json::Value,
+  pub depth: MergeDepth,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonMergedFile {
+  pub path: String,
+  pub size: u64,
+  pub created: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonMergeBatchResult {
+  pub merged: usize,
+  pub files: Vec<JsonMergedFile>,
+}
+
 impl<'a> DirectoryOps<'a> {
   /// Create a new `DirectoryOps` handle wrapping the given storage engine.
   pub fn new(engine: &'a StorageEngine) -> Self {
@@ -297,6 +325,94 @@ impl<'a> DirectoryOps<'a> {
   /// from any `Read` source without buffering the whole file.
   pub fn store_file_buffered(&self, ctx: &RequestContext, path: &str, data: &[u8], content_type: Option<&str>) -> EngineResult<FileRecord> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
+  }
+
+  /// Store multiple small files from fully-buffered byte vectors.
+  ///
+  /// **WARNING — buffered, not streaming.** Every file body is already in
+  /// memory. Use this for small trusted SDK writes (JSON buckets, configs,
+  /// short text files), not arbitrary-size user uploads.
+  pub fn store_files_buffered_batch(&self, ctx: &RequestContext, files: Vec<BufferedFile>) -> EngineResult<CommitResult> {
+    commit_buffered_files(self.engine, ctx, files)
+  }
+
+  /// Apply an RFC 7396 JSON merge patch to one stored JSON file.
+  ///
+  /// Missing files start as `{}` and are created as `application/json`.
+  /// Existing files must contain valid JSON; invalid stored JSON fails fast
+  /// before any write occurs.
+  pub fn merge_json_file(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    patch: serde_json::Value,
+    depth: MergeDepth,
+  ) -> EngineResult<JsonMergeFileResult> {
+    let (serialized, existed) = self.prepare_json_merge(path, patch, depth)?;
+    let file_record = self.store_file_buffered(ctx, path, &serialized, Some("application/json"))?;
+    Ok(JsonMergeFileResult { file_record, created: !existed })
+  }
+
+  /// Apply JSON merge patches to multiple small JSON files in one write batch.
+  ///
+  /// All target documents are read, parsed, and merged before the batch write
+  /// starts, so invalid JSON in any existing file prevents every write in the
+  /// batch.
+  pub fn merge_json_files_batch(&self, ctx: &RequestContext, patches: Vec<JsonMergeFilePatch>) -> EngineResult<JsonMergeBatchResult> {
+    if patches.is_empty() {
+      return Err(EngineError::InvalidInput("No JSON merge patches provided".to_string()));
+    }
+
+    let mut seen_paths = std::collections::HashSet::with_capacity(patches.len());
+    for patch in &patches {
+      let normalized = normalize_path(&patch.path);
+      if normalized == "/" {
+        return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+      }
+      if !seen_paths.insert(normalized.clone()) {
+        return Err(EngineError::InvalidInput(format!("Duplicate batch path: {}", normalized)));
+      }
+    }
+
+    let mut files = Vec::with_capacity(patches.len());
+    let mut merged_files = Vec::with_capacity(patches.len());
+
+    for patch in patches {
+      let normalized = normalize_path(&patch.path);
+      let (serialized, existed) = self.prepare_json_merge(&normalized, patch.patch, patch.depth)?;
+      let size = serialized.len() as u64;
+      files.push(BufferedFile { path: normalized.clone(), data: serialized, content_type: Some("application/json".to_string()) });
+      merged_files.push(JsonMergedFile { path: normalized, size, created: !existed });
+    }
+
+    let result = self.store_files_buffered_batch(ctx, files)?;
+    Ok(JsonMergeBatchResult { merged: result.committed, files: merged_files })
+  }
+
+  fn prepare_json_merge(&self, path: &str, patch: serde_json::Value, depth: MergeDepth) -> EngineResult<(Vec<u8>, bool)> {
+    let normalized = normalize_path(path);
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+    }
+
+    let (mut target, existed) = match self.read_file_buffered(&normalized) {
+      Ok(bytes) => {
+        if bytes.is_empty() {
+          (serde_json::Value::Object(serde_json::Map::new()), true)
+        } else {
+          let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| EngineError::InvalidInput(format!("stored file at {} is not valid JSON: {}", normalized, error)))?;
+          (parsed, true)
+        }
+      }
+      Err(EngineError::NotFound(_)) => (serde_json::Value::Object(serde_json::Map::new()), false),
+      Err(error) => return Err(error),
+    };
+
+    apply_merge_patch(&mut target, patch, depth);
+    serde_json::to_vec(&target)
+      .map(|serialized| (serialized, existed))
+      .map_err(|error| EngineError::InvalidInput(format!("merged document failed to serialize: {}", error)))
   }
 
   /// Store a file at the given path by streaming chunks from a `Read` source.

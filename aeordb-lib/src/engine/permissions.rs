@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::errors::EngineResult;
 
 /// The 8 crudlify flag positions and their canonical letters.
 const CRUDLIFY_LETTERS: [char; 8] = ['c', 'r', 'u', 'd', 'l', 'i', 'f', 'y'];
