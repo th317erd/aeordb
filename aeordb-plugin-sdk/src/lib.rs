@@ -241,6 +241,6 @@ macro_rules! aeordb_query_plugin {
 pub mod prelude {
   pub use super::{PluginError, PluginRequest, PluginResponse};
   pub use super::parser::{ParserInput, FileMeta};
-  pub use super::context::{PluginContext, FileData, DirEntry, FileMetadata};
+  pub use super::context::{PluginContext, FileData, DirEntry, FileMetadata, ExtractRequest, ExtractedText};
   pub use super::query_builder::{QueryResult, AggregateResult, SortDirection};
 }

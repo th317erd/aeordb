@@ -263,6 +263,84 @@ fn test_echo_plugin_reads_file() {
 }
 
 #[test]
+fn test_echo_plugin_extracts_crlf_line_range() {
+    let (engine, pm, _temp) = setup();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(
+        &ctx,
+        "/extract/mixed-lines.txt",
+        b"one\r\ntwo\r\nthree\nfour\rfive",
+        Some("text/plain"),
+    )
+    .expect("store extract test file");
+
+    let response = invoke_raw(
+        &pm,
+        &engine,
+        "extract",
+        br#"{"path":"/extract/mixed-lines.txt","mode":"lines","start":2,"end":3}"#,
+    );
+    let body = extract_body_json(&response);
+
+    assert_eq!(response["status_code"], 200);
+    assert_eq!(body["text"], "two\r\nthree\n");
+    assert_eq!(body["truncated"], false);
+}
+
+#[test]
+fn test_echo_plugin_extracts_utf8_character_range() {
+    let (engine, pm, _temp) = setup();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(
+        &ctx,
+        "/extract/unicode.txt",
+        "aé🙂z".as_bytes(),
+        Some("text/plain; charset=utf-8"),
+    )
+    .expect("store unicode extract test file");
+
+    let response = invoke_raw(
+        &pm,
+        &engine,
+        "extract",
+        br#"{"path":"/extract/unicode.txt","mode":"chars","start":1,"end":3}"#,
+    );
+    let body = extract_body_json(&response);
+
+    assert_eq!(response["status_code"], 200);
+    assert_eq!(body["text"], "é🙂");
+    assert_eq!(body["truncated"], false);
+}
+
+#[test]
+fn test_echo_plugin_extract_respects_max_bytes() {
+    let (engine, pm, _temp) = setup();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(
+        &ctx,
+        "/extract/long.txt",
+        b"abcdef",
+        Some("text/plain"),
+    )
+    .expect("store max-bytes extract test file");
+
+    let response = invoke_raw(
+        &pm,
+        &engine,
+        "extract",
+        br#"{"path":"/extract/long.txt","mode":"chars","start":0,"end":6,"max_bytes":3}"#,
+    );
+    let body = extract_body_json(&response);
+
+    assert_eq!(response["status_code"], 200);
+    assert_eq!(body["text"], "abc");
+    assert_eq!(body["truncated"], true);
+}
+
+#[test]
 fn test_plugin_read_host_function_enforces_user_scope() {
     let (engine, pm, _temp) = setup();
     let ctx = scoped_context(&engine, "plugin_reader", "/allowed");
@@ -278,6 +356,36 @@ fn test_plugin_read_host_function_enforces_user_scope() {
 
     let denied = invoke_raw_with_context(&pm, &engine, ctx, "read", b"/denied/secret.txt");
     assert_ne!(denied["status_code"], 200, "plugin read must not bypass path permissions");
+}
+
+#[test]
+fn test_plugin_extract_host_function_enforces_user_scope() {
+    let (engine, pm, _temp) = setup();
+    let ctx = scoped_context(&engine, "plugin_extractor", "/allowed");
+    let ops = DirectoryOps::new(&engine);
+    let sys = RequestContext::system();
+    ops.store_file_buffered(&sys, "/allowed/visible.txt", b"visible", Some("text/plain"))
+        .expect("store extract visible file");
+    ops.store_file_buffered(&sys, "/denied/secret.txt", b"secret", Some("text/plain"))
+        .expect("store extract secret file");
+
+    let allowed = invoke_raw_with_context(
+        &pm,
+        &engine,
+        ctx.clone(),
+        "extract",
+        br#"{"path":"/allowed/visible.txt","mode":"chars","start":0,"end":7}"#,
+    );
+    assert_eq!(allowed["status_code"], 200);
+
+    let denied = invoke_raw_with_context(
+        &pm,
+        &engine,
+        ctx,
+        "extract",
+        br#"{"path":"/denied/secret.txt","mode":"chars","start":0,"end":6}"#,
+    );
+    assert_ne!(denied["status_code"], 200, "plugin extract must not bypass path permissions");
 }
 
 #[test]

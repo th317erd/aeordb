@@ -122,6 +122,9 @@ fn handle(ctx: PluginContext, request: PluginRequest) -> Result<PluginResponse, 
 // Read a file -- returns FileData { data, content_type, size }
 let file = ctx.read_file("/mydb/users/alice.json")?;
 
+// Extract text without buffering the full file through the plugin boundary
+let excerpt = ctx.extract_file("/mydb/docs/readme.md", ExtractRequest::lines(10, 20))?;
+
 // Write a file (create or overwrite)
 ctx.write_file("/mydb/output/result.json", b"{\"ok\":true}", "application/json")?;
 

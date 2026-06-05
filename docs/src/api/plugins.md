@@ -143,6 +143,7 @@ If the plugin returns data that is not a valid `PluginResponse`, it is sent as r
 Plugins have access to the following host functions for interacting with the database:
 
 - **CRUD:** read, write, and delete files
+- **Extraction:** read UTF-8 line or character ranges without buffering the full file through the plugin boundary
 - **Query:** execute queries and aggregations against the engine
 - **Context:** access request metadata
 

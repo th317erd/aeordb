@@ -35,7 +35,7 @@ Import everything you need with:
 use aeordb_plugin_sdk::prelude::*;
 ```
 
-This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `QueryResult`, `AggregateResult`, `SortDirection`.
+This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `ExtractRequest`, `ExtractedText`, `QueryResult`, `AggregateResult`, `SortDirection`.
 
 ---
 
@@ -123,6 +123,26 @@ On non-WASM targets (native compilation), all methods return `PluginError::Execu
 #### `read_file(&self, path: &str) -> Result<FileData, PluginError>`
 
 Read a file at the given path. Returns the decoded file bytes, content type, and size.
+
+#### `extract_file(&self, path: &str, request: ExtractRequest) -> Result<ExtractedText, PluginError>`
+
+Extract a UTF-8 text slice without buffering the full file through the plugin boundary.
+
+Supported modes:
+
+| Mode | Range semantics |
+|------|-----------------|
+| `lines` | `start` and `end` are 1-based inclusive line numbers |
+| `chars` | `start` is 0-based inclusive and `end` is exclusive |
+
+Line extraction treats `\r\n` as one line break while preserving the original line ending in the returned text. Lone `\n` and lone `\r` also count as line breaks.
+
+```rust
+let lines = ctx.extract_file("/docs/readme.md", ExtractRequest::lines(10, 20))?;
+let chars = ctx.extract_file("/docs/readme.md", ExtractRequest::chars(0, 500))?;
+```
+
+`ExtractRequest.max_bytes` can cap the returned text size. The host enforces an absolute upper bound and sets `ExtractedText.truncated` when output is cut at the cap.
 
 #### `write_file(&self, path: &str, data: &[u8], content_type: &str) -> Result<(), PluginError>`
 

@@ -17,6 +17,7 @@ use crate::PluginError;
 #[link(wasm_import_module = "aeordb")]
 extern "C" {
     fn aeordb_read_file(ptr: i32, len: i32) -> i64;
+    fn aeordb_extract_file(ptr: i32, len: i32) -> i64;
     fn aeordb_write_file(ptr: i32, len: i32) -> i64;
     fn aeordb_delete_file(ptr: i32, len: i32) -> i64;
     fn aeordb_file_metadata(ptr: i32, len: i32) -> i64;
@@ -38,6 +39,55 @@ pub struct FileData {
     pub content_type: String,
     /// File size in bytes.
     pub size: u64,
+}
+
+/// Request for extracting a text range from a file without reading the full file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractRequest {
+    /// `"lines"` for 1-based inclusive line ranges, or `"chars"` for
+    /// 0-based end-exclusive character ranges.
+    pub mode: String,
+    /// Range start. Defaults to 1 for lines and 0 for chars when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+    /// Range end. Inclusive for lines, exclusive for chars.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<u64>,
+    /// Maximum response text bytes. Host enforces an upper bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
+impl ExtractRequest {
+    pub fn lines(start: u64, end: u64) -> Self {
+        Self {
+            mode: "lines".to_string(),
+            start: Some(start),
+            end: Some(end),
+            max_bytes: None,
+        }
+    }
+
+    pub fn chars(start: u64, end: u64) -> Self {
+        Self {
+            mode: "chars".to_string(),
+            start: Some(start),
+            end: Some(end),
+            max_bytes: None,
+        }
+    }
+}
+
+/// Text extracted by the host without materializing the full file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedText {
+    pub text: String,
+    pub content_type: String,
+    pub source_size: u64,
+    pub mode: String,
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+    pub truncated: bool,
 }
 
 /// A single directory entry returned by `list_directory`.
@@ -204,6 +254,25 @@ impl PluginContext {
         })
     }
 
+    /// Extract a text range from a file without buffering the full file in the plugin host.
+    pub fn extract_file(
+        &self,
+        path: &str,
+        request: ExtractRequest,
+    ) -> Result<ExtractedText, PluginError> {
+        let args = serde_json::json!({
+            "path": path,
+            "mode": request.mode,
+            "start": request.start,
+            "end": request.end,
+            "max_bytes": request.max_bytes,
+        });
+        let value = self.call("aeordb_extract_file", &args)?;
+        serde_json::from_value(value).map_err(|e| {
+            PluginError::SerializationFailed(format!("failed to parse extracted text: {}", e))
+        })
+    }
+
     /// Write (create or overwrite) a file.
     pub fn write_file(
         &self,
@@ -271,6 +340,7 @@ impl PluginContext {
     fn call(&self, function_name: &str, args: &serde_json::Value) -> Result<serde_json::Value, PluginError> {
         let host_fn = match function_name {
             "aeordb_read_file" => aeordb_read_file,
+            "aeordb_extract_file" => aeordb_extract_file,
             "aeordb_write_file" => aeordb_write_file,
             "aeordb_delete_file" => aeordb_delete_file,
             "aeordb_file_metadata" => aeordb_file_metadata,
@@ -351,6 +421,19 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_file_native_error() {
+        let context = PluginContext::new();
+        let result = context.extract_file("/some/path", ExtractRequest::lines(1, 2));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PluginError::ExecutionFailed(message) => {
+                assert!(message.contains("WASM context"));
+            }
+            other => panic!("expected ExecutionFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_write_file_native_error() {
         let context = PluginContext::new();
         let result = context.write_file("/some/path", b"hello", "text/plain");
@@ -418,6 +501,40 @@ mod tests {
         let roundtripped: FileData = serde_json::from_value(json).unwrap();
         assert_eq!(roundtripped.data, vec![1, 2, 3]);
         assert_eq!(roundtripped.size, 3);
+    }
+
+    #[test]
+    fn test_extract_request_serialization() {
+        let request = ExtractRequest::chars(2, 5);
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["mode"], "chars");
+        assert_eq!(json["start"], 2);
+        assert_eq!(json["end"], 5);
+
+        let roundtripped: ExtractRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtripped.mode, "chars");
+        assert_eq!(roundtripped.start, Some(2));
+        assert_eq!(roundtripped.end, Some(5));
+    }
+
+    #[test]
+    fn test_extracted_text_serialization() {
+        let extracted = ExtractedText {
+            text: "hello".to_string(),
+            content_type: "text/plain".to_string(),
+            source_size: 100,
+            mode: "lines".to_string(),
+            start: Some(1),
+            end: Some(2),
+            truncated: false,
+        };
+        let json = serde_json::to_value(&extracted).unwrap();
+        assert_eq!(json["text"], "hello");
+        assert_eq!(json["truncated"], false);
+
+        let roundtripped: ExtractedText = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtripped.text, "hello");
+        assert_eq!(roundtripped.source_size, 100);
     }
 
     #[test]
