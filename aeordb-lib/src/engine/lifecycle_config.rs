@@ -63,8 +63,7 @@ pub fn load_lifecycle_config(engine: &StorageEngine) -> LifecycleConfig {
 pub fn save_lifecycle_config(engine: &StorageEngine, config: &LifecycleConfig) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
   let ctx = RequestContext::system();
-  let data = serde_json::to_vec_pretty(config)
-    .map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+  let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
   ops.store_file_buffered(&ctx, LIFECYCLE_CONFIG_PATH, &data, Some("application/json"))?;
   Ok(())
 }
@@ -100,12 +99,8 @@ fn is_engine_internal(name: &str) -> bool {
 ///
 /// Returns the names of pruned snapshots so callers can log/emit them. The
 /// actual reclamation of orphaned data happens in the next GC sweep.
-pub fn prune_expired_snapshots(
-  engine: &StorageEngine,
-  ctx: &RequestContext,
-) -> EngineResult<PruneResult> {
-  let _mem = crate::engine::rss_sampler::PhaseSampler::start(
-    "prune_expired_snapshots", std::time::Duration::from_millis(50));
+pub fn prune_expired_snapshots(engine: &StorageEngine, ctx: &RequestContext) -> EngineResult<PruneResult> {
+  let _mem = crate::engine::rss_sampler::PhaseSampler::start("prune_expired_snapshots", std::time::Duration::from_millis(50));
   let config = load_lifecycle_config(engine);
   let auto_months = config.snapshot_retention.auto_months;
   let manual_months = config.snapshot_retention.manual_months;

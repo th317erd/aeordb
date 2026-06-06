@@ -2,6 +2,8 @@
 
 Query plugins are WASM modules that can read, write, delete, query, and aggregate data inside AeorDB, then return custom HTTP responses. They are the extension mechanism for building custom API endpoints, computed views, data transformations, or any logic that needs to run server-side.
 
+First-party examples live under `aeordb-plugins/`. See [Default Plugins](./default-plugins.md) for the bundled `extract` and `jq` query plugins.
+
 ## How It Works
 
 A query plugin receives a `PluginRequest` (containing the HTTP body and metadata) and a `PluginContext` that provides host functions for interacting with the database. The plugin performs whatever logic it needs -- querying data, writing files, aggregating results -- and returns a `PluginResponse` with a status code, body, and content type.
@@ -121,6 +123,9 @@ fn handle(ctx: PluginContext, request: PluginRequest) -> Result<PluginResponse, 
 ```rust
 // Read a file -- returns FileData { data, content_type, size }
 let file = ctx.read_file("/mydb/users/alice.json")?;
+
+// Extract text without buffering the full file through the plugin boundary
+let excerpt = ctx.extract_file("/mydb/docs/readme.md", ExtractRequest::lines(10, 20))?;
 
 // Write a file (create or overwrite)
 ctx.write_file("/mydb/output/result.json", b"{\"ok\":true}", "application/json")?;

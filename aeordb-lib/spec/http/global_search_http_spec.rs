@@ -23,10 +23,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -75,34 +72,10 @@ fn setup_multi_directory(engine: &StorageEngine) {
     logging: false,
     glob: None,
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "soundex".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "dmetaphone".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "soundex".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "dmetaphone".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/people", &people_config);
@@ -113,12 +86,7 @@ fn setup_multi_directory(engine: &StorageEngine) {
     ("charlie.json", r#"{"name":"Charlie","age":40}"#),
   ];
   for (filename, json) in &people {
-    ops.store_file_with_indexing(
-      &ctx,
-      &format!("/people/{}", filename),
-      json.as_bytes(),
-      Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, &format!("/people/{}", filename), json.as_bytes(), Some("application/json")).unwrap();
   }
 
   // --- /products: title (string + trigram), price (u64) ---
@@ -128,27 +96,9 @@ fn setup_multi_directory(engine: &StorageEngine) {
     logging: false,
     glob: None,
     indexes: vec![
-      IndexFieldConfig {
-        name: "title".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "title".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "price".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "title".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "price".to_string(), index_type: "u64".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/products", &products_config);
@@ -159,21 +109,12 @@ fn setup_multi_directory(engine: &StorageEngine) {
     ("doohickey.json", r#"{"title":"Doohickey","price":50}"#),
   ];
   for (filename, json) in &products {
-    ops.store_file_with_indexing(
-      &ctx,
-      &format!("/products/{}", filename),
-      json.as_bytes(),
-      Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, &format!("/products/{}", filename), json.as_bytes(), Some("application/json")).unwrap();
   }
 }
 
 /// Helper: send a POST /files/search request and return (status, json body).
-async fn search_request(
-  app: axum::Router,
-  auth: &str,
-  body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
+async fn search_request(app: axum::Router, auth: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
   let request = Request::builder()
     .method("POST")
     .uri("/files/search")
@@ -200,10 +141,15 @@ async fn test_broad_search_across_directories() {
   let auth = bearer_token(&jwt_manager);
 
   // "Alice" appears in /people/alice.json (name) AND /products/widget.json (title)
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "limit": 50
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "limit": 50
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -222,9 +168,14 @@ async fn test_broad_search_returns_source_field() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -243,9 +194,14 @@ async fn test_broad_search_response_shape() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -285,9 +241,14 @@ async fn test_structured_search_across_directories() {
   let auth = bearer_token(&jwt_manager);
 
   // Structured search on "name" field — only /people has it indexed
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "name", "op": "eq", "value": "Alice"}
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "name", "op": "eq", "value": "Alice"}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -304,9 +265,14 @@ async fn test_structured_search_numeric_field() {
   let auth = bearer_token(&jwt_manager);
 
   // Search for products with price > 100
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "price", "op": "gt", "value": 100}
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "price", "op": "gt", "value": 100}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -324,23 +290,22 @@ async fn test_results_sorted_by_score_descending() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
   let results = json["results"].as_array().unwrap();
   if results.len() >= 2 {
-    let scores: Vec<f64> = results.iter()
-      .map(|r| r["score"].as_f64().unwrap_or(0.0))
-      .collect();
+    let scores: Vec<f64> = results.iter().map(|r| r["score"].as_f64().unwrap_or(0.0)).collect();
     for window in scores.windows(2) {
-      assert!(
-        window[0] >= window[1],
-        "results must be sorted by score descending: {:?}",
-        scores,
-      );
+      assert!(window[0] >= window[1], "results must be sorted by score descending: {:?}", scores,);
     }
   }
 }
@@ -352,9 +317,14 @@ async fn test_total_count_present() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -376,10 +346,15 @@ async fn test_limit_restricts_results() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "limit": 1
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "limit": 1
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -396,25 +371,31 @@ async fn test_offset_skips_results() {
 
   // First, get all results
   let app_clone = rebuild_app(&jwt_manager, &engine);
-  let (_, full_json) = search_request(app_clone, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (_, full_json) = search_request(
+    app_clone,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
   let full_results = full_json["results"].as_array().unwrap();
 
   if full_results.len() >= 2 {
     // Now search with offset=1
-    let (status, json) = search_request(app, &auth, serde_json::json!({
-      "query": "Alice",
-      "offset": 1
-    })).await;
+    let (status, json) = search_request(
+      app,
+      &auth,
+      serde_json::json!({
+        "query": "Alice",
+        "offset": 1
+      }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     let offset_results = json["results"].as_array().unwrap();
-    assert_eq!(
-      offset_results.len(),
-      full_results.len() - 1,
-      "offset 1 should skip one result"
-    );
+    assert_eq!(offset_results.len(), full_results.len() - 1, "offset 1 should skip one result");
   }
 }
 
@@ -427,16 +408,26 @@ async fn test_has_more_when_more_results_exist() {
 
   // First check total count
   let app_clone = rebuild_app(&jwt_manager, &engine);
-  let (_, full_json) = search_request(app_clone, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (_, full_json) = search_request(
+    app_clone,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
   let total = full_json["results"].as_array().unwrap().len();
 
   if total >= 2 {
-    let (status, json) = search_request(app, &auth, serde_json::json!({
-      "query": "Alice",
-      "limit": 1
-    })).await;
+    let (status, json) = search_request(
+      app,
+      &auth,
+      serde_json::json!({
+        "query": "Alice",
+        "limit": 1
+      }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(json["has_more"].as_bool().unwrap(), "has_more should be true when more results exist");
@@ -450,10 +441,15 @@ async fn test_has_more_false_when_all_returned() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "limit": 1000
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "limit": 1000
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
   assert!(!json["has_more"].as_bool().unwrap(), "has_more should be false when all results fit in limit");
@@ -471,21 +467,22 @@ async fn test_path_scopes_to_subtree() {
   let auth = bearer_token(&jwt_manager);
 
   // Scope to /people — should NOT return /products results
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "path": "/people"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "path": "/people"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
   let results = json["results"].as_array().unwrap();
   for result in results {
     let source = result["source"].as_str().unwrap();
-    assert!(
-      source.starts_with("/people"),
-      "scoped search should only return results from /people, got source: {}",
-      source,
-    );
+    assert!(source.starts_with("/people"), "scoped search should only return results from /people, got source: {}", source,);
   }
 }
 
@@ -497,9 +494,14 @@ async fn test_path_defaults_to_root() {
   let auth = bearer_token(&jwt_manager);
 
   // No path specified — should search everything
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -521,10 +523,15 @@ async fn test_limit_clamped_to_max_1000() {
   let auth = bearer_token(&jwt_manager);
 
   // Request limit > 1000 — should not error, server clamps it
-  let (status, _json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "limit": 5000
-  })).await;
+  let (status, _json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "limit": 5000
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK, "limit above max should be clamped, not rejected");
 }
@@ -560,9 +567,14 @@ async fn test_invalid_where_clause_returns_400() {
   let auth = bearer_token(&jwt_manager);
 
   // where clause with missing "op"
-  let (status, _json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "name", "value": "Alice"}
-  })).await;
+  let (status, _json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "name", "value": "Alice"}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -626,9 +638,14 @@ async fn test_expired_token_returns_401() {
   let token = jwt_manager.create_token(&claims).expect("create token");
   let auth = format!("Bearer {}", token);
 
-  let (status, _json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, _json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::UNAUTHORIZED, "expired token should return 401");
 }
@@ -640,9 +657,14 @@ async fn test_where_with_unknown_op_returns_400() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, _json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "name", "op": "nonexistent_op", "value": "test"}
-  })).await;
+  let (status, _json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "name", "op": "nonexistent_op", "value": "test"}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::BAD_REQUEST, "unknown operator should return 400");
 }
@@ -658,9 +680,14 @@ async fn test_no_matching_results_returns_empty() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "xyzzyplughnowaythismatches"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "xyzzyplughnowaythismatches"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -676,9 +703,14 @@ async fn test_no_indexed_directories_returns_empty() {
   let app = rebuild_app(&jwt_manager, &_engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "anything"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "anything"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -694,9 +726,14 @@ async fn test_structured_search_field_not_indexed_anywhere() {
   let auth = bearer_token(&jwt_manager);
 
   // "nonexistent_field" is not indexed in any directory
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "nonexistent_field", "op": "eq", "value": "anything"}
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "nonexistent_field", "op": "eq", "value": "anything"}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -715,9 +752,14 @@ async fn test_duplicate_paths_are_deduplicated() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -728,12 +770,7 @@ async fn test_duplicate_paths_are_deduplicated() {
   let mut unique_paths = paths.clone();
   unique_paths.sort();
   unique_paths.dedup();
-  assert_eq!(
-    paths.len(),
-    unique_paths.len(),
-    "results should not contain duplicate paths, got: {:?}",
-    paths,
-  );
+  assert_eq!(paths.len(), unique_paths.len(), "results should not contain duplicate paths, got: {:?}", paths,);
 }
 
 // ===========================================================================
@@ -747,9 +784,14 @@ async fn test_scores_are_positive() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -767,9 +809,14 @@ async fn test_matched_by_contains_strings() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -794,9 +841,14 @@ async fn test_query_only_uses_broad_search() {
   let auth = bearer_token(&jwt_manager);
 
   // Only 'query' — should work via broad search (fuzzy indexes)
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Bob"
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Bob"
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -813,9 +865,14 @@ async fn test_where_only_uses_structured_search() {
   let auth = bearer_token(&jwt_manager);
 
   // Only 'where' — structured search
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "where": {"field": "title", "op": "eq", "value": "Super Gadget"}
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "where": {"field": "title", "op": "eq", "value": "Super Gadget"}
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -835,10 +892,15 @@ async fn test_offset_beyond_results_returns_empty() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "Alice",
-    "offset": 9999
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "offset": 9999
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
 
@@ -860,9 +922,14 @@ async fn test_empty_query_string() {
 
   // Empty string query — technically valid (query is provided), but should
   // not crash; behavior may be empty results or all results
-  let (status, _json) = search_request(app, &auth, serde_json::json!({
-    "query": ""
-  })).await;
+  let (status, _json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": ""
+    }),
+  )
+  .await;
 
   // Should not error — either 200 with empty or 200 with results
   assert_eq!(status, StatusCode::OK, "empty query string should not cause an error");
@@ -896,20 +963,8 @@ async fn test_per_directory_cap_is_lifted() {
     logging: false,
     glob: None,
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(&engine, "/sessions", &config);
@@ -926,17 +981,17 @@ async fn test_per_directory_cap_is_lifted() {
 
   // Ask for a generous outer limit so the only possible cause of a short
   // response is the per-directory inner cap we're regressing against.
-  let (status, json) = search_request(app, &auth, serde_json::json!({
-    "query": "xenocept",
-    "limit": 500
-  })).await;
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "xenocept",
+      "limit": 500
+    }),
+  )
+  .await;
 
   assert_eq!(status, StatusCode::OK);
   let results = json["results"].as_array().expect("results array");
-  assert_eq!(
-    results.len(),
-    N,
-    "all {N} matching sessions must appear; got {} — per-directory cap regressed",
-    results.len(),
-  );
+  assert_eq!(results.len(), N, "all {N} matching sessions must appear; got {} — per-directory cap regressed", results.len(),);
 }

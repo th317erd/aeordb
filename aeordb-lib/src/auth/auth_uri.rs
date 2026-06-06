@@ -15,12 +15,12 @@ pub enum AuthMode {
 /// Parse an auth URI string into an AuthMode.
 ///
 /// Recognized values:
-/// - "false", "null", "no", "0" -> Disabled
+/// - "disabled", "false", "null", "no", "0" -> Disabled
 /// - "self", "./" -> SelfContained
 /// - "file:///path" -> File(path)
 pub fn parse_auth_uri(uri: &str) -> Result<AuthMode, String> {
   match uri.to_lowercase().as_str() {
-    "false" | "null" | "no" | "0" => Ok(AuthMode::Disabled),
+    "disabled" | "false" | "null" | "no" | "0" => Ok(AuthMode::Disabled),
     "self" | "./" => Ok(AuthMode::SelfContained),
     _ => {
       if uri.starts_with("file://") {

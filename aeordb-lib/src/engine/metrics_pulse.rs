@@ -22,101 +22,95 @@ const RATE_SAMPLE_INTERVAL_SECS: u64 = 1;
 ///
 /// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_metrics_pulse(
-    bus: Arc<EventBus>,
-    engine: Arc<StorageEngine>,
-    counters: Arc<EngineCounters>,
-    rate_trackers: Arc<RateTrackerSet>,
-    db_path: String,
-    cancel: CancellationToken,
+  bus: Arc<EventBus>,
+  engine: Arc<StorageEngine>,
+  counters: Arc<EngineCounters>,
+  rate_trackers: Arc<RateTrackerSet>,
+  db_path: String,
+  cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::info!("Metrics pulse shutting down");
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(METRICS_INTERVAL_SECS)) => {}
-            }
+  tokio::spawn(async move {
+    loop {
+      tokio::select! {
+          _ = cancel.cancelled() => {
+              tracing::info!("Metrics pulse shutting down");
+              break;
+          }
+          _ = tokio::time::sleep(Duration::from_secs(METRICS_INTERVAL_SECS)) => {}
+      }
 
-            let snapshot = counters.snapshot();
-            let rates = rate_trackers.snapshot();
-            let kv = engine.kv_snapshot.load();
-            let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
-            let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
+      let snapshot = counters.snapshot();
+      let rates = rate_trackers.snapshot();
+      let kv = engine.kv_snapshot.load();
+      let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
+      let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
 
-            // Get the db file size from disk metadata.
-            let disk_total = std::fs::metadata(&db_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+      // Get the db file size from disk metadata.
+      let disk_total = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
-            // statvfs for the partition holding the db file.
-            let disk_health = crate::engine::health::check_disk(&db_path);
+      // statvfs for the partition holding the db file.
+      let disk_health = crate::engine::health::check_disk(&db_path);
 
-            // Compute derived metrics.
-            let dedup_savings = snapshot.logical_data_size.saturating_sub(snapshot.chunk_data_size);
-            let total_chunk_ops = snapshot.chunks + snapshot.chunks_deduped_total;
-            let dedup_hit_rate = if total_chunk_ops > 0 {
-                snapshot.chunks_deduped_total as f64 / total_chunk_ops as f64
-            } else {
-                0.0
-            };
+      // Compute derived metrics.
+      let dedup_savings = snapshot.logical_data_size.saturating_sub(snapshot.chunk_data_size);
+      let total_chunk_ops = snapshot.chunks + snapshot.chunks_deduped_total;
+      let dedup_hit_rate = if total_chunk_ops > 0 { snapshot.chunks_deduped_total as f64 / total_chunk_ops as f64 } else { 0.0 };
 
-            let payload = serde_json::json!({
-                "counts": {
-                    "files": snapshot.files,
-                    "directories": snapshot.directories,
-                    "symlinks": snapshot.symlinks,
-                    "chunks": snapshot.chunks,
-                    "snapshots": snapshot.snapshots,
-                    "forks": snapshot.forks,
-                    "file_revisions": file_revisions,
-                    "directory_revisions": directory_revisions,
-                },
-                "sizes": {
-                    "logical_data": snapshot.logical_data_size,
-                    "chunk_data": snapshot.chunk_data_size,
-                    "void_space": snapshot.void_space,
-                    "dedup_savings": dedup_savings,
-                    "disk_total": disk_total,
-                },
-                "throughput": {
-                    "writes_per_sec": {
-                        "1m": rates.writes.rate_1m,
-                        "5m": rates.writes.rate_5m,
-                        "15m": rates.writes.rate_15m,
-                        "peak_1m": rates.writes.peak_1m,
-                    },
-                    "reads_per_sec": {
-                        "1m": rates.reads.rate_1m,
-                        "5m": rates.reads.rate_5m,
-                        "15m": rates.reads.rate_15m,
-                        "peak_1m": rates.reads.peak_1m,
-                    },
-                    "bytes_written_per_sec": {
-                        "1m": rates.bytes_written.rate_1m,
-                        "5m": rates.bytes_written.rate_5m,
-                        "15m": rates.bytes_written.rate_15m,
-                        "peak_1m": rates.bytes_written.peak_1m,
-                    },
-                    "bytes_read_per_sec": {
-                        "1m": rates.bytes_read.rate_1m,
-                        "5m": rates.bytes_read.rate_5m,
-                        "15m": rates.bytes_read.rate_15m,
-                        "peak_1m": rates.bytes_read.peak_1m,
-                    },
-                },
-                "health": {
-                    "write_buffer_depth": snapshot.write_buffer_depth,
-                    "dedup_hit_rate": dedup_hit_rate,
-                    "disk_usage_percent": disk_health.usage_percent,
-                },
-            });
+      let payload = serde_json::json!({
+          "counts": {
+              "files": snapshot.files,
+              "directories": snapshot.directories,
+              "symlinks": snapshot.symlinks,
+              "chunks": snapshot.chunks,
+              "snapshots": snapshot.snapshots,
+              "forks": snapshot.forks,
+              "file_revisions": file_revisions,
+              "directory_revisions": directory_revisions,
+          },
+          "sizes": {
+              "logical_data": snapshot.logical_data_size,
+              "chunk_data": snapshot.chunk_data_size,
+              "void_space": snapshot.void_space,
+              "dedup_savings": dedup_savings,
+              "disk_total": disk_total,
+          },
+          "throughput": {
+              "writes_per_sec": {
+                  "1m": rates.writes.rate_1m,
+                  "5m": rates.writes.rate_5m,
+                  "15m": rates.writes.rate_15m,
+                  "peak_1m": rates.writes.peak_1m,
+              },
+              "reads_per_sec": {
+                  "1m": rates.reads.rate_1m,
+                  "5m": rates.reads.rate_5m,
+                  "15m": rates.reads.rate_15m,
+                  "peak_1m": rates.reads.peak_1m,
+              },
+              "bytes_written_per_sec": {
+                  "1m": rates.bytes_written.rate_1m,
+                  "5m": rates.bytes_written.rate_5m,
+                  "15m": rates.bytes_written.rate_15m,
+                  "peak_1m": rates.bytes_written.peak_1m,
+              },
+              "bytes_read_per_sec": {
+                  "1m": rates.bytes_read.rate_1m,
+                  "5m": rates.bytes_read.rate_5m,
+                  "15m": rates.bytes_read.rate_15m,
+                  "peak_1m": rates.bytes_read.peak_1m,
+              },
+          },
+          "health": {
+              "write_buffer_depth": snapshot.write_buffer_depth,
+              "dedup_hit_rate": dedup_hit_rate,
+              "disk_usage_percent": disk_health.usage_percent,
+          },
+      });
 
-            let event = EngineEvent::new(EVENT_METRICS, "system", payload);
-            bus.emit(event);
-        }
-    })
+      let event = EngineEvent::new(EVENT_METRICS, "system", payload);
+      bus.emit(event);
+    }
+  })
 }
 
 /// Spawn a background rate sampler that feeds the rate trackers every second.
@@ -129,23 +123,23 @@ pub fn spawn_metrics_pulse(
 ///
 /// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_rate_sampler(
-    counters: Arc<EngineCounters>,
-    rate_trackers: Arc<RateTrackerSet>,
-    cancel: CancellationToken,
+  counters: Arc<EngineCounters>,
+  rate_trackers: Arc<RateTrackerSet>,
+  cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::info!("Rate sampler shutting down");
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(RATE_SAMPLE_INTERVAL_SECS)) => {}
-            }
+  tokio::spawn(async move {
+    loop {
+      tokio::select! {
+          _ = cancel.cancelled() => {
+              tracing::info!("Rate sampler shutting down");
+              break;
+          }
+          _ = tokio::time::sleep(Duration::from_secs(RATE_SAMPLE_INTERVAL_SECS)) => {}
+      }
 
-            let snapshot = counters.snapshot();
-            let timestamp_ms = chrono::Utc::now().timestamp_millis() as u64;
-            rate_trackers.record_all(timestamp_ms, &snapshot);
-        }
-    })
+      let snapshot = counters.snapshot();
+      let timestamp_ms = chrono::Utc::now().timestamp_millis() as u64;
+      rate_trackers.record_all(timestamp_ms, &snapshot);
+    }
+  })
 }

@@ -66,17 +66,49 @@ fn parse_args() -> Result<Mode, String> {
     let arg = args[i].as_str();
     let value = || args.get(i + 1).cloned();
     match arg {
-      "--database"               => { database = value(); i += 2; }
-      "--source-dir"             => { source_dir = value(); i += 2; }
-      "--duration-hours"         => { duration_hours = value().and_then(|v| v.parse().ok()).unwrap_or(12.0); i += 2; }
-      "--checkpoint"             => { checkpoint = value(); i += 2; }
-      "--metrics"                => { metrics = value(); i += 2; }
-      "--workload"               => { workload = value().unwrap_or(workload); i += 2; }
-      "--snapshot-interval-secs" => { snapshot_secs = value().and_then(|v| v.parse().ok()).unwrap_or(snapshot_secs); i += 2; }
-      "--gc-interval-secs"       => { gc_secs = value().and_then(|v| v.parse().ok()).unwrap_or(gc_secs); i += 2; }
-      "--max-db-size-gb"         => { max_db_size_gb = value().and_then(|v| v.parse().ok()); i += 2; }
-      "--summarize"              => { summarize = value(); i += 2; }
-      _ => { i += 1; }
+      "--database" => {
+        database = value();
+        i += 2;
+      }
+      "--source-dir" => {
+        source_dir = value();
+        i += 2;
+      }
+      "--duration-hours" => {
+        duration_hours = value().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+        i += 2;
+      }
+      "--checkpoint" => {
+        checkpoint = value();
+        i += 2;
+      }
+      "--metrics" => {
+        metrics = value();
+        i += 2;
+      }
+      "--workload" => {
+        workload = value().unwrap_or(workload);
+        i += 2;
+      }
+      "--snapshot-interval-secs" => {
+        snapshot_secs = value().and_then(|v| v.parse().ok()).unwrap_or(snapshot_secs);
+        i += 2;
+      }
+      "--gc-interval-secs" => {
+        gc_secs = value().and_then(|v| v.parse().ok()).unwrap_or(gc_secs);
+        i += 2;
+      }
+      "--max-db-size-gb" => {
+        max_db_size_gb = value().and_then(|v| v.parse().ok());
+        i += 2;
+      }
+      "--summarize" => {
+        summarize = value();
+        i += 2;
+      }
+      _ => {
+        i += 1;
+      }
     }
   }
 
@@ -171,9 +203,8 @@ fn run(config: Config) -> Result<(), String> {
   let mut committed: HashSet<String> = load_checkpoint(&config.checkpoint);
   println!("loaded {} previously-committed paths from checkpoint", committed.len());
 
-  let mut checkpoint_file = OpenOptions::new()
-    .create(true).append(true).open(&config.checkpoint)
-    .map_err(|e| format!("open checkpoint: {}", e))?;
+  let mut checkpoint_file =
+    OpenOptions::new().create(true).append(true).open(&config.checkpoint).map_err(|e| format!("open checkpoint: {}", e))?;
   let mut metrics_file = open_metrics(&config.metrics)?;
 
   // Counters shared with the metrics-flush thread.
@@ -206,8 +237,8 @@ fn run(config: Config) -> Result<(), String> {
           let wal_bytes = counters.write_buffer_depth;
           let void_bytes = counters.void_space;
           // No single "live entries" counter — sum the per-type counters.
-          let entry_count = counters.files + counters.directories + counters.symlinks
-            + counters.chunks + counters.snapshots + counters.forks;
+          let entry_count =
+            counters.files + counters.directories + counters.symlinks + counters.chunks + counters.snapshots + counters.forks;
           let (cache_perms, cache_index, cache_dir) = engine.engine_cache_sizes();
           let action = last_action.lock().map(|g| g.clone()).unwrap_or_default();
           let line = format!(
@@ -251,19 +282,21 @@ fn run(config: Config) -> Result<(), String> {
     std::thread::spawn(move || {
       let mut file = match std::fs::File::create(&wide_path) {
         Ok(f) => f,
-        Err(e) => { eprintln!("wide_rss create failed: {e}"); return; }
+        Err(e) => {
+          eprintln!("wide_rss create failed: {e}");
+          return;
+        }
       };
       let _ = writeln!(file, "iso_time\tpeak_rss_kb\tcur_rss_kb\thwm_kb");
       let mut bucket_start = Instant::now();
       let mut bucket_peak_kb: u64 = 0;
       while !stop_flag.load(Ordering::Relaxed) {
         let mem = read_self_memory_stats().unwrap_or_default();
-        if mem.rss_kb > bucket_peak_kb { bucket_peak_kb = mem.rss_kb; }
+        if mem.rss_kb > bucket_peak_kb {
+          bucket_peak_kb = mem.rss_kb;
+        }
         if bucket_start.elapsed() >= Duration::from_secs(1) {
-          let _ = writeln!(file, "{}\t{}\t{}\t{}",
-            chrono::Utc::now().to_rfc3339(),
-            bucket_peak_kb, mem.rss_kb, mem.hwm_kb,
-          );
+          let _ = writeln!(file, "{}\t{}\t{}\t{}", chrono::Utc::now().to_rfc3339(), bucket_peak_kb, mem.rss_kb, mem.hwm_kb,);
           let _ = file.flush();
           bucket_start = Instant::now();
           bucket_peak_kb = 0;
@@ -301,7 +334,11 @@ fn run(config: Config) -> Result<(), String> {
           eprintln!("DB size {} ≥ cap {} — demoting future writes to reads", size_now, cap);
           size_capped_logged = true;
         }
-        if action == 'W' { 'R' } else { action }
+        if action == 'W' {
+          'R'
+        } else {
+          action
+        }
       }
       _ => action,
     };
@@ -315,12 +352,16 @@ fn run(config: Config) -> Result<(), String> {
             checkpoint_file.flush().ok();
             committed.insert(stored_path.clone());
             writes.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut s) = last_action.lock() { *s = format!("W {}", stored_path); }
+            if let Ok(mut s) = last_action.lock() {
+              *s = format!("W {}", stored_path);
+            }
           }
           Err(e) => {
             // Source read errors (e.g. permission denied on .gnupg, broken
             // symlink target) are expected — log + continue, don't fail.
-            if let Ok(mut s) = last_action.lock() { *s = format!("W FAIL {}: {}", source.display(), e); }
+            if let Ok(mut s) = last_action.lock() {
+              *s = format!("W FAIL {}: {}", source.display(), e);
+            }
           }
         }
       }
@@ -340,26 +381,39 @@ fn run(config: Config) -> Result<(), String> {
             let mut failure: Option<String> = None;
             for chunk_result in stream {
               match chunk_result {
-                Ok(chunk) => { total += chunk.len() as u64; }
-                Err(e) => { failure = Some(format!("{}", e)); break; }
+                Ok(chunk) => {
+                  total += chunk.len() as u64;
+                }
+                Err(e) => {
+                  failure = Some(format!("{}", e));
+                  break;
+                }
               }
             }
             if let Some(err) = failure {
               eprintln!("read stream failed for {}: {}", path, err);
-              if let Ok(mut s) = last_action.lock() { *s = format!("R FAIL {}: {}", path, err); }
+              if let Ok(mut s) = last_action.lock() {
+                *s = format!("R FAIL {}: {}", path, err);
+              }
             } else {
               reads.fetch_add(1, Ordering::Relaxed);
-              if let Ok(mut s) = last_action.lock() { *s = format!("R {} ({} bytes)", path, total); }
+              if let Ok(mut s) = last_action.lock() {
+                *s = format!("R {} ({} bytes)", path, total);
+              }
             }
           }
           Err(e) => {
             eprintln!("read failed for {}: {}", path, e);
-            if let Ok(mut s) = last_action.lock() { *s = format!("R FAIL {}: {}", path, e); }
+            if let Ok(mut s) = last_action.lock() {
+              *s = format!("R FAIL {}: {}", path, e);
+            }
           }
         }
       }
       'D' => {
-        if committed.is_empty() { continue; }
+        if committed.is_empty() {
+          continue;
+        }
         let path = pick_random(&committed, &mut rng_state);
         let ctx = RequestContext::system();
         let ops = DirectoryOps::new(&engine);
@@ -369,10 +423,14 @@ fn run(config: Config) -> Result<(), String> {
             checkpoint_file.flush().ok();
             committed.remove(&path);
             deletes.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut s) = last_action.lock() { *s = format!("D {}", path); }
+            if let Ok(mut s) = last_action.lock() {
+              *s = format!("D {}", path);
+            }
           }
           Err(e) => {
-            if let Ok(mut s) = last_action.lock() { *s = format!("D FAIL {}: {}", path, e); }
+            if let Ok(mut s) = last_action.lock() {
+              *s = format!("D FAIL {}: {}", path, e);
+            }
           }
         }
       }
@@ -417,7 +475,8 @@ fn run(config: Config) -> Result<(), String> {
     eprintln!("shutdown returned error: {}", e);
   }
 
-  println!("done. Writes={} Reads={} Deletes={}",
+  println!(
+    "done. Writes={} Reads={} Deletes={}",
     writes.load(Ordering::Relaxed),
     reads.load(Ordering::Relaxed),
     deletes.load(Ordering::Relaxed),
@@ -450,8 +509,7 @@ fn do_write(engine: &StorageEngine, source: &Path, source_root: &str) -> Result<
   let content_type = guess_content_type(source);
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
-  ops.store_file_from_reader(&ctx, &aeordb_path, reader, Some(&content_type))
-    .map_err(|e| format!("store_file_from_reader: {}", e))?;
+  ops.store_file_from_reader(&ctx, &aeordb_path, reader, Some(&content_type)).map_err(|e| format!("store_file_from_reader: {}", e))?;
 
   Ok(aeordb_path)
 }
@@ -533,8 +591,7 @@ fn load_checkpoint(path: &str) -> HashSet<String> {
 
 fn open_metrics(path: &str) -> Result<BufWriter<File>, String> {
   let needs_header = !Path::new(path).exists();
-  let file = OpenOptions::new().create(true).append(true).open(path)
-    .map_err(|e| format!("open metrics: {}", e))?;
+  let file = OpenOptions::new().create(true).append(true).open(path).map_err(|e| format!("open metrics: {}", e))?;
   let mut writer = BufWriter::new(file);
   if needs_header {
     writeln!(writer, "{}", METRICS_HEADER).map_err(|e| format!("write header: {}", e))?;
@@ -557,12 +614,7 @@ fn read_self_memory_stats() -> Option<MemoryStats> {
   // both report bytes the kernel attributes to the current process. Values
   // it can't observe (VmData on macOS) come back as 0.
   let m = aeordb::engine::rss_sampler::read_process_memory();
-  Some(MemoryStats {
-    rss_kb:  m.resident_kb,
-    data_kb: m.data_kb,
-    size_kb: m.virtual_kb,
-    hwm_kb:  m.peak_resident_kb,
-  })
+  Some(MemoryStats { rss_kb: m.resident_kb, data_kb: m.data_kb, size_kb: m.virtual_kb, hwm_kb: m.peak_resident_kb })
 }
 
 fn count_fds() -> Option<usize> {
@@ -582,7 +634,9 @@ fn summarize(path: &str) -> Result<(), String> {
   let file = File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
   let mut rows: Vec<Row> = Vec::new();
   for (i, line) in BufReader::new(file).lines().map_while(Result::ok).enumerate() {
-    if i == 0 || line.starts_with("iso_time") { continue; }
+    if i == 0 || line.starts_with("iso_time") {
+      continue;
+    }
     if let Some(row) = parse_row(&line) {
       rows.push(row);
     }
@@ -609,9 +663,8 @@ fn summarize(path: &str) -> Result<(), String> {
   println!("  T+0:              {} MB", first.rss_kb / 1024);
   println!("  T+1h (warmup):    {} MB", baseline_warm.rss_kb / 1024);
   println!("  T+end:            {} MB", last.rss_kb / 1024);
-  let rss_growth_pct = if baseline_warm.rss_kb > 0 {
-    100.0 * (last.rss_kb as f64 - baseline_warm.rss_kb as f64) / baseline_warm.rss_kb as f64
-  } else { 0.0 };
+  let rss_growth_pct =
+    if baseline_warm.rss_kb > 0 { 100.0 * (last.rss_kb as f64 - baseline_warm.rss_kb as f64) / baseline_warm.rss_kb as f64 } else { 0.0 };
   println!("  growth T+1h→end:  {:+.1}%", rss_growth_pct);
   println!();
   println!("VmData (heap+data) — leaks show up here, not in RSS:");
@@ -620,7 +673,9 @@ fn summarize(path: &str) -> Result<(), String> {
   println!("  T+end:            {} MB", last.data_kb / 1024);
   let data_growth_pct = if baseline_warm.data_kb > 0 {
     100.0 * (last.data_kb as f64 - baseline_warm.data_kb as f64) / baseline_warm.data_kb as f64
-  } else { 0.0 };
+  } else {
+    0.0
+  };
   println!("  growth T+1h→end:  {:+.1}%", data_growth_pct);
   println!();
   println!("VmHWM (peak RSS ever):  {} MB", last.hwm_kb / 1024);
@@ -643,7 +698,9 @@ fn summarize(path: &str) -> Result<(), String> {
   let mut pass = true;
   let mut report = |label: &str, ok: bool, detail: String| {
     println!("  [{}] {}: {}", if ok { " OK " } else { "FAIL" }, label, detail);
-    if !ok { pass = false; }
+    if !ok {
+      pass = false;
+    }
   };
 
   let rss_ok = rss_growth_pct <= 30.0;
@@ -658,7 +715,9 @@ fn summarize(path: &str) -> Result<(), String> {
 
   println!();
   println!("verdict: {}", if pass { "PASS" } else { "FAIL" });
-  if !pass { process::exit(1); }
+  if !pass {
+    process::exit(1);
+  }
   Ok(())
 }
 
@@ -683,21 +742,23 @@ fn parse_row(line: &str) -> Option<Row> {
   // 18 columns in v2 header. Earlier 12-column files are tolerated by falling
   // back to v1 positions for the fields we know about.
   let v2 = cols.len() >= 18;
-  if cols.len() < 11 { return None; }
+  if cols.len() < 11 {
+    return None;
+  }
   Some(Row {
-    elapsed_secs:  cols[1].parse().ok()?,
-    writes:        cols[2].parse().ok()?,
-    reads:         cols[3].parse().ok()?,
-    deletes:       cols[4].parse().ok()?,
-    rss_kb:        cols[5].parse().ok()?,
-    data_kb:       if v2 { cols[6].parse().ok()? } else { 0 },
-    hwm_kb:        if v2 { cols[8].parse().ok()? } else { 0 },
-    fd_count:      if v2 { cols[9].parse().ok()? } else { cols[6].parse().ok()? },
+    elapsed_secs: cols[1].parse().ok()?,
+    writes: cols[2].parse().ok()?,
+    reads: cols[3].parse().ok()?,
+    deletes: cols[4].parse().ok()?,
+    rss_kb: cols[5].parse().ok()?,
+    data_kb: if v2 { cols[6].parse().ok()? } else { 0 },
+    hwm_kb: if v2 { cols[8].parse().ok()? } else { 0 },
+    fd_count: if v2 { cols[9].parse().ok()? } else { cols[6].parse().ok()? },
     db_size_bytes: if v2 { cols[10].parse().ok()? } else { cols[7].parse().ok()? },
-    entry_count:   if v2 { cols[13].parse().ok()? } else { cols[10].parse().ok()? },
-    cache_perms:   if v2 { cols[14].parse().ok()? } else { 0 },
-    cache_index:   if v2 { cols[15].parse().ok()? } else { 0 },
-    cache_dir:     if v2 { cols[16].parse().ok()? } else { 0 },
+    entry_count: if v2 { cols[13].parse().ok()? } else { cols[10].parse().ok()? },
+    cache_perms: if v2 { cols[14].parse().ok()? } else { 0 },
+    cache_index: if v2 { cols[15].parse().ok()? } else { 0 },
+    cache_dir: if v2 { cols[16].parse().ok()? } else { 0 },
   })
 }
 

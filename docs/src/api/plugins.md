@@ -1,6 +1,6 @@
 # Plugin Endpoints
 
-AeorDB supports deploying WebAssembly (WASM) plugins that extend the database with custom logic. Plugins are identified by name under the `/plugins` namespace.
+AeorDB supports deploying WebAssembly (WASM) plugins that extend the database with custom logic. HTTP plugins are invoked by their plugin path under the `/plugins` namespace.
 
 ## Native Parsers
 
@@ -43,15 +43,19 @@ Native parsers have zero overhead compared to WASM -- they run as compiled Rust 
 
 ## PUT /plugins/{name}
 
-Deploy a WASM plugin with the given name. If a plugin already exists with this name, it is replaced.
+Deploy a WASM plugin at the given plugin path. If a plugin already exists at this path, it is replaced.
+
+`{name}` in the URL is the plugin path/key used for storage and invocation. The optional `name` query parameter is display metadata only.
 
 ### Request
 
 - **URL parameters:**
-  - `{name}` -- plugin name
+  - `{name}` -- plugin path/key used by `/plugins/{name}/invoke`
 - **Query parameters:**
-  - `name` (optional) -- override the plugin name (defaults to the `{name}` URL segment)
+  - `name` (optional) -- display name (defaults to the `{name}` URL segment)
   - `plugin_type` (optional) -- plugin type string (defaults to `"wasm"`)
+  - `version` (optional) -- plugin package version
+  - `author` (optional) -- plugin author
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
 - **Body:** raw WASM binary bytes
@@ -64,17 +68,22 @@ Returns the plugin metadata:
 
 ```json
 {
+  "plugin_id": "2f1f4a7a-30f4-4a75-bde0-8e3c6eaf51e4",
   "name": "my-plugin",
   "path": "my-plugin",
   "plugin_type": "wasm",
-  "deployed_at": "2026-04-13T10:00:00Z"
+  "created_at": "2026-04-13T10:00:00Z",
+  "version": "1.2.3",
+  "author": "Plugin Author",
+  "checksum": "blake3:4f3c...",
+  "updated_at": "2026-04-13T10:15:00Z"
 }
 ```
 
 ### Example
 
 ```bash
-curl -X PUT "http://localhost:6830/plugins/my-plugin" \
+curl -X PUT "http://localhost:6830/plugins/my-plugin?version=1.2.3&author=Plugin%20Author" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary @plugin.wasm
 ```
@@ -96,7 +105,7 @@ Invoke a deployed plugin. The request body is wrapped in a `PluginRequest` envel
 ### Request
 
 - **URL parameters:**
-  - `{name}` -- plugin name
+  - `{name}` -- plugin path/key
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
   - `Content-Type` -- depends on what the plugin expects
@@ -143,6 +152,7 @@ If the plugin returns data that is not a valid `PluginResponse`, it is sent as r
 Plugins have access to the following host functions for interacting with the database:
 
 - **CRUD:** read, write, and delete files
+- **Extraction:** read UTF-8 line or character ranges without buffering the full file through the plugin boundary
 - **Query:** execute queries and aggregations against the engine
 - **Context:** access request metadata
 
@@ -181,9 +191,15 @@ List all deployed plugins.
 {
   "items": [
     {
+      "plugin_id": "2f1f4a7a-30f4-4a75-bde0-8e3c6eaf51e4",
       "name": "my-plugin",
       "path": "my-plugin",
-      "plugin_type": "wasm"
+      "plugin_type": "wasm",
+      "created_at": "2026-04-13T10:00:00Z",
+      "version": "1.2.3",
+      "author": "Plugin Author",
+      "checksum": "blake3:4f3c...",
+      "updated_at": "2026-04-13T10:15:00Z"
     }
   ]
 }
@@ -205,7 +221,7 @@ Remove a deployed plugin.
 ### Request
 
 - **URL parameters:**
-  - `{name}` -- plugin name
+  - `{name}` -- plugin path/key
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
 

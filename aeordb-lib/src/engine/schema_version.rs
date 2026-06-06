@@ -34,32 +34,24 @@ use crate::engine::errors::{EngineError, EngineResult};
 /// ```
 #[macro_export]
 macro_rules! impl_json_versioned_v0 {
-    ($t:ty) => {
-        impl $crate::engine::schema_version::JsonVersioned for $t {
-            const SCHEMA_VERSION: u8 = 0;
+  ($t:ty) => {
+    impl $crate::engine::schema_version::JsonVersioned for $t {
+      const SCHEMA_VERSION: u8 = 0;
 
-            fn serialize_versioned(&self) -> Vec<u8> {
-                $crate::engine::schema_version::write_json_with_version(self, 0)
-                    .expect(concat!(stringify!($t), " serialization should never fail"))
-            }
+      fn serialize_versioned(&self) -> Vec<u8> {
+        $crate::engine::schema_version::write_json_with_version(self, 0).expect(concat!(stringify!($t), " serialization should never fail"))
+      }
 
-            fn deserialize_versioned(
-                data: &[u8],
-            ) -> $crate::engine::errors::EngineResult<Self> {
-                let version = $crate::engine::schema_version::read_json_version(data)?;
-                match version {
-                    0 => ::serde_json::from_slice(data).map_err(|e| {
-                        $crate::engine::errors::EngineError::JsonParseError(format!(
-                            "Failed to deserialize {}: {}",
-                            stringify!($t),
-                            e
-                        ))
-                    }),
-                    _ => Err($crate::engine::errors::EngineError::InvalidEntryVersion(version)),
-                }
-            }
+      fn deserialize_versioned(data: &[u8]) -> $crate::engine::errors::EngineResult<Self> {
+        let version = $crate::engine::schema_version::read_json_version(data)?;
+        match version {
+          0 => ::serde_json::from_slice(data)
+            .map_err(|e| $crate::engine::errors::EngineError::JsonParseError(format!("Failed to deserialize {}: {}", stringify!($t), e))),
+          _ => Err($crate::engine::errors::EngineError::InvalidEntryVersion(version)),
         }
-    };
+      }
+    }
+  };
 }
 
 /// Trait every JSON-stored entity must implement so the storage layer can
@@ -80,14 +72,14 @@ macro_rules! impl_json_versioned_v0 {
 /// }
 /// ```
 pub trait JsonVersioned: Sized {
-    /// Schema version this type writes today.
-    const SCHEMA_VERSION: u8;
+  /// Schema version this type writes today.
+  const SCHEMA_VERSION: u8;
 
-    /// Serialize self to JSON bytes with `$v` injected.
-    fn serialize_versioned(&self) -> Vec<u8>;
+  /// Serialize self to JSON bytes with `$v` injected.
+  fn serialize_versioned(&self) -> Vec<u8>;
 
-    /// Read `$v` from bytes and dispatch to the matching `deserialize_v{n}`.
-    fn deserialize_versioned(data: &[u8]) -> EngineResult<Self>;
+  /// Read `$v` from bytes and dispatch to the matching `deserialize_v{n}`.
+  fn deserialize_versioned(data: &[u8]) -> EngineResult<Self>;
 }
 
 /// Current schema version for entities written via this module. New entity
@@ -103,85 +95,70 @@ pub const CURRENT_JSON_SCHEMA_VERSION: u8 = 0;
 /// top level — both are corruption rather than a legitimate format we don't
 /// know how to read.
 pub fn read_json_version(data: &[u8]) -> EngineResult<u8> {
-    let value: serde_json::Value = serde_json::from_slice(data)
-        .map_err(|e| EngineError::JsonParseError(
-            format!("schema_version: payload is not valid JSON: {}", e)
-        ))?;
-    let version = value
-        .get("$v")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if version > u8::MAX as u64 {
-        return Err(EngineError::InvalidEntryVersion(0xff));
-    }
-    Ok(version as u8)
+  let value: serde_json::Value =
+    serde_json::from_slice(data).map_err(|e| EngineError::JsonParseError(format!("schema_version: payload is not valid JSON: {}", e)))?;
+  let version = value.get("$v").and_then(|v| v.as_u64()).unwrap_or(0);
+  if version > u8::MAX as u64 {
+    return Err(EngineError::InvalidEntryVersion(0xff));
+  }
+  Ok(version as u8)
 }
 
 /// Serialize `value` to JSON and inject a `"$v": version` field at the top
 /// level. The value MUST serialize to a JSON object; primitives and arrays
 /// have no place to attach the version and will return an error.
-pub fn write_json_with_version<T: Serialize>(
-    value: &T,
-    version: u8,
-) -> EngineResult<Vec<u8>> {
-    let mut json = serde_json::to_value(value)
-        .map_err(|e| EngineError::JsonParseError(
-            format!("schema_version: cannot serialize to JSON: {}", e)
-        ))?;
-    match json.as_object_mut() {
-        Some(obj) => {
-            obj.insert("$v".to_string(), serde_json::json!(version));
-        }
-        None => {
-            return Err(EngineError::JsonParseError(
-                "schema_version: value must serialize to a JSON object".to_string()
-            ));
-        }
+pub fn write_json_with_version<T: Serialize>(value: &T, version: u8) -> EngineResult<Vec<u8>> {
+  let mut json =
+    serde_json::to_value(value).map_err(|e| EngineError::JsonParseError(format!("schema_version: cannot serialize to JSON: {}", e)))?;
+  match json.as_object_mut() {
+    Some(obj) => {
+      obj.insert("$v".to_string(), serde_json::json!(version));
     }
-    serde_json::to_vec(&json)
-        .map_err(|e| EngineError::JsonParseError(
-            format!("schema_version: re-serialization failed: {}", e)
-        ))
+    None => {
+      return Err(EngineError::JsonParseError("schema_version: value must serialize to a JSON object".to_string()));
+    }
+  }
+  serde_json::to_vec(&json).map_err(|e| EngineError::JsonParseError(format!("schema_version: re-serialization failed: {}", e)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+  use super::*;
 
-    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-    struct Sample {
-        name: String,
-        n: u64,
-    }
+  #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+  struct Sample {
+    name: String,
+    n: u64,
+  }
 
-    #[test]
-    fn injects_and_extracts_version() {
-        let s = Sample { name: "x".to_string(), n: 7 };
-        let bytes = write_json_with_version(&s, 3).unwrap();
-        assert_eq!(read_json_version(&bytes).unwrap(), 3);
+  #[test]
+  fn injects_and_extracts_version() {
+    let s = Sample { name: "x".to_string(), n: 7 };
+    let bytes = write_json_with_version(&s, 3).unwrap();
+    assert_eq!(read_json_version(&bytes).unwrap(), 3);
 
-        // Inner structure preserved alongside $v.
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(parsed["name"], "x");
-        assert_eq!(parsed["n"], 7);
-        assert_eq!(parsed["$v"], 3);
-    }
+    // Inner structure preserved alongside $v.
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(parsed["name"], "x");
+    assert_eq!(parsed["n"], 7);
+    assert_eq!(parsed["$v"], 3);
+  }
 
-    #[test]
-    fn missing_v_defaults_to_zero() {
-        let raw = br#"{"name":"y","n":1}"#;
-        assert_eq!(read_json_version(raw).unwrap(), 0);
-    }
+  #[test]
+  fn missing_v_defaults_to_zero() {
+    let raw = br#"{"name":"y","n":1}"#;
+    assert_eq!(read_json_version(raw).unwrap(), 0);
+  }
 
-    #[test]
-    fn rejects_non_object() {
-        let s = vec![1, 2, 3];
-        let result = write_json_with_version(&s, 0);
-        assert!(result.is_err());
-    }
+  #[test]
+  fn rejects_non_object() {
+    let s = vec![1, 2, 3];
+    let result = write_json_with_version(&s, 0);
+    assert!(result.is_err());
+  }
 
-    #[test]
-    fn rejects_invalid_json() {
-        assert!(read_json_version(b"not json").is_err());
-    }
+  #[test]
+  fn rejects_invalid_json() {
+    assert!(read_json_version(b"not json").is_err());
+  }
 }

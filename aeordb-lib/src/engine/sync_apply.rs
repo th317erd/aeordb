@@ -25,80 +25,64 @@ use crate::engine::storage_engine::StorageEngine;
 ///
 /// If any step fails, return error. The caller should NOT have modified
 /// HEAD before calling this -- the previous HEAD remains valid on failure.
-pub fn apply_merge_operations(
-    engine: &StorageEngine,
-    context: &RequestContext,
-    operations: &[MergeOp],
-) -> EngineResult<()> {
-    // Pre-flight: verify all chunks exist for AddFile operations
-    verify_chunks_exist(engine, operations)?;
+pub fn apply_merge_operations(engine: &StorageEngine, context: &RequestContext, operations: &[MergeOp]) -> EngineResult<()> {
+  // Pre-flight: verify all chunks exist for AddFile operations
+  verify_chunks_exist(engine, operations)?;
 
-    let directory_ops = DirectoryOps::new(engine);
+  let directory_ops = DirectoryOps::new(engine);
 
-    for operation in operations {
-        match operation {
-            MergeOp::AddFile { path, file_hash: _, file_record } => {
-                // Reconstruct file data from chunks
-                let data = reassemble_file_data(engine, &file_record.chunk_hashes)?;
-                directory_ops.store_file_buffered(
-                    context,
-                    path,
-                    &data,
-                    file_record.content_type.as_deref(),
-                )?;
-            }
-            MergeOp::DeleteFile { path } => {
-                // Ignore NotFound errors -- file might already be deleted
-                let _ = directory_ops.delete_file(context, path);
-            }
-            MergeOp::AddSymlink { path, symlink_hash: _, symlink_record } => {
-                directory_ops.store_symlink(context, path, &symlink_record.target)?;
-            }
-            MergeOp::DeleteSymlink { path } => {
-                let _ = directory_ops.delete_symlink(context, path);
-            }
-        }
+  for operation in operations {
+    match operation {
+      MergeOp::AddFile { path, file_hash: _, file_record } => {
+        // Reconstruct file data from chunks
+        let data = reassemble_file_data(engine, &file_record.chunk_hashes)?;
+        directory_ops.store_file_buffered(context, path, &data, file_record.content_type.as_deref())?;
+      }
+      MergeOp::DeleteFile { path } => {
+        // Ignore NotFound errors -- file might already be deleted
+        let _ = directory_ops.delete_file(context, path);
+      }
+      MergeOp::AddSymlink { path, symlink_hash: _, symlink_record } => {
+        directory_ops.store_symlink(context, path, &symlink_record.target)?;
+      }
+      MergeOp::DeleteSymlink { path } => {
+        let _ = directory_ops.delete_symlink(context, path);
+      }
     }
+  }
 
-    Ok(())
+  Ok(())
 }
 
 /// Pre-flight check: verify that all chunks referenced by AddFile operations
 /// exist in the engine. Fails fast with a clear error if any chunk is missing,
 /// rather than partially applying operations before discovering the gap.
 fn verify_chunks_exist(engine: &StorageEngine, operations: &[MergeOp]) -> EngineResult<()> {
-    for operation in operations {
-        if let MergeOp::AddFile { path, file_record, .. } = operation {
-            for chunk_hash in &file_record.chunk_hashes {
-                if engine.get_entry(chunk_hash)?.is_none() {
-                    return Err(EngineError::NotFound(
-                        format!(
-                            "Missing chunk during merge for {}: {}",
-                            path,
-                            hex::encode(chunk_hash),
-                        ),
-                    ));
-                }
-            }
+  for operation in operations {
+    if let MergeOp::AddFile { path, file_record, .. } = operation {
+      for chunk_hash in &file_record.chunk_hashes {
+        if engine.get_entry(chunk_hash)?.is_none() {
+          return Err(EngineError::NotFound(format!("Missing chunk during merge for {}: {}", path, hex::encode(chunk_hash),)));
         }
+      }
     }
-    Ok(())
+  }
+  Ok(())
 }
 
 /// Reassemble file data by reading and decompressing each chunk in order.
 fn reassemble_file_data(engine: &StorageEngine, chunk_hashes: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
-    let mut data = Vec::new();
-    for chunk_hash in chunk_hashes {
-        let (header, _key, value) = engine.get_entry(chunk_hash)?
-            .ok_or_else(|| EngineError::NotFound(
-                format!("Missing chunk during reassembly: {}", hex::encode(chunk_hash)),
-            ))?;
-        let chunk_data = if header.compression_algo != CompressionAlgorithm::None {
-            crate::engine::decompress(&value, header.compression_algo)?
-        } else {
-            value
-        };
-        data.extend_from_slice(&chunk_data);
-    }
-    Ok(data)
+  let mut data = Vec::new();
+  for chunk_hash in chunk_hashes {
+    let (header, _key, value) = engine
+      .get_entry(chunk_hash)?
+      .ok_or_else(|| EngineError::NotFound(format!("Missing chunk during reassembly: {}", hex::encode(chunk_hash))))?;
+    let chunk_data = if header.compression_algo != CompressionAlgorithm::None {
+      crate::engine::decompress(&value, header.compression_algo)?
+    } else {
+      value
+    };
+    data.extend_from_slice(&chunk_data);
+  }
+  Ok(data)
 }

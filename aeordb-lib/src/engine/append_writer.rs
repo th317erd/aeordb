@@ -17,10 +17,7 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()
     #[cfg(windows)]
     let n = file.seek_read(&mut buf[total..], offset + total as u64)?;
     if n == 0 {
-      return Err(std::io::Error::new(
-        std::io::ErrorKind::UnexpectedEof,
-        "early EOF in read_exact_at",
-      ));
+      return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "early EOF in read_exact_at"));
     }
     total += n;
   }
@@ -32,10 +29,7 @@ use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{
-  read_active_header, write_header_to_inactive_slot, write_initial_header,
-  FileHeader, HEADER_REGION_SIZE,
-};
+use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot, write_initial_header, FileHeader, HEADER_REGION_SIZE};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
@@ -51,11 +45,7 @@ pub struct AppendWriter {
 
 impl AppendWriter {
   pub fn create(path: &Path) -> EngineResult<Self> {
-    let mut file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create_new(true)
-      .open(path)?;
+    let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
 
     let mut file_header = FileHeader::new(HashAlgorithm::Blake3_256);
     // v3: write slot A only (slot B left zeroed), data region starts after
@@ -65,35 +55,18 @@ impl AppendWriter {
     let reader = File::open(path)?;
     let current_offset = HEADER_REGION_SIZE as u64;
 
-    Ok(AppendWriter {
-      file,
-      reader,
-      file_path: path.to_path_buf(),
-      file_header,
-      current_offset,
-      active_slot: 0,
-    })
+    Ok(AppendWriter { file, reader, file_path: path.to_path_buf(), file_header, current_offset, active_slot: 0 })
   }
 
   pub fn open(path: &Path) -> EngineResult<Self> {
-    let mut file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .open(path)?;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
     let (file_header, active_slot) = read_active_header(&mut file)?;
 
     let reader = File::open(path)?;
     let current_offset = file.seek(SeekFrom::End(0))?;
 
-    Ok(AppendWriter {
-      file,
-      reader,
-      file_path: path.to_path_buf(),
-      file_header,
-      current_offset,
-      active_slot,
-    })
+    Ok(AppendWriter { file, reader, file_path: path.to_path_buf(), file_header, current_offset, active_slot })
   }
 
   pub fn file_path(&self) -> &Path {
@@ -141,20 +114,8 @@ impl AppendWriter {
   }
 
   /// Append an entry at the current WAL tail. Returns (entry_offset, total_length).
-  pub fn append_entry(
-    &mut self,
-    entry_type: EntryType,
-    key: &[u8],
-    value: &[u8],
-    flags: u8,
-  ) -> EngineResult<(u64, u32)> {
-    self.append_entry_with_compression(
-      entry_type,
-      key,
-      value,
-      flags,
-      CompressionAlgorithm::None,
-    )
+  pub fn append_entry(&mut self, entry_type: EntryType, key: &[u8], value: &[u8], flags: u8) -> EngineResult<(u64, u32)> {
+    self.append_entry_with_compression(entry_type, key, value, flags, CompressionAlgorithm::None)
   }
 
   /// Append an entry at the current WAL tail with optional compression.
@@ -169,8 +130,7 @@ impl AppendWriter {
   ) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
-    let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
+    let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -215,10 +175,7 @@ impl AppendWriter {
     if (size as usize) < header_size {
       return Err(EngineError::CorruptEntry {
         offset: self.current_offset,
-        reason: format!(
-          "Void size {} is smaller than minimum entry size {}",
-          size, header_size
-        ),
+        reason: format!("Void size {} is smaller than minimum entry size {}", size, header_size),
       });
     }
 
@@ -232,13 +189,7 @@ impl AppendWriter {
   /// Write an entry at a specific file offset (in-place overwrite).
   /// Does NOT update current_offset or entry_count — this overwrites existing space.
   /// Calls sync_all after writing. For batch operations, use `write_entry_at_nosync`.
-  pub fn write_entry_at(
-    &mut self,
-    offset: u64,
-    entry_type: EntryType,
-    key: &[u8],
-    value: &[u8],
-  ) -> EngineResult<u32> {
+  pub fn write_entry_at(&mut self, offset: u64, entry_type: EntryType, key: &[u8], value: &[u8]) -> EngineResult<u32> {
     let total_length = self.write_entry_at_nosync(offset, entry_type, key, value)?;
     self.file.sync_all()?;
     Ok(total_length)
@@ -247,13 +198,7 @@ impl AppendWriter {
   /// Write an entry at a specific offset WITHOUT syncing.
   /// Caller is responsible for calling `sync()` after all writes are done.
   /// Used by GC sweep for batch in-place overwrites and by void consumption.
-  pub fn write_entry_at_nosync(
-    &mut self,
-    offset: u64,
-    entry_type: EntryType,
-    key: &[u8],
-    value: &[u8],
-  ) -> EngineResult<u32> {
+  pub fn write_entry_at_nosync(&mut self, offset: u64, entry_type: EntryType, key: &[u8], value: &[u8]) -> EngineResult<u32> {
     self.write_entry_at_nosync_full(offset, entry_type, key, value, 0, CompressionAlgorithm::None)
   }
 
@@ -284,8 +229,7 @@ impl AppendWriter {
   ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
-    let total_length =
-      EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
+    let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -377,8 +321,7 @@ impl AppendWriter {
       Ok(r) => r,
       Err(_) => return crate::engine::hot_tail::HotTailPayload::default(),
     };
-    crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length)
-      .unwrap_or_default()
+    crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length).unwrap_or_default()
   }
 
   /// Backwards-compatible wrapper that returns only the write entries.
@@ -402,10 +345,7 @@ impl AppendWriter {
     if (size as usize) < header_size {
       return Err(EngineError::CorruptEntry {
         offset,
-        reason: format!(
-          "Void size {} is smaller than minimum entry size {}",
-          size, header_size
-        ),
+        reason: format!("Void size {} is smaller than minimum entry size {}", size, header_size),
       });
     }
 
@@ -456,10 +396,7 @@ impl AppendWriter {
     if verify && !header.verify(&key, &value) {
       return Err(EngineError::CorruptEntry {
         offset,
-        reason: format!(
-          "Hash verification failed for entry at offset {}. Data may be corrupt.",
-          offset,
-        ),
+        reason: format!("Hash verification failed for entry at offset {}. Data may be corrupt.", offset,),
       });
     }
 
@@ -490,15 +427,13 @@ impl AppendWriter {
 
     // Parse hash algorithm from the fixed header to determine total header size.
     let hash_algo_raw = u16::from_le_bytes([fixed_buf[7], fixed_buf[8]]);
-    let hash_algo = crate::engine::hash_algorithm::HashAlgorithm::from_u16(hash_algo_raw)
-      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_algo =
+      crate::engine::hash_algorithm::HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
     let hash_length = hash_algo.hash_length();
     let full_header_size = EntryHeader::FIXED_HEADER_SIZE + hash_length;
 
     // Parse total_length from fixed header to know the complete entry size.
-    let total_length = u32::from_le_bytes([
-      fixed_buf[27], fixed_buf[28], fixed_buf[29], fixed_buf[30],
-    ]) as usize;
+    let total_length = u32::from_le_bytes([fixed_buf[27], fixed_buf[28], fixed_buf[29], fixed_buf[30]]) as usize;
 
     // Read the entire entry (header + key + value) in a single pread call.
     let mut entry_buf = vec![0u8; total_length];
@@ -532,10 +467,7 @@ impl AppendWriter {
     if verify && !header.verify(&key, &value) {
       return Err(EngineError::CorruptEntry {
         offset,
-        reason: format!(
-          "Hash verification failed for entry at offset {}. Data may be corrupt.",
-          offset,
-        ),
+        reason: format!("Hash verification failed for entry at offset {}. Data may be corrupt.", offset,),
       });
     }
 

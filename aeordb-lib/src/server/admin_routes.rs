@@ -52,19 +52,14 @@ pub async fn create_user(
 
   if let Err(error) = system_store::store_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to create user: {}", error);
-    return ErrorResponse::new(format!("Failed to create user: {}", error))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(format!("Failed to create user: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
   }
 
   (StatusCode::CREATED, Json(UserResponse::from(&user))).into_response()
 }
 
 /// GET /admin/users -- list all users.
-pub async fn list_users(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-) -> Response {
+pub async fn list_users(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
     Err(response) => return response,
@@ -77,9 +72,7 @@ pub async fn list_users(
     }
     Err(error) => {
       tracing::error!("Failed to list users: {}", error);
-      ErrorResponse::new(format!("Failed to list users: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to list users: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -106,16 +99,12 @@ pub async fn get_user(
 
   match system_store::get_user(&state.engine, &user_id) {
     Ok(Some(user)) => (StatusCode::OK, Json(UserResponse::from(&user))).into_response(),
-    Ok(None) => {
-      ErrorResponse::new(format!("User not found: {}. Use GET /admin/users to list all users", user_id))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
+    Ok(None) => ErrorResponse::new(format!("User not found: {}. Use GET /admin/users to list all users", user_id))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response(),
     Err(error) => {
       tracing::error!("Failed to get user: {}", error);
-      ErrorResponse::new(format!("Failed to get user: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to get user: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -150,9 +139,7 @@ pub async fn update_user(
     }
     Err(error) => {
       tracing::error!("Failed to get user for update: {}", error);
-      return ErrorResponse::new(format!("Failed to get user: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!("Failed to get user: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -173,9 +160,7 @@ pub async fn update_user(
 
   if let Err(error) = system_store::update_user(&state.engine, &ctx, &user) {
     tracing::error!("Failed to update user: {}", error);
-    return ErrorResponse::new(format!("Failed to update user: {}", error))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(format!("Failed to update user: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
   }
 
   (StatusCode::OK, Json(UserResponse::from(&user))).into_response()
@@ -210,9 +195,7 @@ pub async fn deactivate_user(
     }
     Err(error) => {
       tracing::error!("Failed to get user for deactivation: {}", error);
-      return ErrorResponse::new(format!("Failed to get user: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!("Failed to get user: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -281,28 +264,21 @@ pub async fn create_group(
   ) {
     Ok(group) => group,
     Err(error) => {
-      return ErrorResponse::new(format!("Invalid group: {}", error))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
+      return ErrorResponse::new(format!("Invalid group: {}", error)).with_status(StatusCode::BAD_REQUEST).into_response();
     }
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Err(error) = system_store::store_group(&state.engine, &ctx, &group) {
     tracing::error!("Failed to create group: {}", error);
-    return ErrorResponse::new(format!("Failed to create group: {}", error))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(format!("Failed to create group: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
   }
 
   (StatusCode::CREATED, Json(GroupResponse::from(&group))).into_response()
 }
 
 /// GET /admin/groups -- list all groups.
-pub async fn list_groups(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-) -> Response {
+pub async fn list_groups(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
     Err(response) => return response,
@@ -311,27 +287,18 @@ pub async fn list_groups(
   match system_store::list_groups(&state.engine) {
     Ok(groups) => {
       // Filter out auto-generated per-user groups (user:{uuid}) — they're system-managed
-      let responses: Vec<GroupResponse> = groups.iter()
-        .filter(|g| !g.name.starts_with("user:"))
-        .map(GroupResponse::from)
-        .collect();
+      let responses: Vec<GroupResponse> = groups.iter().filter(|g| !g.name.starts_with("user:")).map(GroupResponse::from).collect();
       (StatusCode::OK, Json(serde_json::json!({"items": responses}))).into_response()
     }
     Err(error) => {
       tracing::error!("Failed to list groups: {}", error);
-      ErrorResponse::new(format!("Failed to list groups: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to list groups: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
 
 /// GET /admin/groups/{name} -- get a single group.
-pub async fn get_group(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(name): Path<String>,
-) -> Response {
+pub async fn get_group(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(name): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
     Err(response) => return response,
@@ -339,16 +306,12 @@ pub async fn get_group(
 
   match system_store::get_group(&state.engine, &name) {
     Ok(Some(group)) => (StatusCode::OK, Json(GroupResponse::from(&group))).into_response(),
-    Ok(None) => {
-      ErrorResponse::new(format!("Group not found: '{}'. Use GET /admin/groups to list all groups", name))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
+    Ok(None) => ErrorResponse::new(format!("Group not found: '{}'. Use GET /admin/groups to list all groups", name))
+      .with_status(StatusCode::NOT_FOUND)
+      .into_response(),
     Err(error) => {
       tracing::error!("Failed to get group: {}", error);
-      ErrorResponse::new(format!("Failed to get group: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to get group: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -374,19 +337,14 @@ pub async fn update_group(
     }
     Err(error) => {
       tracing::error!("Failed to get group for update: {}", error);
-      return ErrorResponse::new(format!("Failed to get group: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!("Failed to get group: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
   // If query_field is being changed, validate it against the safe whitelist.
   if let Some(ref query_field) = payload.query_field {
     if !SAFE_QUERY_FIELDS.contains(&query_field.as_str()) {
-      return ErrorResponse::new(format!(
-        "Unsafe query field: '{}' is not allowed in group queries",
-        query_field,
-      ))
+      return ErrorResponse::new(format!("Unsafe query field: '{}' is not allowed in group queries", query_field,))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response();
     }
@@ -410,20 +368,14 @@ pub async fn update_group(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Err(error) = system_store::update_group(&state.engine, &ctx, &group) {
     tracing::error!("Failed to update group: {}", error);
-    return ErrorResponse::new(format!("Failed to update group: {}", error))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(format!("Failed to update group: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
   }
 
   (StatusCode::OK, Json(GroupResponse::from(&group))).into_response()
 }
 
 /// DELETE /admin/groups/{name} -- delete a group.
-pub async fn delete_group(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(name): Path<String>,
-) -> Response {
+pub async fn delete_group(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(name): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
     Err(response) => return response,
@@ -448,9 +400,7 @@ pub async fn delete_group(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   if let Err(error) = system_store::delete_group(&state.engine, &ctx, &name) {
     tracing::error!("Failed to delete group: {}", error);
-    return ErrorResponse::new(format!("Failed to delete group: {}", error))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    return ErrorResponse::new(format!("Failed to delete group: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
   }
 
   (
@@ -477,23 +427,29 @@ pub async fn update_api_key(
   let user_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-        "error": "Invalid user ID"
-      }))).into_response();
+      return (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+          "error": "Invalid user ID"
+        })),
+      )
+        .into_response();
     }
   };
   if !crate::engine::user::is_root(&user_id) {
-    return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-      "error": "Only root user can update API keys"
-    }))).into_response();
+    return (
+      StatusCode::FORBIDDEN,
+      Json(serde_json::json!({
+        "error": "Only root user can update API keys"
+      })),
+    )
+      .into_response();
   }
 
   let key_uuid = match Uuid::parse_str(&key_id_string) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid key ID format")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
+      return ErrorResponse::new("Invalid key ID format").with_status(StatusCode::BAD_REQUEST).into_response();
     }
   };
 
@@ -502,9 +458,7 @@ pub async fn update_api_key(
   let data = match ops.read_file_buffered(&path) {
     Ok(data) => data,
     Err(crate::engine::EngineError::NotFound(_)) => {
-      return ErrorResponse::new(format!("API key not found: {}", key_id_string))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
+      return ErrorResponse::new(format!("API key not found: {}", key_id_string)).with_status(StatusCode::NOT_FOUND).into_response();
     }
     Err(error) => {
       return ErrorResponse::new(format!("Failed to read API key: {}", error))
@@ -516,9 +470,7 @@ pub async fn update_api_key(
   let mut record: crate::auth::api_key::ApiKeyRecord = match serde_json::from_slice(&data) {
     Ok(r) => r,
     Err(e) => {
-      return ErrorResponse::new(format!("Corrupt API key record: {}", e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!("Corrupt API key record: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -530,16 +482,18 @@ pub async fn update_api_key(
   match system_store::store_api_key(&state.engine, &ctx, &record) {
     Ok(()) => {
       state.api_key_cache.evict(&key_id_string);
-      (StatusCode::OK, Json(serde_json::json!({
-        "updated": true,
-        "key_id": key_id_string,
-        "label": record.label,
-      }))).into_response()
+      (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "updated": true,
+          "key_id": key_id_string,
+          "label": record.label,
+        })),
+      )
+        .into_response()
     }
     Err(error) => {
-      ErrorResponse::new(format!("Failed to update API key: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to update API key: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }

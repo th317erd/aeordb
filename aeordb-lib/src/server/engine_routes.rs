@@ -22,74 +22,74 @@ use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_conten
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
-use crate::engine::query_engine::{QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode};
+use crate::engine::query_engine::{
+  QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField,
+  SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode,
+};
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
 /// Check if a file path is deleted and the user lacks delete permission.
 /// Deleted files are invisible/inaccessible to users without 'd' permission.
 fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) -> bool {
-    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-    use crate::engine::directory_ops::file_path_hash;
+  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+  use crate::engine::directory_ops::file_path_hash;
 
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => return false,
-    };
+  let user_id = match Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => return false,
+  };
 
-    // Root can see everything
-    if is_root(&user_id) {
-        return false;
-    }
+  // Root can see everything
+  if is_root(&user_id) {
+    return false;
+  }
 
-    // Check if the file is deleted in the KV store
-    let algo = state.engine.hash_algo();
-    let normalized = crate::engine::path_utils::normalize_path(path);
-    let file_key = match file_path_hash(&normalized, &algo) {
-        Ok(key) => key,
-        Err(_) => return false,
-    };
+  // Check if the file is deleted in the KV store
+  let algo = state.engine.hash_algo();
+  let normalized = crate::engine::path_utils::normalize_path(path);
+  let file_key = match file_path_hash(&normalized, &algo) {
+    Ok(key) => key,
+    Err(_) => return false,
+  };
 
-    let is_deleted = state.engine.is_entry_deleted(&file_key).unwrap_or(false);
-    if !is_deleted {
-        return false;
-    }
+  let is_deleted = state.engine.is_entry_deleted(&file_key).unwrap_or(false);
+  if !is_deleted {
+    return false;
+  }
 
-    // File is deleted — check if user has 'd' permission
-    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-    let has_delete = resolver.check_permission(&user_id, &normalized, CrudlifyOp::Delete).unwrap_or(false);
+  // File is deleted — check if user has 'd' permission
+  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+  let has_delete = resolver.check_permission(&user_id, &normalized, CrudlifyOp::Delete).unwrap_or(false);
 
-    !has_delete
+  !has_delete
 }
 
 /// Evict cache entries when a system file is written, deleted, or renamed.
 fn evict_caches_for_path(state: &AppState, path: &str) {
-    let normalized = crate::engine::path_utils::normalize_path(path);
+  let normalized = crate::engine::path_utils::normalize_path(path);
 
-    if normalized.ends_with("/.aeordb-permissions") || normalized == "/.aeordb-permissions" {
-        let parent = crate::engine::path_utils::parent_path(&normalized)
-            .unwrap_or_else(|| "/".to_string());
-        state.engine.permissions_cache.evict(&parent);
-        state.engine.grants_index_cache.evict_all();
-    }
+  if normalized.ends_with("/.aeordb-permissions") || normalized == "/.aeordb-permissions" {
+    let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+    state.engine.permissions_cache.evict(&parent);
+    state.engine.grants_index_cache.evict_all();
+  }
 
-    if normalized.ends_with("/.aeordb-config/indexes.json") {
-        if let Some(dir) = normalized.strip_suffix("/.aeordb-config/indexes.json") {
-            let key = if dir.is_empty() { "/".to_string() } else { dir.to_string() };
-            state.engine.index_config_cache.evict(&key);
-        }
+  if normalized.ends_with("/.aeordb-config/indexes.json") {
+    if let Some(dir) = normalized.strip_suffix("/.aeordb-config/indexes.json") {
+      let key = if dir.is_empty() { "/".to_string() } else { dir.to_string() };
+      state.engine.index_config_cache.evict(&key);
     }
+  }
 
-    if normalized.starts_with("/.aeordb-system/api-keys/") {
-        if let Some(key_id) = crate::engine::path_utils::file_name(&normalized) {
-            state.api_key_cache.evict(&key_id.to_string());
-        }
+  if normalized.starts_with("/.aeordb-system/api-keys/") {
+    if let Some(key_id) = crate::engine::path_utils::file_name(&normalized) {
+      state.api_key_cache.evict(&key_id.to_string());
     }
+  }
 
-    if normalized.starts_with("/.aeordb-system/groups/")
-        || normalized.starts_with("/.aeordb-system/users/")
-    {
-        state.group_cache.evict_all();
-    }
+  if normalized.starts_with("/.aeordb-system/groups/") || normalized.starts_with("/.aeordb-system/users/") {
+    state.group_cache.evict_all();
+  }
 }
 
 /// Query parameters for GET /files/*path (version access + directory listing).
@@ -112,49 +112,43 @@ pub struct EngineGetQuery {
 /// Entries whose "path" field is denied (no matching rule, or matched rule
 /// forbids the given operation) are silently removed.
 fn filter_listing_by_key_rules(entries: &mut Vec<serde_json::Value>, rules: &[crate::engine::api_key_rules::KeyRule], operation: char) {
-    entries.retain_mut(|entry| {
-        let path = entry["path"].as_str().unwrap_or("").to_string();
+  entries.retain_mut(|entry| {
+    let path = entry["path"].as_str().unwrap_or("").to_string();
 
-        // Order of precedence:
-        // 1. If the item matches an explicit rule (not the catch-all `**`),
-        //    that rule decides: drop unless the rule grants the operation.
-        //    This is the case that the old code got wrong — it would route
-        //    "denied" matches into the shared-path branch and keep them.
-        // 2. Otherwise, if the item is an ANCESTOR of any rule's target
-        //    (e.g. `/foo/` when the rule is on `/foo/bar/*`), allow it for
-        //    navigation only with `-r--l---` perms.
-        // 3. Otherwise, drop.
-        match match_rules(rules, &path) {
-            Some(rule) if rule.glob != "**" => {
-                if check_operation_permitted(&rule.permitted, operation) {
-                    if let Some(obj) = entry.as_object_mut() {
-                        obj.insert(
-                            "effective_permissions".to_string(),
-                            serde_json::Value::String(rule.permitted.clone()),
-                        );
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => {
-                // No explicit rule (or only the catch-all matched). Allow
-                // navigation if this is an ancestor of a scoped target.
-                if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
-                    if let Some(obj) = entry.as_object_mut() {
-                        obj.insert(
-                            "effective_permissions".to_string(),
-                            serde_json::Value::String("-r--l---".to_string()),
-                        );
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
+    // Order of precedence:
+    // 1. If the item matches an explicit rule (not the catch-all `**`),
+    //    that rule decides: drop unless the rule grants the operation.
+    //    This is the case that the old code got wrong — it would route
+    //    "denied" matches into the shared-path branch and keep them.
+    // 2. Otherwise, if the item is an ANCESTOR of any rule's target
+    //    (e.g. `/foo/` when the rule is on `/foo/bar/*`), allow it for
+    //    navigation only with `-r--l---` perms.
+    // 3. Otherwise, drop.
+    match match_rules(rules, &path) {
+      Some(rule) if rule.glob != "**" => {
+        if check_operation_permitted(&rule.permitted, operation) {
+          if let Some(obj) = entry.as_object_mut() {
+            obj.insert("effective_permissions".to_string(), serde_json::Value::String(rule.permitted.clone()));
+          }
+          true
+        } else {
+          false
         }
-    });
+      }
+      _ => {
+        // No explicit rule (or only the catch-all matched). Allow
+        // navigation if this is an ancestor of a scoped target.
+        if crate::engine::api_key_rules::is_item_on_shared_path(rules, &path) {
+          if let Some(obj) = entry.as_object_mut() {
+            obj.insert("effective_permissions".to_string(), serde_json::Value::String("-r--l---".to_string()));
+          }
+          true
+        } else {
+          false
+        }
+      }
+    }
+  });
 }
 
 /// Apply limit/offset pagination to a listing and return a JSON response
@@ -171,6 +165,18 @@ fn paginated_listing_response(
   let descending = order.map(|o| o == "desc").unwrap_or(false);
 
   listing.sort_by(|a, b| {
+    let a_is_dir = a["entry_type"].as_u64().map(|entry_type| entry_type == EntryType::DirectoryIndex.to_u8() as u64).unwrap_or(false);
+    let b_is_dir = b["entry_type"].as_u64().map(|entry_type| entry_type == EntryType::DirectoryIndex.to_u8() as u64).unwrap_or(false);
+
+    let category_cmp = match (a_is_dir, b_is_dir) {
+      (true, false) => std::cmp::Ordering::Less,
+      (false, true) => std::cmp::Ordering::Greater,
+      _ => std::cmp::Ordering::Equal,
+    };
+    if category_cmp != std::cmp::Ordering::Equal {
+      return category_cmp;
+    }
+
     let cmp = match sort_field {
       "size" => {
         let a_size = a["size"].as_u64().unwrap_or(0);
@@ -194,7 +200,11 @@ fn paginated_listing_response(
         a_name.cmp(&b_name)
       }
     };
-    if descending { cmp.reverse() } else { cmp }
+    if descending {
+      cmp.reverse()
+    } else {
+      cmp
+    }
   });
 
   let total = listing.len();
@@ -203,12 +213,16 @@ fn paginated_listing_response(
   if let Some(lim) = limit {
     listing.truncate(lim);
   }
-  (StatusCode::OK, Json(serde_json::json!({
-    "items": listing,
-    "total": total,
-    "limit": limit,
-    "offset": off,
-  }))).into_response()
+  (
+    StatusCode::OK,
+    Json(serde_json::json!({
+      "items": listing,
+      "total": total,
+      "limit": limit,
+      "offset": off,
+    })),
+  )
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -227,23 +241,15 @@ pub struct MkdirRequest {
   pub path: String,
 }
 
-pub async fn mkdir(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Json(body): Json<MkdirRequest>,
-) -> Response {
+pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Json(body): Json<MkdirRequest>) -> Response {
   let normalized = crate::engine::path_utils::normalize_path(&body.path);
 
   if is_system_path(&normalized) {
-    return ErrorResponse::new(format!("Not found: {}", body.path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", body.path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   if normalized == "/" {
-    return ErrorResponse::new("Cannot create root directory")
-      .with_status(StatusCode::BAD_REQUEST)
-      .into_response();
+    return ErrorResponse::new("Cannot create root directory").with_status(StatusCode::BAD_REQUEST).into_response();
   }
 
   // User/group permission check: /files/mkdir is exempt from path-aware
@@ -253,29 +259,20 @@ pub async fn mkdir(
   // key-rule enforcement upstream and don't carry user permissions; we
   // refuse them here.
   if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot create directories")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
+    return ErrorResponse::new("Share keys cannot create directories").with_status(StatusCode::FORBIDDEN).into_response();
   }
   if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
     if !is_root(&user_id) {
       use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-      let parent = crate::engine::path_utils::parent_path(&normalized)
-        .unwrap_or_else(|| "/".to_string());
+      let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
       let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-      let allowed = resolver
-        .check_path_permission(&user_id, &parent, CrudlifyOp::Create)
-        .unwrap_or(false);
+      let allowed = resolver.check_path_permission(&user_id, &parent, CrudlifyOp::Create).unwrap_or(false);
       if !allowed {
-        return ErrorResponse::new("Permission denied")
-          .with_status(StatusCode::FORBIDDEN)
-          .into_response();
+        return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
       }
     }
   } else {
-    return ErrorResponse::new("Invalid user identity")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
+    return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -289,20 +286,22 @@ pub async fn mkdir(
   .await;
 
   match result {
-    Ok(Ok(())) => (StatusCode::CREATED, Json(serde_json::json!({
-      "path": normalized,
-      "entry_type": 3,
-      "created": true,
-    }))).into_response(),
+    Ok(Ok(())) => (
+      StatusCode::CREATED,
+      Json(serde_json::json!({
+        "path": normalized,
+        "entry_type": 3,
+        "created": true,
+      })),
+    )
+      .into_response(),
     Ok(Err(error)) => {
       tracing::error!("Failed to create directory '{}': {}", normalized, error);
       engine_error_response("Failed to create directory", &error)
     }
     Err(join_error) => {
       tracing::error!("create_directory task panicked: {}", join_error);
-      ErrorResponse::new("Failed to create directory: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new("Failed to create directory: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -323,9 +322,7 @@ pub async fn engine_store_file(
   // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // Stream the body in 256KB chunks — each chunk is stored to disk as it
@@ -362,9 +359,7 @@ pub async fn engine_store_file(
               Ok(hash) => chunk_hashes.push(hash),
               Err(error) => {
                 tracing::error!("Failed to store chunk: {}", error);
-                return ErrorResponse::new("Failed to store upload chunk")
-                  .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-                  .into_response();
+                return ErrorResponse::new("Failed to store upload chunk").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
               }
             }
           }
@@ -385,17 +380,12 @@ pub async fn engine_store_file(
       Ok(hash) => chunk_hashes.push(hash),
       Err(error) => {
         tracing::error!("Failed to store final chunk: {}", error);
-        return ErrorResponse::new("Failed to store upload chunk")
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
+        return ErrorResponse::new("Failed to store upload chunk").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
       }
     }
   }
 
-  let content_type = headers
-    .get("content-type")
-    .and_then(|value| value.to_str().ok())
-    .map(|s| s.to_string());
+  let content_type = headers.get("content-type").and_then(|value| value.to_str().ok()).map(|s| s.to_string());
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
@@ -408,14 +398,7 @@ pub async fn engine_store_file(
   let chunk_hashes_owned = chunk_hashes;
   let file_record = match tokio::task::spawn_blocking(move || {
     let ops = DirectoryOps::new(&engine_for_blocking);
-    ops.finalize_file(
-      &ctx_for_blocking,
-      &path_for_blocking,
-      chunk_hashes_owned,
-      total_size,
-      content_type.as_deref(),
-      &first_bytes_owned,
-    )
+    ops.finalize_file(&ctx_for_blocking, &path_for_blocking, chunk_hashes_owned, total_size, content_type.as_deref(), &first_bytes_owned)
   })
   .await
   {
@@ -463,9 +446,12 @@ pub async fn engine_store_file(
   let hash_length = algo.hash_length();
   let file_value = match file_record.serialize(hash_length) {
     Ok(v) => v,
-    Err(_) => return ErrorResponse::new("Failed to serialize file record after storing. The file was saved but the response could not be built — contact your administrator".to_string())
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response(),
+    Err(_) => return ErrorResponse::new(
+      "Failed to serialize file record after storing. The file was saved but the response could not be built — contact your administrator"
+        .to_string(),
+    )
+    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    .into_response(),
   };
   if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
     response_body.hash = Some(hex::encode(&content_hash));
@@ -490,24 +476,22 @@ fn build_file_streaming_response(
   file_record: &FileRecord,
   symlink_target: Option<&str>,
 ) -> Response {
-  let file_stream = match EngineFileStream::from_chunk_hashes_owned(
-    file_record.chunk_hashes.clone(),
-    std::sync::Arc::clone(engine),
-  ) {
+  let file_stream = match EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine)) {
     Ok(s) => s,
     Err(error) => {
       tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
-      return ErrorResponse::new(format!("Failed to stream file '{}': the file data may be corrupted. Contact your administrator", file_record.path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!(
+        "Failed to stream file '{}': the file data may be corrupted. Contact your administrator",
+        file_record.path
+      ))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
   };
 
-  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-    chunk_result
-      .map(axum::body::Bytes::from)
-      .map_err(|error| std::io::Error::other(error.to_string()))
-  }));
+  let chunk_stream = stream::iter(
+    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+  );
 
   let body = Body::from_stream(chunk_stream);
 
@@ -520,39 +504,26 @@ fn build_file_streaming_response(
     .header("X-AeorDB-Updated", file_record.updated_at.to_string());
 
   if let Some(target) = symlink_target {
-    response_builder = response_builder
-      .header("X-AeorDB-Link-Target", target.replace(['\n', '\r'], ""));
+    response_builder = response_builder.header("X-AeorDB-Link-Target", target.replace(['\n', '\r'], ""));
   }
 
   if let Some(ref content_type) = file_record.content_type {
     response_builder = response_builder.header("content-type", content_type.as_str());
   }
 
-  response_builder
-    .body(body)
-    .unwrap_or_else(|_| {
-      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-    })
+  response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
 /// Convert a flat directory listing (ChildEntry vec) to JSON values.
 ///
 /// Each entry is enriched with its full path and, for symlink entries,
 /// the symlink target is included.
-fn build_directory_listing(
-  entries: &[crate::engine::ChildEntry],
-  base_path: &str,
-  directory_ops: &DirectoryOps,
-) -> Vec<serde_json::Value> {
+fn build_directory_listing(entries: &[crate::engine::ChildEntry], base_path: &str, directory_ops: &DirectoryOps) -> Vec<serde_json::Value> {
   let normalized = crate::engine::path_utils::normalize_path(base_path);
   entries
     .iter()
     .map(|child| {
-      let child_path = if normalized == "/" {
-        format!("/{}", child.name)
-      } else {
-        format!("{}/{}", normalized, child.name)
-      };
+      let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
       let mut entry_json = serde_json::json!({
         "path": child_path,
         "name": child.name,
@@ -602,7 +573,9 @@ fn filter_results_by_direct_read(
   }
   let resolver = PermissionResolver::new(engine, group_cache);
   results.retain(|entry| {
-    let Some(path) = entry["path"].as_str() else { return false; };
+    let Some(path) = entry["path"].as_str() else {
+      return false;
+    };
     resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
   });
 }
@@ -650,18 +623,27 @@ fn attach_effective_permissions(
 ) {
   use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 
-  if crate::engine::is_root(user_id) { return; }
+  if crate::engine::is_root(user_id) {
+    return;
+  }
 
   let resolver = PermissionResolver::new(engine, group_cache);
   let ops = [
-    ('c', CrudlifyOp::Create), ('r', CrudlifyOp::Read), ('u', CrudlifyOp::Update),
-    ('d', CrudlifyOp::Delete), ('l', CrudlifyOp::List), ('i', CrudlifyOp::Invoke),
-    ('f', CrudlifyOp::Deploy), ('y', CrudlifyOp::Configure),
+    ('c', CrudlifyOp::Create),
+    ('r', CrudlifyOp::Read),
+    ('u', CrudlifyOp::Update),
+    ('d', CrudlifyOp::Delete),
+    ('l', CrudlifyOp::List),
+    ('i', CrudlifyOp::Invoke),
+    ('f', CrudlifyOp::Deploy),
+    ('y', CrudlifyOp::Configure),
   ];
 
   for entry in listing.iter_mut() {
     // Skip items that already have effective_permissions (set by key rules filter)
-    if entry.get("effective_permissions").is_some() { continue; }
+    if entry.get("effective_permissions").is_some() {
+      continue;
+    }
 
     let raw_path = match entry["path"].as_str() {
       Some(p) => p.to_string(),
@@ -670,14 +652,9 @@ fn attach_effective_permissions(
     // Directories need a trailing slash so path_levels walks INTO them and
     // reads their .aeordb-permissions — otherwise a directory's own grants
     // are silently ignored when it appears as a listing entry.
-    let is_directory = entry["entry_type"].as_u64()
-      .map(|t| t == crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() as u64)
-      .unwrap_or(false);
-    let path = if is_directory && !raw_path.ends_with('/') {
-      format!("{}/", raw_path)
-    } else {
-      raw_path
-    };
+    let is_directory =
+      entry["entry_type"].as_u64().map(|t| t == crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() as u64).unwrap_or(false);
+    let path = if is_directory && !raw_path.ends_with('/') { format!("{}/", raw_path) } else { raw_path };
 
     let mut flags = ['-'; 8];
     for (i, (ch, op)) in ops.iter().enumerate() {
@@ -711,32 +688,22 @@ fn handle_symlink_resolution(
       // Block ALL access to symlinks resolving to /.aeordb-system/ paths — system
       // data is invisible through the API for all users, including root.
       if is_system_path(&file_record.path) {
-        return ErrorResponse::new(format!("Not found: {}", path))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
+        return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
 
       // Check if the resolved target path is allowed by API key rules
       if let Some(rules) = key_rules {
         if !rules.is_empty() {
           let target_path = &file_record.path;
-          let normalized_target = if target_path.starts_with('/') {
-            target_path.to_string()
-          } else {
-            format!("/{}", target_path)
-          };
+          let normalized_target = if target_path.starts_with('/') { target_path.to_string() } else { format!("/{}", target_path) };
           match match_rules(rules, &normalized_target) {
             Some(rule) => {
               if !check_operation_permitted(&rule.permitted, 'r') {
-                return ErrorResponse::new(format!("Not found: {}", path))
-                  .with_status(StatusCode::NOT_FOUND)
-                  .into_response();
+                return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
               }
             }
             None => {
-              return ErrorResponse::new(format!("Not found: {}", path))
-                .with_status(StatusCode::NOT_FOUND)
-                .into_response();
+              return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
             }
           }
         }
@@ -748,9 +715,7 @@ fn handle_symlink_resolution(
       // Block ALL access to symlinks resolving to /.aeordb-system/ directories —
       // system data is invisible through the API for all users, including root.
       if is_system_path(&dir_path) {
-        return ErrorResponse::new(format!("Not found: {}", path))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
+        return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
 
       match directory_ops.list_directory(&dir_path) {
@@ -763,49 +728,42 @@ fn handle_symlink_resolution(
         }
         Err(error) => {
           tracing::error!("Engine: failed to list resolved directory: {}", error);
-          ErrorResponse::new(format!("Failed to list directory after resolving symlink '{}'. If this persists, check GET /system/health for system status", path))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response()
+          ErrorResponse::new(format!(
+            "Failed to list directory after resolving symlink '{}'. If this persists, check GET /system/health for system status",
+            path
+          ))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response()
         }
       }
     }
     Err(EngineError::NotFound(msg)) => {
-      ErrorResponse::new(format!("Dangling symlink: {}", msg))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
+      ErrorResponse::new(format!("Dangling symlink: {}", msg)).with_status(StatusCode::NOT_FOUND).into_response()
     }
     Err(EngineError::CyclicSymlink(msg)) => {
-      ErrorResponse::new(format!("Symlink cycle detected: {}", msg))
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response()
+      ErrorResponse::new(format!("Symlink cycle detected: {}", msg)).with_status(StatusCode::BAD_REQUEST).into_response()
     }
-    Err(EngineError::SymlinkDepthExceeded(msg)) => {
-      ErrorResponse::new(msg)
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response()
-    }
+    Err(EngineError::SymlinkDepthExceeded(msg)) => ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response(),
     Err(error) => {
       tracing::error!("Engine: failed to resolve symlink '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to resolve symlink '{}'. The symlink or its target may be corrupted — contact your administrator", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!(
+        "Failed to resolve symlink '{}'. The symlink or its target may be corrupted — contact your administrator",
+        path
+      ))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response()
     }
   }
 }
 
 /// Handle a direct file read: stream the file content as an HTTP response.
-fn handle_file_response(
-  engine: &std::sync::Arc<crate::engine::StorageEngine>,
-  path: &str,
-) -> Response {
+fn handle_file_response(engine: &std::sync::Arc<crate::engine::StorageEngine>, path: &str) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
   let file_record = match directory_ops.get_metadata(path) {
     Ok(Some(record)) => record,
     Ok(None) => {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
+      return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
     }
     Err(error) => {
       tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
@@ -831,12 +789,11 @@ fn handle_file_response(
         .into_response();
     }
   };
+  engine.counters().record_read(file_record.total_size);
 
-  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-    chunk_result
-      .map(axum::body::Bytes::from)
-      .map_err(|error| std::io::Error::other(error.to_string()))
-  }));
+  let chunk_stream = stream::iter(
+    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+  );
 
   let body = Body::from_stream(chunk_stream);
 
@@ -852,11 +809,7 @@ fn handle_file_response(
     response_builder = response_builder.header("content-type", content_type.as_str());
   }
 
-  response_builder
-    .body(body)
-    .unwrap_or_else(|_| {
-      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-    })
+  response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
 /// Handle recursive directory listing with depth and/or glob parameters.
@@ -910,21 +863,26 @@ fn handle_recursive_listing(
               filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache);
             }
           }
-          paginated_listing_response(listing, version_query.limit, version_query.offset, version_query.sort.as_deref(), version_query.order.as_deref())
+          paginated_listing_response(
+            listing,
+            version_query.limit,
+            version_query.offset,
+            version_query.sort.as_deref(),
+            version_query.order.as_deref(),
+          )
         }
         Err(response) => response,
       }
     }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
+    Err(EngineError::NotFound(_)) => ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
     Err(error) => {
       tracing::error!("Engine: failed to list directory '{}': {}", path, error);
-      ErrorResponse::new(format!("Failed to list directory '{}' with recursive traversal. If this persists, check GET /system/health for system status", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!(
+        "Failed to list directory '{}' with recursive traversal. If this persists, check GET /system/health for system status",
+        path
+      ))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response()
     }
   }
 }
@@ -967,11 +925,7 @@ fn handle_directory_listing(
         Err(response) => response,
       }
     }
-    Err(EngineError::NotFound(_)) => {
-      ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
+    Err(EngineError::NotFound(_)) => ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
     Err(error) => {
       tracing::error!("Engine: failed to list directory '{}': {}", path, error);
       ErrorResponse::new(format!("Failed to list directory '{}'. If this persists, check GET /system/health for system status", path))
@@ -1008,16 +962,12 @@ pub async fn engine_get(
   // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // Deleted files are invisible to users without 'd' permission
   if is_deleted_and_forbidden(&state, &claims, &path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // If snapshot or version query param is present, read from historical version
@@ -1026,10 +976,8 @@ pub async fn engine_get(
   }
 
   // Extract key rules slice for helpers (avoids passing axum Extension around)
-  let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> =
-    active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
-  let filter_ref: Option<&crate::auth::permission_middleware::FilteredListing> =
-    filtered_listing.as_ref().map(|Extension(f)| f);
+  let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  let filter_ref: Option<&crate::auth::permission_middleware::FilteredListing> = filtered_listing.as_ref().map(|Extension(f)| f);
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
@@ -1037,18 +985,28 @@ pub async fn engine_get(
   if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
     // nofollow: return symlink metadata without resolving
     if version_query.nofollow == Some(true) {
-      return (StatusCode::OK, Json(serde_json::json!({
-        "path": symlink_record.path,
-        "target": symlink_record.target,
-        "entry_type": 8,
-        "created_at": symlink_record.created_at,
-        "updated_at": symlink_record.updated_at,
-      }))).into_response();
+      return (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "path": symlink_record.path,
+          "target": symlink_record.target,
+          "entry_type": 8,
+          "created_at": symlink_record.created_at,
+          "updated_at": symlink_record.updated_at,
+        })),
+      )
+        .into_response();
     }
 
     return handle_symlink_resolution(
-      &state.engine, &path, &symlink_record.target, &claims.sub, key_rules,
-      filter_ref, version_query.limit, version_query.offset,
+      &state.engine,
+      &path,
+      &symlink_record.target,
+      &claims.sub,
+      key_rules,
+      filter_ref,
+      version_query.limit,
+      version_query.offset,
     );
   }
 
@@ -1070,10 +1028,7 @@ pub async fn engine_get(
 
   // Try as directory -- recursive listing if depth/glob specified
   if version_query.depth.is_some() || version_query.glob.is_some() {
-    return handle_recursive_listing(
-      &state.engine, &path, &version_query, key_rules, &claims.sub,
-      filter_ref, Some(&state),
-    );
+    return handle_recursive_listing(&state.engine, &path, &version_query, key_rules, &claims.sub, filter_ref, Some(&state));
   }
 
   // Default flat directory listing
@@ -1093,13 +1048,8 @@ pub async fn engine_get(
   )
 }
 
-
 /// Read a file at a historical version (snapshot or explicit root hash).
-async fn engine_get_at_version(
-  state: &AppState,
-  path: &str,
-  version_query: &EngineGetQuery,
-) -> Response {
+async fn engine_get_at_version(state: &AppState, path: &str, version_query: &EngineGetQuery) -> Response {
   let vm = VersionManager::new(&state.engine);
 
   // Resolve root hash: snapshot takes precedence
@@ -1107,9 +1057,7 @@ async fn engine_get_at_version(
     match vm.resolve_root_hash(Some(snapshot_name)) {
       Ok(hash) => hash,
       Err(_) => {
-        return ErrorResponse::new(format!("Snapshot '{}' not found", snapshot_name))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
+        return ErrorResponse::new(format!("Snapshot '{}' not found", snapshot_name)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }
   } else if let Some(ref version_hex) = version_query.version {
@@ -1122,26 +1070,27 @@ async fn engine_get_at_version(
       }
     }
   } else {
-    return ErrorResponse::new("No snapshot or version specified. Use ?snapshot=<name> or ?version=<hex_hash> to read a historical version")
-      .with_status(StatusCode::BAD_REQUEST)
-      .into_response();
+    return ErrorResponse::new(
+      "No snapshot or version specified. Use ?snapshot=<name> or ?version=<hex_hash> to read a historical version",
+    )
+    .with_status(StatusCode::BAD_REQUEST)
+    .into_response();
   };
 
   // Resolve the file at this version
-  let (_file_hash, file_record) = match crate::engine::version_access::resolve_file_at_version(
-    &state.engine, &root_hash, path,
-  ) {
+  let (_file_hash, file_record) = match crate::engine::version_access::resolve_file_at_version(&state.engine, &root_hash, path) {
     Ok(result) => result,
     Err(crate::engine::errors::EngineError::NotFound(msg)) => {
-      return ErrorResponse::new(msg)
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
+      return ErrorResponse::new(msg).with_status(StatusCode::NOT_FOUND).into_response();
     }
     Err(error) => {
       tracing::error!("Engine: failed to read file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!("Failed to read file '{}' at historical version. If this persists, check GET /system/health for system status", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!(
+        "Failed to read file '{}' at historical version. If this persists, check GET /system/health for system status",
+        path
+      ))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
   };
 
@@ -1154,17 +1103,19 @@ async fn engine_get_at_version(
     Ok(stream) => stream,
     Err(error) => {
       tracing::error!("Engine: failed to stream file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!("Failed to stream file '{}' from historical version. The file data may be corrupted — contact your administrator", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!(
+        "Failed to stream file '{}' from historical version. The file data may be corrupted — contact your administrator",
+        path
+      ))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
   };
+  state.engine.counters().record_read(file_record.total_size);
 
-  let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-    chunk_result
-      .map(axum::body::Bytes::from)
-      .map_err(|error| std::io::Error::other(error.to_string()))
-  }));
+  let chunk_stream = stream::iter(
+    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+  );
 
   let body = Body::from_stream(chunk_stream);
 
@@ -1179,11 +1130,7 @@ async fn engine_get_at_version(
     response_builder = response_builder.header("content-type", content_type.as_str());
   }
 
-  response_builder
-    .body(body)
-    .unwrap_or_else(|_| {
-      (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-    })
+  response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
@@ -1195,9 +1142,7 @@ pub async fn engine_delete_file(
   // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -1237,9 +1182,7 @@ pub async fn engine_delete_file(
       (StatusCode::OK, Json(body)).into_response()
     }
     Ok(Err(EngineError::NotFound(_))) => {
-      ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
+      ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response()
     }
     Ok(Err(error)) => {
       tracing::error!("Engine: failed to delete '{}': {}", path, error);
@@ -1247,9 +1190,7 @@ pub async fn engine_delete_file(
     }
     Err(join_error) => {
       tracing::error!("delete task panicked: {}", join_error);
-      ErrorResponse::new("Failed to delete: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new("Failed to delete: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -1265,44 +1206,32 @@ pub async fn restore_deleted_file(
   let path = match body.get("path").and_then(|v| v.as_str()) {
     Some(p) => p.to_string(),
     None => {
-      return ErrorResponse::new("Missing 'path' field")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
+      return ErrorResponse::new("Missing 'path' field").with_status(StatusCode::BAD_REQUEST).into_response();
     }
   };
 
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // User/group permission check: /files/restore is exempt from path-aware
   // middleware. Restoring a file is an inverse Delete operation — require
   // the 'd' (Delete) permission on the path, matching list_deleted_files.
   if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot restore deleted files")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
+    return ErrorResponse::new("Share keys cannot restore deleted files").with_status(StatusCode::FORBIDDEN).into_response();
   }
   let user_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid user identity")
-        .with_status(StatusCode::FORBIDDEN)
-        .into_response();
+      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
     }
   };
   if !is_root(&user_id) {
     use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
     let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-    let allowed = resolver
-      .check_path_permission(&user_id, &path, CrudlifyOp::Delete)
-      .unwrap_or(false);
+    let allowed = resolver.check_path_permission(&user_id, &path, CrudlifyOp::Delete).unwrap_or(false);
     if !allowed {
-      return ErrorResponse::new(format!("Not found: {}", path))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
+      return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
     }
   }
 
@@ -1310,17 +1239,15 @@ pub async fn restore_deleted_file(
   let ops = DirectoryOps::new(&state.engine);
 
   match ops.restore_deleted_file(&ctx, &path) {
-    Ok(()) => {
-      (StatusCode::OK, Json(serde_json::json!({
+    Ok(()) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
         "restored": true,
         "path": path,
-      }))).into_response()
-    }
-    Err(e) => {
-      ErrorResponse::new(format!("Restore failed: {}", e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
+      })),
+    )
+      .into_response(),
+    Err(e) => ErrorResponse::new(format!("Restore failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
   }
 }
 
@@ -1334,9 +1261,7 @@ pub async fn list_deleted_files(
   let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
 
   if is_system_path(dir_path) {
-    return ErrorResponse::new(format!("Not found: {}", dir_path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", dir_path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // Deleted files require 'd' permission — check on the directory
@@ -1345,19 +1270,21 @@ pub async fn list_deleted_files(
     let user_id = match Uuid::parse_str(&claims.sub) {
       Ok(id) => id,
       Err(_) => {
-        return ErrorResponse::new("Invalid user ID")
-          .with_status(StatusCode::FORBIDDEN)
-          .into_response();
+        return ErrorResponse::new("Invalid user ID").with_status(StatusCode::FORBIDDEN).into_response();
       }
     };
     if !is_root(&user_id) {
       let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
       let has_delete = resolver.check_permission(&user_id, dir_path, CrudlifyOp::Delete).unwrap_or(false);
       if !has_delete {
-        return (StatusCode::OK, Json(serde_json::json!({
-          "items": [],
-          "total": 0,
-        }))).into_response();
+        return (
+          StatusCode::OK,
+          Json(serde_json::json!({
+            "items": [],
+            "total": 0,
+          })),
+        )
+          .into_response();
       }
     }
   }
@@ -1366,44 +1293,41 @@ pub async fn list_deleted_files(
 
   match ops.list_deleted(dir_path) {
     Ok(records) => {
-      let items: Vec<serde_json::Value> = records.iter().map(|r| {
-        let name = crate::engine::path_utils::file_name(&r.path).unwrap_or("").to_string();
-        serde_json::json!({
-          "path": r.path,
-          "name": name,
-          "deleted_at": r.deleted_at,
-          "reason": r.reason,
+      let items: Vec<serde_json::Value> = records
+        .iter()
+        .map(|r| {
+          let name = crate::engine::path_utils::file_name(&r.path).unwrap_or("").to_string();
+          serde_json::json!({
+            "path": r.path,
+            "name": name,
+            "deleted_at": r.deleted_at,
+            "reason": r.reason,
+          })
         })
-      }).collect();
-      (StatusCode::OK, Json(serde_json::json!({
-        "items": items,
-        "total": items.len(),
-      }))).into_response()
+        .collect();
+      (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "items": items,
+          "total": items.len(),
+        })),
+      )
+        .into_response()
     }
     Err(e) => {
-      ErrorResponse::new(format!("Failed to list deleted files: {}", e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Failed to list deleted files: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
 
-pub async fn engine_head(
-  State(state): State<AppState>,
-  Extension(claims): Extension<TokenClaims>,
-  Path(path): Path<String>,
-) -> Response {
+pub async fn engine_head(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(path): Path<String>) -> Response {
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // Deleted files are invisible to users without 'd' permission
   if is_deleted_and_forbidden(&state, &claims, &path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let directory_ops = DirectoryOps::new(&state.engine);
@@ -1436,9 +1360,7 @@ pub async fn engine_head(
         response_builder = response_builder.header("content-type", content_type.as_str());
       }
 
-      response_builder
-        .body(Body::empty())
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+      response_builder.body(Body::empty()).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     }
     Ok(None) => {
       // Check if it is a directory
@@ -1496,24 +1418,18 @@ pub async fn engine_get_by_hash(
   let (header, _key, value) = match state.engine.get_entry(&hash_bytes) {
     Ok(Some(entry)) => entry,
     Ok(None) => {
-      return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response();
+      return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
     }
     Err(e) => {
       tracing::error!("Engine: failed to retrieve entry by hash '{}': {}", hex_hash, e);
-      return ErrorResponse::new(format!("Failed to retrieve entry: {}", e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new(format!("Failed to retrieve entry: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
   // Block ALL access to system-flagged entries via API — system data is only
   // accessible through the internal system_store module, never through HTTP.
   if header.is_system_entry() {
-    return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // Scoped-key check. ActiveKeyRules is only inserted by the permission
@@ -1528,9 +1444,7 @@ pub async fn engine_get_by_hash(
         let path = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
           Ok(r) => r.path,
           Err(_) => {
-            return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-              .with_status(StatusCode::NOT_FOUND)
-              .into_response();
+            return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
           }
         };
         let allowed = match match_rules(&rules.0, &path) {
@@ -1540,17 +1454,13 @@ pub async fn engine_get_by_hash(
         if !allowed {
           // Use 404 (not 403) so scoped keys cannot enumerate forbidden
           // paths by probing hashes.
-          return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-            .with_status(StatusCode::NOT_FOUND)
-            .into_response();
+          return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
         }
       }
       // For raw chunks and other non-path entries, we can't tie the hash
       // back to a path the scoped key is permitted to access. Deny.
       _ => {
-        return ErrorResponse::new(format!("Entry not found: {}", hex_hash))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
+        return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }
   }
@@ -1565,30 +1475,33 @@ pub async fn engine_get_by_hash(
         Ok(r) => r,
         Err(e) => {
           tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new(format!("Corrupt or unreadable file record at hash '{}'. The entry may need to be re-uploaded — contact your administrator", hex_hash))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
+          return ErrorResponse::new(format!(
+            "Corrupt or unreadable file record at hash '{}'. The entry may need to be re-uploaded — contact your administrator",
+            hex_hash
+          ))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
         }
       };
 
-      let file_stream = match EngineFileStream::from_chunk_hashes_owned(
-        file_record.chunk_hashes,
-        std::sync::Arc::clone(&state.engine),
-      ) {
-        Ok(s) => s,
-        Err(e) => {
-          tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new(format!("Failed to read file chunks for hash '{}'. The file data may be corrupted — contact your administrator", hex_hash))
+      let file_stream =
+        match EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(&state.engine)) {
+          Ok(s) => s,
+          Err(e) => {
+            tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
+            return ErrorResponse::new(format!(
+              "Failed to read file chunks for hash '{}'. The file data may be corrupted — contact your administrator",
+              hex_hash
+            ))
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
-        }
-      };
+          }
+        };
+      state.engine.counters().record_read(file_record.total_size);
 
-      let chunk_stream = stream::iter(file_stream.map(|chunk_result| {
-        chunk_result
-          .map(axum::body::Bytes::from)
-          .map_err(|error| std::io::Error::other(error.to_string()))
-      }));
+      let chunk_stream = stream::iter(
+        file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+      );
 
       let body = Body::from_stream(chunk_stream);
 
@@ -1602,11 +1515,7 @@ pub async fn engine_get_by_hash(
         response_builder = response_builder.header("content-type", ct.as_str());
       }
 
-      response_builder
-        .body(body)
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+      response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
 
     EntryType::Chunk => {
@@ -1619,6 +1528,7 @@ pub async fn engine_get_by_hash(
       } else {
         value
       };
+      state.engine.counters().record_read(data.len() as u64);
 
       axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -1626,21 +1536,18 @@ pub async fn engine_get_by_hash(
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(data))
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
 
     EntryType::DirectoryIndex => {
+      state.engine.counters().record_read(value.len() as u64);
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(value))
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
 
     _ => {
@@ -1651,15 +1558,12 @@ pub async fn engine_get_by_hash(
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(value))
-        .unwrap_or_else(|_| {
-          (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
   }
 }
 
 // Snapshot + fork handlers moved to `server::version_routes`.
-
 
 // ---------------------------------------------------------------------------
 // Query endpoint
@@ -1685,18 +1589,18 @@ pub struct QueryRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct AggregateRequestData {
-    #[serde(default)]
-    pub count: bool,
-    #[serde(default)]
-    pub sum: Vec<String>,
-    #[serde(default)]
-    pub avg: Vec<String>,
-    #[serde(default)]
-    pub min: Vec<String>,
-    #[serde(default)]
-    pub max: Vec<String>,
-    #[serde(default)]
-    pub group_by: Vec<String>,
+  #[serde(default)]
+  pub count: bool,
+  #[serde(default)]
+  pub sum: Vec<String>,
+  #[serde(default)]
+  pub avg: Vec<String>,
+  #[serde(default)]
+  pub min: Vec<String>,
+  #[serde(default)]
+  pub max: Vec<String>,
+  #[serde(default)]
+  pub group_by: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1738,72 +1642,54 @@ fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 
 /// Parse a single field-level where clause JSON object into a QueryNode::Field.
 fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, String> {
-  let field = value.get("field")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| "Missing 'field' in where clause".to_string())?;
-  let op = value.get("op")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
-  let raw_value = value.get("value")
-    .ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
+  let field = value.get("field").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'field' in where clause".to_string())?;
+  let op = value.get("op").and_then(|v| v.as_str()).ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
+  let raw_value = value.get("value").ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
 
   let operation = match op {
     "eq" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
       QueryOp::Eq(bytes)
     }
     "gt" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
       QueryOp::Gt(bytes)
     }
     "lt" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
       QueryOp::Lt(bytes)
     }
     "between" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
-      let raw_value2 = value.get("value2")
-        .ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
-      let bytes2 = json_value_to_bytes(raw_value2)
-        .map_err(|message| format!("Invalid value2 for field '{}': {}", field, message))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let raw_value2 = value.get("value2").ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
+      let bytes2 = json_value_to_bytes(raw_value2).map_err(|message| format!("Invalid value2 for field '{}': {}", field, message))?;
       QueryOp::Between(bytes, bytes2)
     }
     "in" => {
-      let array = raw_value.as_array()
-        .ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
+      let array = raw_value.as_array().ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
       let mut byte_values = Vec::with_capacity(array.len());
       for item in array {
-        let bytes = json_value_to_bytes(item)
-          .map_err(|message| format!("Invalid value in 'in' array for field '{}': {}", field, message))?;
+        let bytes =
+          json_value_to_bytes(item).map_err(|message| format!("Invalid value in 'in' array for field '{}': {}", field, message))?;
         byte_values.push(bytes);
       }
       QueryOp::In(byte_values)
     }
     "contains" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
       QueryOp::Contains(s.to_string())
     }
     "similar" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
-      let threshold = value.get("threshold")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.3);
+      let s = raw_value.as_str().ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
+      let threshold = value.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
       QueryOp::Similar(s.to_string(), threshold)
     }
     "phonetic" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
       QueryOp::Phonetic(s.to_string())
     }
     "fuzzy" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
 
       let fuzziness = match value.get("fuzziness") {
         Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
@@ -1820,8 +1706,7 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, Stri
       QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
     }
     "match" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
       QueryOp::Match(s.to_string())
     }
     unknown => {
@@ -1829,10 +1714,7 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, Stri
     }
   };
 
-  Ok(QueryNode::Field(FieldQuery {
-    field_name: field.to_string(),
-    operation,
-  }))
+  Ok(QueryNode::Field(FieldQuery { field_name: field.to_string(), operation }))
 }
 
 /// Recursively parse a where clause JSON value into a QueryNode tree.
@@ -1852,35 +1734,24 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
 
 fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<QueryNode, String> {
   if depth > MAX_WHERE_CLAUSE_DEPTH {
-    return Err(format!(
-      "Query nesting too deep (max {} levels). Simplify the where clause",
-      MAX_WHERE_CLAUSE_DEPTH,
-    ));
+    return Err(format!("Query nesting too deep (max {} levels). Simplify the where clause", MAX_WHERE_CLAUSE_DEPTH,));
   }
 
   if value.is_array() {
     let array = value.as_array().unwrap();
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(|v| parse_where_clause_inner(v, depth + 1))
-      .collect();
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
     return Ok(QueryNode::And(children?));
   }
 
   if let Some(and_array) = value.get("and") {
-    let array = and_array.as_array()
-      .ok_or_else(|| "'and' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(|v| parse_where_clause_inner(v, depth + 1))
-      .collect();
+    let array = and_array.as_array().ok_or_else(|| "'and' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
     return Ok(QueryNode::And(children?));
   }
 
   if let Some(or_array) = value.get("or") {
-    let array = or_array.as_array()
-      .ok_or_else(|| "'or' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(|v| parse_where_clause_inner(v, depth + 1))
-      .collect();
+    let array = or_array.as_array().ok_or_else(|| "'or' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
     return Ok(QueryNode::Or(children?));
   }
 
@@ -1902,8 +1773,9 @@ fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<Q
 
 /// Map virtual `@`-prefixed field names to their actual JSON keys.
 fn map_select_fields(select: &[String]) -> Vec<String> {
-  select.iter().map(|s| {
-    match s.as_str() {
+  select
+    .iter()
+    .map(|s| match s.as_str() {
       "@path" => "path".to_string(),
       "@score" => "score".to_string(),
       "@size" => "size".to_string(),
@@ -1912,8 +1784,8 @@ fn map_select_fields(select: &[String]) -> Vec<String> {
       "@updated_at" => "updated_at".to_string(),
       "@matched_by" => "matched_by".to_string(),
       other => other.to_string(),
-    }
-  }).collect()
+    })
+    .collect()
 }
 
 /// Filter a JSON response to include only selected fields.
@@ -1970,9 +1842,7 @@ pub async fn query_endpoint(
   let query_node = match parse_where_clause(&body.r#where) {
     Ok(node) => node,
     Err(message) => {
-      return ErrorResponse::new(message)
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
+      return ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response();
     }
   };
 
@@ -1980,14 +1850,21 @@ pub async fn query_endpoint(
   let is_empty = matches!(&query_node, QueryNode::And(children) if children.is_empty());
 
   // Parse order_by
-  let order_by: Vec<SortField> = body.order_by.as_ref()
-    .map(|fields| fields.iter().map(|f| SortField {
-      field: f.field.clone(),
-      direction: match f.direction.as_deref() {
-        Some("desc") => SortDirection::Desc,
-        _ => SortDirection::Asc,
-      },
-    }).collect())
+  let order_by: Vec<SortField> = body
+    .order_by
+    .as_ref()
+    .map(|fields| {
+      fields
+        .iter()
+        .map(|f| SortField {
+          field: f.field.clone(),
+          direction: match f.direction.as_deref() {
+            Some("desc") => SortDirection::Desc,
+            _ => SortDirection::Asc,
+          },
+        })
+        .collect()
+    })
     .unwrap_or_default();
 
   // Determine explain mode
@@ -2029,8 +1906,7 @@ pub async fn query_endpoint(
         return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
       }
       Err(e) => {
-        return ErrorResponse::new(format!("Explain failed: {}", e))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+        return ErrorResponse::new(format!("Explain failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
       }
     }
   }
@@ -2038,12 +1914,12 @@ pub async fn query_endpoint(
   // If aggregate query, use execute_aggregate
   if let Some(ref agg_data) = body.aggregate {
     let agg_query = AggregateQuery {
-        count: agg_data.count,
-        sum: agg_data.sum.clone(),
-        avg: agg_data.avg.clone(),
-        min: agg_data.min.clone(),
-        max: agg_data.max.clone(),
-        group_by: agg_data.group_by.clone(),
+      count: agg_data.count,
+      sum: agg_data.sum.clone(),
+      avg: agg_data.avg.clone(),
+      min: agg_data.min.clone(),
+      max: agg_data.max.clone(),
+      group_by: agg_data.group_by.clone(),
     };
 
     let query = Query {
@@ -2078,8 +1954,7 @@ pub async fn query_endpoint(
         return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
       }
       Err(e) => {
-        return ErrorResponse::new(format!("Aggregation failed: {}", e))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+        return ErrorResponse::new(format!("Aggregation failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
       }
     }
   }
@@ -2102,7 +1977,8 @@ pub async fn query_endpoint(
   let query_engine = QueryEngine::new(&state.engine);
   match query_engine.execute_paginated(&query) {
     Ok(paginated) => {
-      let response_items: Vec<serde_json::Value> = paginated.results
+      let response_items: Vec<serde_json::Value> = paginated
+        .results
         .iter()
         // Filter /.aeordb-system/ paths from query results — system data is invisible
         // through the API for all users, including root.
@@ -2126,11 +2002,7 @@ pub async fn query_endpoint(
           let mut items = response_items;
           items.retain(|item| {
             let path = item["path"].as_str().unwrap_or("");
-            let normalized = if path.starts_with('/') {
-              path.to_string()
-            } else {
-              format!("/{}", path)
-            };
+            let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
             match match_rules(&rules.0, &normalized) {
               Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
               None => false,
@@ -2150,9 +2022,7 @@ pub async fn query_endpoint(
       // Root short-circuits; share keys are handled by the key_rules branch
       // above.
       if !claims.sub.starts_with("share:") {
-        filter_results_by_direct_read(
-          &mut response_items, &claims.sub, &state.engine, &state.group_cache,
-        );
+        filter_results_by_direct_read(&mut response_items, &claims.sub, &state.engine, &state.group_cache);
       }
 
       let mut response = serde_json::json!({
@@ -2176,14 +2046,12 @@ pub async fn query_endpoint(
 
       // Add reindex meta if a reindex is active for the query path
       let meta = state.task_queue.as_ref().and_then(|queue| {
-        queue.get_reindex_progress_for_path(&body.path).map(|info| {
-          QueryMeta {
-            reindexing: Some(info.progress),
-            reindexing_eta: info.eta_ms,
-            reindexing_indexed: Some(info.indexed_count),
-            reindexing_total: Some(info.total_count),
-            reindexing_stale_since: info.stale_since,
-          }
+        queue.get_reindex_progress_for_path(&body.path).map(|info| QueryMeta {
+          reindexing: Some(info.progress),
+          reindexing_eta: info.eta_ms,
+          reindexing_indexed: Some(info.indexed_count),
+          reindexing_total: Some(info.total_count),
+          reindexing_stale_since: info.stale_since,
         })
       });
       if let Some(ref meta) = meta {
@@ -2200,29 +2068,16 @@ pub async fn query_endpoint(
 
       (StatusCode::OK, Json(response)).into_response()
     }
-    Err(EngineError::NotFound(message)) => {
-      ErrorResponse::new(message)
-        .with_status(StatusCode::NOT_FOUND)
-        .into_response()
-    }
-    Err(EngineError::JsonParseError(message)) => {
-      ErrorResponse::new(message)
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response()
-    }
+    Err(EngineError::NotFound(message)) => ErrorResponse::new(message).with_status(StatusCode::NOT_FOUND).into_response(),
+    Err(EngineError::JsonParseError(message)) => ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response(),
     Err(EngineError::RangeQueryNotSupported(converter_name)) => {
-      ErrorResponse::new(format!(
-        "Range query not supported for converter '{}'",
-        converter_name,
-      ))
+      ErrorResponse::new(format!("Range query not supported for converter '{}'", converter_name,))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response()
     }
     Err(error) => {
       tracing::error!("Query execution failed: {}", error);
-      ErrorResponse::new(format!("Query failed: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Query failed: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -2234,7 +2089,7 @@ pub async fn query_endpoint(
 /// Request body for POST /engine-rename/{*path}.
 #[derive(Deserialize)]
 pub struct RenameRequest {
-    pub to: Option<String>,
+  pub to: Option<String>,
 }
 
 /// POST /engine-rename/{*path} -- rename (move) a file or symlink.
@@ -2274,10 +2129,8 @@ pub async fn engine_patch(
   headers: HeaderMap,
   body: Body,
 ) -> Response {
-  let content_type = headers
-    .get("content-type")
-    .and_then(|v| v.to_str().ok())
-    .map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
+  let content_type =
+    headers.get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
 
   if content_type.as_deref() == Some("application/merge-patch+json") {
     return do_merge_patch(state, claims, path, merge_q, body).await;
@@ -2292,12 +2145,10 @@ async fn do_merge_patch(
   merge_q: MergePatchQuery,
   body: Body,
 ) -> Response {
-  use crate::server::json_merge_patch::{apply_merge_patch, MergeDepth};
+  use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 
   if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let depth = match merge_q.depth {
@@ -2311,10 +2162,7 @@ async fn do_merge_patch(
   let body_bytes = match axum::body::to_bytes(body, MAX_MERGE_PATCH_BYTES).await {
     Ok(b) => b,
     Err(_) => {
-      return ErrorResponse::new(format!(
-        "Patch body exceeds {} bytes or could not be read",
-        MAX_MERGE_PATCH_BYTES
-      ))
+      return ErrorResponse::new(format!("Patch body exceeds {} bytes or could not be read", MAX_MERGE_PATCH_BYTES))
         .with_status(StatusCode::PAYLOAD_TOO_LARGE)
         .into_response();
     }
@@ -2343,35 +2191,28 @@ async fn do_merge_patch(
         if bytes.len() > MAX_MERGE_PATCH_BYTES {
           return Err(EngineError::InvalidInput(format!(
             "stored file at {} is {} bytes, exceeds {} byte merge cap",
-            path_for_blocking, bytes.len(), MAX_MERGE_PATCH_BYTES
+            path_for_blocking,
+            bytes.len(),
+            MAX_MERGE_PATCH_BYTES
           )));
         }
         if bytes.is_empty() {
           (serde_json::Value::Object(serde_json::Map::new()), true)
         } else {
           let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| EngineError::InvalidInput(format!(
-              "stored file at {} is not valid JSON: {}", path_for_blocking, e
-            )))?;
+            .map_err(|e| EngineError::InvalidInput(format!("stored file at {} is not valid JSON: {}", path_for_blocking, e)))?;
           (parsed, true)
         }
       }
-      Err(EngineError::NotFound(_)) => {
-        (serde_json::Value::Object(serde_json::Map::new()), false)
-      }
+      Err(EngineError::NotFound(_)) => (serde_json::Value::Object(serde_json::Map::new()), false),
       Err(e) => return Err(e),
     };
 
     apply_merge_patch(&mut target, patch_value, depth);
 
-    let serialized = serde_json::to_vec(&target)
-      .map_err(|e| EngineError::InvalidInput(format!("merged document failed to serialize: {}", e)))?;
-    let record = ops.store_file_buffered(
-      &ctx,
-      &path_for_blocking,
-      &serialized,
-      Some("application/json"),
-    )?;
+    let serialized =
+      serde_json::to_vec(&target).map_err(|e| EngineError::InvalidInput(format!("merged document failed to serialize: {}", e)))?;
+    let record = ops.store_file_buffered(&ctx, &path_for_blocking, &serialized, Some("application/json"))?;
     Ok((record, existed))
   })
   .await;
@@ -2395,9 +2236,7 @@ async fn do_merge_patch(
     }
     Err(join_error) => {
       tracing::error!("merge-patch task panicked: {}", join_error);
-      return ErrorResponse::new("Merge-patch failed: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new("Merge-patch failed: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -2428,9 +2267,7 @@ async fn do_rename(
   let body_bytes = match axum::body::to_bytes(body, 64 * 1024).await {
     Ok(b) => b,
     Err(_) => {
-      return ErrorResponse::new("Rename request body too large or unreadable")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
+      return ErrorResponse::new("Rename request body too large or unreadable").with_status(StatusCode::BAD_REQUEST).into_response();
     }
   };
   let payload: RenameRequest = match serde_json::from_slice(&body_bytes) {
@@ -2454,9 +2291,7 @@ async fn do_rename(
   // Block ALL access to /.aeordb-system/ via API — system data is only accessible
   // through the internal system_store module, never through HTTP endpoints.
   if is_system_path(&path) || is_system_path(destination) {
-    return ErrorResponse::new(format!("Not found: {}", path))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -2482,11 +2317,14 @@ async fn do_rename(
       evict_caches_for_path(&state, destination);
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
       let to_normalized = crate::engine::path_utils::normalize_path(destination);
-      (StatusCode::OK, Json(serde_json::json!({
-        "from": from_normalized,
-        "to": to_normalized,
-        "entry_type": kind,
-      })))
+      (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "from": from_normalized,
+          "to": to_normalized,
+          "entry_type": kind,
+        })),
+      )
         .into_response()
     }
     Ok(Err(error)) => {
@@ -2495,9 +2333,7 @@ async fn do_rename(
     }
     Err(join_error) => {
       tracing::error!("rename task panicked: {}", join_error);
-      ErrorResponse::new("Rename failed: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new("Rename failed: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }
@@ -2507,33 +2343,27 @@ async fn do_rename(
 // ---------------------------------------------------------------------------
 
 /// POST /system/repair — trigger a KV index rebuild from the append log.
-pub async fn repair_kv(
-    State(state): State<AppState>,
-    Extension(claims): Extension<TokenClaims>,
-) -> Response {
-    let caller_id = match uuid::Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => return ErrorResponse::new("Invalid token")
-            .with_status(StatusCode::UNAUTHORIZED).into_response(),
-    };
+pub async fn repair_kv(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
+  let caller_id = match uuid::Uuid::parse_str(&claims.sub) {
+    Ok(id) => id,
+    Err(_) => return ErrorResponse::new("Invalid token").with_status(StatusCode::UNAUTHORIZED).into_response(),
+  };
 
-    if !crate::engine::user::is_root(&caller_id) {
-        return ErrorResponse::new("Root access required for repair operations")
-            .with_status(StatusCode::FORBIDDEN).into_response();
-    }
+  if !crate::engine::user::is_root(&caller_id) {
+    return ErrorResponse::new("Root access required for repair operations").with_status(StatusCode::FORBIDDEN).into_response();
+  }
 
-    match state.engine.rebuild_kv() {
-        Ok(()) => {
-            (StatusCode::OK, Json(serde_json::json!({
-                "status": "ok",
-                "message": "KV index rebuilt successfully",
-            }))).into_response()
-        }
-        Err(e) => {
-            ErrorResponse::new(format!("Repair failed: {}", e))
-                .with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
-        }
-    }
+  match state.engine.rebuild_kv() {
+    Ok(()) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+          "status": "ok",
+          "message": "KV index rebuilt successfully",
+      })),
+    )
+      .into_response(),
+    Err(e) => ErrorResponse::new(format!("Repair failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2561,9 +2391,7 @@ pub async fn copy_files(
   let dest_normalized = crate::engine::path_utils::normalize_path(&payload.destination);
 
   if is_system_path(&dest_normalized) {
-    return ErrorResponse::new("Not found")
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
+    return ErrorResponse::new("Not found").with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   // User/group permission check: /files/copy is exempt from path-aware
@@ -2571,16 +2399,12 @@ pub async fn copy_files(
   // file to any location. Required: Read on each source AND Create on
   // the destination directory.
   if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot copy files")
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
+    return ErrorResponse::new("Share keys cannot copy files").with_status(StatusCode::FORBIDDEN).into_response();
   }
   let user_id = match Uuid::parse_str(&claims.sub) {
     Ok(id) => id,
     Err(_) => {
-      return ErrorResponse::new("Invalid user identity")
-        .with_status(StatusCode::FORBIDDEN)
-        .into_response();
+      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
     }
   };
   if !is_root(&user_id) {
@@ -2590,25 +2414,15 @@ pub async fn copy_files(
     // by a 403 on an unauthorized destination.
     for raw_path in &payload.paths {
       let normalized = crate::engine::path_utils::normalize_path(raw_path);
-      let read_allowed = resolver
-        .check_path_permission(&user_id, &normalized, CrudlifyOp::Read)
-        .unwrap_or(false)
-        || resolver
-          .check_path_permission(&user_id, &normalized, CrudlifyOp::List)
-          .unwrap_or(false);
+      let read_allowed = resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::Read).unwrap_or(false)
+        || resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::List).unwrap_or(false);
       if !read_allowed {
-        return ErrorResponse::new(format!("Not found: {}", raw_path))
-          .with_status(StatusCode::NOT_FOUND)
-          .into_response();
+        return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }
-    let create_allowed = resolver
-      .check_path_permission(&user_id, &dest_normalized, CrudlifyOp::Create)
-      .unwrap_or(false);
+    let create_allowed = resolver.check_path_permission(&user_id, &dest_normalized, CrudlifyOp::Create).unwrap_or(false);
     if !create_allowed {
-      return ErrorResponse::new("Permission denied")
-        .with_status(StatusCode::FORBIDDEN)
-        .into_response();
+      return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
     }
   }
 
@@ -2625,8 +2439,7 @@ pub async fn copy_files(
     let mut errors: Vec<String> = Vec::new();
     for path in &paths {
       let from_normalized = crate::engine::path_utils::normalize_path(path);
-      let name = crate::engine::path_utils::file_name(&from_normalized)
-        .unwrap_or("").to_string();
+      let name = crate::engine::path_utils::file_name(&from_normalized).unwrap_or("").to_string();
       let to_path = format!("{}/{}", dest_for_blocking.trim_end_matches('/'), name);
       match ops.copy_path(&ctx, &from_normalized, &to_path) {
         Ok(paths) => copied.extend(paths),
@@ -2640,9 +2453,7 @@ pub async fn copy_files(
     Ok(pair) => pair,
     Err(join_error) => {
       tracing::error!("copy task panicked: {}", join_error);
-      return ErrorResponse::new("Copy failed: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      return ErrorResponse::new("Copy failed: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
@@ -2674,28 +2485,22 @@ pub async fn global_search_endpoint(
   Json(payload): Json<GlobalSearchRequest>,
 ) -> Response {
   if payload.query.is_none() && payload.where_clause.is_none() {
-    return ErrorResponse::new("At least one of 'query' or 'where' is required")
-      .with_status(StatusCode::BAD_REQUEST)
-      .into_response();
+    return ErrorResponse::new("At least one of 'query' or 'where' is required").with_status(StatusCode::BAD_REQUEST).into_response();
   }
 
   // Parse the where clause into a FieldQuery, if provided.
   let field_query = match payload.where_clause.as_ref() {
-    Some(value) => {
-      match parse_single_field_query(value) {
-        Ok(QueryNode::Field(fq)) => Some(fq),
-        Ok(_) => {
-          return ErrorResponse::new("'where' must be a single field query (field, op, value)")
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
-        }
-        Err(msg) => {
-          return ErrorResponse::new(msg)
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
-        }
+    Some(value) => match parse_single_field_query(value) {
+      Ok(QueryNode::Field(fq)) => Some(fq),
+      Ok(_) => {
+        return ErrorResponse::new("'where' must be a single field query (field, op, value)")
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response();
       }
-    }
+      Err(msg) => {
+        return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
+      }
+    },
     None => None,
   };
 
@@ -2703,35 +2508,30 @@ pub async fn global_search_endpoint(
   let limit = payload.limit.map(|l| l.min(1000));
   let offset = payload.offset;
 
-  match crate::engine::search::global_search(
-    &state.engine,
-    base_path,
-    payload.query.as_deref(),
-    field_query.as_ref(),
-    limit,
-    offset,
-  ) {
+  match crate::engine::search::global_search(&state.engine, base_path, payload.query.as_deref(), field_query.as_ref(), limit, offset) {
     Ok(results) => {
-      let mut items: Vec<serde_json::Value> = results.results.iter().map(|r| {
-        serde_json::json!({
-          "path": r.path,
-          "score": r.score,
-          "matched_by": r.matched_by,
-          "source": r.source_dir,
-          "size": r.size,
-          "content_type": r.content_type,
-          "created_at": r.created_at,
-          "updated_at": r.updated_at,
+      let mut items: Vec<serde_json::Value> = results
+        .results
+        .iter()
+        .map(|r| {
+          serde_json::json!({
+            "path": r.path,
+            "score": r.score,
+            "matched_by": r.matched_by,
+            "source": r.source_dir,
+            "size": r.size,
+            "content_type": r.content_type,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at,
+          })
         })
-      }).collect();
+        .collect();
 
       // Filter search results by user/group permissions. Search is exempt
       // from path-level middleware, so authorization happens here: a user
       // only sees files they have direct Read on (grants + inheritance).
       if !claims.sub.starts_with("share:") {
-        filter_results_by_direct_read(
-          &mut items, &claims.sub, &state.engine, &state.group_cache,
-        );
+        filter_results_by_direct_read(&mut items, &claims.sub, &state.engine, &state.group_cache);
       }
 
       let mut response = serde_json::json!({
@@ -2745,9 +2545,7 @@ pub async fn global_search_endpoint(
     }
     Err(error) => {
       tracing::error!("Global search failed: {}", error);
-      ErrorResponse::new(format!("Search failed: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+      ErrorResponse::new(format!("Search failed: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }
   }
 }

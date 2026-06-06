@@ -53,13 +53,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Then from the repo root:
 
 ```bash
-cargo build --release
+./scripts/install-local.sh
 ```
 
-The binary lands at `target/release/aeordb`. Smoke-test it:
+The binary is installed to `~/.local/bin/aeordb`. Smoke-test it:
 
 ```bash
-./target/release/aeordb start -D /tmp/example.aeordb
+aeordb start -D /tmp/example.aeordb
 ```
 
 That starts the HTTP server on `http://127.0.0.1:6830` with self-contained auth, prints a one-time root API key, and creates `/tmp/example.aeordb` if it doesn't exist. `Ctrl-C` to shut down.

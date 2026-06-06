@@ -55,19 +55,10 @@ fn test_walk_tree_collects_chunks() {
   // Each file with non-empty content should contribute at least one chunk
   for (path, (_, record)) in &tree.files {
     if record.total_size > 0 {
-      assert!(
-        !record.chunk_hashes.is_empty(),
-        "file {} with size {} should have chunks",
-        path,
-        record.total_size,
-      );
+      assert!(!record.chunk_hashes.is_empty(), "file {} with size {} should have chunks", path, record.total_size,);
       // Every chunk hash from a file record should be in tree.chunks
       for chunk in &record.chunk_hashes {
-        assert!(
-          tree.chunks.contains(chunk),
-          "chunk from {} should be in tree.chunks",
-          path,
-        );
+        assert!(tree.chunks.contains(chunk), "chunk from {} should be in tree.chunks", path,);
       }
     }
   }
@@ -106,10 +97,10 @@ fn test_walk_nested_directories() {
 fn test_walk_tree_with_nonexistent_root_hash() {
   let (engine, _temp) = create_temp_engine_for_tests();
   // A bogus hash that doesn't exist in the database
-  let bogus_hash = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+  let bogus_hash = vec![
+    0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ];
   let tree = walk_version_tree(&engine, &bogus_hash).unwrap();
 
   // Should return an empty tree since root was not found
@@ -152,7 +143,7 @@ fn tree_from_files(files: &[(&str, &[u8])]) -> aeordb::engine::tree_walker::Vers
   }
   let head = engine.head_hash().unwrap();
   // _temp must stay alive until walk completes
-  
+
   walk_version_tree(&engine, &head).unwrap()
 }
 
@@ -196,29 +187,19 @@ fn test_diff_modified_files() {
 #[test]
 fn test_diff_deleted_files() {
   // Base: two files, Target: only one file
-  let tree_a = tree_from_files(&[
-    ("/data/file1.txt", b"content"),
-    ("/data/file2.txt", b"content2"),
-  ]);
+  let tree_a = tree_from_files(&[("/data/file1.txt", b"content"), ("/data/file2.txt", b"content2")]);
   let tree_b = tree_from_files(&[("/data/file1.txt", b"content")]);
 
   let diff = diff_trees(&tree_a, &tree_b);
 
-  assert!(
-    diff.deleted.contains(&"/data/file2.txt".to_string()),
-    "file2.txt should be deleted, got: {:?}",
-    diff.deleted,
-  );
+  assert!(diff.deleted.contains(&"/data/file2.txt".to_string()), "file2.txt should be deleted, got: {:?}", diff.deleted,);
 }
 
 #[test]
 fn test_diff_new_chunks_only() {
   // Base: one file, Target: same file + a new file
   let tree_a = tree_from_files(&[("/data/file1.txt", b"shared content")]);
-  let tree_b = tree_from_files(&[
-    ("/data/file1.txt", b"shared content"),
-    ("/data/file2.txt", b"new unique content"),
-  ]);
+  let tree_b = tree_from_files(&[("/data/file1.txt", b"shared content"), ("/data/file2.txt", b"new unique content")]);
 
   let diff = diff_trees(&tree_a, &tree_b);
 
@@ -228,10 +209,7 @@ fn test_diff_new_chunks_only() {
   // Verify file1's chunks are not in new_chunks (same content = same chunk hashes)
   let (_, file1_record) = tree_a.files.get("/data/file1.txt").unwrap();
   for chunk in &file1_record.chunk_hashes {
-    assert!(
-      !diff.new_chunks.contains(chunk),
-      "file1 chunks should not be in new_chunks",
-    );
+    assert!(!diff.new_chunks.contains(chunk), "file1 chunks should not be in new_chunks",);
   }
 }
 
@@ -250,10 +228,7 @@ fn test_diff_no_changes() {
 fn test_diff_changed_directories() {
   // Base: one file in /data, Target: two files in /data
   let tree_a = tree_from_files(&[("/data/file1.txt", b"content")]);
-  let tree_b = tree_from_files(&[
-    ("/data/file1.txt", b"content"),
-    ("/data/file2.txt", b"content2"),
-  ]);
+  let tree_b = tree_from_files(&[("/data/file1.txt", b"content"), ("/data/file2.txt", b"content2")]);
 
   let diff = diff_trees(&tree_a, &tree_b);
 
@@ -268,17 +243,9 @@ fn test_diff_changed_directories() {
 #[test]
 fn test_diff_mixed_operations() {
   // Base: keep, modify, remove
-  let tree_base = tree_from_files(&[
-    ("/keep.txt", b"keep"),
-    ("/modify.txt", b"original"),
-    ("/remove.txt", b"going away"),
-  ]);
+  let tree_base = tree_from_files(&[("/keep.txt", b"keep"), ("/modify.txt", b"original"), ("/remove.txt", b"going away")]);
   // Target: keep (same), modify (changed), remove (gone), added (new)
-  let tree_target = tree_from_files(&[
-    ("/keep.txt", b"keep"),
-    ("/modify.txt", b"changed"),
-    ("/added.txt", b"new file"),
-  ]);
+  let tree_target = tree_from_files(&[("/keep.txt", b"keep"), ("/modify.txt", b"changed"), ("/added.txt", b"new file")]);
 
   let diff = diff_trees(&tree_base, &tree_target);
 
@@ -376,10 +343,7 @@ fn test_tree_diff_is_not_empty_with_added() {
   use aeordb::engine::FileRecord;
 
   let mut added = HashMap::new();
-  added.insert(
-    "/test.txt".to_string(),
-    (vec![1, 2, 3], FileRecord::new("test.txt".to_string(), None, 0, vec![])),
-  );
+  added.insert("/test.txt".to_string(), (vec![1, 2, 3], FileRecord::new("test.txt".to_string(), None, 0, vec![])));
 
   let diff = TreeDiff {
     added,

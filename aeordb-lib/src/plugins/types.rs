@@ -1,7 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 /// The kind of plugin deployed into the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,11 +35,15 @@ impl std::str::FromStr for PluginType {
 /// Lightweight metadata about a deployed plugin (excludes the WASM bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMetadata {
-  pub plugin_id: Uuid,
+  pub plugin_id: String,
   pub name: String,
   pub path: String,
   pub plugin_type: PluginType,
   pub created_at: DateTime<Utc>,
+  pub version: Option<String>,
+  pub author: Option<String>,
+  pub checksum: String,
+  pub updated_at: DateTime<Utc>,
 }
 
 /// Decision returned by a permission rule plugin.
@@ -71,8 +73,6 @@ pub fn serialize_for_ffi<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json:
 }
 
 /// Deserialize a value from JSON bytes received via FFI.
-pub fn deserialize_from_ffi<T: for<'de> Deserialize<'de>>(
-  bytes: &[u8],
-) -> Result<T, serde_json::Error> {
+pub fn deserialize_from_ffi<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, serde_json::Error> {
   serde_json::from_slice(bytes)
 }

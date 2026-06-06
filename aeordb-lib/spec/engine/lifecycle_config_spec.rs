@@ -4,8 +4,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::{
-  load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots,
-  LifecycleConfig, SnapshotRetention, RequestContext,
+  load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, LifecycleConfig, SnapshotRetention, RequestContext,
   SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_MANUAL,
 };
 
@@ -31,9 +30,7 @@ fn default_config_when_file_missing() {
 fn config_round_trip_through_disk() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
-  let written = LifecycleConfig {
-    snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 12 },
-  };
+  let written = LifecycleConfig { snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 12 } };
   save_lifecycle_config(&engine, &written).unwrap();
   let read_back = load_lifecycle_config(&engine);
   assert_eq!(read_back, written);
@@ -114,9 +111,7 @@ fn prune_respects_engine_internal_prefix() {
   // be touched here. Since we just created it (age 0), it wouldn't be eligible
   // for pruning anyway, but the result.skipped_engine_internal count proves
   // the check ran.
-  save_lifecycle_config(&engine, &LifecycleConfig {
-    snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 1 },
-  }).unwrap();
+  save_lifecycle_config(&engine, &LifecycleConfig { snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 1 } }).unwrap();
 
   let result = prune_expired_snapshots(&engine, &ctx).unwrap();
   assert_eq!(result.pruned_count, 0);
@@ -142,9 +137,7 @@ fn prune_targets_correct_type() {
   let manual_meta = HashMap::new();
   vm.create_snapshot(&ctx, "manual-snap", manual_meta).unwrap();
 
-  save_lifecycle_config(&engine, &LifecycleConfig {
-    snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 12 },
-  }).unwrap();
+  save_lifecycle_config(&engine, &LifecycleConfig { snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 12 } }).unwrap();
 
   let result = prune_expired_snapshots(&engine, &ctx).unwrap();
   assert_eq!(result.pruned_count, 0, "fresh snapshots shouldn't be pruned");

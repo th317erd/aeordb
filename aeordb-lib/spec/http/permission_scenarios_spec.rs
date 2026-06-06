@@ -17,9 +17,7 @@ use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsStat
 // ===========================================================================
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 struct TestHarness {
@@ -36,13 +34,7 @@ impl TestHarness {
     let (engine, temp_dir) = create_temp_engine_for_tests();
     let rate_limiter = Arc::new(RateLimiter::default_config());
     let root_jwt = root_bearer_token(&jwt_manager);
-    TestHarness {
-      jwt_manager,
-      engine,
-      rate_limiter,
-      root_jwt,
-      _temp_dir: temp_dir,
-    }
+    TestHarness { jwt_manager, engine, rate_limiter, root_jwt, _temp_dir: temp_dir }
   }
 
   fn app(&self) -> axum::Router {
@@ -78,12 +70,7 @@ impl TestHarness {
       .unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::CREATED,
-      "Failed to create user '{}'",
-      username,
-    );
+    assert_eq!(response.status(), StatusCode::CREATED, "Failed to create user '{}'", username,);
 
     let json = body_json(response.into_body()).await;
     let user_id = json["user_id"].as_str().unwrap().to_string();
@@ -103,12 +90,7 @@ impl TestHarness {
       .unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::CREATED,
-      "Failed to create API key for user '{}'",
-      user_id,
-    );
+    assert_eq!(response.status(), StatusCode::CREATED, "Failed to create API key for user '{}'", user_id,);
 
     let json = body_json(response.into_body()).await;
     json["api_key"].as_str().unwrap().to_string()
@@ -118,19 +100,11 @@ impl TestHarness {
   async fn get_jwt_for_user(&self, api_key: &str) -> String {
     let body = format!(r#"{{"api_key":"{}"}}"#, api_key);
 
-    let request = Request::builder()
-      .method("POST")
-      .uri("/auth/token")
-      .header("content-type", "application/json")
-      .body(Body::from(body))
-      .unwrap();
+    let request =
+      Request::builder().method("POST").uri("/auth/token").header("content-type", "application/json").body(Body::from(body)).unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::OK,
-      "Failed to exchange API key for JWT",
-    );
+    assert_eq!(response.status(), StatusCode::OK, "Failed to exchange API key for JWT",);
 
     let json = body_json(response.into_body()).await;
     let token = json["token"].as_str().unwrap().to_string();
@@ -165,22 +139,14 @@ impl TestHarness {
       .unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::CREATED,
-      "Failed to create group '{}'",
-      name,
-    );
+    assert_eq!(response.status(), StatusCode::CREATED, "Failed to create group '{}'", name,);
   }
 
   /// Set .permissions at a path using the root JWT via PUT /engine/{path}/.aeordb-permissions.
   async fn set_permissions(&self, path: &str, links: serde_json::Value) {
     let permissions_body = serde_json::json!({ "links": links });
-    let permissions_path = if path == "/" || path.ends_with('/') {
-      format!("{}.aeordb-permissions", path)
-    } else {
-      format!("{}/.aeordb-permissions", path)
-    };
+    let permissions_path =
+      if path == "/" || path.ends_with('/') { format!("{}.aeordb-permissions", path) } else { format!("{}/.aeordb-permissions", path) };
 
     let uri = format!("/files/{}", permissions_path.trim_start_matches('/'));
 
@@ -193,12 +159,7 @@ impl TestHarness {
       .unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::CREATED,
-      "Failed to set permissions at '{}'",
-      uri,
-    );
+    assert_eq!(response.status(), StatusCode::CREATED, "Failed to set permissions at '{}'", uri,);
   }
 
   /// Store a file as root. Returns the status code.
@@ -235,12 +196,7 @@ impl TestHarness {
   async fn user_read_file(&self, jwt: &str, path: &str) -> (StatusCode, Vec<u8>) {
     let uri = format!("/files/{}", path.trim_start_matches('/'));
 
-    let request = Request::builder()
-      .method("GET")
-      .uri(&uri)
-      .header("authorization", jwt)
-      .body(Body::empty())
-      .unwrap();
+    let request = Request::builder().method("GET").uri(&uri).header("authorization", jwt).body(Body::empty()).unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
     let status = response.status();
@@ -251,19 +207,10 @@ impl TestHarness {
   /// List a directory as a specific user. Returns status code.
   async fn user_list_directory(&self, jwt: &str, path: &str) -> StatusCode {
     // Ensure path ends with '/' for list operation.
-    let normalized_path = if path.ends_with('/') {
-      path.to_string()
-    } else {
-      format!("{}/", path)
-    };
+    let normalized_path = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
     let uri = format!("/files/{}", normalized_path.trim_start_matches('/'));
 
-    let request = Request::builder()
-      .method("GET")
-      .uri(&uri)
-      .header("authorization", jwt)
-      .body(Body::empty())
-      .unwrap();
+    let request = Request::builder().method("GET").uri(&uri).header("authorization", jwt).body(Body::empty()).unwrap();
 
     self.app().oneshot(request).await.unwrap().status()
   }
@@ -272,12 +219,7 @@ impl TestHarness {
   async fn user_delete_file(&self, jwt: &str, path: &str) -> StatusCode {
     let uri = format!("/files/{}", path.trim_start_matches('/'));
 
-    let request = Request::builder()
-      .method("DELETE")
-      .uri(&uri)
-      .header("authorization", jwt)
-      .body(Body::empty())
-      .unwrap();
+    let request = Request::builder().method("DELETE").uri(&uri).header("authorization", jwt).body(Body::empty()).unwrap();
 
     self.app().oneshot(request).await.unwrap().status()
   }
@@ -292,12 +234,7 @@ impl TestHarness {
       .unwrap();
 
     let response = self.app().oneshot(request).await.unwrap();
-    assert_eq!(
-      response.status(),
-      StatusCode::OK,
-      "Failed to deactivate user '{}'",
-      user_id,
-    );
+    assert_eq!(response.status(), StatusCode::OK, "Failed to deactivate user '{}'", user_id,);
   }
 
   /// Make a full user (create + API key + JWT). Returns (user_id, jwt).
@@ -361,9 +298,14 @@ async fn scenario_single_developer() {
 
   // Set root-level permissions: alice's auto-group gets full crudlify.
   let alice_group = format!("user:{}", alice_id);
-  harness.set_permissions("/", serde_json::json!([
-    { "group": alice_group, "allow": "crudlify", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/",
+      serde_json::json!([
+        { "group": alice_group, "allow": "crudlify", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // Alice stores a file.
   let status = harness.user_store_file(&alice_jwt, "project/readme.txt", b"Hello world").await;
@@ -405,21 +347,20 @@ async fn scenario_small_team() {
   // Groups:
   // "developers" = alice + bob, allow crudli.. (no configure/deploy)
   // "viewers" = everyone active, allow .r..l...
-  harness.create_group(
-    "developers", "crudli..", "........",
-    "user_id", "in", &format!("{},{}", alice_id, bob_id),
-  ).await;
+  harness.create_group("developers", "crudli..", "........", "user_id", "in", &format!("{},{}", alice_id, bob_id)).await;
 
-  harness.create_group(
-    "viewers", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("viewers", ".r..l...", "........", "is_active", "eq", "true").await;
 
   // Set project-level permissions.
-  harness.set_permissions("/project", serde_json::json!([
-    { "group": "developers", "allow": "crudli..", "deny": "........" },
-    { "group": "viewers", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/project",
+      serde_json::json!([
+        { "group": "developers", "allow": "crudli..", "deny": "........" },
+        { "group": "viewers", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // Alice (developer): creates a file.
   let status = harness.user_store_file(&alice_jwt, "project/design.md", b"Architecture").await;
@@ -483,53 +424,64 @@ async fn scenario_organization_secrets() {
   let (_employee_id, employee_jwt) = harness.make_user("employee").await;
 
   // Groups.
-  harness.create_group(
-    "employees", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("employees", ".r..l...", "........", "is_active", "eq", "true").await;
 
-  harness.create_group(
-    "engineers", "crudli..", "........",
-    "user_id", "in", &format!("{},{}", engineer_id, security_id),
-  ).await;
+  harness.create_group("engineers", "crudli..", "........", "user_id", "in", &format!("{},{}", engineer_id, security_id)).await;
 
-  harness.create_group(
-    "security_team", "crudlify", "........",
-    "user_id", "eq", &security_id,
-  ).await;
+  harness.create_group("security_team", "crudlify", "........", "user_id", "eq", &security_id).await;
 
   // Permissions hierarchy:
   // /org/ -> employees = read+list
-  harness.set_permissions("/org", serde_json::json!([
-    { "group": "employees", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/org",
+      serde_json::json!([
+        { "group": "employees", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // /org/engineering/ -> engineers = crudli, others denied
-  harness.set_permissions("/org/engineering", serde_json::json!([
-    {
-      "group": "engineers",
-      "allow": "crudli..",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/org/engineering",
+      serde_json::json!([
+        {
+          "group": "engineers",
+          "allow": "crudli..",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // /org/engineering/secrets/ -> security_team = full access, others_deny = everything
-  harness.set_permissions("/org/engineering/secrets", serde_json::json!([
-    {
-      "group": "security_team",
-      "allow": "crudlify",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/org/engineering/secrets",
+      serde_json::json!([
+        {
+          "group": "security_team",
+          "allow": "crudlify",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // /org/public/ -> employees = read+list
-  harness.set_permissions("/org/public", serde_json::json!([
-    { "group": "employees", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/org/public",
+      serde_json::json!([
+        { "group": "employees", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // Root seeds some files.
   harness.root_store_file("org/engineering/design.md", b"design notes").await;
@@ -572,42 +524,48 @@ async fn scenario_permission_inheritance() {
   let (owner_id, owner_jwt) = harness.make_user("owner").await;
 
   // Groups.
-  harness.create_group(
-    "everyone", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("everyone", ".r..l...", "........", "is_active", "eq", "true").await;
 
-  harness.create_group(
-    "writers", "crudl...", "........",
-    "user_id", "in", &format!("{},{}", writer_id, owner_id),
-  ).await;
+  harness.create_group("writers", "crudl...", "........", "user_id", "in", &format!("{},{}", writer_id, owner_id)).await;
 
-  harness.create_group(
-    "owner_group", "crudlify", "........",
-    "user_id", "eq", &owner_id,
-  ).await;
+  harness.create_group("owner_group", "crudlify", "........", "user_id", "eq", &owner_id).await;
 
   // / -> everyone allow .r..l...
-  harness.set_permissions("/", serde_json::json!([
-    { "group": "everyone", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/",
+      serde_json::json!([
+        { "group": "everyone", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // /docs/ -> writers allow crudl...
-  harness.set_permissions("/docs", serde_json::json!([
-    { "group": "writers", "allow": "crudl...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/docs",
+      serde_json::json!([
+        { "group": "writers", "allow": "crudl...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   // /docs/private/ -> owner_group allow crudlify, non-members denied
   // Using others_deny so only the owner group retains access.
-  harness.set_permissions("/docs/private", serde_json::json!([
-    {
-      "group": "owner_group",
-      "allow": "crudlify",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/docs/private",
+      serde_json::json!([
+        {
+          "group": "owner_group",
+          "allow": "crudlify",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // Root seeds files.
   harness.root_store_file("hello.txt", b"root file").await;
@@ -645,37 +603,41 @@ async fn scenario_multi_tenant() {
   let (tenant_b_user_id, tenant_b_jwt) = harness.make_user("tenant_b_user").await;
 
   // Groups.
-  harness.create_group(
-    "tenant_a_users", "crudlify", "........",
-    "user_id", "eq", &tenant_a_user_id,
-  ).await;
+  harness.create_group("tenant_a_users", "crudlify", "........", "user_id", "eq", &tenant_a_user_id).await;
 
-  harness.create_group(
-    "tenant_b_users", "crudlify", "........",
-    "user_id", "eq", &tenant_b_user_id,
-  ).await;
+  harness.create_group("tenant_b_users", "crudlify", "........", "user_id", "eq", &tenant_b_user_id).await;
 
   // /tenant_a/ -> tenant_a_users = full access, others_deny = everything.
-  harness.set_permissions("/tenant_a", serde_json::json!([
-    {
-      "group": "tenant_a_users",
-      "allow": "crudlify",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/tenant_a",
+      serde_json::json!([
+        {
+          "group": "tenant_a_users",
+          "allow": "crudlify",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // /tenant_b/ -> tenant_b_users = full access, others_deny = everything.
-  harness.set_permissions("/tenant_b", serde_json::json!([
-    {
-      "group": "tenant_b_users",
-      "allow": "crudlify",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/tenant_b",
+      serde_json::json!([
+        {
+          "group": "tenant_b_users",
+          "allow": "crudlify",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // Root seeds files.
   harness.root_store_file("tenant_a/data.json", b"tenant A data").await;
@@ -720,11 +682,7 @@ async fn scenario_security_nil_uuid_via_http() {
   // But the nil UUID validation is at the engine level (store_user).
   // We verify no user can have the nil UUID by checking the created user_id.
   let (user_id, _) = harness.create_user("attacker", None).await;
-  assert_ne!(
-    user_id,
-    "00000000-0000-0000-0000-000000000000",
-    "Created user_id must never be nil UUID",
-  );
+  assert_ne!(user_id, "00000000-0000-0000-0000-000000000000", "Created user_id must never be nil UUID",);
 }
 
 #[tokio::test]
@@ -746,11 +704,7 @@ async fn scenario_security_nil_uuid_api_key() {
 
   let response = harness.app().oneshot(request).await.unwrap();
   // The store_api_key call should reject nil UUID, returning 500 (engine error).
-  assert_ne!(
-    response.status(),
-    StatusCode::CREATED,
-    "Should NOT be able to create API key for nil UUID",
-  );
+  assert_ne!(response.status(), StatusCode::CREATED, "Should NOT be able to create API key for nil UUID",);
   assert!(
     response.status() == StatusCode::INTERNAL_SERVER_ERROR
       || response.status() == StatusCode::BAD_REQUEST
@@ -777,26 +731,13 @@ async fn scenario_security_non_root_admin_access() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "Non-root user should NOT access admin user creation",
-  );
+  assert_eq!(response.status(), StatusCode::FORBIDDEN, "Non-root user should NOT access admin user creation",);
 
   // Non-root user tries to list users -> 403.
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/users")
-    .header("authorization", &user_jwt)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/users").header("authorization", &user_jwt).body(Body::empty()).unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "Non-root user should NOT list users",
-  );
+  assert_eq!(response.status(), StatusCode::FORBIDDEN, "Non-root user should NOT list users",);
 
   // Non-root user tries to create a group -> 403.
   let request = Request::builder()
@@ -810,26 +751,13 @@ async fn scenario_security_non_root_admin_access() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "Non-root user should NOT create groups",
-  );
+  assert_eq!(response.status(), StatusCode::FORBIDDEN, "Non-root user should NOT create groups",);
 
   // Non-root user tries to list groups -> 403.
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups")
-    .header("authorization", &user_jwt)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/groups").header("authorization", &user_jwt).body(Body::empty()).unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "Non-root user should NOT list groups",
-  );
+  assert_eq!(response.status(), StatusCode::FORBIDDEN, "Non-root user should NOT list groups",);
 
   // Non-root user tries to create API keys -> 403.
   let request = Request::builder()
@@ -841,11 +769,7 @@ async fn scenario_security_non_root_admin_access() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::FORBIDDEN,
-    "Non-root user should NOT create API keys",
-  );
+  assert_eq!(response.status(), StatusCode::FORBIDDEN, "Non-root user should NOT create API keys",);
 }
 
 #[tokio::test]
@@ -862,15 +786,17 @@ async fn scenario_security_deactivated_user() {
   let deact_jwt = harness.get_jwt_for_user(&deact_api_key).await;
 
   // Create an is_active-based group.
-  harness.create_group(
-    "active_users", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("active_users", ".r..l...", "........", "is_active", "eq", "true").await;
 
   // Set permissions that rely on active_users group.
-  harness.set_permissions("/gated", serde_json::json!([
-    { "group": "active_users", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/gated",
+      serde_json::json!([
+        { "group": "active_users", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   harness.root_store_file("gated/secret.txt", b"gated data").await;
 
@@ -893,11 +819,7 @@ async fn scenario_security_deactivated_user() {
   // The group cache is fresh (new app), so it re-loads the user from engine,
   // sees is_active = false, and "active_users" group no longer matches.
   let (status, _) = harness.user_read_file(&deact_jwt, "gated/secret.txt").await;
-  assert_eq!(
-    status,
-    StatusCode::FORBIDDEN,
-    "Deactivated user should be denied from is_active-gated resources",
-  );
+  assert_eq!(status, StatusCode::FORBIDDEN, "Deactivated user should be denied from is_active-gated resources",);
 
   // Active user still has access.
   let (status, _) = harness.user_read_file(&active_jwt, "gated/secret.txt").await;
@@ -927,11 +849,7 @@ async fn scenario_security_unsafe_query_field_email() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::BAD_REQUEST,
-    "Group with email query_field should be rejected",
-  );
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Group with email query_field should be rejected",);
 }
 
 #[tokio::test]
@@ -957,11 +875,7 @@ async fn scenario_security_unsafe_query_field_username() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::BAD_REQUEST,
-    "Group with username query_field should be rejected",
-  );
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Group with username query_field should be rejected",);
 }
 
 #[tokio::test]
@@ -987,11 +901,7 @@ async fn scenario_security_safe_query_field_user_id() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::CREATED,
-    "Group with user_id query_field should succeed",
-  );
+  assert_eq!(response.status(), StatusCode::CREATED, "Group with user_id query_field should succeed",);
 }
 
 #[tokio::test]
@@ -1017,11 +927,7 @@ async fn scenario_security_safe_query_field_is_active() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::CREATED,
-    "Group with is_active query_field should succeed",
-  );
+  assert_eq!(response.status(), StatusCode::CREATED, "Group with is_active query_field should succeed",);
 }
 
 #[tokio::test]
@@ -1047,11 +953,7 @@ async fn scenario_security_safe_query_field_created_at() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::CREATED,
-    "Group with created_at query_field should succeed",
-  );
+  assert_eq!(response.status(), StatusCode::CREATED, "Group with created_at query_field should succeed",);
 }
 
 #[tokio::test]
@@ -1077,11 +979,7 @@ async fn scenario_security_unsafe_query_field_arbitrary() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::BAD_REQUEST,
-    "Group with arbitrary query_field should be rejected",
-  );
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Group with arbitrary query_field should be rejected",);
 }
 
 // ===========================================================================
@@ -1131,18 +1029,10 @@ async fn scenario_security_no_auth_token_on_engine_routes() {
   let harness = TestHarness::new();
 
   // No authorization header at all -> 401.
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/anything.txt")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/files/anything.txt").body(Body::empty()).unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::UNAUTHORIZED,
-    "No auth token should result in 401",
-  );
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "No auth token should result in 401",);
 }
 
 #[tokio::test]
@@ -1158,11 +1048,7 @@ async fn scenario_security_invalid_jwt_on_engine_routes() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::UNAUTHORIZED,
-    "Invalid JWT should result in 401",
-  );
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "Invalid JWT should result in 401",);
 }
 
 #[tokio::test]
@@ -1180,25 +1066,14 @@ async fn scenario_security_expired_jwt_on_engine_routes() {
     permissions: None,
     key_id: None,
   };
-  let token = harness
-    .jwt_manager
-    .create_token(&claims)
-    .expect("create token");
+  let token = harness.jwt_manager.create_token(&claims).expect("create token");
   let expired_jwt = format!("Bearer {}", token);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/files/anything.txt")
-    .header("authorization", &expired_jwt)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/files/anything.txt").header("authorization", &expired_jwt).body(Body::empty()).unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::UNAUTHORIZED,
-    "Expired JWT should result in 401",
-  );
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "Expired JWT should result in 401",);
 }
 
 #[tokio::test]
@@ -1206,20 +1081,22 @@ async fn scenario_security_root_bypasses_all_permissions() {
   let harness = TestHarness::new();
 
   // Set up a deny-everything permission at root level.
-  harness.create_group(
-    "nobody", "........", "........",
-    "is_active", "eq", "false",
-  ).await;
+  harness.create_group("nobody", "........", "........", "is_active", "eq", "false").await;
 
-  harness.set_permissions("/", serde_json::json!([
-    {
-      "group": "nobody",
-      "allow": "........",
-      "deny": "........",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/",
+      serde_json::json!([
+        {
+          "group": "nobody",
+          "allow": "........",
+          "deny": "........",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // Root stores, reads, and deletes despite the deny-all.
   let status = harness.root_store_file("lockdown/file.txt", b"data").await;
@@ -1240,31 +1117,26 @@ async fn scenario_security_deny_overrides_allow_at_same_level() {
 
   // Create two groups: one that allows, one that denies.
   // User is a member of both.
-  harness.create_group(
-    "allowgroup", "crudlify", "........",
-    "user_id", "eq", &user_id,
-  ).await;
+  harness.create_group("allowgroup", "crudlify", "........", "user_id", "eq", &user_id).await;
 
-  harness.create_group(
-    "denygroup", "........", "........",
-    "user_id", "eq", &user_id,
-  ).await;
+  harness.create_group("denygroup", "........", "........", "user_id", "eq", &user_id).await;
 
   // At the same level: allowgroup grants crudlify, denygroup denies crudlify.
-  harness.set_permissions("/conflict", serde_json::json!([
-    { "group": "allowgroup", "allow": "crudlify", "deny": "........" },
-    { "group": "denygroup", "allow": "........", "deny": "crudlify" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/conflict",
+      serde_json::json!([
+        { "group": "allowgroup", "allow": "crudlify", "deny": "........" },
+        { "group": "denygroup", "allow": "........", "deny": "crudlify" }
+      ]),
+    )
+    .await;
 
   harness.root_store_file("conflict/test.txt", b"data").await;
 
   // Deny should override allow at the same level.
   let (status, _) = harness.user_read_file(&user_jwt, "conflict/test.txt").await;
-  assert_eq!(
-    status,
-    StatusCode::FORBIDDEN,
-    "Deny should override allow at same level",
-  );
+  assert_eq!(status, StatusCode::FORBIDDEN, "Deny should override allow at same level",);
 }
 
 #[tokio::test]
@@ -1274,21 +1146,23 @@ async fn scenario_security_others_flags_apply_to_non_members() {
   let (member_id, member_jwt) = harness.make_user("member").await;
   let (_outsider_id, outsider_jwt) = harness.make_user("outsider").await;
 
-  harness.create_group(
-    "exclusive_club", "crudlify", "........",
-    "user_id", "eq", &member_id,
-  ).await;
+  harness.create_group("exclusive_club", "crudlify", "........", "user_id", "eq", &member_id).await;
 
   // Members get full access, non-members get read-only via others_allow.
-  harness.set_permissions("/clubhouse", serde_json::json!([
-    {
-      "group": "exclusive_club",
-      "allow": "crudlify",
-      "deny": "........",
-      "others_allow": ".r..l...",
-      "others_deny": "........"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/clubhouse",
+      serde_json::json!([
+        {
+          "group": "exclusive_club",
+          "allow": "crudlify",
+          "deny": "........",
+          "others_allow": ".r..l...",
+          "others_deny": "........"
+        }
+      ]),
+    )
+    .await;
 
   harness.root_store_file("clubhouse/welcome.txt", b"welcome").await;
 
@@ -1315,26 +1189,33 @@ async fn scenario_deeper_permission_overrides_shallower() {
   let (_user_id, user_jwt) = harness.make_user("layered_user").await;
 
   // "everyone" group.
-  harness.create_group(
-    "all_active", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("all_active", ".r..l...", "........", "is_active", "eq", "true").await;
 
   // Shallow: deny read at root.
-  harness.set_permissions("/", serde_json::json!([
-    {
-      "group": "all_active",
-      "allow": "........",
-      "deny": "crudlify",
-      "others_allow": "........",
-      "others_deny": "crudlify"
-    }
-  ])).await;
+  harness
+    .set_permissions(
+      "/",
+      serde_json::json!([
+        {
+          "group": "all_active",
+          "allow": "........",
+          "deny": "crudlify",
+          "others_allow": "........",
+          "others_deny": "crudlify"
+        }
+      ]),
+    )
+    .await;
 
   // Deeper: allow read at /open/.
-  harness.set_permissions("/open", serde_json::json!([
-    { "group": "all_active", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/open",
+      serde_json::json!([
+        { "group": "all_active", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   harness.root_store_file("open/public.txt", b"public data").await;
   harness.root_store_file("closed/private.txt", b"private data").await;
@@ -1353,10 +1234,7 @@ async fn scenario_security_update_group_to_unsafe_field_rejected() {
   let harness = TestHarness::new();
 
   // Create a safe group first.
-  harness.create_group(
-    "mutable_group", "crudlify", "........",
-    "user_id", "eq", "some-value",
-  ).await;
+  harness.create_group("mutable_group", "crudlify", "........", "user_id", "eq", "some-value").await;
 
   // Try to update its query_field to "email" -> rejected.
   let body = serde_json::json!({ "query_field": "email" });
@@ -1370,11 +1248,7 @@ async fn scenario_security_update_group_to_unsafe_field_rejected() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::BAD_REQUEST,
-    "Updating group to unsafe query_field should be rejected",
-  );
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Updating group to unsafe query_field should be rejected",);
 
   // Try to update to "username" -> rejected.
   let body = serde_json::json!({ "query_field": "username" });
@@ -1388,11 +1262,7 @@ async fn scenario_security_update_group_to_unsafe_field_rejected() {
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    StatusCode::BAD_REQUEST,
-    "Updating group to unsafe query_field 'username' should be rejected",
-  );
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Updating group to unsafe query_field 'username' should be rejected",);
 }
 
 #[tokio::test]
@@ -1407,27 +1277,21 @@ async fn scenario_security_non_root_jwt_with_random_uuid() {
 
   // No permissions set. Default deny.
   let (status, _) = harness.user_read_file(&auth, "phantom/data.txt").await;
-  assert_eq!(
-    status,
-    StatusCode::FORBIDDEN,
-    "Random UUID JWT should be denied by default",
-  );
+  assert_eq!(status, StatusCode::FORBIDDEN, "Random UUID JWT should be denied by default",);
 
   // Even with permissions for "all active users", this user doesn't exist
   // in system_store so group_cache returns empty groups.
-  harness.create_group(
-    "phantom_active", ".r..l...", "........",
-    "is_active", "eq", "true",
-  ).await;
+  harness.create_group("phantom_active", ".r..l...", "........", "is_active", "eq", "true").await;
 
-  harness.set_permissions("/phantom", serde_json::json!([
-    { "group": "phantom_active", "allow": ".r..l...", "deny": "........" }
-  ])).await;
+  harness
+    .set_permissions(
+      "/phantom",
+      serde_json::json!([
+        { "group": "phantom_active", "allow": ".r..l...", "deny": "........" }
+      ]),
+    )
+    .await;
 
   let (status, _) = harness.user_read_file(&auth, "phantom/data.txt").await;
-  assert_eq!(
-    status,
-    StatusCode::FORBIDDEN,
-    "Non-existent user should be denied even with active-user group",
-  );
+  assert_eq!(status, StatusCode::FORBIDDEN, "Non-existent user should be denied even with active-user group",);
 }

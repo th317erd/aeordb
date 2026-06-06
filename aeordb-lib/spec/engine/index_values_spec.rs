@@ -5,9 +5,7 @@
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_store::{FieldIndex, IndexManager};
-use aeordb::engine::query_engine::{
-    FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode,
-};
+use aeordb::engine::query_engine::{FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode};
 use aeordb::engine::scalar_converter::{StringConverter, TrigramConverter};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
@@ -17,89 +15,66 @@ use std::sync::Arc;
 
 fn create_test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
   let ctx = RequestContext::system();
-    let dir = tempfile::tempdir().unwrap();
-    let engine_path = dir.path().join("test.aeordb");
-    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    let ops = DirectoryOps::new(&engine);
-    ops.ensure_root_directory(&ctx).unwrap();
-    (Arc::new(engine), dir)
+  let dir = tempfile::tempdir().unwrap();
+  let engine_path = dir.path().join("test.aeordb");
+  let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+  let ops = DirectoryOps::new(&engine);
+  ops.ensure_root_directory(&ctx).unwrap();
+  (Arc::new(engine), dir)
 }
 
 fn load_plaintext_parser_wasm() -> Option<Vec<u8>> {
-    let release_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../target/wasm32-unknown-unknown/release/aeordb_parser_plaintext.wasm"
-    );
-    let debug_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../target/wasm32-unknown-unknown/debug/aeordb_parser_plaintext.wasm"
-    );
-    if let Ok(bytes) = std::fs::read(release_path) {
-        return Some(bytes);
-    }
-    if let Ok(bytes) = std::fs::read(debug_path) {
-        return Some(bytes);
-    }
-    None
+  let release_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/wasm32-unknown-unknown/release/aeordb_parser_plaintext.wasm");
+  let debug_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/wasm32-unknown-unknown/debug/aeordb_parser_plaintext.wasm");
+  if let Ok(bytes) = std::fs::read(release_path) {
+    return Some(bytes);
+  }
+  if let Ok(bytes) = std::fs::read(debug_path) {
+    return Some(bytes);
+  }
+  None
 }
 
 macro_rules! require_wasm_parser {
-    () => {
-        match load_plaintext_parser_wasm() {
-            Some(bytes) => bytes,
-            None => {
-                eprintln!(
-                    "SKIPPED: Plaintext parser WASM not built. Run:\n  \
+  () => {
+    match load_plaintext_parser_wasm() {
+      Some(bytes) => bytes,
+      None => {
+        eprintln!(
+          "SKIPPED: Plaintext parser WASM not built. Run:\n  \
                      cd aeordb-parsers/plaintext && cargo build --target wasm32-unknown-unknown --release"
-                );
-                return;
-            }
-        }
-    };
+        );
+        return;
+      }
+    }
+  };
 }
 
 fn deploy_plaintext_parser(engine: &Arc<StorageEngine>, wasm_bytes: Vec<u8>) -> PluginManager {
-    let pm = PluginManager::new(engine.clone());
-    pm.deploy_plugin(
-        "plaintext-parser",
-        "plaintext-parser",
-        PluginType::Wasm,
-        wasm_bytes,
-    )
-    .expect("deploy parser");
-    pm
+  let pm = PluginManager::new(engine.clone());
+  pm.deploy_plugin("plaintext-parser", "plaintext-parser", PluginType::Wasm, wasm_bytes).expect("deploy parser");
+  pm
 }
 
 // Convenience wrapper for backward compatibility
 #[allow(dead_code)]
 fn deploy_parser_auto(engine: &Arc<StorageEngine>) -> Option<PluginManager> {
-    let bytes = load_plaintext_parser_wasm()?;
-    Some(deploy_plaintext_parser(engine, bytes))
+  let bytes = load_plaintext_parser_wasm()?;
+  Some(deploy_plaintext_parser(engine, bytes))
 }
 
 /// Helper: set up engine + parser + config with trigram index on a field.
-fn setup_with_trigram_config(
-    field_name: &str,
-    source: &str,
-) -> Option<(Arc<StorageEngine>, tempfile::TempDir, PluginManager)> {
+fn setup_with_trigram_config(field_name: &str, source: &str) -> Option<(Arc<StorageEngine>, tempfile::TempDir, PluginManager)> {
   let ctx = RequestContext::system();
-    let (engine, temp) = create_test_engine();
-    let wasm_bytes = load_plaintext_parser_wasm()?;
-    let pm = deploy_plaintext_parser(&engine, wasm_bytes);
-    let ops = DirectoryOps::new(&engine);
+  let (engine, temp) = create_test_engine();
+  let wasm_bytes = load_plaintext_parser_wasm()?;
+  let pm = deploy_plaintext_parser(&engine, wasm_bytes);
+  let ops = DirectoryOps::new(&engine);
 
-    let config = format!(
-        r#"{{"parser":"plaintext-parser","indexes":[{{"name":"{}","source":{},"type":"trigram"}}]}}"#,
-        field_name, source
-    );
-    ops.store_file_buffered(&ctx,
-        "/docs/.aeordb-config/indexes.json",
-        config.as_bytes(),
-        Some("application/json"),
-    )
-    .expect("store config");
+  let config = format!(r#"{{"parser":"plaintext-parser","indexes":[{{"name":"{}","source":{},"type":"trigram"}}]}}"#, field_name, source);
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json")).expect("store config");
 
-    Some((engine, temp, pm))
+  Some((engine, temp, pm))
 }
 
 // ============================================================
@@ -109,23 +84,16 @@ fn setup_with_trigram_config(
 
 #[test]
 fn test_field_index_stores_value() {
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let value = b"Hello World";
-    let file_hash = vec![1, 2, 3, 4];
+  let value = b"Hello World";
+  let file_hash = vec![1, 2, 3, 4];
 
-    index.insert_expanded(value, file_hash.clone());
+  index.insert_expanded(value, file_hash.clone());
 
-    assert!(
-        index.values.contains_key(&file_hash),
-        "values map should contain the file hash after insert_expanded"
-    );
-    assert_eq!(
-        index.values.get(&file_hash).unwrap().as_slice(),
-        value,
-        "stored value should match the original value"
-    );
+  assert!(index.values.contains_key(&file_hash), "values map should contain the file hash after insert_expanded");
+  assert_eq!(index.values.get(&file_hash).unwrap().as_slice(), value, "stored value should match the original value");
 }
 
 // ============================================================
@@ -135,25 +103,21 @@ fn test_field_index_stores_value() {
 
 #[test]
 fn test_field_index_get_value() {
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let value = b"Test data for lookup";
-    let file_hash = vec![10, 20, 30, 40];
+  let value = b"Test data for lookup";
+  let file_hash = vec![10, 20, 30, 40];
 
-    index.insert_expanded(value, file_hash.clone());
+  index.insert_expanded(value, file_hash.clone());
 
-    let retrieved = index.get_value(&file_hash);
-    assert!(retrieved.is_some(), "get_value should return Some for existing hash");
-    assert_eq!(
-        retrieved.unwrap(),
-        value,
-        "get_value should return the original value bytes"
-    );
+  let retrieved = index.get_value(&file_hash);
+  assert!(retrieved.is_some(), "get_value should return Some for existing hash");
+  assert_eq!(retrieved.unwrap(), value, "get_value should return the original value bytes");
 
-    // Non-existent hash should return None
-    let missing = index.get_value(&[99, 99, 99, 99]);
-    assert!(missing.is_none(), "get_value should return None for non-existent hash");
+  // Non-existent hash should return None
+  let missing = index.get_value(&[99, 99, 99, 99]);
+  assert!(missing.is_none(), "get_value should return None for non-existent hash");
 }
 
 // ============================================================
@@ -163,26 +127,20 @@ fn test_field_index_get_value() {
 
 #[test]
 fn test_field_index_remove_clears_value() {
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let value = b"Data to be removed";
-    let file_hash = vec![5, 6, 7, 8];
+  let value = b"Data to be removed";
+  let file_hash = vec![5, 6, 7, 8];
 
-    index.insert_expanded(value, file_hash.clone());
-    assert!(index.values.contains_key(&file_hash), "precondition: value should exist");
+  index.insert_expanded(value, file_hash.clone());
+  assert!(index.values.contains_key(&file_hash), "precondition: value should exist");
 
-    index.remove(&file_hash);
+  index.remove(&file_hash);
 
-    assert!(
-        !index.values.contains_key(&file_hash),
-        "values map should not contain the file hash after remove"
-    );
-    assert!(
-        index.get_value(&file_hash).is_none(),
-        "get_value should return None after remove"
-    );
-    assert!(index.entries.is_empty(), "entries should be empty after remove");
+  assert!(!index.values.contains_key(&file_hash), "values map should not contain the file hash after remove");
+  assert!(index.get_value(&file_hash).is_none(), "get_value should return None after remove");
+  assert!(index.entries.is_empty(), "entries should be empty after remove");
 }
 
 // ============================================================
@@ -192,44 +150,39 @@ fn test_field_index_remove_clears_value() {
 
 #[test]
 fn test_field_index_serialize_deserialize_with_values() {
-    let hash_length = 32;
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let hash_length = 32;
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let value1 = b"First document content";
-    let file_hash1 = vec![0u8; hash_length];
+  let value1 = b"First document content";
+  let file_hash1 = vec![0u8; hash_length];
 
-    let value2 = b"Second document content";
-    let mut file_hash2 = vec![0u8; hash_length];
-    file_hash2[0] = 1;
+  let value2 = b"Second document content";
+  let mut file_hash2 = vec![0u8; hash_length];
+  file_hash2[0] = 1;
 
-    index.insert_expanded(value1, file_hash1.clone());
-    index.insert_expanded(value2, file_hash2.clone());
+  index.insert_expanded(value1, file_hash1.clone());
+  index.insert_expanded(value2, file_hash2.clone());
 
-    // Serialize
-    let serialized = index.serialize(hash_length);
+  // Serialize
+  let serialized = index.serialize(hash_length);
 
-    // Deserialize
-    let deserialized = FieldIndex::deserialize(&serialized, hash_length)
-        .expect("deserialization should succeed");
+  // Deserialize
+  let deserialized = FieldIndex::deserialize(&serialized, hash_length).expect("deserialization should succeed");
 
-    // Verify values survived round-trip
-    assert_eq!(deserialized.values.len(), 2, "should have 2 values after round-trip");
+  // Verify values survived round-trip
+  assert_eq!(deserialized.values.len(), 2, "should have 2 values after round-trip");
 
-    let v1 = deserialized.get_value(&file_hash1);
-    assert!(v1.is_some(), "value for hash1 should exist after round-trip");
-    assert_eq!(v1.unwrap(), value1, "value for hash1 should match");
+  let v1 = deserialized.get_value(&file_hash1);
+  assert!(v1.is_some(), "value for hash1 should exist after round-trip");
+  assert_eq!(v1.unwrap(), value1, "value for hash1 should match");
 
-    let v2 = deserialized.get_value(&file_hash2);
-    assert!(v2.is_some(), "value for hash2 should exist after round-trip");
-    assert_eq!(v2.unwrap(), value2, "value for hash2 should match");
+  let v2 = deserialized.get_value(&file_hash2);
+  assert!(v2.is_some(), "value for hash2 should exist after round-trip");
+  assert_eq!(v2.unwrap(), value2, "value for hash2 should match");
 
-    // Verify entries also survived
-    assert_eq!(
-        deserialized.entries.len(),
-        index.entries.len(),
-        "entry count should match after round-trip"
-    );
+  // Verify entries also survived
+  assert_eq!(deserialized.entries.len(), index.entries.len(), "entry count should match after round-trip");
 }
 
 // ============================================================
@@ -239,50 +192,43 @@ fn test_field_index_serialize_deserialize_with_values() {
 
 #[test]
 fn test_field_index_backward_compat_no_values() {
-    let hash_length = 32;
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let hash_length = 32;
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let value = b"Some data";
-    let file_hash = vec![0u8; hash_length];
-    index.insert_expanded(value, file_hash.clone());
+  let value = b"Some data";
+  let file_hash = vec![0u8; hash_length];
+  index.insert_expanded(value, file_hash.clone());
 
-    // Serialize the full format
-    let _full_serialized = index.serialize(hash_length);
+  // Serialize the full format
+  let _full_serialized = index.serialize(hash_length);
 
-    // Manually truncate to remove the values section (last part of serialized data).
-    // The values section starts after all entries. We need to find where it is.
-    // Strategy: serialize with no values to get the "old format" size.
-    let old_format_index = {
-        let converter2 = Box::new(TrigramConverter);
-        let mut idx = FieldIndex::new("content".to_string(), converter2);
-        // Insert same entries but then clear values to simulate old format
-        idx.insert_expanded(value, file_hash.clone());
-        let mut serialized = idx.serialize(hash_length);
-        // The values section is: 4 bytes (count) + entries.
-        // For 1 value with hash_length=32 and value="Some data" (9 bytes):
-        // 4 + 32 + 4 + 9 = 49 bytes at the end.
-        // Truncate to remove the values section entirely.
-        let values_section_size = 4 + hash_length + 4 + value.len();
-        serialized.truncate(serialized.len() - values_section_size);
-        serialized
-    };
+  // Manually truncate to remove the values section (last part of serialized data).
+  // The values section starts after all entries. We need to find where it is.
+  // Strategy: serialize with no values to get the "old format" size.
+  let old_format_index = {
+    let converter2 = Box::new(TrigramConverter);
+    let mut idx = FieldIndex::new("content".to_string(), converter2);
+    // Insert same entries but then clear values to simulate old format
+    idx.insert_expanded(value, file_hash.clone());
+    let mut serialized = idx.serialize(hash_length);
+    // The values section is: 4 bytes (count) + entries.
+    // For 1 value with hash_length=32 and value="Some data" (9 bytes):
+    // 4 + 32 + 4 + 9 = 49 bytes at the end.
+    // Truncate to remove the values section entirely.
+    let values_section_size = 4 + hash_length + 4 + value.len();
+    serialized.truncate(serialized.len() - values_section_size);
+    serialized
+  };
 
-    // Deserialize the truncated (old format) data
-    let deserialized = FieldIndex::deserialize(&old_format_index, hash_length)
-        .expect("old format deserialization should succeed");
+  // Deserialize the truncated (old format) data
+  let deserialized = FieldIndex::deserialize(&old_format_index, hash_length).expect("old format deserialization should succeed");
 
-    // Values map should be empty (no values section in old format)
-    assert!(
-        deserialized.values.is_empty(),
-        "old format should deserialize with empty values map"
-    );
+  // Values map should be empty (no values section in old format)
+  assert!(deserialized.values.is_empty(), "old format should deserialize with empty values map");
 
-    // But entries should still be there
-    assert!(
-        !deserialized.entries.is_empty(),
-        "entries should still be present in old format"
-    );
+  // But entries should still be there
+  assert!(!deserialized.entries.is_empty(), "entries should still be present in old format");
 }
 
 // ============================================================
@@ -293,50 +239,40 @@ fn test_field_index_backward_compat_no_values() {
 #[test]
 fn test_fuzzy_contains_with_parser() {
   let ctx = RequestContext::system();
-    let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
-        eprintln!("SKIPPED: WASM parser not available");
-        return;
-    };
-    let ops = DirectoryOps::new(&engine);
+  let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
+    eprintln!("SKIPPED: WASM parser not available");
+    return;
+  };
+  let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/greeting.txt",
-        b"Hello World this is a greeting document",
-        Some("text/plain"),
-        Some(&pm),
-    )
+  ops
+    .store_file_with_full_pipeline(&ctx, "/docs/greeting.txt", b"Hello World this is a greeting document", Some("text/plain"), Some(&pm))
     .expect("store text file");
 
-    let qe = QueryEngine::new(&engine);
+  let qe = QueryEngine::new(&engine);
 
-    let query = Query {
-        path: "/docs/".to_string(),
-        field_queries: vec![],
-        node: Some(QueryNode::Field(FieldQuery {
-            field_name: "text".to_string(),
-            operation: QueryOp::Contains("Hello".to_string()),
-        })),
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        after: None,
-        before: None,
-        include_total: false,
-        strategy: QueryStrategy::Full,
-        aggregate: None,
-        explain: ExplainMode::Off,
-    };
+  let query = Query {
+    path: "/docs/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery { field_name: "text".to_string(), operation: QueryOp::Contains("Hello".to_string()) })),
+    limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Off,
+  };
 
-    let results = qe.execute(&query).expect("contains query");
-    assert!(
-        !results.is_empty(),
-        "Contains('Hello') should find the text file via index values, got 0 results"
-    );
-    assert!(
-        results.iter().any(|r| r.file_record.path.contains("greeting.txt")),
-        "should find greeting.txt, got: {:?}",
-        results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
-    );
+  let results = qe.execute(&query).expect("contains query");
+  assert!(!results.is_empty(), "Contains('Hello') should find the text file via index values, got 0 results");
+  assert!(
+    results.iter().any(|r| r.file_record.path.contains("greeting.txt")),
+    "should find greeting.txt, got: {:?}",
+    results.iter().map(|r| &r.file_record.path).collect::<Vec<_>>()
+  );
 }
 
 // ============================================================
@@ -347,57 +283,40 @@ fn test_fuzzy_contains_with_parser() {
 #[test]
 fn test_fuzzy_similar_with_parser() {
   let ctx = RequestContext::system();
-    let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
-        eprintln!("SKIPPED: WASM parser not available");
-        return;
-    };
-    let ops = DirectoryOps::new(&engine);
+  let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
+    eprintln!("SKIPPED: WASM parser not available");
+    return;
+  };
+  let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/greeting.txt",
-        b"Hello World this is a greeting document",
-        Some("text/plain"),
-        Some(&pm),
-    )
+  ops
+    .store_file_with_full_pipeline(&ctx, "/docs/greeting.txt", b"Hello World this is a greeting document", Some("text/plain"), Some(&pm))
     .expect("store text file");
 
-    let qe = QueryEngine::new(&engine);
+  let qe = QueryEngine::new(&engine);
 
-    let query = Query {
-        path: "/docs/".to_string(),
-        field_queries: vec![],
-        node: Some(QueryNode::Field(FieldQuery {
-            field_name: "text".to_string(),
-            operation: QueryOp::Similar(
-                "Hello World this is a greeting document".to_string(),
-                0.3,
-            ),
-        })),
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        after: None,
-        before: None,
-        include_total: false,
-        strategy: QueryStrategy::Full,
-        aggregate: None,
-        explain: ExplainMode::Off,
-    };
+  let query = Query {
+    path: "/docs/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery {
+      field_name: "text".to_string(),
+      operation: QueryOp::Similar("Hello World this is a greeting document".to_string(), 0.3),
+    })),
+    limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Off,
+  };
 
-    let results = qe.execute(&query).expect("similar query");
-    assert!(
-        !results.is_empty(),
-        "Similar query should find the text file via index values, got 0 results"
-    );
-    assert!(
-        results[0].score > 0.0,
-        "score should be positive, got {}",
-        results[0].score
-    );
-    assert!(
-        results.iter().any(|r| r.file_record.path.contains("greeting.txt")),
-        "should find greeting.txt"
-    );
+  let results = qe.execute(&query).expect("similar query");
+  assert!(!results.is_empty(), "Similar query should find the text file via index values, got 0 results");
+  assert!(results[0].score > 0.0, "score should be positive, got {}", results[0].score);
+  assert!(results.iter().any(|r| r.file_record.path.contains("greeting.txt")), "should find greeting.txt");
 }
 
 // ============================================================
@@ -408,26 +327,17 @@ fn test_fuzzy_similar_with_parser() {
 #[test]
 fn test_no_parsed_cache_created() {
   let ctx = RequestContext::system();
-    let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
-        eprintln!("SKIPPED: WASM parser not available");
-        return;
-    };
-    let ops = DirectoryOps::new(&engine);
+  let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
+    eprintln!("SKIPPED: WASM parser not available");
+    return;
+  };
+  let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/hello.txt",
-        b"Hello World",
-        Some("text/plain"),
-        Some(&pm),
-    )
-    .expect("store text file");
+  ops.store_file_with_full_pipeline(&ctx, "/docs/hello.txt", b"Hello World", Some("text/plain"), Some(&pm)).expect("store text file");
 
-    // Verify .parsed/ cache was NOT created
-    let parsed = ops.read_file_buffered("/docs/.parsed/hello.txt.json");
-    assert!(
-        parsed.is_err(),
-        ".parsed/ cache should NOT exist — values are stored in the index now"
-    );
+  // Verify .parsed/ cache was NOT created
+  let parsed = ops.read_file_buffered("/docs/.parsed/hello.txt.json");
+  assert!(parsed.is_err(), ".parsed/ cache should NOT exist — values are stored in the index now");
 }
 
 // ============================================================
@@ -438,57 +348,38 @@ fn test_no_parsed_cache_created() {
 #[test]
 fn test_json_file_fuzzy_still_works() {
   let ctx = RequestContext::system();
-    let (engine, _temp) = create_test_engine();
-    let ops = DirectoryOps::new(&engine);
+  let (engine, _temp) = create_test_engine();
+  let ops = DirectoryOps::new(&engine);
 
-    // Config with trigram index but NO parser (expects JSON data)
-    let config = r#"{"indexes":[{"name":"name","type":"trigram"}]}"#;
-    ops.store_file_buffered(&ctx,
-        "/docs/.aeordb-config/indexes.json",
-        config.as_bytes(),
-        Some("application/json"),
-    )
-    .expect("store config");
+  // Config with trigram index but NO parser (expects JSON data)
+  let config = r#"{"indexes":[{"name":"name","type":"trigram"}]}"#;
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-config/indexes.json", config.as_bytes(), Some("application/json")).expect("store config");
 
-    // Store a JSON file — should index the name field directly
-    let json_data = r#"{"name":"Alexander Hamilton"}"#;
-    ops.store_file_with_indexing(&ctx,
-        "/docs/person.json",
-        json_data.as_bytes(),
-        Some("application/json"),
-    )
-    .expect("store json file");
+  // Store a JSON file — should index the name field directly
+  let json_data = r#"{"name":"Alexander Hamilton"}"#;
+  ops.store_file_with_indexing(&ctx, "/docs/person.json", json_data.as_bytes(), Some("application/json")).expect("store json file");
 
-    let qe = QueryEngine::new(&engine);
+  let qe = QueryEngine::new(&engine);
 
-    // Contains query should work — value is stored in index
-    let query = Query {
-        path: "/docs/".to_string(),
-        field_queries: vec![],
-        node: Some(QueryNode::Field(FieldQuery {
-            field_name: "name".to_string(),
-            operation: QueryOp::Contains("Alexander".to_string()),
-        })),
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        after: None,
-        before: None,
-        include_total: false,
-        strategy: QueryStrategy::Full,
-        aggregate: None,
-        explain: ExplainMode::Off,
-    };
+  // Contains query should work — value is stored in index
+  let query = Query {
+    path: "/docs/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery { field_name: "name".to_string(), operation: QueryOp::Contains("Alexander".to_string()) })),
+    limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Off,
+  };
 
-    let results = qe.execute(&query).expect("contains query on JSON");
-    assert!(
-        !results.is_empty(),
-        "Contains('Alexander') should work for native JSON via index values"
-    );
-    assert!(
-        results.iter().any(|r| r.file_record.path.contains("person.json")),
-        "should find person.json"
-    );
+  let results = qe.execute(&query).expect("contains query on JSON");
+  assert!(!results.is_empty(), "Contains('Alexander') should work for native JSON via index values");
+  assert!(results.iter().any(|r| r.file_record.path.contains("person.json")), "should find person.json");
 }
 
 // ============================================================
@@ -499,63 +390,42 @@ fn test_json_file_fuzzy_still_works() {
 #[test]
 fn test_multiple_files_values_independent() {
   let ctx = RequestContext::system();
-    let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
-        eprintln!("SKIPPED: WASM parser not available");
-        return;
-    };
-    let ops = DirectoryOps::new(&engine);
+  let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
+    eprintln!("SKIPPED: WASM parser not available");
+    return;
+  };
+  let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/alpha.txt",
-        b"Alpha content here for testing",
-        Some("text/plain"),
-        Some(&pm),
-    )
+  ops
+    .store_file_with_full_pipeline(&ctx, "/docs/alpha.txt", b"Alpha content here for testing", Some("text/plain"), Some(&pm))
     .expect("store alpha");
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/beta.txt",
-        b"Beta content here for testing",
-        Some("text/plain"),
-        Some(&pm),
-    )
+  ops
+    .store_file_with_full_pipeline(&ctx, "/docs/beta.txt", b"Beta content here for testing", Some("text/plain"), Some(&pm))
     .expect("store beta");
 
-    // Load the trigram index and verify both files have independent values
-    let index_manager = IndexManager::new(&engine);
-    let index = index_manager
-        .load_index_by_strategy("/docs/", "text", "trigram")
-        .expect("load index")
-        .expect("trigram index should exist");
+  // Load the trigram index and verify both files have independent values
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index_by_strategy("/docs/", "text", "trigram").expect("load index").expect("trigram index should exist");
 
-    assert!(
-        index.values.len() >= 2,
-        "should have at least 2 values in index, got {}",
-        index.values.len()
-    );
+  assert!(index.values.len() >= 2, "should have at least 2 values in index, got {}", index.values.len());
 
-    // Verify the values are different
-    let values: Vec<&Vec<u8>> = index.values.values().collect();
-    let has_alpha = values.iter().any(|v| {
-        let s = String::from_utf8_lossy(v);
-        s.contains("Alpha")
-    });
-    let has_beta = values.iter().any(|v| {
-        let s = String::from_utf8_lossy(v);
-        s.contains("Beta")
-    });
-    assert!(has_alpha, "should have Alpha value in index");
-    assert!(has_beta, "should have Beta value in index");
+  // Verify the values are different
+  let values: Vec<&Vec<u8>> = index.values.values().collect();
+  let has_alpha = values.iter().any(|v| {
+    let s = String::from_utf8_lossy(v);
+    s.contains("Alpha")
+  });
+  let has_beta = values.iter().any(|v| {
+    let s = String::from_utf8_lossy(v);
+    s.contains("Beta")
+  });
+  assert!(has_alpha, "should have Alpha value in index");
+  assert!(has_beta, "should have Beta value in index");
 
-    // Verify no .parsed/ cache was created
-    assert!(
-        ops.read_file_buffered("/docs/.parsed/alpha.txt.json").is_err(),
-        ".parsed/ should not exist for alpha"
-    );
-    assert!(
-        ops.read_file_buffered("/docs/.parsed/beta.txt.json").is_err(),
-        ".parsed/ should not exist for beta"
-    );
+  // Verify no .parsed/ cache was created
+  assert!(ops.read_file_buffered("/docs/.parsed/alpha.txt.json").is_err(), ".parsed/ should not exist for alpha");
+  assert!(ops.read_file_buffered("/docs/.parsed/beta.txt.json").is_err(), ".parsed/ should not exist for beta");
 }
 
 // ============================================================
@@ -566,46 +436,38 @@ fn test_multiple_files_values_independent() {
 #[test]
 fn test_contains_query_no_match_returns_empty() {
   let ctx = RequestContext::system();
-    let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
-        eprintln!("SKIPPED: WASM parser not available");
-        return;
-    };
-    let ops = DirectoryOps::new(&engine);
+  let Some((engine, _temp, pm)) = setup_with_trigram_config("text", r#"["text"]"#) else {
+    eprintln!("SKIPPED: WASM parser not available");
+    return;
+  };
+  let ops = DirectoryOps::new(&engine);
 
-    ops.store_file_with_full_pipeline(&ctx,
-        "/docs/greeting.txt",
-        b"Hello World this is a greeting document",
-        Some("text/plain"),
-        Some(&pm),
-    )
+  ops
+    .store_file_with_full_pipeline(&ctx, "/docs/greeting.txt", b"Hello World this is a greeting document", Some("text/plain"), Some(&pm))
     .expect("store text file");
 
-    let qe = QueryEngine::new(&engine);
+  let qe = QueryEngine::new(&engine);
 
-    let query = Query {
-        path: "/docs/".to_string(),
-        field_queries: vec![],
-        node: Some(QueryNode::Field(FieldQuery {
-            field_name: "text".to_string(),
-            operation: QueryOp::Contains("Nonexistent Phrase XYZ".to_string()),
-        })),
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        after: None,
-        before: None,
-        include_total: false,
-        strategy: QueryStrategy::Full,
-        aggregate: None,
-        explain: ExplainMode::Off,
-    };
+  let query = Query {
+    path: "/docs/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery {
+      field_name: "text".to_string(),
+      operation: QueryOp::Contains("Nonexistent Phrase XYZ".to_string()),
+    })),
+    limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Off,
+  };
 
-    let results = qe.execute(&query).expect("contains query");
-    assert!(
-        results.is_empty(),
-        "Contains for absent text should return empty, got {} results",
-        results.len()
-    );
+  let results = qe.execute(&query).expect("contains query");
+  assert!(results.is_empty(), "Contains for absent text should return empty, got {} results", results.len());
 }
 
 // ============================================================
@@ -615,26 +477,19 @@ fn test_contains_query_no_match_returns_empty() {
 
 #[test]
 fn test_field_index_value_overwritten_on_reinsert() {
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let file_hash = vec![1, 2, 3, 4];
+  let file_hash = vec![1, 2, 3, 4];
 
-    // Insert first value
-    index.insert_expanded(b"First version", file_hash.clone());
-    assert_eq!(
-        index.get_value(&file_hash).unwrap(),
-        b"First version",
-    );
+  // Insert first value
+  index.insert_expanded(b"First version", file_hash.clone());
+  assert_eq!(index.get_value(&file_hash).unwrap(), b"First version",);
 
-    // Remove and reinsert with new value (simulating file overwrite)
-    index.remove(&file_hash);
-    index.insert_expanded(b"Second version", file_hash.clone());
-    assert_eq!(
-        index.get_value(&file_hash).unwrap(),
-        b"Second version",
-        "value should be updated after remove + reinsert"
-    );
+  // Remove and reinsert with new value (simulating file overwrite)
+  index.remove(&file_hash);
+  index.insert_expanded(b"Second version", file_hash.clone());
+  assert_eq!(index.get_value(&file_hash).unwrap(), b"Second version", "value should be updated after remove + reinsert");
 }
 
 // ============================================================
@@ -644,20 +499,19 @@ fn test_field_index_value_overwritten_on_reinsert() {
 
 #[test]
 fn test_field_index_empty_value() {
-    let hash_length = 32;
-    let converter = Box::new(StringConverter::new(256));
-    let mut index = FieldIndex::new("field".to_string(), converter);
+  let hash_length = 32;
+  let converter = Box::new(StringConverter::new(256));
+  let mut index = FieldIndex::new("field".to_string(), converter);
 
-    let file_hash = vec![0u8; hash_length];
-    index.insert_expanded(b"", file_hash.clone());
+  let file_hash = vec![0u8; hash_length];
+  index.insert_expanded(b"", file_hash.clone());
 
-    assert_eq!(index.get_value(&file_hash).unwrap(), b"");
+  assert_eq!(index.get_value(&file_hash).unwrap(), b"");
 
-    // Round-trip
-    let serialized = index.serialize(hash_length);
-    let deserialized = FieldIndex::deserialize(&serialized, hash_length)
-        .expect("deserialization should succeed");
-    assert_eq!(deserialized.get_value(&file_hash).unwrap(), b"");
+  // Round-trip
+  let serialized = index.serialize(hash_length);
+  let deserialized = FieldIndex::deserialize(&serialized, hash_length).expect("deserialization should succeed");
+  assert_eq!(deserialized.get_value(&file_hash).unwrap(), b"");
 }
 
 // ============================================================
@@ -667,23 +521,18 @@ fn test_field_index_empty_value() {
 
 #[test]
 fn test_field_index_large_value_roundtrip() {
-    let hash_length = 32;
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let hash_length = 32;
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let large_value = vec![b'x'; 100_000]; // 100KB
-    let file_hash = vec![0u8; hash_length];
-    index.insert_expanded(&large_value, file_hash.clone());
+  let large_value = vec![b'x'; 100_000]; // 100KB
+  let file_hash = vec![0u8; hash_length];
+  index.insert_expanded(&large_value, file_hash.clone());
 
-    let serialized = index.serialize(hash_length);
-    let deserialized = FieldIndex::deserialize(&serialized, hash_length)
-        .expect("deserialization should succeed");
+  let serialized = index.serialize(hash_length);
+  let deserialized = FieldIndex::deserialize(&serialized, hash_length).expect("deserialization should succeed");
 
-    assert_eq!(
-        deserialized.get_value(&file_hash).unwrap(),
-        large_value.as_slice(),
-        "large value should survive round-trip"
-    );
+  assert_eq!(deserialized.get_value(&file_hash).unwrap(), large_value.as_slice(), "large value should survive round-trip");
 }
 
 // ============================================================
@@ -693,18 +542,18 @@ fn test_field_index_large_value_roundtrip() {
 
 #[test]
 fn test_remove_nonexistent_hash_is_noop() {
-    let converter = Box::new(TrigramConverter);
-    let mut index = FieldIndex::new("content".to_string(), converter);
+  let converter = Box::new(TrigramConverter);
+  let mut index = FieldIndex::new("content".to_string(), converter);
 
-    let file_hash = vec![1, 2, 3, 4];
-    index.insert_expanded(b"Some data", file_hash.clone());
+  let file_hash = vec![1, 2, 3, 4];
+  index.insert_expanded(b"Some data", file_hash.clone());
 
-    let entry_count_before = index.entries.len();
-    let values_count_before = index.values.len();
+  let entry_count_before = index.entries.len();
+  let values_count_before = index.values.len();
 
-    // Remove a hash that doesn't exist
-    index.remove(&[99, 99, 99, 99]);
+  // Remove a hash that doesn't exist
+  index.remove(&[99, 99, 99, 99]);
 
-    assert_eq!(index.entries.len(), entry_count_before);
-    assert_eq!(index.values.len(), values_count_before);
+  assert_eq!(index.entries.len(), entry_count_before);
+  assert_eq!(index.values.len(), values_count_before);
 }

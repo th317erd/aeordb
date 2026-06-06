@@ -13,7 +13,9 @@ pub fn normalize_path(path: &str) -> String {
   for segment in trimmed.split('/').filter(|s| !s.is_empty()) {
     match segment {
       "." => {} // skip current-dir references
-      ".." => { segments.pop(); } // go up one level (silently ignored at root)
+      ".." => {
+        segments.pop();
+      } // go up one level (silently ignored at root)
       s => segments.push(s),
     }
   }

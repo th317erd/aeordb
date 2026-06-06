@@ -368,35 +368,24 @@ fn test_indexes_persist_across_restart() {
 
     // Store index config
     let config = PathIndexConfig {
-      indexes: vec![
-        IndexFieldConfig {
-          name: "age".to_string(),
-          index_type: "u32".to_string(),
-          source: None,
-          min: Some(0.0),
-          max: Some(200.0),
-        },
-      ],
+      indexes: vec![IndexFieldConfig {
+        name: "age".to_string(),
+        index_type: "u32".to_string(),
+        source: None,
+        min: Some(0.0),
+        max: Some(200.0),
+      }],
       parser: None,
       parser_memory_limit: None,
       logging: false,
       glob: None,
-
     };
     let config_data = config.serialize();
     ops.store_file_buffered(&ctx, "/people/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
     // Store files with indexing
-    ops.store_file_with_indexing(&ctx,
-      "/people/alice.json",
-      b"{\"age\": 30}",
-      Some("application/json"),
-    ).unwrap();
-    ops.store_file_with_indexing(&ctx,
-      "/people/bob.json",
-      b"{\"age\": 25}",
-      Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, "/people/alice.json", b"{\"age\": 30}", Some("application/json")).unwrap();
+    ops.store_file_with_indexing(&ctx, "/people/bob.json", b"{\"age\": 25}", Some("application/json")).unwrap();
   }
 
   // Session 2: verify indexes exist
@@ -419,29 +408,16 @@ fn test_index_values_persist_across_restart() {
 
     // Store index config with trigram
     let config = PathIndexConfig {
-      indexes: vec![
-        IndexFieldConfig {
-          name: "name".to_string(),
-          index_type: "trigram".to_string(),
-          source: None,
-          min: None,
-          max: None,
-        },
-      ],
+      indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
       parser: None,
       parser_memory_limit: None,
       logging: false,
       glob: None,
-
     };
     let config_data = config.serialize();
     ops.store_file_buffered(&ctx, "/contacts/.aeordb-config/indexes.json", &config_data, Some("application/json")).unwrap();
 
-    ops.store_file_with_indexing(&ctx,
-      "/contacts/john.json",
-      b"{\"name\": \"Jonathan Smith\"}",
-      Some("application/json"),
-    ).unwrap();
+    ops.store_file_with_indexing(&ctx, "/contacts/john.json", b"{\"name\": \"Jonathan Smith\"}", Some("application/json")).unwrap();
   }
 
   // Session 2: index should be loadable with values
@@ -470,12 +446,7 @@ fn test_compressed_files_readable_after_restart() {
   {
     let engine = create_engine(&dir);
     let ops = DirectoryOps::new(&engine);
-    ops.store_file_compressed(&ctx,
-      "/compressed.txt",
-      large_content.as_bytes(),
-      Some("text/plain"),
-      CompressionAlgorithm::Zstd,
-    ).unwrap();
+    ops.store_file_compressed(&ctx, "/compressed.txt", large_content.as_bytes(), Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
   }
 
   // Session 2: read should return decompressed content
@@ -637,12 +608,9 @@ fn test_complex_scenario_across_restart() {
 
     // Store compressed file
     let big_data = "repeated data ".repeat(200);
-    ops.store_file_compressed(&ctx,
-      "/project/large.bin",
-      big_data.as_bytes(),
-      Some("application/octet-stream"),
-      CompressionAlgorithm::Zstd,
-    ).unwrap();
+    ops
+      .store_file_compressed(&ctx, "/project/large.bin", big_data.as_bytes(), Some("application/octet-stream"), CompressionAlgorithm::Zstd)
+      .unwrap();
 
     // Create a user
 

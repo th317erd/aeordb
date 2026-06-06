@@ -74,11 +74,9 @@ pub fn load_config(path: &str) -> Result<AeorConfig, String> {
     return Err(format!("Config file not found: {path}"));
   }
 
-  let contents = std::fs::read_to_string(file_path)
-    .map_err(|error| format!("Failed to read config file '{path}': {error}"))?;
+  let contents = std::fs::read_to_string(file_path).map_err(|error| format!("Failed to read config file '{path}': {error}"))?;
 
-  let config: AeorConfig = toml::from_str(&contents)
-    .map_err(|error| format!("Failed to parse config file '{path}': {error}"))?;
+  let config: AeorConfig = toml::from_str(&contents).map_err(|error| format!("Failed to parse config file '{path}': {error}"))?;
 
   Ok(config)
 }

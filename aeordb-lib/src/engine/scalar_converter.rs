@@ -61,34 +61,23 @@ pub fn serialize_converter(converter: &dyn ScalarConverter) -> Vec<u8> {
 /// Deserialize a converter from bytes.
 pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverter>> {
   if data.is_empty() {
-    return Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: "Converter data is empty".to_string(),
-    });
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "Converter data is empty".to_string() });
   }
 
   let type_tag = data[0];
   let payload = &data[1..];
 
   match type_tag {
-    CONVERTER_TYPE_HASH => {
-      Ok(Box::new(HashConverter))
-    }
+    CONVERTER_TYPE_HASH => Ok(Box::new(HashConverter)),
     CONVERTER_TYPE_U8 => {
       if payload.len() < 2 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "U8Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "U8Converter data too short".to_string() });
       }
       Ok(Box::new(U8Converter::with_range(payload[0], payload[1])))
     }
     CONVERTER_TYPE_U16 => {
       if payload.len() < 4 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "U16Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "U16Converter data too short".to_string() });
       }
       let min = u16::from_le_bytes([payload[0], payload[1]]);
       let max = u16::from_le_bytes([payload[2], payload[3]]);
@@ -96,10 +85,7 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
     }
     CONVERTER_TYPE_U32 => {
       if payload.len() < 8 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "U32Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "U32Converter data too short".to_string() });
       }
       let min = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
       let max = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -107,10 +93,7 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
     }
     CONVERTER_TYPE_U64 => {
       if payload.len() < 16 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "U64Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "U64Converter data too short".to_string() });
       }
       let min = u64::from_le_bytes(payload[0..8].try_into().unwrap());
       let max = u64::from_le_bytes(payload[8..16].try_into().unwrap());
@@ -118,10 +101,7 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
     }
     CONVERTER_TYPE_I64 => {
       if payload.len() < 16 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "I64Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "I64Converter data too short".to_string() });
       }
       let min = i64::from_le_bytes(payload[0..8].try_into().unwrap());
       let max = i64::from_le_bytes(payload[8..16].try_into().unwrap());
@@ -129,10 +109,7 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
     }
     CONVERTER_TYPE_F64 => {
       if payload.len() < 16 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "F64Converter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "F64Converter data too short".to_string() });
       }
       let min = f64::from_le_bytes(payload[0..8].try_into().unwrap());
       let max = f64::from_le_bytes(payload[8..16].try_into().unwrap());
@@ -140,54 +117,33 @@ pub fn deserialize_converter(data: &[u8]) -> EngineResult<Box<dyn ScalarConverte
     }
     CONVERTER_TYPE_STRING => {
       if payload.len() < 4 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "StringConverter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "StringConverter data too short".to_string() });
       }
       let max_length = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
       Ok(Box::new(StringConverter::new(max_length)))
     }
     CONVERTER_TYPE_TIMESTAMP => {
       if payload.len() < 16 {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "TimestampConverter data too short".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "TimestampConverter data too short".to_string() });
       }
       let min = i64::from_le_bytes(payload[0..8].try_into().unwrap());
       let max = i64::from_le_bytes(payload[8..16].try_into().unwrap());
       Ok(Box::new(TimestampConverter::with_range(min, max)))
     }
-    CONVERTER_TYPE_TRIGRAM => {
-      Ok(Box::new(TrigramConverter))
-    }
+    CONVERTER_TYPE_TRIGRAM => Ok(Box::new(TrigramConverter)),
     CONVERTER_TYPE_PHONETIC => {
       if payload.is_empty() {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: "Phonetic converter missing algorithm byte".to_string(),
-        });
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "Phonetic converter missing algorithm byte".to_string() });
       }
       let algo = match payload[0] {
         0 => PhoneticAlgorithm::Soundex,
         1 => PhoneticAlgorithm::DoubleMetaphonePrimary,
         2 => PhoneticAlgorithm::DoubleMetaphoneAlt,
-        other => {
-          return Err(EngineError::CorruptEntry {
-            offset: 0,
-            reason: format!("Unknown phonetic algorithm: {}", other),
-          })
-        }
+        other => return Err(EngineError::CorruptEntry { offset: 0, reason: format!("Unknown phonetic algorithm: {}", other) }),
       };
       Ok(Box::new(PhoneticConverter::new(algo)))
     }
-    unknown => {
-      Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("Unknown converter type tag: 0x{:02X}", unknown),
-      })
-    }
+    unknown => Err(EngineError::CorruptEntry { offset: 0, reason: format!("Unknown converter type tag: 0x{:02X}", unknown) }),
   }
 }
 
@@ -695,10 +651,7 @@ impl Default for TimestampConverter {
 impl TimestampConverter {
   pub fn new() -> Self {
     // Default range: Unix epoch (0) to ~year 2100 (4102444800000ms)
-    Self {
-      min: 0,
-      max: 4_102_444_800_000,
-    }
+    Self { min: 0, max: 4_102_444_800_000 }
   }
 
   pub fn with_range(min: i64, max: i64) -> Self {
@@ -921,30 +874,38 @@ impl ScalarConverter for PhoneticConverter {
 
     // Tokenize on whitespace — produce a phonetic code for EACH word.
     // "John Smith" → ["J500", "S530"] (Soundex) or ["JN", "SM0"] (DM)
-    let words: Vec<&str> = text.split_whitespace()
-      .filter(|w| w.chars().any(|c| c.is_alphabetic()))
-      .collect();
+    let words: Vec<&str> = text.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
 
     let mut codes = Vec::new();
     for word in &words {
       let word_codes = match self.algorithm {
         PhoneticAlgorithm::Soundex => {
           let code = crate::engine::phonetic::soundex(word);
-          if code.is_empty() { vec![] } else { vec![code] }
+          if code.is_empty() {
+            vec![]
+          } else {
+            vec![code]
+          }
         }
         PhoneticAlgorithm::DoubleMetaphonePrimary => {
           let code = crate::engine::phonetic::dmetaphone_primary(word);
-          if code.is_empty() { vec![] } else { vec![code] }
-        }
-        PhoneticAlgorithm::DoubleMetaphoneAlt => {
-          match crate::engine::phonetic::dmetaphone_alt(word) {
-            Some(code) => vec![code],
-            None => {
-              let code = crate::engine::phonetic::dmetaphone_primary(word);
-              if code.is_empty() { vec![] } else { vec![code] }
-            }
+          if code.is_empty() {
+            vec![]
+          } else {
+            vec![code]
           }
         }
+        PhoneticAlgorithm::DoubleMetaphoneAlt => match crate::engine::phonetic::dmetaphone_alt(word) {
+          Some(code) => vec![code],
+          None => {
+            let code = crate::engine::phonetic::dmetaphone_primary(word);
+            if code.is_empty() {
+              vec![]
+            } else {
+              vec![code]
+            }
+          }
+        },
       };
       for code in word_codes {
         codes.push(code.into_bytes());

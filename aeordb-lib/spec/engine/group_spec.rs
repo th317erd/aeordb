@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use aeordb::engine::{
-  RequestContext,
-  Group, StorageEngine, User, SAFE_QUERY_FIELDS,
-};
+use aeordb::engine::{RequestContext, Group, StorageEngine, User, SAFE_QUERY_FIELDS};
 use aeordb::engine::system_store;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -17,8 +14,7 @@ fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
 
 #[test]
 fn test_create_group() {
-  let group = Group::new("engineers", "crudli..", "........", "is_active", "eq", "true")
-    .expect("should create group");
+  let group = Group::new("engineers", "crudli..", "........", "is_active", "eq", "true").expect("should create group");
   assert_eq!(group.name, "engineers");
   assert_eq!(group.default_allow, "crudli..");
   assert_eq!(group.default_deny, "........");
@@ -52,8 +48,7 @@ fn test_create_group_rejects_arbitrary_field() {
 
 #[test]
 fn test_group_serialize_deserialize() {
-  let group = Group::new("roundtrip", "crudlify", "........", "is_active", "eq", "true")
-    .expect("create group");
+  let group = Group::new("roundtrip", "crudlify", "........", "is_active", "eq", "true").expect("create group");
   let serialized = group.serialize();
   let deserialized = Group::deserialize(&serialized).expect("should deserialize");
 
@@ -80,15 +75,7 @@ fn test_group_deserialize_invalid_data() {
 #[test]
 fn test_evaluate_membership_eq() {
   let user = User::new("testuser", None);
-  let group = Group::new(
-    "specific_user",
-    "crudlify",
-    "........",
-    "user_id",
-    "eq",
-    &user.user_id.to_string(),
-  )
-  .unwrap();
+  let group = Group::new("specific_user", "crudlify", "........", "user_id", "eq", &user.user_id.to_string()).unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -96,15 +83,7 @@ fn test_evaluate_membership_eq() {
 #[test]
 fn test_evaluate_membership_neq() {
   let user = User::new("testuser", None);
-  let group = Group::new(
-    "not_this_user",
-    "crudlify",
-    "........",
-    "user_id",
-    "neq",
-    "00000000-0000-0000-0000-000000000099",
-  )
-  .unwrap();
+  let group = Group::new("not_this_user", "crudlify", "........", "user_id", "neq", "00000000-0000-0000-0000-000000000099").unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -136,15 +115,7 @@ fn test_evaluate_membership_lt() {
   let mut user = User::new("lttest", None);
   user.created_at = 1000;
 
-  let group = Group::new(
-    "early_users",
-    "crudlify",
-    "........",
-    "created_at",
-    "lt",
-    "2000",
-  )
-  .unwrap();
+  let group = Group::new("early_users", "crudlify", "........", "created_at", "lt", "2000").unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -154,15 +125,7 @@ fn test_evaluate_membership_gt() {
   let mut user = User::new("gttest", None);
   user.created_at = 3000;
 
-  let group = Group::new(
-    "late_users",
-    "crudlify",
-    "........",
-    "created_at",
-    "gt",
-    "2000",
-  )
-  .unwrap();
+  let group = Group::new("late_users", "crudlify", "........", "created_at", "gt", "2000").unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -170,15 +133,7 @@ fn test_evaluate_membership_gt() {
 #[test]
 fn test_evaluate_membership_no_match() {
   let user = User::new("nomatch", None);
-  let group = Group::new(
-    "exclusive",
-    "crudlify",
-    "........",
-    "user_id",
-    "eq",
-    "00000000-0000-0000-0000-000000000099",
-  )
-  .unwrap();
+  let group = Group::new("exclusive", "crudlify", "........", "user_id", "eq", "00000000-0000-0000-0000-000000000099").unwrap();
 
   assert!(!group.evaluate_membership(&user));
 }
@@ -206,8 +161,7 @@ fn test_evaluate_membership_is_active_eq() {
   let user = User::new("active_test", None);
   assert!(user.is_active);
 
-  let group = Group::new("active_users", "crudlify", "........", "is_active", "eq", "true")
-    .unwrap();
+  let group = Group::new("active_users", "crudlify", "........", "is_active", "eq", "true").unwrap();
   assert!(group.evaluate_membership(&user));
 
   let mut inactive_user = User::new("inactive", None);
@@ -220,15 +174,7 @@ fn test_evaluate_membership_contains() {
   let user = User::new("containstest", None);
   let partial_id = &user.user_id.to_string()[..8];
 
-  let group = Group::new(
-    "contains_group",
-    "crudlify",
-    "........",
-    "user_id",
-    "contains",
-    partial_id,
-  )
-  .unwrap();
+  let group = Group::new("contains_group", "crudlify", "........", "user_id", "contains", partial_id).unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -238,15 +184,7 @@ fn test_evaluate_membership_starts_with() {
   let user = User::new("swtest", None);
   let prefix = &user.user_id.to_string()[..8];
 
-  let group = Group::new(
-    "sw_group",
-    "crudlify",
-    "........",
-    "user_id",
-    "starts_with",
-    prefix,
-  )
-  .unwrap();
+  let group = Group::new("sw_group", "crudlify", "........", "user_id", "starts_with", prefix).unwrap();
 
   assert!(group.evaluate_membership(&user));
 }
@@ -255,11 +193,7 @@ fn test_evaluate_membership_starts_with() {
 fn test_safe_query_fields_enforced() {
   // All safe fields should be accepted.
   for field in SAFE_QUERY_FIELDS {
-    assert!(
-      Group::new("test", "crudlify", "........", field, "eq", "v").is_ok(),
-      "field '{}' should be safe",
-      field
-    );
+    assert!(Group::new("test", "crudlify", "........", field, "eq", "v").is_ok(), "field '{}' should be safe", field);
   }
 
   // Mutable fields should be rejected.
@@ -277,13 +211,10 @@ fn test_store_and_get_group() {
   let ctx = RequestContext::system();
   let (engine, _temp_dir) = setup();
 
-  let group = Group::new("engineers", "crudli..", "........", "is_active", "eq", "true")
-    .expect("create group");
+  let group = Group::new("engineers", "crudli..", "........", "is_active", "eq", "true").expect("create group");
   system_store::store_group(&engine, &ctx, &group).expect("store group");
 
-  let retrieved = system_store::get_group(&engine,"engineers")
-    .expect("get group")
-    .expect("group should exist");
+  let retrieved = system_store::get_group(&engine, "engineers").expect("get group").expect("group should exist");
 
   assert_eq!(retrieved.name, "engineers");
   assert_eq!(retrieved.query_field, "is_active");
@@ -335,9 +266,7 @@ fn test_update_group() {
   group.updated_at = chrono::Utc::now().timestamp_millis();
   system_store::update_group(&engine, &ctx, &group).expect("update group");
 
-  let retrieved = system_store::get_group(&engine,"mutable")
-    .unwrap()
-    .expect("group should exist");
+  let retrieved = system_store::get_group(&engine, "mutable").unwrap().expect("group should exist");
   assert_eq!(retrieved.default_allow, ".r..l...");
 }
 
@@ -390,15 +319,7 @@ fn test_group_with_empty_name() {
 #[test]
 fn test_group_in_operator_no_match() {
   let user = User::new("notinlist", None);
-  let group = Group::new(
-    "in_nomatch",
-    "crudlify",
-    "........",
-    "user_id",
-    "in",
-    "aaa,bbb,ccc",
-  )
-  .unwrap();
+  let group = Group::new("in_nomatch", "crudlify", "........", "user_id", "in", "aaa,bbb,ccc").unwrap();
 
   assert!(!group.evaluate_membership(&user));
 }

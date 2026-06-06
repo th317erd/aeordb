@@ -146,17 +146,11 @@ fn test_store_symlink_creates_parent_dirs() {
 
   // Root should contain "a"
   let root_children = ops.list_directory("/").unwrap();
-  assert!(
-    root_children.iter().any(|c| c.name == "a"),
-    "root should contain directory 'a'"
-  );
+  assert!(root_children.iter().any(|c| c.name == "a"), "root should contain directory 'a'");
 
   // /a should contain "b"
   let a_children = ops.list_directory("/a").unwrap();
-  assert!(
-    a_children.iter().any(|c| c.name == "b"),
-    "/a should contain directory 'b'"
-  );
+  assert!(a_children.iter().any(|c| c.name == "b"), "/a should contain directory 'b'");
 
   // /a/b should contain "link" with Symlink type
   let b_children = ops.list_directory("/a/b").unwrap();
@@ -212,10 +206,7 @@ fn test_delete_symlink_removes_from_parent() {
 
   // Should be gone from listing
   let children = ops.list_directory("/").unwrap();
-  assert!(
-    !children.iter().any(|c| c.name == "link.txt"),
-    "deleted symlink should not appear in directory listing"
-  );
+  assert!(!children.iter().any(|c| c.name == "link.txt"), "deleted symlink should not appear in directory listing");
 }
 
 // --- Path normalization ---
@@ -251,11 +242,7 @@ fn test_multiple_symlinks_in_same_directory() {
   ops.store_symlink(&ctx, "/link3", "/target3").unwrap();
 
   let children = ops.list_directory("/").unwrap();
-  let symlink_names: Vec<&str> = children
-    .iter()
-    .filter(|c| c.entry_type == EntryType::Symlink.to_u8())
-    .map(|c| c.name.as_str())
-    .collect();
+  let symlink_names: Vec<&str> = children.iter().filter(|c| c.entry_type == EntryType::Symlink.to_u8()).map(|c| c.name.as_str()).collect();
 
   assert!(symlink_names.contains(&"link1"));
   assert!(symlink_names.contains(&"link2"));

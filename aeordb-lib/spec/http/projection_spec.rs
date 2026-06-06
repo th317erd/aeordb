@@ -19,10 +19,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
   (app, jwt_manager, engine, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -47,10 +44,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
-  format!(
-    r#"{{"name":"{}","age":{},"email":"{}"}}"#,
-    name, age, email,
-  ).into_bytes()
+  format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
@@ -76,48 +70,31 @@ fn setup_users(engine: &StorageEngine) {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/myapp/users", &config);
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/alice.json",
-    &make_user_json("Alice", 30, "alice@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/alice.json", &make_user_json("Alice", 30, "alice@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/bob.json",
-    &make_user_json("Bob", 25, "bob@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/bob.json", &make_user_json("Bob", 25, "bob@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/charlie.json",
-    &make_user_json("Charlie", 40, "charlie@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(
+      &ctx,
+      "/myapp/users/charlie.json",
+      &make_user_json("Charlie", 40, "charlie@test.com"),
+      Some("application/json"),
+    )
+    .unwrap();
 }
 
-async fn query_with_select(
-  app: axum::Router,
-  auth: &str,
-  select: Option<serde_json::Value>,
-) -> serde_json::Value {
+async fn query_with_select(app: axum::Router, auth: &str, select: Option<serde_json::Value>) -> serde_json::Value {
   let mut body = serde_json::json!({
     "path": "/myapp/users",
     "where": [
@@ -152,11 +129,7 @@ async fn test_select_filters_response() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["path", "score"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["path", "score"]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
@@ -181,11 +154,7 @@ async fn test_select_virtual_fields() {
   let auth = bearer_token(&jwt_manager);
 
   // Use @-prefixed virtual field names
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["@path", "@score"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["@path", "@score"]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
@@ -232,11 +201,7 @@ async fn test_select_empty_array() {
   let auth = bearer_token(&jwt_manager);
 
   // Empty select -> no filtering (treated same as no select)
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!([])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!([]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
@@ -256,11 +221,7 @@ async fn test_select_preserves_envelope() {
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["path"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["path"]))).await;
 
   // Envelope fields are never stripped
   assert!(json.get("items").is_some(), "envelope 'items' should be present");
@@ -307,11 +268,7 @@ async fn test_select_unknown_field() {
   let auth = bearer_token(&jwt_manager);
 
   // Select a field that doesn't exist in results
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["nonexistent"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["nonexistent"]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
@@ -333,11 +290,7 @@ async fn test_select_size_virtual_field() {
   let auth = bearer_token(&jwt_manager);
 
   // @size maps to size
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["@size"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["@size"]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());
@@ -356,11 +309,7 @@ async fn test_select_mixed_virtual_and_regular() {
   let auth = bearer_token(&jwt_manager);
 
   // Mix virtual (@path) and regular (score) field names
-  let json = query_with_select(
-    app,
-    &auth,
-    Some(serde_json::json!(["@path", "score", "@content_type"])),
-  ).await;
+  let json = query_with_select(app, &auth, Some(serde_json::json!(["@path", "score", "@content_type"]))).await;
 
   let results = json["items"].as_array().unwrap();
   assert!(!results.is_empty());

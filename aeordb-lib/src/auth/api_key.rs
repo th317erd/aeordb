@@ -1,7 +1,4 @@
-use argon2::{
-  Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-  password_hash::SaltString,
-};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Utc};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -53,20 +50,13 @@ pub fn generate_api_key(key_id: Uuid) -> String {
 /// Parse an API key, extracting the key_id prefix and the full key string.
 /// Returns (key_id_prefix, full_key) on success.
 pub fn parse_api_key(key: &str) -> Result<(String, String), String> {
-  let without_prefix = key
-    .strip_prefix(API_KEY_PREFIX)
-    .ok_or_else(|| "API key missing aeor_k_ prefix".to_string())?;
+  let without_prefix = key.strip_prefix(API_KEY_PREFIX).ok_or_else(|| "API key missing aeor_k_ prefix".to_string())?;
 
-  let underscore_position = without_prefix
-    .find('_')
-    .ok_or_else(|| "API key missing key_id separator".to_string())?;
+  let underscore_position = without_prefix.find('_').ok_or_else(|| "API key missing key_id separator".to_string())?;
 
   let key_id_prefix = without_prefix[..underscore_position].to_string();
   if key_id_prefix.len() != 16 {
-    return Err(format!(
-      "key_id prefix must be 16 hex chars, got {}",
-      key_id_prefix.len()
-    ));
+    return Err(format!("key_id prefix must be 16 hex chars, got {}", key_id_prefix.len()));
   }
 
   Ok((key_id_prefix, key.to_string()))
@@ -97,10 +87,7 @@ pub fn verify_api_key(key: &str, hash: &str) -> Result<bool, argon2::password_ha
 /// Used by CLI tools (export/import) to authorize system data access.
 ///
 /// The root key is identified by `user_id == ROOT_USER_ID` (the nil UUID).
-pub fn validate_root_key(
-  engine: &crate::engine::StorageEngine,
-  key: &str,
-) -> Result<bool, String> {
+pub fn validate_root_key(engine: &crate::engine::StorageEngine, key: &str) -> Result<bool, String> {
   let (key_id_prefix, full_key) = parse_api_key(key)?;
 
   let record = crate::engine::system_store::get_api_key_by_prefix(engine, &key_id_prefix)

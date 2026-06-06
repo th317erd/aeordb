@@ -39,6 +39,7 @@ arc-swap = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
+semver = "1"
 
 # URL query-string parsing (for ?token= auth)
 form_urlencoded = "1"
@@ -201,6 +202,10 @@ name = "directory_ops_spec"
 path = "spec/engine/directory_ops_spec.rs"
 
 [[test]]
+name = "sdk_bulk_write_spec"
+path = "spec/engine/sdk_bulk_write_spec.rs"
+
+[[test]]
 name = "versioning_spec"
 path = "spec/engine/versioning_spec.rs"
 
@@ -319,6 +324,10 @@ path = "spec/engine/parser_integration_spec.rs"
 [[test]]
 name = "e2e_parser_spec"
 path = "spec/engine/e2e_parser_spec.rs"
+
+[[test]]
+name = "default_plugins_spec"
+path = "spec/engine/default_plugins_spec.rs"
 
 [[test]]
 name = "index_values_spec"

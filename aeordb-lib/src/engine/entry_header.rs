@@ -49,23 +49,13 @@ impl EntryHeader {
   /// corruption.
   pub const MAX_KEY_OR_VALUE_BYTES: u32 = 1 << 30;
 
-  pub fn compute_total_length(
-    hash_algo: HashAlgorithm,
-    key_length: usize,
-    value_length: usize,
-  ) -> EngineResult<u32> {
+  pub fn compute_total_length(hash_algo: HashAlgorithm, key_length: usize, value_length: usize) -> EngineResult<u32> {
     let max = Self::MAX_KEY_OR_VALUE_BYTES as usize;
     if key_length > max {
-      return Err(EngineError::InvalidInput(format!(
-        "key length {} exceeds maximum {} bytes",
-        key_length, max
-      )));
+      return Err(EngineError::InvalidInput(format!("key length {} exceeds maximum {} bytes", key_length, max)));
     }
     if value_length > max {
-      return Err(EngineError::InvalidInput(format!(
-        "value length {} exceeds maximum {} bytes",
-        value_length, max
-      )));
+      return Err(EngineError::InvalidInput(format!("value length {} exceeds maximum {} bytes", value_length, max)));
     }
     let header_size = Self::FIXED_HEADER_SIZE + hash_algo.hash_length();
     // header_size + key_length + value_length cannot overflow u32 because
@@ -73,12 +63,7 @@ impl EntryHeader {
     Ok((header_size as u32) + (key_length as u32) + (value_length as u32))
   }
 
-  pub fn compute_hash(
-    entry_type: EntryType,
-    key: &[u8],
-    value: &[u8],
-    algorithm: HashAlgorithm,
-  ) -> EngineResult<Vec<u8>> {
+  pub fn compute_hash(entry_type: EntryType, key: &[u8], value: &[u8], algorithm: HashAlgorithm) -> EngineResult<Vec<u8>> {
     let mut hash_input = Vec::with_capacity(1 + key.len() + value.len());
     hash_input.push(entry_type.to_u8());
     hash_input.extend_from_slice(key);
@@ -118,12 +103,7 @@ impl EntryHeader {
     let mut fixed_buffer = [0u8; Self::FIXED_HEADER_SIZE];
     reader.read_exact(&mut fixed_buffer)?;
 
-    let magic = u32::from_le_bytes([
-      fixed_buffer[0],
-      fixed_buffer[1],
-      fixed_buffer[2],
-      fixed_buffer[3],
-    ]);
+    let magic = u32::from_le_bytes([fixed_buffer[0], fixed_buffer[1], fixed_buffer[2], fixed_buffer[3]]);
     if magic != ENTRY_MAGIC {
       return Err(EngineError::InvalidMagic);
     }
@@ -134,30 +114,16 @@ impl EntryHeader {
     let flags = fixed_buffer[6];
 
     let hash_algo_raw = u16::from_le_bytes([fixed_buffer[7], fixed_buffer[8]]);
-    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw)
-      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
 
     let compression_algo_raw = fixed_buffer[9];
     let compression_algo = CompressionAlgorithm::from_u8(compression_algo_raw)
-      .ok_or(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("Invalid compression algorithm: 0x{:02X}", compression_algo_raw),
-      })?;
+      .ok_or(EngineError::CorruptEntry { offset: 0, reason: format!("Invalid compression algorithm: 0x{:02X}", compression_algo_raw) })?;
 
     let encryption_algo = fixed_buffer[10];
 
-    let key_length = u32::from_le_bytes([
-      fixed_buffer[11],
-      fixed_buffer[12],
-      fixed_buffer[13],
-      fixed_buffer[14],
-    ]);
-    let value_length = u32::from_le_bytes([
-      fixed_buffer[15],
-      fixed_buffer[16],
-      fixed_buffer[17],
-      fixed_buffer[18],
-    ]);
+    let key_length = u32::from_le_bytes([fixed_buffer[11], fixed_buffer[12], fixed_buffer[13], fixed_buffer[14]]);
+    let value_length = u32::from_le_bytes([fixed_buffer[15], fixed_buffer[16], fixed_buffer[17], fixed_buffer[18]]);
     let timestamp = i64::from_le_bytes([
       fixed_buffer[19],
       fixed_buffer[20],
@@ -168,12 +134,7 @@ impl EntryHeader {
       fixed_buffer[25],
       fixed_buffer[26],
     ]);
-    let total_length = u32::from_le_bytes([
-      fixed_buffer[27],
-      fixed_buffer[28],
-      fixed_buffer[29],
-      fixed_buffer[30],
-    ]);
+    let total_length = u32::from_le_bytes([fixed_buffer[27], fixed_buffer[28], fixed_buffer[29], fixed_buffer[30]]);
 
     let hash_length = hash_algo.hash_length();
     let mut hash = vec![0u8; hash_length];

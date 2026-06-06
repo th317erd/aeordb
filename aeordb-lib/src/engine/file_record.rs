@@ -13,22 +13,9 @@ pub struct FileRecord {
 }
 
 impl FileRecord {
-  pub fn new(
-    path: String,
-    content_type: Option<String>,
-    total_size: u64,
-    chunk_hashes: Vec<Vec<u8>>,
-  ) -> Self {
+  pub fn new(path: String, content_type: Option<String>, total_size: u64, chunk_hashes: Vec<Vec<u8>>) -> Self {
     let now = chrono::Utc::now().timestamp_millis();
-    Self {
-      path,
-      content_type,
-      total_size,
-      created_at: now,
-      updated_at: now,
-      metadata: Vec::new(),
-      chunk_hashes,
-    }
+    Self { path, content_type, total_size, created_at: now, updated_at: now, metadata: Vec::new(), chunk_hashes }
   }
 
   pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
@@ -36,31 +23,20 @@ impl FileRecord {
     let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
 
     if path_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len())));
     }
     if content_type_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len())));
     }
     if self.metadata.len() > u32::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Metadata too large: {} bytes exceeds u32 max", self.metadata.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Metadata too large: {} bytes exceeds u32 max", self.metadata.len())));
     }
     if self.chunk_hashes.len() > u32::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Too many chunk hashes: {} exceeds u32 max", self.chunk_hashes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Too many chunk hashes: {} exceeds u32 max", self.chunk_hashes.len())));
     }
 
-    let capacity = 2 + path_bytes.len()
-      + 2 + content_type_bytes.len()
-      + 8 + 8 + 8
-      + 4 + self.metadata.len()
-      + 4 + self.chunk_hashes.len() * hash_length;
+    let capacity =
+      2 + path_bytes.len() + 2 + content_type_bytes.len() + 8 + 8 + 8 + 4 + self.metadata.len() + 4 + self.chunk_hashes.len() * hash_length;
 
     let mut buffer = Vec::with_capacity(capacity);
 
@@ -99,11 +75,7 @@ impl FileRecord {
     let path = read_string(data, &mut offset, path_length)?;
 
     let content_type_length = read_u16(data, &mut offset)? as usize;
-    let content_type = if content_type_length == 0 {
-      None
-    } else {
-      Some(read_string(data, &mut offset, content_type_length)?)
-    };
+    let content_type = if content_type_length == 0 { None } else { Some(read_string(data, &mut offset, content_type_length)?) };
 
     let total_size = read_u64(data, &mut offset)?;
     let created_at = read_i64(data, &mut offset)?;
@@ -119,15 +91,6 @@ impl FileRecord {
       chunk_hashes.push(hash);
     }
 
-    Ok(Self {
-      path,
-      content_type,
-      total_size,
-      created_at,
-      updated_at,
-      metadata,
-      chunk_hashes,
-    })
+    Ok(Self { path, content_type, total_size, created_at, updated_at, metadata, chunk_hashes })
   }
 }
-

@@ -10,11 +10,7 @@ pub struct DeletionRecord {
 impl DeletionRecord {
   pub fn new(path: String, reason: Option<String>) -> Self {
     let now = chrono::Utc::now().timestamp_millis();
-    Self {
-      path,
-      deleted_at: now,
-      reason,
-    }
+    Self { path, deleted_at: now, reason }
   }
 
   pub fn serialize(&self) -> Vec<u8> {
@@ -54,17 +50,9 @@ impl DeletionRecord {
     let deleted_at = read_i64(data, &mut offset)?;
 
     let reason_length = read_u16(data, &mut offset)? as usize;
-    let reason = if reason_length == 0 {
-      None
-    } else {
-      Some(read_string(data, &mut offset, reason_length)?)
-    };
+    let reason = if reason_length == 0 { None } else { Some(read_string(data, &mut offset, reason_length)?) };
 
-    Ok(Self {
-      path,
-      deleted_at,
-      reason,
-    })
+    Ok(Self { path, deleted_at, reason })
   }
 }
 
@@ -98,8 +86,6 @@ fn read_bytes(data: &[u8], offset: &mut usize, length: usize) -> EngineResult<Ve
 
 fn read_string(data: &[u8], offset: &mut usize, length: usize) -> EngineResult<String> {
   let bytes = read_bytes(data, offset, length)?;
-  String::from_utf8(bytes).map_err(|error| EngineError::CorruptEntry {
-    offset: *offset as u64,
-    reason: format!("Invalid UTF-8 string: {}", error),
-  })
+  String::from_utf8(bytes)
+    .map_err(|error| EngineError::CorruptEntry { offset: *offset as u64, reason: format!("Invalid UTF-8 string: {}", error) })
 }

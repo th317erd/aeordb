@@ -609,10 +609,7 @@ fn merge_cors_cli_overrides_config() {
 #[test]
 fn merge_cors_from_config_joins_origins() {
   let cli_cors: Option<String> = None;
-  let config_origins: Option<Vec<String>> = Some(vec![
-    "https://a.com".to_string(),
-    "https://b.com".to_string(),
-  ]);
+  let config_origins: Option<Vec<String>> = Some(vec!["https://a.com".to_string(), "https://b.com".to_string()]);
 
   let merged = cli_cors.or_else(|| config_origins.map(|origins| origins.join(",")));
   assert_eq!(merged.as_deref(), Some("https://a.com,https://b.com"));

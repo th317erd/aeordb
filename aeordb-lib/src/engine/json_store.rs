@@ -25,135 +25,113 @@ use crate::engine::storage_engine::StorageEngine;
 /// constant can be used across the lifetime of the process. The prefix is a
 /// `&'static str` so it can be declared as a `const`.
 pub struct JsonStore<T> {
-    prefix: &'static str,
-    _phantom: PhantomData<T>,
+  prefix: &'static str,
+  _phantom: PhantomData<T>,
 }
 
 /// Single-document variant of [`JsonStore`] for entities stored at one
 /// fixed path rather than a directory of per-id files. Used for things like
 /// the peer_configs list (one JSON array at `/.aeordb-system/cluster/peers`).
 pub struct JsonDoc<T> {
-    path: &'static str,
-    _phantom: PhantomData<T>,
+  path: &'static str,
+  _phantom: PhantomData<T>,
 }
 
 impl<T> JsonDoc<T>
 where
-    T: JsonVersioned,
+  T: JsonVersioned,
 {
-    pub const fn new(path: &'static str) -> Self {
-        Self {
-            path,
-            _phantom: PhantomData,
-        }
-    }
+  pub const fn new(path: &'static str) -> Self {
+    Self { path, _phantom: PhantomData }
+  }
 
-    pub fn put(
-        &self,
-        engine: &StorageEngine,
-        ctx: &RequestContext,
-        value: &T,
-    ) -> EngineResult<()> {
-        let ops = DirectoryOps::new(engine);
-        let json = value.serialize_versioned();
-        ops.store_file_buffered(ctx, self.path, &json, Some("application/json"))?;
-        Ok(())
-    }
+  pub fn put(&self, engine: &StorageEngine, ctx: &RequestContext, value: &T) -> EngineResult<()> {
+    let ops = DirectoryOps::new(engine);
+    let json = value.serialize_versioned();
+    ops.store_file_buffered(ctx, self.path, &json, Some("application/json"))?;
+    Ok(())
+  }
 
-    pub fn get(&self, engine: &StorageEngine) -> EngineResult<Option<T>> {
-        let ops = DirectoryOps::new(engine);
-        match ops.read_file_buffered(self.path) {
-            Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
-            Err(EngineError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
+  pub fn get(&self, engine: &StorageEngine) -> EngineResult<Option<T>> {
+    let ops = DirectoryOps::new(engine);
+    match ops.read_file_buffered(self.path) {
+      Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
+      Err(EngineError::NotFound(_)) => Ok(None),
+      Err(error) => Err(error),
     }
+  }
 
-    /// Convenience: `get` returning the supplied default when absent.
-    pub fn get_or_default(&self, engine: &StorageEngine, default: T) -> EngineResult<T> {
-        Ok(self.get(engine)?.unwrap_or(default))
-    }
+  /// Convenience: `get` returning the supplied default when absent.
+  pub fn get_or_default(&self, engine: &StorageEngine, default: T) -> EngineResult<T> {
+    Ok(self.get(engine)?.unwrap_or(default))
+  }
 }
 
 impl<T> JsonStore<T>
 where
-    T: JsonVersioned,
+  T: JsonVersioned,
 {
-    /// Construct a new store rooted at `prefix` (e.g. `/.aeordb-system/groups`).
-    /// `prefix` should NOT have a trailing slash.
-    pub const fn new(prefix: &'static str) -> Self {
-        Self {
-            prefix,
-            _phantom: PhantomData,
+  /// Construct a new store rooted at `prefix` (e.g. `/.aeordb-system/groups`).
+  /// `prefix` should NOT have a trailing slash.
+  pub const fn new(prefix: &'static str) -> Self {
+    Self { prefix, _phantom: PhantomData }
+  }
+
+  fn path_for(&self, id: &str) -> String {
+    format!("{}/{}", self.prefix, id)
+  }
+
+  /// Store a value at `<prefix>/<id>`, creating or overwriting.
+  pub fn put(&self, engine: &StorageEngine, ctx: &RequestContext, id: &str, value: &T) -> EngineResult<()> {
+    let ops = DirectoryOps::new(engine);
+    let path = self.path_for(id);
+    let json = value.serialize_versioned();
+    ops.store_file_buffered(ctx, &path, &json, Some("application/json"))?;
+    Ok(())
+  }
+
+  /// Retrieve the value at `<prefix>/<id>`. Returns `Ok(None)` if not found.
+  pub fn get(&self, engine: &StorageEngine, id: &str) -> EngineResult<Option<T>> {
+    let ops = DirectoryOps::new(engine);
+    let path = self.path_for(id);
+    match ops.read_file_buffered(&path) {
+      Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
+      Err(EngineError::NotFound(_)) => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  /// List every value under the prefix. Entries that fail to deserialize
+  /// are silently skipped — they're treated as foreign content from a
+  /// future schema rather than as fatal errors.
+  pub fn list(&self, engine: &StorageEngine) -> EngineResult<Vec<T>> {
+    let ops = DirectoryOps::new(engine);
+    let entries = match ops.list_directory(self.prefix) {
+      Ok(entries) => entries,
+      Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
+      Err(error) => return Err(error),
+    };
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in &entries {
+      let path = self.path_for(&entry.name);
+      if let Ok(data) = ops.read_file_buffered(&path) {
+        if let Ok(value) = T::deserialize_versioned(&data) {
+          values.push(value);
         }
+      }
     }
+    Ok(values)
+  }
 
-    fn path_for(&self, id: &str) -> String {
-        format!("{}/{}", self.prefix, id)
+  /// Delete the value at `<prefix>/<id>`. Returns `Ok(true)` if it existed,
+  /// `Ok(false)` if not.
+  pub fn delete(&self, engine: &StorageEngine, ctx: &RequestContext, id: &str) -> EngineResult<bool> {
+    let ops = DirectoryOps::new(engine);
+    let path = self.path_for(id);
+    match ops.delete_file(ctx, &path) {
+      Ok(()) => Ok(true),
+      Err(EngineError::NotFound(_)) => Ok(false),
+      Err(error) => Err(error),
     }
-
-    /// Store a value at `<prefix>/<id>`, creating or overwriting.
-    pub fn put(
-        &self,
-        engine: &StorageEngine,
-        ctx: &RequestContext,
-        id: &str,
-        value: &T,
-    ) -> EngineResult<()> {
-        let ops = DirectoryOps::new(engine);
-        let path = self.path_for(id);
-        let json = value.serialize_versioned();
-        ops.store_file_buffered(ctx, &path, &json, Some("application/json"))?;
-        Ok(())
-    }
-
-    /// Retrieve the value at `<prefix>/<id>`. Returns `Ok(None)` if not found.
-    pub fn get(&self, engine: &StorageEngine, id: &str) -> EngineResult<Option<T>> {
-        let ops = DirectoryOps::new(engine);
-        let path = self.path_for(id);
-        match ops.read_file_buffered(&path) {
-            Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
-            Err(EngineError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// List every value under the prefix. Entries that fail to deserialize
-    /// are silently skipped — they're treated as foreign content from a
-    /// future schema rather than as fatal errors.
-    pub fn list(&self, engine: &StorageEngine) -> EngineResult<Vec<T>> {
-        let ops = DirectoryOps::new(engine);
-        let entries = match ops.list_directory(self.prefix) {
-            Ok(entries) => entries,
-            Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        let mut values = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let path = self.path_for(&entry.name);
-            if let Ok(data) = ops.read_file_buffered(&path) {
-                if let Ok(value) = T::deserialize_versioned(&data) {
-                    values.push(value);
-                }
-            }
-        }
-        Ok(values)
-    }
-
-    /// Delete the value at `<prefix>/<id>`. Returns `Ok(true)` if it existed,
-    /// `Ok(false)` if not.
-    pub fn delete(
-        &self,
-        engine: &StorageEngine,
-        ctx: &RequestContext,
-        id: &str,
-    ) -> EngineResult<bool> {
-        let ops = DirectoryOps::new(engine);
-        let path = self.path_for(id);
-        match ops.delete_file(ctx, &path) {
-            Ok(()) => Ok(true),
-            Err(EngineError::NotFound(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
+  }
 }

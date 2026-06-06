@@ -5,12 +5,7 @@ use aeordb::engine::kv_store::{KVEntry, KVStore, KV_TYPE_CHUNK};
 fn make_entry(hash_byte: u8, offset: u64) -> KVEntry {
   let mut hash = vec![0u8; 32];
   hash[0] = hash_byte;
-  KVEntry {
-    type_flags: KV_TYPE_CHUNK,
-    hash,
-    offset,
-    total_length: 64,
-        }
+  KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset, total_length: 64 }
 }
 
 #[test]

@@ -10,11 +10,7 @@ pub struct RateLimitError {
 
 impl std::fmt::Display for RateLimitError {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      formatter,
-      "Rate limit exceeded. Retry after {} seconds.",
-      self.retry_after_seconds
-    )
+    write!(formatter, "Rate limit exceeded. Retry after {} seconds.", self.retry_after_seconds)
   }
 }
 
@@ -36,13 +32,7 @@ struct RateLimiterInner {
 impl RateLimiter {
   /// Create a new rate limiter with the given limits.
   pub fn new(max_requests: u64, window_seconds: u64) -> Self {
-    Self {
-      inner: Arc::new(Mutex::new(RateLimiterInner {
-        windows: HashMap::new(),
-      })),
-      max_requests,
-      window_seconds,
-    }
+    Self { inner: Arc::new(Mutex::new(RateLimiterInner { windows: HashMap::new() })), max_requests, window_seconds }
   }
 
   /// Create a rate limiter with default settings (30 requests per 60 seconds).
@@ -67,21 +57,14 @@ impl RateLimiter {
     // M4: Evict oldest entries when the HashMap grows too large to prevent
     // unbounded memory growth from unique keys (e.g. IP-based rate limiting).
     if inner.windows.len() > 100_000 {
-      let mut entries: Vec<_> = inner
-        .windows
-        .iter()
-        .map(|(k, v)| (k.clone(), v.last().copied()))
-        .collect();
+      let mut entries: Vec<_> = inner.windows.iter().map(|(k, v)| (k.clone(), v.last().copied())).collect();
       entries.sort_by_key(|(_, t)| *t);
       for (key, _) in entries.iter().take(10_000) {
         inner.windows.remove(key);
       }
     }
 
-    let timestamps = inner
-      .windows
-      .entry(key.to_string())
-      .or_default();
+    let timestamps = inner.windows.entry(key.to_string()).or_default();
 
     // Remove expired entries.
     timestamps.retain(|timestamp| now.duration_since(*timestamp) < window_duration);
@@ -90,9 +73,7 @@ impl RateLimiter {
       let oldest = timestamps.first().expect("timestamps not empty");
       let elapsed = now.duration_since(*oldest);
       let retry_after = self.window_seconds.saturating_sub(elapsed.as_secs());
-      return Err(RateLimitError {
-        retry_after_seconds: retry_after.max(1),
-      });
+      return Err(RateLimitError { retry_after_seconds: retry_after.max(1) });
     }
 
     timestamps.push(now);

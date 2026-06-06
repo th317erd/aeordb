@@ -1,6 +1,4 @@
-use aeordb::engine::compression::{
-  CompressionAlgorithm, compress, decompress, should_compress,
-};
+use aeordb::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
@@ -18,14 +16,10 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
 
 #[test]
 fn test_compression_algorithm_enum_roundtrip() {
-  let algorithms = [
-    (0x00, CompressionAlgorithm::None),
-    (0x01, CompressionAlgorithm::Zstd),
-  ];
+  let algorithms = [(0x00, CompressionAlgorithm::None), (0x01, CompressionAlgorithm::Zstd)];
 
   for (byte_value, expected) in algorithms {
-    let parsed = CompressionAlgorithm::from_u8(byte_value)
-      .expect("Failed to parse compression algorithm");
+    let parsed = CompressionAlgorithm::from_u8(byte_value).expect("Failed to parse compression algorithm");
     assert_eq!(parsed, expected);
     assert_eq!(parsed.to_u8(), byte_value);
   }
@@ -43,32 +37,26 @@ fn test_compression_algorithm_from_u8_invalid() {
 #[test]
 fn test_compress_decompress_roundtrip_zstd() {
   let original = b"Hello, world! This is a test of zstd compression.";
-  let compressed = compress(original, CompressionAlgorithm::Zstd)
-    .expect("Compression failed");
-  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd)
-    .expect("Decompression failed");
+  let compressed = compress(original, CompressionAlgorithm::Zstd).expect("Compression failed");
+  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd).expect("Decompression failed");
   assert_eq!(decompressed, original);
 }
 
 #[test]
 fn test_compress_none_is_identity() {
   let original = b"No compression applied here.";
-  let compressed = compress(original, CompressionAlgorithm::None)
-    .expect("Compression failed");
+  let compressed = compress(original, CompressionAlgorithm::None).expect("Compression failed");
   assert_eq!(compressed, original);
 
-  let decompressed = decompress(&compressed, CompressionAlgorithm::None)
-    .expect("Decompression failed");
+  let decompressed = decompress(&compressed, CompressionAlgorithm::None).expect("Decompression failed");
   assert_eq!(decompressed, original);
 }
 
 #[test]
 fn test_compress_empty_data_zstd() {
   let original: &[u8] = b"";
-  let compressed = compress(original, CompressionAlgorithm::Zstd)
-    .expect("Compression failed");
-  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd)
-    .expect("Decompression failed");
+  let compressed = compress(original, CompressionAlgorithm::Zstd).expect("Compression failed");
+  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd).expect("Decompression failed");
   assert_eq!(decompressed, original);
 }
 
@@ -76,14 +64,8 @@ fn test_compress_empty_data_zstd() {
 fn test_compressed_file_smaller_than_original() {
   // Highly compressible data: repeated pattern
   let original: Vec<u8> = "abcdefghij".repeat(1000).into_bytes();
-  let compressed = compress(&original, CompressionAlgorithm::Zstd)
-    .expect("Compression failed");
-  assert!(
-    compressed.len() < original.len(),
-    "Compressed ({}) should be smaller than original ({})",
-    compressed.len(),
-    original.len()
-  );
+  let compressed = compress(&original, CompressionAlgorithm::Zstd).expect("Compression failed");
+  assert!(compressed.len() < original.len(), "Compressed ({}) should be smaller than original ({})", compressed.len(), original.len());
 }
 
 #[test]
@@ -97,10 +79,8 @@ fn test_decompress_invalid_zstd_data() {
 fn test_compress_large_data_roundtrip() {
   // 1 MB of pseudo-random-ish data (still compressible due to patterns)
   let original: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
-  let compressed = compress(&original, CompressionAlgorithm::Zstd)
-    .expect("Compression failed");
-  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd)
-    .expect("Decompression failed");
+  let compressed = compress(&original, CompressionAlgorithm::Zstd).expect("Compression failed");
+  let decompressed = decompress(&compressed, CompressionAlgorithm::Zstd).expect("Decompression failed");
   assert_eq!(decompressed, original);
 }
 
@@ -205,12 +185,7 @@ fn test_store_file_with_compression() {
   let data = "Hello, this is test data for compression!".repeat(50);
   let data_bytes = data.as_bytes();
 
-  ops.store_file_compressed(&ctx,
-    "/compressed.txt",
-    data_bytes,
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/compressed.txt", data_bytes, Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   let read_back = ops.read_file_buffered("/compressed.txt").unwrap();
   assert_eq!(read_back, data_bytes);
@@ -233,12 +208,7 @@ fn test_hash_is_on_uncompressed_data() {
   let meta_uncompressed = ops.get_metadata("/uncompressed.txt").unwrap().unwrap();
 
   // Store compressed version at a different path
-  ops.store_file_compressed(&ctx,
-    "/compressed.txt",
-    data_bytes,
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/compressed.txt", data_bytes, Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
   let meta_compressed = ops.get_metadata("/compressed.txt").unwrap().unwrap();
 
   // Chunk hashes should match (hash is on uncompressed data)
@@ -255,12 +225,7 @@ fn test_read_compressed_file_streaming() {
   let data = "Streaming test data. ".repeat(200);
   let data_bytes = data.as_bytes();
 
-  ops.store_file_compressed(&ctx,
-    "/streamed.txt",
-    data_bytes,
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/streamed.txt", data_bytes, Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   // Read via streaming iterator
   let stream = ops.read_file_streaming("/streamed.txt").unwrap();
@@ -282,12 +247,7 @@ fn test_mixed_compressed_and_uncompressed() {
   // Store compressed
   let data_b = "File B: compressed content. ".repeat(100);
   let data_b_bytes = data_b.as_bytes();
-  ops.store_file_compressed(&ctx,
-    "/file_b.txt",
-    data_b_bytes,
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/file_b.txt", data_b_bytes, Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   // Store another uncompressed
   let data_c = b"File C: also uncompressed.";
@@ -306,12 +266,7 @@ fn test_store_empty_file_with_compression() {
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);
 
-  ops.store_file_compressed(&ctx,
-    "/empty.txt",
-    &[],
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/empty.txt", &[], Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   let read_back = ops.read_file_buffered("/empty.txt").unwrap();
   assert!(read_back.is_empty());
@@ -327,12 +282,7 @@ fn test_store_large_file_with_compression_multiple_chunks() {
   // 512 KB of data = 2 chunks at 256 KB each
   let data: Vec<u8> = (0..524_288).map(|i| (i % 256) as u8).collect();
 
-  ops.store_file_compressed(&ctx,
-    "/large.bin",
-    &data,
-    Some("application/octet-stream"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/large.bin", &data, Some("application/octet-stream"), CompressionAlgorithm::Zstd).unwrap();
 
   let read_back = ops.read_file_buffered("/large.bin").unwrap();
   assert_eq!(read_back, data);
@@ -349,20 +299,10 @@ fn test_overwrite_compressed_file() {
   let ops = DirectoryOps::new(&engine);
 
   let data_v1 = "Version 1 content. ".repeat(50);
-  ops.store_file_compressed(&ctx,
-    "/versioned.txt",
-    data_v1.as_bytes(),
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/versioned.txt", data_v1.as_bytes(), Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   let data_v2 = "Version 2 content that is different. ".repeat(50);
-  ops.store_file_compressed(&ctx,
-    "/versioned.txt",
-    data_v2.as_bytes(),
-    Some("text/plain"),
-    CompressionAlgorithm::Zstd,
-  ).unwrap();
+  ops.store_file_compressed(&ctx, "/versioned.txt", data_v2.as_bytes(), Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
 
   let read_back = ops.read_file_buffered("/versioned.txt").unwrap();
   assert_eq!(read_back, data_v2.as_bytes());
@@ -377,19 +317,11 @@ fn test_compression_with_indexing_via_config() {
 
   // Store a config that enables zstd compression
   let config_json = r#"{"compression":"zstd","indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file_buffered(&ctx,
-    "/data/.aeordb-config/indexes.json",
-    config_json.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/data/.aeordb-config/indexes.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
   // Store a file that should be auto-compressed (> 500 bytes, text/json)
   let data = format!(r#"{{"name":"test","payload":"{}"}}"#, "x".repeat(1000));
-  ops.store_file_with_indexing(&ctx,
-    "/data/record.json",
-    data.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/record.json", data.as_bytes(), Some("application/json")).unwrap();
 
   // Read back and verify
   let read_back = ops.read_file_buffered("/data/record.json").unwrap();
@@ -405,19 +337,11 @@ fn test_compression_config_skips_small_data() {
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file_buffered(&ctx,
-    "/data/.aeordb-config/indexes.json",
-    config_json.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/data/.aeordb-config/indexes.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
   // Store a small file (< 500 bytes) - should NOT be compressed per should_compress
   let small_data = r#"{"name":"tiny"}"#;
-  ops.store_file_with_indexing(&ctx,
-    "/data/small.json",
-    small_data.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/small.json", small_data.as_bytes(), Some("application/json")).unwrap();
 
   let read_back = ops.read_file_buffered("/data/small.json").unwrap();
   assert_eq!(read_back, small_data.as_bytes());
@@ -432,19 +356,11 @@ fn test_compression_config_skips_images() {
 
   // Config enables compression
   let config_json = r#"{"compression":"zstd","indexes":[]}"#;
-  ops.store_file_buffered(&ctx,
-    "/images/.aeordb-config/indexes.json",
-    config_json.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/images/.aeordb-config/indexes.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
   // Store a "JPEG" (fake data, but content-type signals image/jpeg)
   let jpeg_data = vec![0xFF; 10_000];
-  ops.store_file_with_indexing(&ctx,
-    "/images/photo.jpg",
-    &jpeg_data,
-    Some("image/jpeg"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/images/photo.jpg", &jpeg_data, Some("image/jpeg")).unwrap();
 
   let read_back = ops.read_file_buffered("/images/photo.jpg").unwrap();
   assert_eq!(read_back, jpeg_data);
@@ -464,12 +380,7 @@ fn test_reopen_engine_reads_compressed_entries() {
     ops.ensure_root_directory(&ctx).unwrap();
 
     let data = "Persistent compressed data. ".repeat(100);
-    ops.store_file_compressed(&ctx,
-      "/persistent.txt",
-      data.as_bytes(),
-      Some("text/plain"),
-      CompressionAlgorithm::Zstd,
-    ).unwrap();
+    ops.store_file_compressed(&ctx, "/persistent.txt", data.as_bytes(), Some("text/plain"), CompressionAlgorithm::Zstd).unwrap();
   }
 
   // Re-open and read back
@@ -492,18 +403,10 @@ fn test_no_compression_config_means_no_compression() {
 
   // Config WITHOUT compression field
   let config_json = r#"{"indexes":[{"name":"name","type":"string"}]}"#;
-  ops.store_file_buffered(&ctx,
-    "/data/.aeordb-config/indexes.json",
-    config_json.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/data/.aeordb-config/indexes.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
   let data = format!(r#"{{"name":"test","payload":"{}"}}"#, "x".repeat(1000));
-  ops.store_file_with_indexing(&ctx,
-    "/data/record.json",
-    data.as_bytes(),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/record.json", data.as_bytes(), Some("application/json")).unwrap();
 
   // Should still read back fine (stored uncompressed)
   let read_back = ops.read_file_buffered("/data/record.json").unwrap();

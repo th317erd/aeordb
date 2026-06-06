@@ -13,10 +13,7 @@ impl NVTMask {
   /// Create a new mask with all bits off.
   pub fn new(bucket_count: usize) -> Self {
     let word_count = Self::words_needed(bucket_count);
-    NVTMask {
-      bucket_count,
-      bits: vec![0u64; word_count],
-    }
+    NVTMask { bucket_count, bits: vec![0u64; word_count] }
   }
 
   /// Create a mask with all bits on (up to bucket_count).
@@ -29,10 +26,7 @@ impl NVTMask {
       let last_index = bits.len() - 1;
       bits[last_index] = (1u64 << remainder) - 1;
     }
-    NVTMask {
-      bucket_count,
-      bits,
-    }
+    NVTMask { bucket_count, bits }
   }
 
   /// Create a mask from an NVT: bit on if bucket has entries.
@@ -91,83 +85,52 @@ impl NVTMask {
   /// Bitwise AND of two masks. Both must have the same bucket_count.
   pub fn and(&self, other: &NVTMask) -> EngineResult<NVTMask> {
     self.require_same_bucket_count(other)?;
-    let bits = self.bits.iter()
-      .zip(other.bits.iter())
-      .map(|(a, b)| a & b)
-      .collect();
-    Ok(NVTMask {
-      bucket_count: self.bucket_count,
-      bits,
-    })
+    let bits = self.bits.iter().zip(other.bits.iter()).map(|(a, b)| a & b).collect();
+    Ok(NVTMask { bucket_count: self.bucket_count, bits })
   }
 
   /// Bitwise OR of two masks. Both must have the same bucket_count.
   pub fn or(&self, other: &NVTMask) -> EngineResult<NVTMask> {
     self.require_same_bucket_count(other)?;
-    let bits = self.bits.iter()
-      .zip(other.bits.iter())
-      .map(|(a, b)| a | b)
-      .collect();
-    Ok(NVTMask {
-      bucket_count: self.bucket_count,
-      bits,
-    })
+    let bits = self.bits.iter().zip(other.bits.iter()).map(|(a, b)| a | b).collect();
+    Ok(NVTMask { bucket_count: self.bucket_count, bits })
   }
 
   /// Bitwise NOT of this mask.
   pub fn not(&self) -> NVTMask {
-    let mut bits: Vec<u64> = self.bits.iter()
-      .map(|word| !word)
-      .collect();
+    let mut bits: Vec<u64> = self.bits.iter().map(|word| !word).collect();
     // Clear trailing bits beyond bucket_count in the last word.
     let remainder = self.bucket_count % 64;
     if remainder > 0 && !bits.is_empty() {
       let last_index = bits.len() - 1;
       bits[last_index] &= (1u64 << remainder) - 1;
     }
-    NVTMask {
-      bucket_count: self.bucket_count,
-      bits,
-    }
+    NVTMask { bucket_count: self.bucket_count, bits }
   }
 
   /// Bitwise XOR of two masks. Both must have the same bucket_count.
   pub fn xor(&self, other: &NVTMask) -> EngineResult<NVTMask> {
     self.require_same_bucket_count(other)?;
-    let bits = self.bits.iter()
-      .zip(other.bits.iter())
-      .map(|(a, b)| a ^ b)
-      .collect();
-    Ok(NVTMask {
-      bucket_count: self.bucket_count,
-      bits,
-    })
+    let bits = self.bits.iter().zip(other.bits.iter()).map(|(a, b)| a ^ b).collect();
+    Ok(NVTMask { bucket_count: self.bucket_count, bits })
   }
 
   /// Difference: self AND NOT other. Both must have the same bucket_count.
   pub fn difference(&self, other: &NVTMask) -> EngineResult<NVTMask> {
     self.require_same_bucket_count(other)?;
-    let mut bits: Vec<u64> = self.bits.iter()
-      .zip(other.bits.iter())
-      .map(|(a, b)| a & !b)
-      .collect();
+    let mut bits: Vec<u64> = self.bits.iter().zip(other.bits.iter()).map(|(a, b)| a & !b).collect();
     // Clear trailing bits beyond bucket_count in the last word.
     let remainder = self.bucket_count % 64;
     if remainder > 0 && !bits.is_empty() {
       let last_index = bits.len() - 1;
       bits[last_index] &= (1u64 << remainder) - 1;
     }
-    Ok(NVTMask {
-      bucket_count: self.bucket_count,
-      bits,
-    })
+    Ok(NVTMask { bucket_count: self.bucket_count, bits })
   }
 
   /// Count of on bits.
   pub fn popcount(&self) -> usize {
-    self.bits.iter()
-      .map(|word| word.count_ones() as usize)
-      .sum()
+    self.bits.iter().map(|word| word.count_ones() as usize).sum()
   }
 
   /// Indices of all on bits.
@@ -263,10 +226,7 @@ impl NVTMask {
     if self.bucket_count != other.bucket_count {
       return Err(EngineError::CorruptEntry {
         offset: 0,
-        reason: format!(
-          "NVTMask bucket count mismatch: {} vs {}",
-          self.bucket_count, other.bucket_count,
-        ),
+        reason: format!("NVTMask bucket count mismatch: {} vs {}", self.bucket_count, other.bucket_count,),
       });
     }
     Ok(())

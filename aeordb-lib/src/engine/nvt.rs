@@ -1,7 +1,5 @@
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::scalar_converter::{
-  ScalarConverter, deserialize_converter,
-};
+use crate::engine::scalar_converter::{ScalarConverter, deserialize_converter};
 
 #[derive(Debug, Clone)]
 pub struct NVTBucket {
@@ -31,26 +29,16 @@ impl std::fmt::Debug for ConverterHolder {
 impl Clone for ConverterHolder {
   fn clone(&self) -> Self {
     let serialized = self.inner.serialize();
-    let cloned = deserialize_converter(&serialized)
-      .expect("converter roundtrip clone should never fail");
+    let cloned = deserialize_converter(&serialized).expect("converter roundtrip clone should never fail");
     ConverterHolder { inner: cloned }
   }
 }
 
 impl NormalizedVectorTable {
   pub fn new(converter: Box<dyn ScalarConverter>, initial_bucket_count: usize) -> Self {
-    let buckets = (0..initial_bucket_count)
-      .map(|_| NVTBucket {
-        kv_block_offset: 0,
-        entry_count: 0,
-      })
-      .collect();
+    let buckets = (0..initial_bucket_count).map(|_| NVTBucket { kv_block_offset: 0, entry_count: 0 }).collect();
 
-    NormalizedVectorTable {
-      version: 1,
-      buckets,
-      converter: ConverterHolder { inner: converter },
-    }
+    NormalizedVectorTable { version: 1, buckets, converter: ConverterHolder { inner: converter } }
   }
 
   pub fn bucket_for_value(&self, value: &[u8]) -> usize {
@@ -76,12 +64,7 @@ impl NormalizedVectorTable {
   }
 
   pub fn resize(&mut self, new_bucket_count: usize) {
-    let mut new_buckets: Vec<NVTBucket> = (0..new_bucket_count)
-      .map(|_| NVTBucket {
-        kv_block_offset: 0,
-        entry_count: 0,
-      })
-      .collect();
+    let mut new_buckets: Vec<NVTBucket> = (0..new_bucket_count).map(|_| NVTBucket { kv_block_offset: 0, entry_count: 0 }).collect();
 
     // Redistribute entries from old buckets into new buckets.
     // Each old bucket's entries span a range in the new bucket space.
@@ -163,10 +146,7 @@ impl NormalizedVectorTable {
   /// fail loudly rather than getting parsed with the wrong layout.
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
     if data.is_empty() {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "NVT data is empty".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "NVT data is empty".to_string() });
     }
     let version = data[0];
     match version {
@@ -178,25 +158,17 @@ impl NormalizedVectorTable {
   fn deserialize_v1(data: &[u8]) -> EngineResult<Self> {
     // Minimum: version(1) + converter_length(4) = 5 bytes
     if data.len() < 5 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "NVT data too short for header".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "NVT data too short for header".to_string() });
     }
 
     let mut cursor = 1;
 
     // Read converter
-    let converter_length = u32::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-    ]) as usize;
+    let converter_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     if data.len() < cursor + converter_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "NVT data too short for converter section".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "NVT data too short for converter section".to_string() });
     }
 
     let converter = deserialize_converter(&data[cursor..cursor + converter_length])?;
@@ -204,25 +176,17 @@ impl NormalizedVectorTable {
 
     // Read bucket count
     if data.len() < cursor + 4 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "NVT data too short for bucket count".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "NVT data too short for bucket count".to_string() });
     }
 
-    let bucket_count = u32::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-    ]) as usize;
+    let bucket_count = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     let expected_length = cursor + bucket_count * 12;
     if data.len() < expected_length {
       return Err(EngineError::CorruptEntry {
         offset: 0,
-        reason: format!(
-          "NVT data too short: expected {} bytes for {} buckets, got {}",
-          expected_length, bucket_count, data.len()
-        ),
+        reason: format!("NVT data too short: expected {} bytes for {} buckets, got {}", expected_length, bucket_count, data.len()),
       });
     }
 
@@ -238,23 +202,11 @@ impl NormalizedVectorTable {
         data[cursor + 6],
         data[cursor + 7],
       ]);
-      let entry_count = u32::from_le_bytes([
-        data[cursor + 8],
-        data[cursor + 9],
-        data[cursor + 10],
-        data[cursor + 11],
-      ]);
-      buckets.push(NVTBucket {
-        kv_block_offset,
-        entry_count,
-      });
+      let entry_count = u32::from_le_bytes([data[cursor + 8], data[cursor + 9], data[cursor + 10], data[cursor + 11]]);
+      buckets.push(NVTBucket { kv_block_offset, entry_count });
       cursor += 12;
     }
 
-    Ok(NormalizedVectorTable {
-      version: 1,
-      buckets,
-      converter: ConverterHolder { inner: converter },
-    })
+    Ok(NormalizedVectorTable { version: 1, buckets, converter: ConverterHolder { inner: converter } })
   }
 }

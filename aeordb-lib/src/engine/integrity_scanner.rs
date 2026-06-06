@@ -20,10 +20,7 @@ const MAX_SAMPLE: usize = 1000;
 /// Periodically picks a random sample of entries from the KV index,
 /// reads each one (triggering hash verification), and logs failures.
 /// Corrupt entries are quarantined to `lost+found/`.
-pub fn spawn_integrity_scanner(
-  engine: Arc<StorageEngine>,
-  cancel: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn_integrity_scanner(engine: Arc<StorageEngine>, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
     loop {
       tokio::select! {
@@ -55,10 +52,7 @@ fn run_scan_cycle(engine: &StorageEngine) {
   }
 
   // Calculate sample size: ~1% of entries, clamped to [MIN_SAMPLE, MAX_SAMPLE]
-  let sample_size = ((all_entries.len() as f64 * 0.01).ceil() as usize)
-    .max(MIN_SAMPLE)
-    .min(MAX_SAMPLE)
-    .min(all_entries.len());
+  let sample_size = ((all_entries.len() as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(all_entries.len());
 
   // Pick entries by stepping through with a stride
   let stride = (all_entries.len() / sample_size).max(1);
@@ -70,12 +64,9 @@ fn run_scan_cycle(engine: &StorageEngine) {
   // the cluster and miss other slices for the same wall-clock period).
   static PROCESS_JITTER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
   let jitter = *PROCESS_JITTER.get_or_init(rand::random::<u64>);
-  let cycle_offset = ((std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs()
-    .wrapping_add(jitter))
-    % stride as u64) as usize;
+  let cycle_offset =
+    ((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().wrapping_add(jitter))
+      % stride as u64) as usize;
 
   let mut checked = 0u64;
   let mut failures = 0u64;
@@ -96,10 +87,7 @@ fn run_scan_cycle(engine: &StorageEngine) {
       }
       Err(e) => {
         failures += 1;
-        tracing::warn!(
-          "Integrity scanner: corrupt entry at offset {}: {}",
-          entry.offset, e
-        );
+        tracing::warn!("Integrity scanner: corrupt entry at offset {}: {}", entry.offset, e);
 
         // Quarantine metadata about the corrupt entry
         crate::engine::lost_found::quarantine_metadata(
@@ -119,15 +107,9 @@ fn run_scan_cycle(engine: &StorageEngine) {
   }
 
   if failures > 0 {
-    tracing::warn!(
-      "Integrity scanner: checked {} entries, {} failures detected",
-      checked, failures
-    );
+    tracing::warn!("Integrity scanner: checked {} entries, {} failures detected", checked, failures);
   } else {
-    tracing::debug!(
-      "Integrity scanner: checked {} entries, all OK",
-      checked
-    );
+    tracing::debug!("Integrity scanner: checked {} entries, all OK", checked);
   }
 }
 
@@ -148,20 +130,9 @@ mod tests {
   fn store_test_files(engine: &StorageEngine) {
     let ctx = RequestContext::system();
     let ops = DirectoryOps::new(engine);
-    ops
-      .store_file_buffered(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain"))
-      .unwrap();
-    ops
-      .store_file_buffered(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain"))
-      .unwrap();
-    ops
-      .store_file_buffered(
-        &ctx,
-        "/images/photo.jpg",
-        b"jpeg-data-here",
-        Some("image/jpeg"),
-      )
-      .unwrap();
+    ops.store_file_buffered(&ctx, "/docs/a.txt", b"file-a-content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/docs/b.txt", b"file-b-content", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/images/photo.jpg", b"jpeg-data-here", Some("image/jpeg")).unwrap();
   }
 
   #[test]
@@ -198,10 +169,7 @@ mod tests {
     // Inject corruption into the middle of the file
     {
       let file_size = std::fs::metadata(db_str).unwrap().len();
-      let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(db_str)
-        .unwrap();
+      let mut file = std::fs::OpenOptions::new().write(true).open(db_str).unwrap();
       // Write garbage in the middle of data region
       file.seek(SeekFrom::Start(file_size / 2)).unwrap();
       let garbage: Vec<u8> = (0..64).map(|i: u8| i.wrapping_mul(0x37)).collect();
@@ -224,12 +192,7 @@ mod tests {
   #[test]
   fn sample_size_clamped_correctly() {
     // Test the clamping logic directly
-    let compute_sample = |total: usize| -> usize {
-      ((total as f64 * 0.01).ceil() as usize)
-        .max(MIN_SAMPLE)
-        .min(MAX_SAMPLE)
-        .min(total)
-    };
+    let compute_sample = |total: usize| -> usize { ((total as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(total) };
 
     // Small DB: clamp to min but not more than total
     assert_eq!(compute_sample(5), 5); // min(max(1, 10), 5) = 5

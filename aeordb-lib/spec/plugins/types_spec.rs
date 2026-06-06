@@ -1,7 +1,4 @@
-use aeordb::plugins::types::{
-  PluginType, RuleDecision, RuleContext, PluginMetadata,
-  serialize_for_ffi, deserialize_from_ffi,
-};
+use aeordb::plugins::types::{PluginType, RuleDecision, RuleContext, PluginMetadata, serialize_for_ffi, deserialize_from_ffi};
 
 // ---------------------------------------------------------------------------
 // PluginType Display
@@ -49,11 +46,7 @@ fn test_plugin_type_from_str_unknown_returns_error() {
   let result: Result<PluginType, String> = "javascript".parse();
   assert!(result.is_err());
   let error_message = result.unwrap_err();
-  assert!(
-    error_message.contains("unknown plugin type"),
-    "Error should mention 'unknown plugin type', got: {}",
-    error_message,
-  );
+  assert!(error_message.contains("unknown plugin type"), "Error should mention 'unknown plugin type', got: {}", error_message,);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,15 +178,23 @@ fn test_deserialize_from_ffi_invalid_bytes_returns_error() {
 #[test]
 fn test_serialize_for_ffi_plugin_metadata() {
   let metadata = PluginMetadata {
-    plugin_id: uuid::Uuid::new_v4(),
+    plugin_id: "/org/example/plugins/test-plugin".to_string(),
     name: "test-plugin".to_string(),
     path: "db/schema/table".to_string(),
     plugin_type: PluginType::Wasm,
     created_at: chrono::Utc::now(),
+    version: Some("1.2.3".to_string()),
+    author: Some("Test Author".to_string()),
+    checksum: "blake3:test".to_string(),
+    updated_at: chrono::Utc::now(),
   };
 
   let bytes = serialize_for_ffi(&metadata).unwrap();
   let deserialized: PluginMetadata = deserialize_from_ffi(&bytes).unwrap();
+  assert_eq!(deserialized.plugin_id, "/org/example/plugins/test-plugin");
   assert_eq!(deserialized.name, "test-plugin");
   assert_eq!(deserialized.plugin_type, PluginType::Wasm);
+  assert_eq!(deserialized.version.as_deref(), Some("1.2.3"));
+  assert_eq!(deserialized.author.as_deref(), Some("Test Author"));
+  assert_eq!(deserialized.checksum, "blake3:test");
 }

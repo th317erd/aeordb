@@ -6,7 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
-use aeordb::engine::{spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus};
+use aeordb::engine::{
+  spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus,
+};
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
@@ -109,9 +111,7 @@ pub async fn run(config: StartConfig<'_>) {
   // exposes the entire database — the audit found this is the worst
   // mis-deploy footgun. Require explicit acknowledgement.
   if matches!(auth_mode, AuthMode::Disabled) {
-    let is_loopback = host == "127.0.0.1"
-      || host == "::1"
-      || host == "localhost";
+    let is_loopback = host == "127.0.0.1" || host == "::1" || host == "localhost";
     if !is_loopback && std::env::var("AEORDB_ALLOW_UNAUTHENTICATED_PUBLIC_BIND").is_err() {
       eprintln!();
       eprintln!("==========================================================");
@@ -138,13 +138,8 @@ pub async fn run(config: StartConfig<'_>) {
   }
   // Resolve hot directory: use --hot-dir if specified, otherwise default to
   // the database file's parent directory.
-  let default_hot_dir = Path::new(database)
-    .parent()
-    .unwrap_or(Path::new("."))
-    .to_path_buf();
-  let hot_dir = hot_dir_arg
-    .map(std::path::PathBuf::from)
-    .unwrap_or(default_hot_dir);
+  let default_hot_dir = Path::new(database).parent().unwrap_or(Path::new(".")).to_path_buf();
+  let hot_dir = hot_dir_arg.map(std::path::PathBuf::from).unwrap_or(default_hot_dir);
   let hot_dir_ref = hot_dir.as_path();
 
   println!("Hot dir: {}", hot_dir_ref.display());
@@ -189,13 +184,7 @@ pub async fn run(config: StartConfig<'_>) {
   // We use the *_and_cancel variant so the sync loop's shutdown is wired
   // to this token; without it, the loop runs until the process is killed.
   let (application, file_bootstrap_key, engine, event_bus, task_queue) =
-    create_app_with_auth_mode_and_cancel(
-      database,
-      &auth_mode,
-      Some(hot_dir_ref),
-      cors_flag,
-      Some(cancel.clone()),
-    );
+    create_app_with_auth_mode_and_cancel(database, &auth_mode, Some(hot_dir_ref), cors_flag, Some(cancel.clone()));
 
   // For SelfContained mode, bootstrap the root key using the already-open engine.
   if auth_mode == AuthMode::SelfContained {
@@ -225,19 +214,11 @@ pub async fn run(config: StartConfig<'_>) {
   let counters = engine.counters().clone();
   let rate_trackers = Arc::new(RateTrackerSet::new());
   let sampler_handle = spawn_rate_sampler(counters.clone(), rate_trackers.clone(), cancel.clone());
-  let metrics_handle = spawn_metrics_pulse(
-    event_bus.clone(),
-    engine.clone(),
-    counters,
-    rate_trackers.clone(),
-    database.to_string(),
-    cancel.clone(),
-  );
+  let metrics_handle =
+    spawn_metrics_pulse(event_bus.clone(), engine.clone(), counters, rate_trackers.clone(), database.to_string(), cancel.clone());
 
   // Make rate_trackers and db_path available to the stats endpoint via Extension.
-  let application = application
-    .layer(axum::Extension(rate_trackers))
-    .layer(axum::Extension(database.to_string()));
+  let application = application.layer(axum::Extension(rate_trackers)).layer(axum::Extension(database.to_string()));
 
   // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {
@@ -312,13 +293,7 @@ pub async fn run(config: StartConfig<'_>) {
 
   // Start the task worker (dequeues and executes background tasks).
   let plugin_manager = std::sync::Arc::new(PluginManager::new(engine.clone()));
-  let worker_handle = spawn_task_worker(
-    task_queue,
-    engine.clone(),
-    plugin_manager,
-    event_bus.clone(),
-    cancel.clone(),
-  );
+  let worker_handle = spawn_task_worker(task_queue, engine.clone(), plugin_manager, event_bus.clone(), cancel.clone());
 
   // Start the webhook dispatcher (delivers matching events to registered URLs).
   let webhook_handle = spawn_webhook_dispatcher(event_bus, engine.clone(), cancel.clone());
@@ -378,8 +353,7 @@ pub async fn run(config: StartConfig<'_>) {
       server_cancel.cancel();
     };
 
-    let serve_fut = axum::serve(listener, application)
-      .with_graceful_shutdown(shutdown_fut);
+    let serve_fut = axum::serve(listener, application).with_graceful_shutdown(shutdown_fut);
 
     // axum's graceful shutdown waits for ALL active connections to close,
     // but long-lived connections (SSE) never close. Once the shutdown
@@ -399,7 +373,8 @@ pub async fn run(config: StartConfig<'_>) {
     let _ = tokio::time::timeout(
       std::time::Duration::from_secs(5),
       futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
-    ).await;
+    )
+    .await;
     engine.shutdown().ok();
     std::process::exit(1);
   }
@@ -409,7 +384,8 @@ pub async fn run(config: StartConfig<'_>) {
   let _ = tokio::time::timeout(
     std::time::Duration::from_secs(10),
     futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
-  ).await;
+  )
+  .await;
 
   // Flush engine buffers and sync to disk.
   engine.shutdown().ok();
@@ -428,17 +404,12 @@ async fn futures_join_all(handles: Vec<tokio::task::JoinHandle<()>>) {
 /// Listen for shutdown signals (SIGINT and SIGTERM on Unix, Ctrl+C everywhere).
 async fn shutdown_signal() {
   let ctrl_c = async {
-    tokio::signal::ctrl_c()
-      .await
-      .expect("failed to install CTRL+C handler");
+    tokio::signal::ctrl_c().await.expect("failed to install CTRL+C handler");
   };
 
   #[cfg(unix)]
   let terminate = async {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-      .expect("failed to install SIGTERM handler")
-      .recv()
-      .await;
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("failed to install SIGTERM handler").recv().await;
   };
 
   #[cfg(not(unix))]
@@ -497,9 +468,11 @@ async fn perform_cluster_join(
       .send()
       .await
       .map_err(|e| format!("token exchange request failed: {}", e))?;
-    let token_json: serde_json::Value = token_resp.json().await
-      .map_err(|e| format!("token exchange response parse failed: {}", e))?;
-    token_json.get("token").and_then(|v| v.as_str()).map(String::from)
+    let token_json: serde_json::Value = token_resp.json().await.map_err(|e| format!("token exchange response parse failed: {}", e))?;
+    token_json
+      .get("token")
+      .and_then(|v| v.as_str())
+      .map(String::from)
       .ok_or_else(|| format!("token exchange did not return a token: {}", token_json))?
   } else {
     join_token.to_string()
@@ -519,16 +492,13 @@ async fn perform_cluster_join(
     return Err(format!("status {}: {}", status, body));
   }
 
-  let body: serde_json::Value = resp.json().await
-    .map_err(|e| format!("response parse failed: {}", e))?;
+  let body: serde_json::Value = resp.json().await.map_err(|e| format!("response parse failed: {}", e))?;
 
-  let signing_key_b64 = body.get("signing_key").and_then(|v| v.as_str())
-    .ok_or_else(|| "response missing 'signing_key'".to_string())?;
-  let signing_key = B64.decode(signing_key_b64)
-    .map_err(|e| format!("invalid base64 signing key: {}", e))?;
+  let signing_key_b64 = body.get("signing_key").and_then(|v| v.as_str()).ok_or_else(|| "response missing 'signing_key'".to_string())?;
+  let signing_key = B64.decode(signing_key_b64).map_err(|e| format!("invalid base64 signing key: {}", e))?;
 
-  let responding_node_id = body.get("responding_node_id").and_then(|v| v.as_u64())
-    .ok_or_else(|| "response missing 'responding_node_id'".to_string())?;
+  let responding_node_id =
+    body.get("responding_node_id").and_then(|v| v.as_u64()).ok_or_else(|| "response missing 'responding_node_id'".to_string())?;
 
   // Open the engine, write the signing key + peer, then drop it so the
   // server can re-open it normally.
@@ -562,11 +532,7 @@ async fn perform_cluster_join(
 }
 
 /// Write peer configs for --peers URLs into the engine's system store.
-fn register_initial_peers(
-  database: &str,
-  hot_dir: &std::path::Path,
-  peers: &[String],
-) -> Result<(), String> {
+fn register_initial_peers(database: &str, hot_dir: &std::path::Path, peers: &[String]) -> Result<(), String> {
   let engine = aeordb::engine::StorageEngine::open_with_hot_dir(database, Some(hot_dir))
     .or_else(|_| aeordb::engine::StorageEngine::create_with_hot_dir(database, Some(hot_dir)))
     .map_err(|e| format!("failed to open engine: {}", e))?;
@@ -575,7 +541,9 @@ fn register_initial_peers(
   let mut peer_configs = aeordb::engine::system_store::get_peer_configs(&engine).unwrap_or_default();
 
   for url in peers {
-    if peer_configs.iter().any(|p| &p.address == url) { continue; }
+    if peer_configs.iter().any(|p| &p.address == url) {
+      continue;
+    }
     peer_configs.push(aeordb::engine::PeerConfig {
       node_id: rand::random(),
       address: url.clone(),

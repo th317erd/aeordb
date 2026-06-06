@@ -61,5 +61,9 @@ path = "spec/emergency_reset_spec.rs"
 name = "config_spec"
 path = "spec/config_spec.rs"
 
+[[test]]
+name = "probe_spec"
+path = "spec/probe_spec.rs"
+
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
@@ -37,7 +37,7 @@ fn test_store_file_from_reader_roundtrip_multichunk() {
 
   let mut data = Vec::with_capacity(600 * 1024);
   for i in 0..(600 * 1024) {
-    data.push((i % 251) as u8);  // 251 is prime — gives non-trivial pattern
+    data.push((i % 251) as u8); // 251 is prime — gives non-trivial pattern
   }
 
   let reader = std::io::Cursor::new(data.clone());
@@ -147,11 +147,7 @@ fn test_read_nonexistent_returns_error() {
   let result = ops.read_file_buffered("/does_not_exist.txt");
   assert!(result.is_err());
   let error = result.unwrap_err();
-  assert!(
-    error.to_string().contains("Not found"),
-    "Expected NotFound error, got: {}",
-    error,
-  );
+  assert!(error.to_string().contains("Not found"), "Expected NotFound error, got: {}", error,);
 }
 
 #[test]
@@ -171,6 +167,63 @@ fn test_delete_file() {
   let children = ops.list_directory("/").unwrap();
   let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
   assert!(!names.contains(&"to_delete.txt"));
+}
+
+#[test]
+fn test_list_directory_omits_deleted_file_child_left_in_parent() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/docs/live.txt", b"live", None).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/ghost.txt", b"ghost", None).unwrap();
+
+  let ghost_key = file_path_hash("/docs/ghost.txt", &engine.hash_algo()).unwrap();
+  engine.mark_entry_deleted(&ghost_key).unwrap();
+
+  assert!(ops.read_file_buffered("/docs/ghost.txt").is_err(), "direct file read should not see deleted path key");
+
+  let children = ops.list_directory("/docs").unwrap();
+  let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+  assert_eq!(names, vec!["live.txt"]);
+}
+
+#[test]
+fn test_list_directory_omits_deleted_directory_child_left_in_parent() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.create_directory(&ctx, "/root/live").unwrap();
+  ops.create_directory(&ctx, "/root/ghost").unwrap();
+
+  let ghost_key = directory_path_hash("/root/ghost", &engine.hash_algo()).unwrap();
+  engine.mark_entry_deleted(&ghost_key).unwrap();
+
+  let children = ops.list_directory("/root").unwrap();
+  let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+  assert_eq!(names, vec!["live"]);
+}
+
+#[test]
+fn test_delete_directory_succeeds_when_only_stale_deleted_file_child_remains() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/root/empty/ghost.txt", b"ghost", None).unwrap();
+
+  let ghost_key = file_path_hash("/root/empty/ghost.txt", &engine.hash_algo()).unwrap();
+  engine.mark_entry_deleted(&ghost_key).unwrap();
+
+  ops.delete_directory(&ctx, "/root/empty").unwrap();
+
+  let children = ops.list_directory("/root").unwrap();
+  let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+  assert!(!names.contains(&"empty"));
 }
 
 #[test]
@@ -407,11 +460,7 @@ fn test_nested_directories() {
   ops.create_directory(&ctx, "/level1/level2").unwrap();
   ops.create_directory(&ctx, "/level1/level2/level3").unwrap();
 
-  ops.store_file_buffered(&ctx,
-    "/level1/level2/level3/deep_file.txt",
-    b"deep content",
-    None,
-  ).unwrap();
+  ops.store_file_buffered(&ctx, "/level1/level2/level3/deep_file.txt", b"deep content", None).unwrap();
 
   let children = ops.list_directory("/level1/level2/level3").unwrap();
   assert_eq!(children.len(), 1);

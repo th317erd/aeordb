@@ -1,8 +1,6 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_store::{FieldIndex, IndexManager};
-use aeordb::engine::scalar_converter::{
-  HashConverter, U64Converter, StringConverter,
-};
+use aeordb::engine::scalar_converter::{HashConverter, U64Converter, StringConverter};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -53,12 +51,7 @@ fn test_insert_many_sorted() {
 
   // Verify sorted order by scalar
   for window in index.entries.windows(2) {
-    assert!(
-      window[0].scalar <= window[1].scalar,
-      "Entries not sorted: {} > {}",
-      window[0].scalar,
-      window[1].scalar,
-    );
+    assert!(window[0].scalar <= window[1].scalar, "Entries not sorted: {} > {}", window[0].scalar, window[1].scalar,);
   }
 }
 
@@ -89,10 +82,7 @@ fn test_lookup_range() {
   index.insert(&50u64.to_be_bytes(), vec![0x50; 32]);
   index.insert(&80u64.to_be_bytes(), vec![0x80; 32]);
 
-  let results = index.lookup_range(
-    &15u64.to_be_bytes(),
-    &55u64.to_be_bytes(),
-  ).unwrap();
+  let results = index.lookup_range(&15u64.to_be_bytes(), &55u64.to_be_bytes()).unwrap();
 
   assert_eq!(results.len(), 2);
   // Should include 20 and 50
@@ -396,10 +386,7 @@ fn test_field_index_nvt_lookup_range() {
   }
 
   // Range query spanning multiple NVT buckets
-  let results = index.lookup_range(
-    &20u64.to_be_bytes(),
-    &40u64.to_be_bytes(),
-  ).unwrap();
+  let results = index.lookup_range(&20u64.to_be_bytes(), &40u64.to_be_bytes()).unwrap();
 
   // Should include 20, 25, 30, 35, 40
   assert_eq!(results.len(), 5);
@@ -409,10 +396,7 @@ fn test_field_index_nvt_lookup_range() {
   }
 
   // Range at the very start
-  let results = index.lookup_range(
-    &0u64.to_be_bytes(),
-    &5u64.to_be_bytes(),
-  ).unwrap();
+  let results = index.lookup_range(&0u64.to_be_bytes(), &5u64.to_be_bytes()).unwrap();
   assert_eq!(results.len(), 2); // 0 and 5
 }
 

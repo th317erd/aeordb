@@ -1,3 +1,3 @@
 fn main() {
-    println!("gc-investigate stub");
+  println!("gc-investigate stub");
 }

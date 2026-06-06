@@ -4,20 +4,20 @@ use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
 
 // Lower 4 bits - type
-pub const KV_TYPE_CHUNK: u8       = 0x0;
+pub const KV_TYPE_CHUNK: u8 = 0x0;
 pub const KV_TYPE_FILE_RECORD: u8 = 0x1;
-pub const KV_TYPE_DIRECTORY: u8   = 0x2;
-pub const KV_TYPE_DELETION: u8    = 0x3;
-pub const KV_TYPE_SNAPSHOT: u8    = 0x4;
-pub const KV_TYPE_VOID: u8        = 0x5;
-pub const KV_TYPE_HEAD: u8        = 0x6;
-pub const KV_TYPE_FORK: u8        = 0x7;
-pub const KV_TYPE_VERSION: u8     = 0x8;
-pub const KV_TYPE_SYMLINK: u8     = 0x9;
+pub const KV_TYPE_DIRECTORY: u8 = 0x2;
+pub const KV_TYPE_DELETION: u8 = 0x3;
+pub const KV_TYPE_SNAPSHOT: u8 = 0x4;
+pub const KV_TYPE_VOID: u8 = 0x5;
+pub const KV_TYPE_HEAD: u8 = 0x6;
+pub const KV_TYPE_FORK: u8 = 0x7;
+pub const KV_TYPE_VERSION: u8 = 0x8;
+pub const KV_TYPE_SYMLINK: u8 = 0x9;
 
 // Upper 4 bits - flags
-pub const KV_FLAG_PENDING: u8     = 0x10;
-pub const KV_FLAG_DELETED: u8     = 0x20;
+pub const KV_FLAG_PENDING: u8 = 0x10;
+pub const KV_FLAG_DELETED: u8 = 0x20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KVEntry {
@@ -58,12 +58,7 @@ pub struct KVStore {
 
 impl KVStore {
   pub fn new(hash_algo: HashAlgorithm, initial_nvt_buckets: usize) -> Self {
-    KVStore {
-      version: 1,
-      hash_algo,
-      entries: Vec::new(),
-      nvt: NormalizedVectorTable::new(Box::new(HashConverter), initial_nvt_buckets),
-    }
+    KVStore { version: 1, hash_algo, entries: Vec::new(), nvt: NormalizedVectorTable::new(Box::new(HashConverter), initial_nvt_buckets) }
   }
 
   pub fn insert(&mut self, entry: KVEntry) {
@@ -212,10 +207,7 @@ impl KVStore {
   }
 
   pub fn entries_in_range(&self, start_offset: u64, end_offset: u64) -> Vec<&KVEntry> {
-    self.entries
-      .iter()
-      .filter(|entry| entry.offset >= start_offset && entry.offset < end_offset)
-      .collect()
+    self.entries.iter().filter(|entry| entry.offset >= start_offset && entry.offset < end_offset).collect()
   }
 
   pub fn version(&self) -> u8 {
@@ -262,27 +254,18 @@ impl KVStore {
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
     // Minimum: version(1) + hash_algo(2) + entry_count(8) = 11 bytes
     if data.len() < 11 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "KVStore data too short for header".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "KVStore data too short for header".to_string() });
     }
 
     let version = data[0];
     if version == 0 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("Invalid KVStore version: {}", version),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("Invalid KVStore version: {}", version) });
     }
 
     let hash_algo_raw = u16::from_le_bytes([data[1], data[2]]);
-    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw)
-      .ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
 
-    let entry_count = u64::from_le_bytes([
-      data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10],
-    ]) as usize;
+    let entry_count = u64::from_le_bytes([data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10]]) as usize;
 
     let hash_length = hash_algo.hash_length();
     let entry_size = 1 + hash_length + 8 + 4;
@@ -291,11 +274,7 @@ impl KVStore {
     if data.len() < entries_end + 4 {
       return Err(EngineError::CorruptEntry {
         offset: 0,
-        reason: format!(
-          "KVStore data too short: expected at least {} bytes, got {}",
-          entries_end + 4,
-          data.len()
-        ),
+        reason: format!("KVStore data too short: expected at least {} bytes, got {}", entries_end + 4, data.len()),
       });
     }
 
@@ -320,42 +299,22 @@ impl KVStore {
       ]);
       cursor += 8;
 
-      let total_length = u32::from_le_bytes([
-        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-      ]);
+      let total_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]);
       cursor += 4;
 
-      entries.push(KVEntry {
-        type_flags,
-        hash,
-        offset,
-        total_length,
-      });
+      entries.push(KVEntry { type_flags, hash, offset, total_length });
     }
 
-    let nvt_length = u32::from_le_bytes([
-      data[cursor],
-      data[cursor + 1],
-      data[cursor + 2],
-      data[cursor + 3],
-    ]) as usize;
+    let nvt_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     if data.len() < cursor + nvt_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "KVStore data too short for NVT section".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "KVStore data too short for NVT section".to_string() });
     }
 
     let nvt = NormalizedVectorTable::deserialize(&data[cursor..cursor + nvt_length])?;
 
-    Ok(KVStore {
-      version,
-      hash_algo,
-      entries,
-      nvt,
-    })
+    Ok(KVStore { version, hash_algo, entries, nvt })
   }
 
   pub fn rebuild_nvt(&mut self) {

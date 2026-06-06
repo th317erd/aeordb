@@ -1,7 +1,6 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::scalar_converter::{
-  HashConverter, U8Converter, U16Converter, U32Converter, U64Converter,
-  I64Converter, F64Converter, StringConverter, TimestampConverter,
+  HashConverter, U8Converter, U16Converter, U32Converter, U64Converter, I64Converter, F64Converter, StringConverter, TimestampConverter,
   TrigramConverter, PhoneticConverter, ScalarConverter,
 };
 
@@ -46,10 +45,7 @@ impl PathIndexConfig {
       if position > 0 {
         json.push(',');
       }
-      json.push_str(&format!(
-        "{{\"name\":\"{}\",\"type\":\"{}\"",
-        config.name, config.index_type,
-      ));
+      json.push_str(&format!("{{\"name\":\"{}\",\"type\":\"{}\"", config.name, config.index_type,));
       if let Some(ref source) = config.source {
         json.push_str(&format!(",\"source\":{}", source));
       }
@@ -77,43 +73,37 @@ impl PathIndexConfig {
   }
 
   fn deserialize_v0(data: &[u8]) -> EngineResult<Self> {
-    let text = std::str::from_utf8(data).map_err(|error| {
-      EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
-    })?;
+    let text = std::str::from_utf8(data).map_err(|error| EngineError::JsonParseError(format!("Invalid UTF-8: {}", error)))?;
 
     // Use serde_json for parsing
-    let parsed: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-      EngineError::JsonParseError(format!("Invalid JSON: {}", error))
-    })?;
+    let parsed: serde_json::Value =
+      serde_json::from_str(text).map_err(|error| EngineError::JsonParseError(format!("Invalid JSON: {}", error)))?;
 
-    let indexes_array = parsed.get("indexes")
+    let indexes_array = parsed
+      .get("indexes")
       .and_then(|value| value.as_array())
       .ok_or_else(|| EngineError::JsonParseError("Missing 'indexes' array".to_string()))?;
 
-    let parser = parsed.get("parser")
-      .and_then(|v| v.as_str())
-      .map(|v| v.to_string());
+    let parser = parsed.get("parser").and_then(|v| v.as_str()).map(|v| v.to_string());
 
-    let parser_memory_limit = parsed.get("parser_memory_limit")
-      .and_then(|v| v.as_str())
-      .map(|v| v.to_string());
+    let parser_memory_limit = parsed.get("parser_memory_limit").and_then(|v| v.as_str()).map(|v| v.to_string());
 
-    let logging = parsed.get("logging")
-      .and_then(|v| v.as_bool())
-      .unwrap_or(false);
+    let logging = parsed.get("logging").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let glob = parsed.get("glob").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     let mut indexes = Vec::with_capacity(indexes_array.len());
     for item in indexes_array {
-      let name = item.get("name")
+      let name = item
+        .get("name")
         .or_else(|| item.get("field_name"))
         .or_else(|| item.get("field"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| EngineError::JsonParseError("Missing 'name' in index config".to_string()))?
         .to_string();
 
-      let type_value = item.get("type")
+      let type_value = item
+        .get("type")
         .or_else(|| item.get("converter_type"))
         .or_else(|| item.get("converter"))
         .ok_or_else(|| EngineError::JsonParseError("Missing 'type' in index config".to_string()))?;
@@ -126,23 +116,18 @@ impl PathIndexConfig {
       let type_strings: Vec<String> = if let Some(s) = type_value.as_str() {
         vec![s.to_string()]
       } else if let Some(arr) = type_value.as_array() {
-        arr.iter()
-          .map(|v| v.as_str()
-            .ok_or_else(|| EngineError::JsonParseError("'type' array must contain strings".to_string()))
-            .map(|s| s.to_string()))
+        arr
+          .iter()
+          .map(|v| {
+            v.as_str().ok_or_else(|| EngineError::JsonParseError("'type' array must contain strings".to_string())).map(|s| s.to_string())
+          })
           .collect::<EngineResult<Vec<String>>>()?
       } else {
         return Err(EngineError::JsonParseError("'type' must be a string or array of strings".to_string()));
       };
 
       for index_type in type_strings {
-        indexes.push(IndexFieldConfig {
-          name: name.clone(),
-          index_type,
-          source: source.clone(),
-          min,
-          max,
-        });
+        indexes.push(IndexFieldConfig { name: name.clone(), index_type, source: source.clone(), min, max });
       }
     }
 
@@ -161,17 +146,12 @@ impl PathIndexConfig {
   }
 
   fn deserialize_with_compression_v0(data: &[u8]) -> EngineResult<Option<String>> {
-    let text = std::str::from_utf8(data).map_err(|error| {
-      EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
-    })?;
+    let text = std::str::from_utf8(data).map_err(|error| EngineError::JsonParseError(format!("Invalid UTF-8: {}", error)))?;
 
-    let parsed: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-      EngineError::JsonParseError(format!("Invalid JSON: {}", error))
-    })?;
+    let parsed: serde_json::Value =
+      serde_json::from_str(text).map_err(|error| EngineError::JsonParseError(format!("Invalid JSON: {}", error)))?;
 
-    let compression = parsed.get("compression")
-      .and_then(|value| value.as_str())
-      .map(|value| value.to_string());
+    let compression = parsed.get("compression").and_then(|value| value.as_str()).map(|value| value.to_string());
 
     Ok(compression)
   }
@@ -224,9 +204,6 @@ pub fn create_converter_from_config(config: &IndexFieldConfig) -> EngineResult<B
     "phonetic" | "dmetaphone" => Ok(Box::new(PhoneticConverter::dmetaphone())),
     "soundex" => Ok(Box::new(PhoneticConverter::soundex())),
     "dmetaphone_alt" => Ok(Box::new(PhoneticConverter::dmetaphone_alt())),
-    unknown => Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("Unknown converter type: '{}'", unknown),
-    }),
+    unknown => Err(EngineError::CorruptEntry { offset: 0, reason: format!("Unknown converter type: '{}'", unknown) }),
   }
 }

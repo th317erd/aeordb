@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "xenocept": {
+      "command": "/home/wyatt/Projects/xenocept-workspace/xenocept-client/target/debug/xenocept",
+      "args": [
+        "plugin://org.aeor.xenocept.claude/mcp?channel=AeorDB"
+      ]
+    }
+  }
+}

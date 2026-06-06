@@ -1,0 +1,277 @@
+{
+  "capturedAtUTC": "2026-06-05T06:32:57.324Z",
+  "baseURL": "http://127.0.0.1:6830",
+  "observations": [
+    {
+      "method": "GET",
+      "path": "/system/health",
+      "status": 200,
+      "body": {
+        "status": "healthy",
+        "version": "0.9.5"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions?depth=-1&glob=*/session.json&limit=500",
+      "status": 200,
+      "body": {
+        "items": [],
+        "limit": 500,
+        "offset": 0,
+        "total": 0
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions?depth=-1&glob=**/frames/*.json&limit=500",
+      "status": 200,
+      "body": {
+        "items": [],
+        "limit": 500,
+        "offset": 0,
+        "total": 0
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions?depth=-1&glob=**/*&limit=1000",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "content_type": "application/json",
+            "created_at": 1780635409040,
+            "entry_type": 2,
+            "hash": "b6556179e1c2696a13c284ad657233a8834bcf4bce8dfcf8367f0138bdd911fc",
+            "name": "0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json",
+            "path": "/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json",
+            "size": 313,
+            "updated_at": 1780635409040
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780339429442,
+            "entry_type": 2,
+            "hash": "5f1c3f67c603c3e3293122ba862d25e64a92fbacfa5e1c19f291334bdce32619",
+            "name": "0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json",
+            "path": "/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json",
+            "size": 519,
+            "updated_at": 1780339429442
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780635412404,
+            "entry_type": 2,
+            "hash": "c32f92239e3b832119e0fbf0a036b1ca669797853b9b2f9b40a7fcddff96ce3a",
+            "name": "0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json",
+            "path": "/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json",
+            "size": 406,
+            "updated_at": 1780635412404
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780632613290,
+            "entry_type": 2,
+            "hash": "7fd088fc433422f15584982b7816f9ba8ae1f0d694ce185768fda409c9aeecba",
+            "name": "0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json",
+            "path": "/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json",
+            "size": 1941,
+            "updated_at": 1780632613290
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780337739458,
+            "entry_type": 2,
+            "hash": "2fe33c81c339f7a8d7d4124664ec4c1fb657b59076ca1415c9a04218e7f6c7c1",
+            "name": "indexes.json",
+            "path": "/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json",
+            "size": 297,
+            "updated_at": 1780337739458
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780338014987,
+            "entry_type": 2,
+            "hash": "aacc2426ae584937046bce509333ee3944ba384857bcd9cb7f4ebe6b446f0b14",
+            "name": "indexes.json",
+            "path": "/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json",
+            "size": 254,
+            "updated_at": 1780338019630
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780338268948,
+            "entry_type": 2,
+            "hash": "04334f9143522ca3f4d2b3ae51186c97f30736e8cd1a884799992705601a3715",
+            "name": "indexes.json",
+            "path": "/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json",
+            "size": 254,
+            "updated_at": 1780338268948
+          }
+        ],
+        "limit": 1000,
+        "offset": 0,
+        "total": 7
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/agents?depth=-1&limit=500",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "content_type": "application/json",
+            "created_at": 1780619186465,
+            "entry_type": 2,
+            "hash": "ce261ee99dda1f410fcecc2f961e45153b5920fc80db4457a01094c2af787f04",
+            "name": "agent.json",
+            "path": "/kikx/agents/1b498f52-d681-4a31-9da3-1737183ffaf3/agent.json",
+            "size": 395,
+            "updated_at": 1780622506882
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620097955,
+            "entry_type": 2,
+            "hash": "5375b01b2411df53691bd8c6aec1d61ebe91065dd00af0f637144f946e766df6",
+            "name": "createdAt.timestamp.idx",
+            "path": "/kikx/agents/.aeordb-indexes/createdAt.timestamp.idx",
+            "size": 12443,
+            "updated_at": 1780639571374
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620097883,
+            "entry_type": 2,
+            "hash": "3c8fd295f046545465122cc8cc5881dd3f8ccd2c31ad48e9bc7810c9ddadba42",
+            "name": "enabled.string.idx",
+            "path": "/kikx/agents/.aeordb-indexes/enabled.string.idx",
+            "size": 12413,
+            "updated_at": 1780639571307
+          },
+          {
+            "content_type": "application/x-coff",
+            "created_at": 1780620097634,
+            "entry_type": 2,
+            "hash": "c82942927084a342e14b392a6bcdf917816796ecf7d968961669105b66355f9c",
+            "name": "id.string.idx",
+            "path": "/kikx/agents/.aeordb-indexes/id.string.idx",
+            "size": 12440,
+            "updated_at": 1780639571049
+          },
+          {
+            "content_type": "application/json",
+            "created_at": 1780345309891,
+            "entry_type": 2,
+            "hash": "42a0d2d5587f7ec89505fb6085e01e53c096a7b72b939815e3b762a3e237955f",
+            "name": "indexes.json",
+            "path": "/kikx/agents/.aeordb-config/indexes.json",
+            "size": 286,
+            "updated_at": 1780639569303
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620097693,
+            "entry_type": 2,
+            "hash": "f90dba01700aa470d085273e1d8f98d13d8b0d9e8dffec8a15982282409c356b",
+            "name": "name.string.idx",
+            "path": "/kikx/agents/.aeordb-indexes/name.string.idx",
+            "size": 12412,
+            "updated_at": 1780639571112
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620097751,
+            "entry_type": 2,
+            "hash": "2aad98fb37a371381806d5506f236e08020aeab71890ae7e033988724d126d64",
+            "name": "name.trigram.idx",
+            "path": "/kikx/agents/.aeordb-indexes/name.trigram.idx",
+            "size": 12644,
+            "updated_at": 1780639571173
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620097812,
+            "entry_type": 2,
+            "hash": "320189fe5a7dbdfccc37e93e58d2f7fa7d5f85546964a1162cc45bfa8c584941",
+            "name": "pluginID.string.idx",
+            "path": "/kikx/agents/.aeordb-indexes/pluginID.string.idx",
+            "size": 12421,
+            "updated_at": 1780639571245
+          },
+          {
+            "content_type": "application/octet-stream",
+            "created_at": 1780620098029,
+            "entry_type": 2,
+            "hash": "ca0fa729c18892e10a4e622238af236a738c355825cf3c163ef247376c7e0da5",
+            "name": "updatedAt.timestamp.idx",
+            "path": "/kikx/agents/.aeordb-indexes/updatedAt.timestamp.idx",
+            "size": 12443,
+            "updated_at": 1780639571443
+          }
+        ],
+        "limit": 500,
+        "offset": 0,
+        "total": 9
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 313
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 519
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 406
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 1933
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 297
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 254
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json",
+      "status": 200,
+      "bodySummary": {
+        "byteLength": 254
+      }
+    }
+  ]
+}

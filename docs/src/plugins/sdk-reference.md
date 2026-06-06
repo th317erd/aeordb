@@ -35,7 +35,7 @@ Import everything you need with:
 use aeordb_plugin_sdk::prelude::*;
 ```
 
-This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `QueryResult`, `AggregateResult`, `SortDirection`.
+This re-exports: `PluginError`, `PluginRequest`, `PluginResponse`, `json`, `ParserInput`, `FileMeta`, `PluginContext`, `FileData`, `DirEntry`, `FileMetadata`, `ExtractRequest`, `ExtractedText`, `QueryResult`, `AggregateResult`, `SortDirection`.
 
 ---
 
@@ -112,6 +112,54 @@ All variants carry a `String` message. `PluginError` implements `Display`, `Debu
 
 ---
 
+## `json`
+
+The SDK re-exports `serde_json` directly and also provides `aeordb_plugin_sdk::json` helpers for common plugin request parsing, serialization, and recursive value merging.
+
+Types and macros re-exported from `serde_json`:
+
+| Item | Description |
+|------|-------------|
+| `json!` | Build a JSON value inline |
+| `Value` | Dynamic JSON value |
+| `Map` | JSON object map |
+| `Number` | JSON number |
+
+Helper functions:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `parse_bytes` | `<T: DeserializeOwned>(&[u8]) -> Result<T, PluginError>` | Parse raw JSON bytes into a typed value |
+| `parse_str` | `<T: DeserializeOwned>(&str) -> Result<T, PluginError>` | Parse a JSON string into a typed value |
+| `parse_request` | `<T: DeserializeOwned>(&PluginRequest) -> Result<T, PluginError>` | Parse `PluginRequest.arguments` into a typed value |
+| `to_value` | `<T: Serialize>(&T) -> Result<Value, PluginError>` | Serialize into `serde_json::Value` |
+| `to_bytes` | `<T: Serialize>(&T) -> Result<Vec<u8>, PluginError>` | Serialize into compact JSON bytes |
+| `to_string` | `<T: Serialize>(&T) -> Result<String, PluginError>` | Serialize into a compact JSON string |
+| `merge_into` | `(&mut Value, Value)` | Recursively merge one JSON value into another |
+| `merged` | `(Value, Value) -> Value` | Return a merged copy |
+| `merge_all` | `(Value, impl IntoIterator<Item = Value>) -> Value` | Apply overlays left to right |
+
+Merge semantics are recursive for object/object branches. Arrays, scalars, and `null` replace the existing value. This is not JSON Merge Patch; `null` is preserved as a value and does not delete a key.
+
+```rust
+use aeordb_plugin_sdk::prelude::*;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Args {
+    file: String,
+    options: json::Value,
+}
+
+let args: Args = json::parse_request(&request)?;
+let options = json::merged(
+    json::json!({"max_bytes": 65536, "format": {"pretty": false}}),
+    args.options,
+);
+```
+
+---
+
 ## `PluginContext`
 
 Guest-side handle for calling AeorDB host functions from WASM. Created automatically by `aeordb_query_plugin!` and passed to the handler.
@@ -123,6 +171,26 @@ On non-WASM targets (native compilation), all methods return `PluginError::Execu
 #### `read_file(&self, path: &str) -> Result<FileData, PluginError>`
 
 Read a file at the given path. Returns the decoded file bytes, content type, and size.
+
+#### `extract_file(&self, path: &str, request: ExtractRequest) -> Result<ExtractedText, PluginError>`
+
+Extract a UTF-8 text slice without buffering the full file through the plugin boundary.
+
+Supported modes:
+
+| Mode | Range semantics |
+|------|-----------------|
+| `lines` | `start` and `end` are 1-based inclusive line numbers |
+| `chars` | `start` is 0-based inclusive and `end` is exclusive |
+
+Line extraction treats `\r\n` as one line break while preserving the original line ending in the returned text. Lone `\n` and lone `\r` also count as line breaks.
+
+```rust
+let lines = ctx.extract_file("/docs/readme.md", ExtractRequest::lines(10, 20))?;
+let chars = ctx.extract_file("/docs/readme.md", ExtractRequest::chars(0, 500))?;
+```
+
+`ExtractRequest.max_bytes` can cap the returned text size. The host enforces an absolute upper bound and sets `ExtractedText.truncated` when output is cut at the cap.
 
 #### `write_file(&self, path: &str, data: &[u8], content_type: &str) -> Result<(), PluginError>`
 

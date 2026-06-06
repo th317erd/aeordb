@@ -23,6 +23,11 @@ fn test_parse_auth_uri_false() {
 }
 
 #[test]
+fn test_parse_auth_uri_disabled() {
+  assert_eq!(parse_auth_uri("disabled").unwrap(), AuthMode::Disabled);
+}
+
+#[test]
 fn test_parse_auth_uri_null() {
   assert_eq!(parse_auth_uri("null").unwrap(), AuthMode::Disabled);
 }
@@ -41,6 +46,8 @@ fn test_parse_auth_uri_zero() {
 fn test_parse_auth_uri_false_case_insensitive() {
   assert_eq!(parse_auth_uri("FALSE").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("False").unwrap(), AuthMode::Disabled);
+  assert_eq!(parse_auth_uri("DISABLED").unwrap(), AuthMode::Disabled);
+  assert_eq!(parse_auth_uri("Disabled").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("NO").unwrap(), AuthMode::Disabled);
   assert_eq!(parse_auth_uri("NULL").unwrap(), AuthMode::Disabled);
 }
@@ -179,11 +186,7 @@ fn test_resolve_auth_mode_default_self() {
   let result = resolve_auth_mode(None);
   // Should be SelfContained (unless ~/.aeordb-config/aeordb/identity exists).
   // We don't create that file in tests, so this should be SelfContained.
-  assert!(
-    result == AuthMode::SelfContained || matches!(result, AuthMode::File(_)),
-    "Expected SelfContained or File, got {:?}",
-    result
-  );
+  assert!(result == AuthMode::SelfContained || matches!(result, AuthMode::File(_)), "Expected SelfContained or File, got {:?}", result);
 }
 
 #[test]
@@ -424,9 +427,7 @@ fn test_file_auth_provider_from_identity_file_creates_parent_dirs() {
 // ===========================================================================
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 async fn body_json(body: Body) -> serde_json::Value {
@@ -485,10 +486,7 @@ async fn test_no_auth_mode_allows_admin_without_token() {
   );
 
   // GET /admin/api-keys without auth should work (root claims injected).
-  let request = Request::builder()
-    .uri("/auth/keys/admin")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().uri("/auth/keys/admin").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   // Should succeed because NoAuth injects root claims.
@@ -537,10 +535,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
     CorsState { default_origins: None, rules: vec![] },
   );
 
-  let read_req = Request::builder()
-    .uri("/files/noauth/data.json")
-    .body(Body::empty())
-    .unwrap();
+  let read_req = Request::builder().uri("/files/noauth/data.json").body(Body::empty()).unwrap();
 
   let read_resp = app2.oneshot(read_req).await.unwrap();
   assert_eq!(read_resp.status(), StatusCode::OK);
@@ -554,9 +549,7 @@ async fn test_no_auth_mode_engine_read_after_write() {
 async fn test_file_auth_provider_token_exchange_works() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let provider = Arc::new(FileAuthProvider::new(engine.clone()));
-  let jwt_manager = Arc::new(
-    JwtManager::from_bytes(&provider.jwt_manager().to_bytes()).unwrap()
-  );
+  let jwt_manager = Arc::new(JwtManager::from_bytes(&provider.jwt_manager().to_bytes()).unwrap());
 
   // Bootstrap a root key.
   let root_key = bootstrap_root_key(&engine).expect("bootstrap should succeed").expect("should bootstrap");

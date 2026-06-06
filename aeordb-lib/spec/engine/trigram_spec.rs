@@ -1,8 +1,5 @@
 use aeordb::engine::fuzzy::{extract_trigrams, trigram_similarity, auto_fuzziness};
-use aeordb::engine::scalar_converter::{
-  ScalarConverter, TrigramConverter, CONVERTER_TYPE_TRIGRAM,
-  serialize_converter, deserialize_converter,
-};
+use aeordb::engine::scalar_converter::{ScalarConverter, TrigramConverter, CONVERTER_TYPE_TRIGRAM, serialize_converter, deserialize_converter};
 use aeordb::engine::index_config::{IndexFieldConfig, create_converter_from_config};
 use aeordb::engine::index_store::FieldIndex;
 
@@ -182,12 +179,7 @@ fn test_trigram_similarity_known_value() {
   // Dice: 2*3 / (6+5) = 6/11
   let sim = trigram_similarity("hello", "help");
   let expected = 6.0 / 11.0;
-  assert!(
-    (sim - expected).abs() < 1e-10,
-    "expected {}, got {}",
-    expected,
-    sim
-  );
+  assert!((sim - expected).abs() < 1e-10, "expected {}, got {}", expected, sim);
 }
 
 // ============================================================================
@@ -241,12 +233,7 @@ fn test_trigram_converter_to_scalar_range() {
   // Test with various trigram values
   for trigram in &["  h", " he", "hel", "ell", "llo", "lo ", "abc", "xyz"] {
     let scalar = converter.to_scalar(trigram.as_bytes());
-    assert!(
-      (0.0..=1.0).contains(&scalar),
-      "scalar {} out of [0,1] for trigram '{}'",
-      scalar,
-      trigram
-    );
+    assert!((0.0..=1.0).contains(&scalar), "scalar {} out of [0,1] for trigram '{}'", scalar, trigram);
   }
 }
 
@@ -305,13 +292,7 @@ fn test_trigram_converter_not_order_preserving() {
 
 #[test]
 fn test_create_converter_from_config_trigram() {
-  let config = IndexFieldConfig {
-    name: "name".to_string(),
-    index_type: "trigram".to_string(),
-        source: None,
-    min: None,
-    max: None,
-  };
+  let config = IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None };
   let converter = create_converter_from_config(&config).expect("should create trigram converter");
   assert_eq!(converter.name(), "trigram");
   assert_eq!(converter.strategy(), "trigram");
@@ -334,21 +315,12 @@ fn test_trigram_index_store_and_load() {
   index.insert_expanded(b"hello", file_hash.clone());
 
   // "hello" should produce 6 trigrams, so 6 entries
-  assert_eq!(
-    index.len(),
-    6,
-    "expected 6 entries (one per trigram), got {}",
-    index.len()
-  );
+  assert_eq!(index.len(), 6, "expected 6 entries (one per trigram), got {}", index.len());
 
   // All entries should reference the same file hash
   for entry in &index.entries {
     assert_eq!(entry.file_hash, file_hash);
-    assert!(
-      (0.0..=1.0).contains(&entry.scalar),
-      "scalar {} out of range",
-      entry.scalar
-    );
+    assert!((0.0..=1.0).contains(&entry.scalar), "scalar {} out of range", entry.scalar);
   }
 
   // Serialize and deserialize round-trip
@@ -384,13 +356,7 @@ fn test_trigram_index_multiple_documents() {
   let expected_world = 6; // "  w", " wo", "wor", "orl", "rld", "ld "
   let expected_total = expected_hello + expected_help + expected_world;
 
-  assert_eq!(
-    index.len(),
-    expected_total,
-    "expected {} entries, got {}",
-    expected_total,
-    index.len()
-  );
+  assert_eq!(index.len(), expected_total, "expected {} entries, got {}", expected_total, index.len());
 
   // Verify entries reference correct hashes
   let hash1_entries: Vec<_> = index.entries.iter().filter(|e| e.file_hash == hash1).collect();

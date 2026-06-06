@@ -12,10 +12,7 @@ pub struct PluginPath {
 /// Paths follow the pattern: "database/schema/table/function_name"
 /// Fewer segments are allowed — only as many as are present will be populated.
 pub fn parse_plugin_path(path: &str) -> PluginPath {
-  let segments: Vec<&str> = path
-    .split('/')
-    .filter(|segment| !segment.is_empty())
-    .collect();
+  let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
 
   PluginPath {
     database: segments.first().map(|s| s.to_string()),
@@ -33,10 +30,7 @@ pub fn parse_plugin_path(path: &str) -> PluginPath {
 ///   - "mydb/public/validate"
 ///   - "mydb/validate"
 pub fn resolve_function_path(current_path: &str, function_name: &str) -> Vec<String> {
-  let segments: Vec<&str> = current_path
-    .split('/')
-    .filter(|segment| !segment.is_empty())
-    .collect();
+  let segments: Vec<&str> = current_path.split('/').filter(|segment| !segment.is_empty()).collect();
 
   let mut paths = Vec::with_capacity(segments.len());
 
@@ -59,14 +53,8 @@ pub fn resolve_function_path(current_path: &str, function_name: &str) -> Vec<Str
 /// The rule: target must be a prefix of (or equal to) the requester's ancestor chain.
 /// In other words, every segment of target must match the corresponding segment of requester.
 pub fn is_scope_accessible(requester_path: &str, target_path: &str) -> bool {
-  let requester_segments: Vec<&str> = requester_path
-    .split('/')
-    .filter(|segment| !segment.is_empty())
-    .collect();
-  let target_segments: Vec<&str> = target_path
-    .split('/')
-    .filter(|segment| !segment.is_empty())
-    .collect();
+  let requester_segments: Vec<&str> = requester_path.split('/').filter(|segment| !segment.is_empty()).collect();
+  let target_segments: Vec<&str> = target_path.split('/').filter(|segment| !segment.is_empty()).collect();
 
   // Target must not be deeper than requester (can't reach into sibling's children).
   if target_segments.len() > requester_segments.len() {

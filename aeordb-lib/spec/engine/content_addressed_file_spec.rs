@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use aeordb::engine::{
-  DirectoryOps, RequestContext, VersionManager,
-  file_path_hash, file_content_hash, file_identity_hash,
-};
+use aeordb::engine::{DirectoryOps, RequestContext, VersionManager, file_path_hash, file_content_hash, file_identity_hash};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::gc::run_gc;
 use aeordb::server::create_temp_engine_for_tests;
@@ -54,8 +51,7 @@ fn test_child_entry_uses_identity_hash_not_path_hash() {
   let head = engine.head_hash().unwrap();
   let tree = walk_version_tree(&engine, &head).unwrap();
 
-  let (file_hash, record) = tree.files.get("/check.txt")
-    .expect("file should appear in version tree");
+  let (file_hash, record) = tree.files.get("/check.txt").expect("file should appear in version tree");
 
   // The ChildEntry hash (stored in tree.files) should NOT equal the path hash
   assert_ne!(file_hash, &path_key, "ChildEntry.hash should be identity hash, not path hash");
@@ -70,8 +66,7 @@ fn test_child_entry_uses_identity_hash_not_path_hash() {
   assert_eq!(file_hash, &expected_identity_key, "ChildEntry.hash should equal computed identity hash");
 
   // The identity key should also resolve in the KV store (stored for tree walker lookups)
-  assert!(engine.get_entry(&expected_identity_key).unwrap().is_some(),
-    "identity hash should be stored in KV store for tree walker access");
+  assert!(engine.get_entry(&expected_identity_key).unwrap().is_some(), "identity hash should be stored in KV store for tree walker access");
 }
 
 #[test]
@@ -138,18 +133,14 @@ fn test_snapshot_preserves_historical_file_version() {
   let snap_hash = vm.get_snapshot_hash("snap1").unwrap();
   let snap_tree = walk_version_tree(&engine, &snap_hash).unwrap();
 
-  let (_hash, record) = snap_tree.files.get("/doc.txt")
-    .expect("snapshot should contain /doc.txt");
-  assert_eq!(record.total_size, b"original content".len() as u64,
-    "snapshot should have v1's size, not v2's");
+  let (_hash, record) = snap_tree.files.get("/doc.txt").expect("snapshot should contain /doc.txt");
+  assert_eq!(record.total_size, b"original content".len() as u64, "snapshot should have v1's size, not v2's");
 
   // Walk HEAD — should have v2
   let head = engine.head_hash().unwrap();
   let head_tree = walk_version_tree(&engine, &head).unwrap();
-  let (_hash2, record2) = head_tree.files.get("/doc.txt")
-    .expect("HEAD should contain /doc.txt");
-  assert_eq!(record2.total_size, b"updated content".len() as u64,
-    "HEAD should have v2's size");
+  let (_hash2, record2) = head_tree.files.get("/doc.txt").expect("HEAD should contain /doc.txt");
+  assert_eq!(record2.total_size, b"updated content".len() as u64, "HEAD should have v2's size");
 }
 
 #[test]
@@ -167,19 +158,16 @@ fn test_snapshot_file_content_readable() {
   // Walk snapshot to get the file record
   let snap_hash = vm.get_snapshot_hash("before-overwrite").unwrap();
   let snap_tree = walk_version_tree(&engine, &snap_hash).unwrap();
-  let (_file_hash, file_record) = snap_tree.files.get("/data.bin")
-    .expect("snapshot should contain /data.bin");
+  let (_file_hash, file_record) = snap_tree.files.get("/data.bin").expect("snapshot should contain /data.bin");
 
   // Read chunks from the snapshot's file record
   let mut content = Vec::new();
   for chunk_hash in &file_record.chunk_hashes {
-    let (_header, _key, chunk_data) = engine.get_entry(chunk_hash).unwrap()
-      .expect("chunk should exist");
+    let (_header, _key, chunk_data) = engine.get_entry(chunk_hash).unwrap().expect("chunk should exist");
     content.extend_from_slice(&chunk_data);
   }
 
-  assert_eq!(content, b"original bytes here",
-    "snapshot chunks should yield original content");
+  assert_eq!(content, b"original bytes here", "snapshot chunks should yield original content");
 }
 
 #[test]
@@ -197,14 +185,12 @@ fn test_deleted_file_snapshot_still_has_it() {
   // HEAD should NOT have the file
   let head = engine.head_hash().unwrap();
   let head_tree = walk_version_tree(&engine, &head).unwrap();
-  assert!(!head_tree.files.contains_key("/ephemeral.txt"),
-    "HEAD should not contain deleted file");
+  assert!(!head_tree.files.contains_key("/ephemeral.txt"), "HEAD should not contain deleted file");
 
   // Snapshot should still have it
   let snap_hash = vm.get_snapshot_hash("has-file").unwrap();
   let snap_tree = walk_version_tree(&engine, &snap_hash).unwrap();
-  assert!(snap_tree.files.contains_key("/ephemeral.txt"),
-    "snapshot should still contain the file");
+  assert!(snap_tree.files.contains_key("/ephemeral.txt"), "snapshot should still contain the file");
 
   let (_hash, record) = snap_tree.files.get("/ephemeral.txt").unwrap();
   assert_eq!(record.total_size, b"here today".len() as u64);
@@ -258,8 +244,7 @@ fn test_gc_sweeps_old_content_keys_after_overwrite() {
   run_gc(&engine, &ctx, false).unwrap();
 
   // v1 content key should be swept (no snapshot references it)
-  assert!(!engine.has_entry(&v1_content_key).unwrap(),
-    "v1 content key should be swept by GC (unreferenced)");
+  assert!(!engine.has_entry(&v1_content_key).unwrap(), "v1 content key should be swept by GC (unreferenced)");
 
   // v2 should still be readable
   let content = ops.read_file_buffered("/mutable.txt").unwrap();
@@ -291,16 +276,13 @@ fn test_gc_preserves_snapshot_content_keys() {
   run_gc(&engine, &ctx, false).unwrap();
 
   // v1 content key should NOT be swept — snapshot references it
-  assert!(engine.has_entry(&v1_content_key).unwrap(),
-    "v1 content key should survive GC because snapshot references it");
+  assert!(engine.has_entry(&v1_content_key).unwrap(), "v1 content key should survive GC because snapshot references it");
 
   // Snapshot tree should still be walkable and have v1 data
   let snap_hash = vm.get_snapshot_hash("pin").unwrap();
   let snap_tree = walk_version_tree(&engine, &snap_hash).unwrap();
-  let (_hash, record) = snap_tree.files.get("/pinned.txt")
-    .expect("snapshot should still contain /pinned.txt after GC");
-  assert_eq!(record.total_size, b"v1 pinned".len() as u64,
-    "snapshot should have v1 size after GC");
+  let (_hash, record) = snap_tree.files.get("/pinned.txt").expect("snapshot should still contain /pinned.txt after GC");
+  assert_eq!(record.total_size, b"v1 pinned".len() as u64, "snapshot should have v1 size after GC");
 
   // HEAD should have v2
   let content = ops.read_file_buffered("/pinned.txt").unwrap();

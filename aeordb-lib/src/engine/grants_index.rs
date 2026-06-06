@@ -104,9 +104,7 @@ impl CacheLoader for GrantsIndexLoader {
   fn load(&self, _key: &(), engine: &StorageEngine) -> EngineResult<GrantsIndex> {
     let ops = DirectoryOps::new(engine);
 
-    let perm_files = match list_directory_recursive(
-      engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES),
-    ) {
+    let perm_files = match list_directory_recursive(engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES)) {
       Ok(entries) => entries,
       Err(_) => return Ok(GrantsIndex::default()),
     };
@@ -125,7 +123,11 @@ impl CacheLoader for GrantsIndexLoader {
 
       let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
         let stripped = &entry.path[..entry.path.len() - "/.aeordb-permissions".len()];
-        if stripped.is_empty() { "/".to_string() } else { stripped.to_string() }
+        if stripped.is_empty() {
+          "/".to_string()
+        } else {
+          stripped.to_string()
+        }
       } else if entry.path == "/.aeordb-permissions" {
         "/".to_string()
       } else {
@@ -150,7 +152,11 @@ impl CacheLoader for GrantsIndexLoader {
 
 /// Strip a trailing slash from a path while preserving `"/"` itself.
 fn normalize_for_compare(path: &str) -> &str {
-  if path.len() > 1 { path.trim_end_matches('/') } else { path }
+  if path.len() > 1 {
+    path.trim_end_matches('/')
+  } else {
+    path
+  }
 }
 
 /// True if `ancestor` is `target` itself or a parent directory of `target`.
@@ -159,9 +165,15 @@ fn normalize_for_compare(path: &str) -> &str {
 fn path_is_ancestor_or_equal(ancestor: &str, target: &str) -> bool {
   let ancestor = normalize_for_compare(ancestor);
   let target = normalize_for_compare(target);
-  if ancestor == target { return true; }
-  if ancestor == "/" { return target.starts_with('/'); }
-  if !target.starts_with(ancestor) { return false; }
+  if ancestor == target {
+    return true;
+  }
+  if ancestor == "/" {
+    return target.starts_with('/');
+  }
+  if !target.starts_with(ancestor) {
+    return false;
+  }
   target[ancestor.len()..].starts_with('/')
 }
 
@@ -170,7 +182,9 @@ fn path_is_ancestor_or_equal(ancestor: &str, target: &str) -> bool {
 fn path_is_strict_ancestor(ancestor: &str, target: &str) -> bool {
   let a = normalize_for_compare(ancestor);
   let t = normalize_for_compare(target);
-  if a == t { return false; }
+  if a == t {
+    return false;
+  }
   path_is_ancestor_or_equal(a, t)
 }
 
@@ -189,7 +203,9 @@ fn next_segment_below<'a>(parent_path: &str, target: &'a str) -> Option<&'a str>
     let after = target.strip_prefix(parent_path)?;
     after.strip_prefix('/')?
   };
-  if stripped.is_empty() { return None; }
+  if stripped.is_empty() {
+    return None;
+  }
   Some(stripped.split('/').next().unwrap_or(stripped))
 }
 
@@ -272,14 +288,17 @@ mod tests {
   #[test]
   fn grants_index_user_has_descendant_grants() {
     let mut by_group: HashMap<String, Vec<GrantRecord>> = HashMap::new();
-    by_group.insert("share-1".to_string(), vec![GrantRecord {
-      dir_path: "/Pictures/Family/Harlo".to_string(),
-      allow: "rl......".to_string(),
-      deny: "........".to_string(),
-      others_allow: None,
-      others_deny: None,
-      path_pattern: None,
-    }]);
+    by_group.insert(
+      "share-1".to_string(),
+      vec![GrantRecord {
+        dir_path: "/Pictures/Family/Harlo".to_string(),
+        allow: "rl......".to_string(),
+        deny: "........".to_string(),
+        others_allow: None,
+        others_deny: None,
+        path_pattern: None,
+      }],
+    );
     let index = GrantsIndex { by_group };
     let groups = vec!["share-1".to_string()];
 
@@ -289,8 +308,10 @@ mod tests {
     // Strict ancestor: the grant target itself is NOT a "descendant" for
     // this check — the direct resolver walk handles equal-path access.
     assert!(!index.user_has_descendant_grants(&groups, "/Pictures/Family/Harlo"));
-    assert!(!index.user_has_descendant_grants(&groups, "/Pictures/Family/Harlo/photos/2024"),
-      "deeper than the grant should not register as descendant");
+    assert!(
+      !index.user_has_descendant_grants(&groups, "/Pictures/Family/Harlo/photos/2024"),
+      "deeper than the grant should not register as descendant"
+    );
     assert!(!index.user_has_descendant_grants(&groups, "/Music"));
     assert!(!index.user_has_descendant_grants(&[], "/"));
   }
@@ -298,19 +319,27 @@ mod tests {
   #[test]
   fn grants_index_accessible_child_names() {
     let mut by_group: HashMap<String, Vec<GrantRecord>> = HashMap::new();
-    by_group.insert("share-1".to_string(), vec![
-      GrantRecord {
-        dir_path: "/Pictures/Family/Harlo".to_string(),
-        allow: "rl......".to_string(), deny: "........".to_string(),
-        others_allow: None, others_deny: None, path_pattern: None,
-      },
-      GrantRecord {
-        dir_path: "/Documents".to_string(),
-        allow: "r.......".to_string(), deny: "........".to_string(),
-        others_allow: None, others_deny: None,
-        path_pattern: Some("tax-2025.pdf".to_string()),
-      },
-    ]);
+    by_group.insert(
+      "share-1".to_string(),
+      vec![
+        GrantRecord {
+          dir_path: "/Pictures/Family/Harlo".to_string(),
+          allow: "rl......".to_string(),
+          deny: "........".to_string(),
+          others_allow: None,
+          others_deny: None,
+          path_pattern: None,
+        },
+        GrantRecord {
+          dir_path: "/Documents".to_string(),
+          allow: "r.......".to_string(),
+          deny: "........".to_string(),
+          others_allow: None,
+          others_deny: None,
+          path_pattern: Some("tax-2025.pdf".to_string()),
+        },
+      ],
+    );
     let index = GrantsIndex { by_group };
     let groups = vec!["share-1".to_string()];
 
@@ -331,11 +360,17 @@ mod tests {
   #[test]
   fn ancestor_descent_does_not_register_grants_in_unrelated_subtrees() {
     let mut by_group: HashMap<String, Vec<GrantRecord>> = HashMap::new();
-    by_group.insert("share-1".to_string(), vec![GrantRecord {
-      dir_path: "/A/B".to_string(),
-      allow: "rl......".to_string(), deny: "........".to_string(),
-      others_allow: None, others_deny: None, path_pattern: None,
-    }]);
+    by_group.insert(
+      "share-1".to_string(),
+      vec![GrantRecord {
+        dir_path: "/A/B".to_string(),
+        allow: "rl......".to_string(),
+        deny: "........".to_string(),
+        others_allow: None,
+        others_deny: None,
+        path_pattern: None,
+      }],
+    );
     let index = GrantsIndex { by_group };
     let groups = vec!["share-1".to_string()];
 

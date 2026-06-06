@@ -1,9 +1,4 @@
-use axum::{
-  extract::Request,
-  http::HeaderValue,
-  middleware::Next,
-  response::Response,
-};
+use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
 use uuid::Uuid;
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -14,10 +9,7 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 /// 2. Otherwise generates a UUID v4.
 /// 3. Creates a tracing span so all downstream log events inherit the ID.
 /// 4. Adds the `X-Request-Id` header to the response.
-pub async fn request_id_middleware(
-  request: Request,
-  next: Next,
-) -> Response {
+pub async fn request_id_middleware(request: Request, next: Next) -> Response {
   let request_id = request
     .headers()
     .get(REQUEST_ID_HEADER)
@@ -44,21 +36,20 @@ pub async fn request_id_middleware(
   // across await points via `Span::enter`).
   drop(_guard);
 
-  let mut response = span.in_scope(|| {
-    // We cannot use `in_scope` across an await, so we instrument the future
-    // instead.  However `Next::run` is an opaque future that we cannot
-    // `.instrument()` directly without adding `tracing-futures`.  The pragmatic
-    // solution: attach the span to the task with `Instrument`.
-    next
-  })
-  // Use `tracing::Instrument` to carry the span across the await point.
-  .run(request)
-  .await;
+  let mut response = span
+    .in_scope(|| {
+      // We cannot use `in_scope` across an await, so we instrument the future
+      // instead.  However `Next::run` is an opaque future that we cannot
+      // `.instrument()` directly without adding `tracing-futures`.  The pragmatic
+      // solution: attach the span to the task with `Instrument`.
+      next
+    })
+    // Use `tracing::Instrument` to carry the span across the await point.
+    .run(request)
+    .await;
 
   if let Ok(header_value) = HeaderValue::from_str(&request_id) {
-    response
-      .headers_mut()
-      .insert(REQUEST_ID_HEADER, header_value);
+    response.headers_mut().insert(REQUEST_ID_HEADER, header_value);
   }
 
   response

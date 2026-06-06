@@ -63,8 +63,7 @@ pub fn run(database: &str, force: bool) {
     user_id: Some(ROOT_USER_ID),
     created_at: chrono::Utc::now(),
     is_revoked: false,
-    expires_at: chrono::Utc::now().timestamp_millis()
-      + (aeordb::auth::DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
+    expires_at: chrono::Utc::now().timestamp_millis() + (aeordb::auth::DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
     label: Some("emergency-reset".to_string()),
     rules: vec![],
   };

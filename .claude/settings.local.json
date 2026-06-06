@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -9 -f \"target/release/aeordb\")",
+      "Bash(mkdir -p /tmp/sync-test)",
+      "Bash(rm -f /tmp/sync-test/*)",
+      "Read(//tmp/sync-test/**)",
+      "Bash(/home/wyatt/Projects/aeordb-workspace/aeordb/target/release/aeordb start *)",
+      "Bash(mkdir -p /tmp/stress-test)",
+      "Bash(rm -f /tmp/stress-test/*)",
+      "Read(//tmp/**)",
+      "Bash(echo \"PID $!\")",
+      "Read(//tmp/stress-test/**)",
+      "Bash(mkdir -p /tmp/stress2)",
+      "Bash(rm -f /tmp/stress2/*)",
+      "Bash(mkdir -p /tmp/soak-realtest)",
+      "Bash(rm -rf /tmp/soak-realtest/*)",
+      "Bash(AEORDB_SOAK_DB=/tmp/soak-realtest/soak.aeordb AEORDB_SOAK_HOURS=0.033 ./scripts/soak.sh s1)"
+    ]
+  }
+}

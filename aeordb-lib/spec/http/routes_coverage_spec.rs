@@ -16,9 +16,7 @@ use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLimiter>, tempfile::TempDir) {
@@ -40,11 +38,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-  rate_limiter: &Arc<RateLimiter>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>, rate_limiter: &Arc<RateLimiter>) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
@@ -167,23 +161,15 @@ async fn test_auth_token_malformed_json_body() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
 async fn test_auth_token_empty_body() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/auth/token")
-    .header("content-type", "application/json")
-    .body(Body::from(r#"{}"#))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/auth/token").header("content-type", "application/json").body(Body::from(r#"{}"#)).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
@@ -270,12 +256,8 @@ async fn test_list_api_keys_requires_admin_role() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let non_admin_auth = non_admin_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys/admin")
-    .header("authorization", &non_admin_auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/auth/keys/admin").header("authorization", &non_admin_auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -372,12 +354,7 @@ async fn test_list_api_keys_returns_stored_keys() {
 
   // List them
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys/admin")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys/admin").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -396,12 +373,8 @@ async fn test_expired_jwt_returns_401() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let expired_auth = expired_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys/admin")
-    .header("authorization", &expired_auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/auth/keys/admin").header("authorization", &expired_auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -426,11 +399,7 @@ async fn test_malformed_bearer_token_returns_401() {
 async fn test_missing_authorization_header_returns_401() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/auth/keys/admin")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/auth/keys/admin").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -453,11 +422,7 @@ async fn test_magic_link_malformed_body_returns_error() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,11 +442,7 @@ async fn test_refresh_malformed_body_returns_error() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 // ---------------------------------------------------------------------------
@@ -493,12 +454,7 @@ async fn test_deploy_plugin_empty_body_returns_400() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = admin_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("PUT")
-    .uri("/plugins/mytable")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("PUT").uri("/plugins/mytable").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -525,12 +481,8 @@ async fn test_invoke_nonexistent_plugin_returns_404() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = admin_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/plugins/nonexistent/invoke")
-    .header("authorization", &auth)
-    .body(Body::from("input"))
-    .unwrap();
+  let request =
+    Request::builder().method("POST").uri("/plugins/nonexistent/invoke").header("authorization", &auth).body(Body::from("input")).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -541,12 +493,7 @@ async fn test_remove_nonexistent_plugin_returns_404() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = admin_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/plugins/nonexistent")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("DELETE").uri("/plugins/nonexistent").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -560,11 +507,7 @@ async fn test_remove_nonexistent_plugin_returns_404() {
 async fn test_health_check_returns_ok() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/health")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/health").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -586,11 +529,7 @@ async fn test_health_check_returns_ok() {
 async fn test_metrics_endpoint_requires_auth() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/metrics")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/metrics").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -601,17 +540,9 @@ async fn test_metrics_endpoint_returns_prometheus_text() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = admin_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/metrics")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/metrics").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
-  assert_eq!(
-    response.headers().get("content-type").unwrap().to_str().unwrap(),
-    "text/plain; version=0.0.4; charset=utf-8"
-  );
+  assert_eq!(response.headers().get("content-type").unwrap().to_str().unwrap(), "text/plain; version=0.0.4; charset=utf-8");
 }

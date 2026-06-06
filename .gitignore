@@ -16,11 +16,12 @@ Thumbs.db
 
 # Database files
 *.aeor
+*.aeordb
+*.aeordb.lock
 
 # Environment
 .env
 .env.local
-data.aeordb
 
 # Portal asset links — materialized by aeordb-lib/build.rs on every build.
 # Linux/macOS: relative symlinks. Windows: NTFS junctions.

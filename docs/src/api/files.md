@@ -8,6 +8,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 |--------|------|-------------|------|-------------|
 | PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 413, 500 |
 | GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
+| POST | `/files/fetch` | Batch read file bodies as JSON strings | Yes | 200, 400, 404, 413, 500 |
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
 | PATCH | `/files/{path}` | Rename a file/symlink (`application/json`) or [JSON merge-patch](./merge-patch.md) into a stored document (`application/merge-patch+json`) | Yes | 200, 201, 400, 404, 413, 415, 500 |
@@ -99,7 +100,7 @@ Read a file or list a directory. The server determines the type automatically:
 | `version` | string | — | Read the file at this version hash (hex) |
 | `nofollow` | boolean | `false` | If the path is a symlink, return metadata instead of following |
 | `depth` | integer | `0` | Directory listing depth: `0` = immediate children, `-1` = unlimited recursion |
-| `glob` | string | — | Filter directory listing by file name glob pattern (`*`, `?`, `[abc]`) |
+| `glob` | string | — | Filter directory listings by name, relative path, or full-path glob pattern (`*`, `?`, `**`) |
 | `limit` | integer | — | Maximum number of entries to return in a directory listing |
 | `offset` | integer | — | Number of entries to skip before returning results |
 
@@ -223,12 +224,16 @@ curl http://localhost:6830/files/data/?depth=-1 \
 curl "http://localhost:6830/files/assets/?depth=-1&glob=*.psd" \
   -H "Authorization: Bearer $TOKEN"
 
+# List JSON frames anywhere under /sessions/
+curl "http://localhost:6830/files/sessions/?depth=-1&glob=**/frames/*.json" \
+  -H "Authorization: Bearer $TOKEN"
+
 # List one level deep
 curl http://localhost:6830/files/data/?depth=1 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-When `depth > 0` or `depth = -1`, the response contains **files only** in a flat list. Directory entries are traversed but not included in the output.
+When `depth > 0` or `depth = -1`, the response contains **files only** in a flat list. Directory entries are traversed but not included in the output. Recursive globs can match a basename (`*.psd`), a path relative to the requested directory (`**/frames/*.json`), or a full path.
 
 ### Versioned Reads
 
@@ -251,6 +256,88 @@ If both `snapshot` and `version` are provided, `snapshot` takes precedence. Retu
 | Status | Condition |
 |--------|-----------|
 | 404 | Path does not exist as file or directory |
+| 500 | Internal read failure |
+
+---
+
+## POST /files/fetch
+
+Fetch multiple files in one request and return a JSON object keyed by canonical file path. This endpoint is for file bodies only; directories, missing files, system paths, and unreadable paths return `404`.
+
+The response is all-or-nothing. If any requested path cannot be read, no partial result is returned. File bytes are encoded into JSON strings with UTF-8 lossy conversion, so binary data may contain replacement characters.
+
+### Request
+
+- **Headers:**
+  - `Authorization: Bearer <token>` (required)
+  - `Content-Type: application/json` (required)
+- **Body:**
+
+```json
+{
+  "paths": [
+    "/data/a.txt",
+    "/data/b.json"
+  ],
+  "max_bytes": 1048576
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `paths` | array | Yes | File paths to fetch |
+| `max_bytes` | integer | No | Optional lower cumulative byte limit for this request. Values above the server cap are clamped to the server cap. |
+
+### Response
+
+**Status:** `200 OK`
+
+```json
+{
+  "/data/a.txt": {
+    "path": "/data/a.txt",
+    "name": "a.txt",
+    "size": 324534,
+    "created_at": 1235413451345,
+    "updated_at": 134513453145,
+    "content_type": "text/plain",
+    "content": "..."
+  },
+  "/data/b.json": {
+    "path": "/data/b.json",
+    "name": "b.json",
+    "size": 2048,
+    "created_at": 1235413451345,
+    "updated_at": 134513453145,
+    "content_type": "application/json",
+    "content": "{\"ok\":true}"
+  }
+}
+```
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Maximum paths | 10,000 |
+| Maximum cumulative file bytes | 256 MB |
+
+### Example
+
+```bash
+curl -X POST http://localhost:6830/files/fetch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["/data/a.txt","/data/b.json"]}'
+```
+
+### Error Responses
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Empty `paths` array or too many paths |
+| 404 | Any requested path is missing, a directory, a system path, or not readable by the caller |
+| 413 | Response would exceed the cumulative byte limit |
 | 500 | Internal read failure |
 
 ---

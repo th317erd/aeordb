@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_store::IndexManager;
 use crate::engine::query_engine::{
-  FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryResult,
-  ExplainMode, QueryStrategy,
-  DEFAULT_QUERY_LIMIT,
+  FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryResult, ExplainMode, QueryStrategy, DEFAULT_QUERY_LIMIT,
 };
 use crate::engine::storage_engine::StorageEngine;
 
@@ -71,11 +69,7 @@ pub fn global_search(
   let indexed_dirs = index_manager.discover_indexed_directories(base_path)?;
 
   if indexed_dirs.is_empty() {
-    return Ok(SearchResults {
-      results: Vec::new(),
-      has_more: false,
-      total_count: Some(0),
-    });
+    return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
   }
 
   // Collect raw results across every directory.
@@ -89,23 +83,14 @@ pub fn global_search(
     structured_search(engine, &index_manager, &indexed_dirs, field_query, &mut all_results)?;
   } else {
     // Neither query nor where_clause provided -- nothing to search.
-    return Ok(SearchResults {
-      results: Vec::new(),
-      has_more: false,
-      total_count: Some(0),
-    });
+    return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
   }
 
   // Deduplicate by path, keeping the highest score for each.
   deduplicate_by_path(&mut all_results);
 
   // Sort by score descending (ties broken by path for determinism).
-  all_results.sort_by(|a, b| {
-    b.score
-      .partial_cmp(&a.score)
-      .unwrap_or(std::cmp::Ordering::Equal)
-      .then_with(|| a.path.cmp(&b.path))
-  });
+  all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.path.cmp(&b.path)));
 
   let total_count = all_results.len();
   let effective_offset = offset.unwrap_or(0);
@@ -120,11 +105,7 @@ pub fn global_search(
   let has_more = page.len() > effective_limit;
   let results: Vec<SearchResult> = page.into_iter().take(effective_limit).collect();
 
-  Ok(SearchResults {
-    results,
-    has_more,
-    total_count: Some(total_count),
-  })
+  Ok(SearchResults { results, has_more, total_count: Some(total_count) })
 }
 
 // ---------------------------------------------------------------------------
@@ -167,10 +148,7 @@ fn broad_search(
       let q = Query {
         path: dir.clone(),
         field_queries: vec![],
-        node: Some(QueryNode::Field(FieldQuery {
-          field_name: field_name.clone(),
-          operation: QueryOp::Match(query_str.to_string()),
-        })),
+        node: Some(QueryNode::Field(FieldQuery { field_name: field_name.clone(), operation: QueryOp::Match(query_str.to_string()) })),
         // No per-directory cap — global_search paginates after every
         // directory has contributed all its hits. `limit: None` would
         // silently get rewritten to `DEFAULT_QUERY_LIMIT = 20` by
@@ -223,10 +201,7 @@ fn structured_search(
   for dir in indexed_dirs {
     // Only search directories that actually index the requested field.
     let indexes = index_manager.list_indexes(dir)?;
-    let has_field = indexes.iter().any(|name| {
-      name == &field_query.field_name
-        || name.starts_with(&format!("{}.", field_query.field_name))
-    });
+    let has_field = indexes.iter().any(|name| name == &field_query.field_name || name.starts_with(&format!("{}.", field_query.field_name)));
     if !has_field {
       continue;
     }
@@ -288,11 +263,7 @@ fn discover_fuzzy_fields(index_names: &[String]) -> Vec<String> {
 }
 
 /// Convert a `QueryResult` from the query engine into a `SearchResult`.
-fn query_result_to_search_result(
-  qr: QueryResult,
-  source_dir: &str,
-  matched_field: &str,
-) -> SearchResult {
+fn query_result_to_search_result(qr: QueryResult, source_dir: &str, matched_field: &str) -> SearchResult {
   let mut matched_by = qr.matched_by;
   if matched_by.is_empty() {
     matched_by.push(matched_field.to_string());
@@ -365,12 +336,8 @@ mod tests {
 
   #[test]
   fn test_discover_fuzzy_fields_no_duplicates() {
-    let names = vec![
-      "name.trigram".to_string(),
-      "name.soundex".to_string(),
-      "name.dmetaphone".to_string(),
-      "name.dmetaphone_alt".to_string(),
-    ];
+    let names =
+      vec!["name.trigram".to_string(), "name.soundex".to_string(), "name.dmetaphone".to_string(), "name.dmetaphone_alt".to_string()];
     let fields = discover_fuzzy_fields(&names);
     assert_eq!(fields, vec!["name".to_string()]);
   }
@@ -426,18 +393,16 @@ mod tests {
 
   #[test]
   fn test_deduplicate_by_path_no_duplicates() {
-    let mut results = vec![
-      SearchResult {
-        path: "/x".to_string(),
-        score: 1.0,
-        matched_by: vec![],
-        source_dir: "/d".to_string(),
-        size: 0,
-        content_type: None,
-        created_at: 0,
-        updated_at: 0,
-      },
-    ];
+    let mut results = vec![SearchResult {
+      path: "/x".to_string(),
+      score: 1.0,
+      matched_by: vec![],
+      source_dir: "/d".to_string(),
+      size: 0,
+      content_type: None,
+      created_at: 0,
+      updated_at: 0,
+    }];
     deduplicate_by_path(&mut results);
     assert_eq!(results.len(), 1);
   }

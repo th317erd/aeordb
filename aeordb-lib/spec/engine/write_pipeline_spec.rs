@@ -28,10 +28,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
-  format!(
-    r#"{{"name":"{}","age":{},"email":"{}"}}"#,
-    name, age, email,
-  ).into_bytes()
+  format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
 
 #[test]
@@ -48,15 +45,13 @@ fn test_store_file_indexes_fields() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
@@ -100,15 +95,13 @@ fn test_delete_file_removes_index_entries() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
@@ -141,15 +134,13 @@ fn test_overwrite_file_updates_index() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
@@ -181,20 +172,8 @@ fn test_multiple_indexed_fields() {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(&engine, "/users", &config);
@@ -308,20 +287,8 @@ fn test_index_config_serialize_deserialize_roundtrip() {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
 
@@ -364,15 +331,13 @@ fn test_store_non_json_data_with_config_does_not_crash() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/data", &config);
 
@@ -403,35 +368,25 @@ fn test_multiple_files_indexed_together() {
     logging: false,
     glob: None,
 
-    indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-    ],
+    indexes: vec![IndexFieldConfig {
+      name: "age".to_string(),
+      index_type: "u64".to_string(),
+      source: None,
+      min: Some(0.0),
+      max: Some(200.0),
+    }],
   };
   store_index_config(&engine, "/users", &config);
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/alice.json",
-    &make_user_json("Alice", 30, "alice@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/users/alice.json", &make_user_json("Alice", 30, "alice@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/bob.json",
-    &make_user_json("Bob", 25, "bob@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops.store_file_with_indexing(&ctx, "/users/bob.json", &make_user_json("Bob", 25, "bob@test.com"), Some("application/json")).unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/users/charlie.json",
-    &make_user_json("Charlie", 40, "charlie@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/users/charlie.json", &make_user_json("Charlie", 40, "charlie@test.com"), Some("application/json"))
+    .unwrap();
 
   let index_manager = IndexManager::new(&engine);
   let index = index_manager.load_index("/users", "age").unwrap().unwrap();

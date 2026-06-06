@@ -1,6 +1,4 @@
-use aeordb::engine::scalar_converter::{
-  HashConverter, ScalarConverter, U64Converter, StringConverter,
-};
+use aeordb::engine::scalar_converter::{HashConverter, ScalarConverter, U64Converter, StringConverter};
 use aeordb::engine::nvt::NormalizedVectorTable;
 
 fn make_hash(first_byte: u8) -> Vec<u8> {
@@ -127,8 +125,7 @@ fn test_nvt_serialize_deserialize_roundtrip() {
   nvt.update_bucket(7, 300, 15);
 
   let serialized = nvt.serialize();
-  let deserialized = NormalizedVectorTable::deserialize(&serialized)
-    .expect("deserialization should succeed");
+  let deserialized = NormalizedVectorTable::deserialize(&serialized).expect("deserialization should succeed");
 
   assert_eq!(deserialized.bucket_count(), 8);
   assert_eq!(deserialized.version(), 1);
@@ -150,8 +147,7 @@ fn test_nvt_empty() {
   assert_eq!(nvt.bucket_count(), 0);
 
   let serialized = nvt.serialize();
-  let deserialized = NormalizedVectorTable::deserialize(&serialized)
-    .expect("empty NVT deserialization should succeed");
+  let deserialized = NormalizedVectorTable::deserialize(&serialized).expect("empty NVT deserialization should succeed");
   assert_eq!(deserialized.bucket_count(), 0);
 }
 
@@ -172,7 +168,7 @@ fn test_nvt_deserialize_truncated_buckets() {
   data.extend_from_slice(&1u32.to_le_bytes()); // converter_length = 1
   data.push(0x01); // HashConverter type tag
   data.extend_from_slice(&10u32.to_le_bytes()); // bucket_count = 10
-  // Missing bucket data
+                                                // Missing bucket data
 
   let result = NormalizedVectorTable::deserialize(&data);
   assert!(result.is_err(), "truncated bucket data should fail");
@@ -261,8 +257,7 @@ fn test_nvt_with_u64_converter() {
 
   // Serialization roundtrip preserves converter behavior
   let serialized = nvt.serialize();
-  let deserialized = NormalizedVectorTable::deserialize(&serialized)
-    .expect("deserialization should succeed");
+  let deserialized = NormalizedVectorTable::deserialize(&serialized).expect("deserialization should succeed");
   assert_eq!(deserialized.bucket_for_value(&mid_bytes), nvt.bucket_for_value(&mid_bytes));
 }
 
@@ -286,7 +281,6 @@ fn test_nvt_with_string_converter() {
 
   // Serialization roundtrip
   let serialized = nvt.serialize();
-  let deserialized = NormalizedVectorTable::deserialize(&serialized)
-    .expect("deserialization should succeed");
+  let deserialized = NormalizedVectorTable::deserialize(&serialized).expect("deserialization should succeed");
   assert_eq!(deserialized.bucket_for_value(a_bytes), bucket_a);
 }

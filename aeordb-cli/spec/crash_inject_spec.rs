@@ -103,7 +103,9 @@ fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
   let file = File::open(checkpoint_path).expect("open checkpoint");
   let mut entries = Vec::new();
   for line in BufReader::new(file).lines().map_while(Result::ok) {
-    if line.starts_with('#') || line.is_empty() { continue; }
+    if line.starts_with('#') || line.is_empty() {
+      continue;
+    }
     if let Some((path, body)) = line.split_once('\t') {
       entries.push((path.to_string(), body.to_string()));
     }
@@ -133,21 +135,13 @@ fn run_sigkill_iteration(iteration: usize, mode: &str, kill_after: Duration) {
   drop(StorageEngine::create(&db_path).expect("create db"));
 
   let mut worker = spawn_worker(&db_path, &checkpoint, mode);
-  assert!(
-    wait_for_worker_up(&checkpoint, Duration::from_secs(10)),
-    "iteration {}: worker didn't come up in time",
-    iteration,
-  );
+  assert!(wait_for_worker_up(&checkpoint, Duration::from_secs(10)), "iteration {}: worker didn't come up in time", iteration,);
 
   std::thread::sleep(kill_after);
   sigkill(&mut worker);
 
   let committed = read_checkpoint(&checkpoint);
-  assert!(
-    !committed.is_empty(),
-    "iteration {}: worker was killed before committing anything; raise kill_after",
-    iteration,
-  );
+  assert!(!committed.is_empty(), "iteration {}: worker was killed before committing anything; raise kill_after", iteration,);
 
   // Reopen and verify every committed entry is intact.
   let engine = open_or_repair(&db_path);
@@ -178,10 +172,7 @@ fn run_sigkill_iteration(iteration: usize, mode: &str, kill_after: Duration) {
     corrupted.first(),
   );
 
-  println!(
-    "iteration {}: {} entries survived SIGKILL (mode={}, killed_after={:?})",
-    iteration, committed.len(), mode, kill_after,
-  );
+  println!("iteration {}: {} entries survived SIGKILL (mode={}, killed_after={:?})", iteration, committed.len(), mode, kill_after,);
 }
 
 #[test]
@@ -217,8 +208,7 @@ fn test_bit_flip_in_kv_page_caught_by_crc() {
     let ctx = aeordb::engine::RequestContext::system();
     for i in 0..100 {
       let path = format!("/file-{:04}.txt", i);
-      ops.store_file_buffered(&ctx, &path, format!("body {}", i).as_bytes(), Some("text/plain"))
-        .expect("store");
+      ops.store_file_buffered(&ctx, &path, format!("body {}", i).as_bytes(), Some("text/plain")).expect("store");
     }
     engine.shutdown().expect("shutdown");
   }
@@ -297,11 +287,7 @@ fn test_umount_during_writes() {
       break;
     }
   }
-  assert!(
-    is_tmpfs_mount,
-    "AEORDB_CRASH_SOAK_TMPFS path {} is NOT a tmpfs mount — refusing to run umount test for safety",
-    tmpfs,
-  );
+  assert!(is_tmpfs_mount, "AEORDB_CRASH_SOAK_TMPFS path {} is NOT a tmpfs mount — refusing to run umount test for safety", tmpfs,);
 
   let db_path = format!("{}/crash.aeordb", tmpfs);
   let checkpoint = format!("{}/checkpoint.tsv", tmpfs);
@@ -315,19 +301,13 @@ fn test_umount_during_writes() {
   std::thread::sleep(Duration::from_millis(1500));
 
   // Force unmount. This sends EIO to the worker's outstanding fs operations.
-  let status = Command::new("umount")
-    .args(["-f", &tmpfs])
-    .status()
-    .expect("run umount");
+  let status = Command::new("umount").args(["-f", &tmpfs]).status().expect("run umount");
   assert!(status.success(), "umount -f failed; need sudo? errno was reported");
 
   let _ = worker.wait();
 
   // Re-mount and verify what survived
-  let status = Command::new("mount")
-    .args(["-t", "tmpfs", "-o", "size=512m", "tmpfs", &tmpfs])
-    .status()
-    .expect("run mount");
+  let status = Command::new("mount").args(["-t", "tmpfs", "-o", "size=512m", "tmpfs", &tmpfs]).status().expect("run mount");
   assert!(status.success(), "remount failed");
 
   // The DB file is on the now-fresh tmpfs and is gone — that's expected
@@ -353,8 +333,7 @@ fn test_trailing_truncation_recoverable() {
     let ctx = aeordb::engine::RequestContext::system();
     for i in 0..200 {
       let path = format!("/data-{:04}.txt", i);
-      ops.store_file_buffered(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain"))
-        .expect("store");
+      ops.store_file_buffered(&ctx, &path, format!("v{}", i).as_bytes(), Some("text/plain")).expect("store");
       last_path_written = Some(path);
     }
     engine.shutdown().expect("shutdown");
@@ -384,10 +363,6 @@ fn test_trailing_truncation_recoverable() {
       earlier_surviving += 1;
     }
   }
-  assert!(
-    earlier_surviving >= 190,
-    "expected most earlier writes to survive truncation; got {} of 199",
-    earlier_surviving,
-  );
+  assert!(earlier_surviving >= 190, "expected most earlier writes to survive truncation; got {} of 199", earlier_surviving,);
   let _ = last;
 }

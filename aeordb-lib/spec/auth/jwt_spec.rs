@@ -175,8 +175,5 @@ fn test_scope_and_permissions_serialized_when_present() {
   let decoded = manager.verify_token(&token).expect("should verify token");
 
   assert_eq!(decoded.scope, Some("read write".to_string()));
-  assert_eq!(
-    decoded.permissions,
-    Some(vec!["docs:read".to_string(), "docs:write".to_string()])
-  );
+  assert_eq!(decoded.permissions, Some(vec!["docs:read".to_string(), "docs:write".to_string()]));
 }

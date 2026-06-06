@@ -21,10 +21,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
 }
 
 /// Rebuild app from shared state (multi-request tests).
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
 }
 
@@ -52,10 +49,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
-  format!(
-    r#"{{"name":"{}","age":{},"email":"{}"}}"#,
-    name, age, email,
-  ).into_bytes()
+  format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
 
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
@@ -82,47 +76,32 @@ fn setup_users(engine: &StorageEngine) {
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "age".to_string(),
-        index_type: "u64".to_string(),
-        source: None,
-        min: Some(0.0),
-        max: Some(200.0),
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "string".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "age".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(200.0) },
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(engine, "/myapp/users", &config);
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/alice.json",
-    &make_user_json("Alice", 30, "alice@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/alice.json", &make_user_json("Alice", 30, "alice@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/bob.json",
-    &make_user_json("Bob", 25, "bob@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/bob.json", &make_user_json("Bob", 25, "bob@test.com"), Some("application/json"))
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/charlie.json",
-    &make_user_json("Charlie", 40, "charlie@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(
+      &ctx,
+      "/myapp/users/charlie.json",
+      &make_user_json("Charlie", 40, "charlie@test.com"),
+      Some("application/json"),
+    )
+    .unwrap();
 
-  ops.store_file_with_indexing(&ctx,
-    "/myapp/users/diana.json",
-    &make_user_json("Diana", 35, "diana@test.com"),
-    Some("application/json"),
-  ).unwrap();
+  ops
+    .store_file_with_indexing(&ctx, "/myapp/users/diana.json", &make_user_json("Diana", 35, "diana@test.com"), Some("application/json"))
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +370,7 @@ async fn test_query_invalid_body_returns_400() {
   let response = app.oneshot(request).await.unwrap();
   // axum returns 422 for deserialization failures by default
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -935,16 +910,11 @@ fn setup_virtual_field_files(engine: &StorageEngine) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
 
-  ops.store_file_buffered(&ctx, "/docs/quarterly-report.pdf", b"fake pdf data for quarterly report",
-    Some("application/pdf")).unwrap();
-  ops.store_file_buffered(&ctx, "/docs/annual-report.pdf", b"fake pdf data for annual report document",
-    Some("application/pdf")).unwrap();
-  ops.store_file_buffered(&ctx, "/docs/notes.txt", b"some plain text notes",
-    Some("text/plain")).unwrap();
-  ops.store_file_buffered(&ctx, "/images/photo.jpeg", b"fake jpeg image data bytes here",
-    Some("image/jpeg")).unwrap();
-  ops.store_file_buffered(&ctx, "/images/logo.png", b"ab",
-    Some("image/png")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/quarterly-report.pdf", b"fake pdf data for quarterly report", Some("application/pdf")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/annual-report.pdf", b"fake pdf data for annual report document", Some("application/pdf")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/notes.txt", b"some plain text notes", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/images/photo.jpeg", b"fake jpeg image data bytes here", Some("image/jpeg")).unwrap();
+  ops.store_file_buffered(&ctx, "/images/logo.png", b"ab", Some("image/png")).unwrap();
 }
 
 #[tokio::test]
@@ -974,8 +944,12 @@ async fn test_virtual_field_filename_contains() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 2, "Expected 2 files with 'report' in filename, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    2,
+    "Expected 2 files with 'report' in filename, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/docs/quarterly-report.pdf"));
@@ -1009,8 +983,7 @@ async fn test_virtual_field_extension_eq() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 2, "Expected 2 PDF files, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(results.len(), 2, "Expected 2 PDF files, got: {:?}", results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/docs/quarterly-report.pdf"));
@@ -1078,8 +1051,12 @@ async fn test_virtual_field_size_gt() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 1, "Expected 1 file > 10 bytes, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    1,
+    "Expected 1 file > 10 bytes, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
   assert_eq!(results[0]["path"], "/images/photo.jpeg");
 }
 
@@ -1111,8 +1088,12 @@ async fn test_virtual_field_path_contains() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 3, "Expected 3 files under /docs/, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    3,
+    "Expected 3 files under /docs/, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
 }
 
 #[tokio::test]
@@ -1144,8 +1125,12 @@ async fn test_virtual_field_created_at_gt() {
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
   // All 3 docs files were just created, so they should all be newer than 2001.
-  assert_eq!(results.len(), 3, "Expected all 3 /docs/ files with created_at > 1000000000000, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    3,
+    "Expected all 3 /docs/ files with created_at > 1000000000000, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
 }
 
 #[tokio::test]
@@ -1179,8 +1164,12 @@ async fn test_virtual_field_combined_and() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 1, "Expected only annual-report.pdf, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    1,
+    "Expected only annual-report.pdf, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
   assert_eq!(results[0]["path"], "/docs/annual-report.pdf");
 }
 
@@ -1216,8 +1205,12 @@ async fn test_virtual_field_boolean_or() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 3, "Expected all 3 /docs/ files (2 pdf + 1 txt), got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    3,
+    "Expected all 3 /docs/ files (2 pdf + 1 txt), got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
 }
 
 #[tokio::test]
@@ -1346,8 +1339,12 @@ async fn test_virtual_field_size_between() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 1, "Expected 1 file between 10-25 bytes, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    1,
+    "Expected 1 file between 10-25 bytes, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
   assert_eq!(results[0]["path"], "/docs/notes.txt");
 }
 
@@ -1379,8 +1376,12 @@ async fn test_virtual_field_content_type_contains() {
 
   let json = body_json(response.into_body()).await;
   let results = json["items"].as_array().unwrap();
-  assert_eq!(results.len(), 2, "Expected 2 image files, got: {:?}",
-    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>());
+  assert_eq!(
+    results.len(),
+    2,
+    "Expected 2 image files, got: {:?}",
+    results.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>()
+  );
 
   let paths: Vec<&str> = results.iter().map(|r| r["path"].as_str().unwrap()).collect();
   assert!(paths.contains(&"/images/photo.jpeg"));
@@ -1574,119 +1575,118 @@ async fn test_virtual_field_no_match_returns_empty() {
   assert_eq!(results.len(), 0);
 }
 
-
 // ---------------------------------------------------------------------------
 // Virtual field fuzzy/phonetic/similar query tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_virtual_field_filename_similar() {
-    let (_, jwt_manager, engine, _temp_dir) = test_app();
-    setup_virtual_field_files(&engine);
-    let app = rebuild_app(&jwt_manager, &engine);
-    let auth = bearer_token(&jwt_manager);
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_virtual_field_files(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
 
-    let body = serde_json::json!({
-        "path": "/docs",
-        "where": [{ "field": "@filename", "op": "similar", "value": "report", "threshold": 0.2 }]
-    });
+  let body = serde_json::json!({
+      "path": "/docs",
+      "where": [{ "field": "@filename", "op": "similar", "value": "report", "threshold": 0.2 }]
+  });
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/files/query")
-        .header("content-type", "application/json")
-        .header("authorization", &auth)
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    let results = json["items"].as_array().unwrap();
-    assert!(!results.is_empty(), "similar search should find files with names similar to 'report'");
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert!(!results.is_empty(), "similar search should find files with names similar to 'report'");
 }
 
 #[tokio::test]
 async fn test_virtual_field_filename_fuzzy() {
-    let (_, jwt_manager, engine, _temp_dir) = test_app();
-    setup_virtual_field_files(&engine);
-    let app = rebuild_app(&jwt_manager, &engine);
-    let auth = bearer_token(&jwt_manager);
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_virtual_field_files(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
 
-    let body = serde_json::json!({
-        "path": "/docs",
-        "where": [{ "field": "@filename", "op": "fuzzy", "value": "notes.txt", "fuzziness": 2 }]
-    });
+  let body = serde_json::json!({
+      "path": "/docs",
+      "where": [{ "field": "@filename", "op": "fuzzy", "value": "notes.txt", "fuzziness": 2 }]
+  });
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/files/query")
-        .header("content-type", "application/json")
-        .header("authorization", &auth)
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    let results = json["items"].as_array().unwrap();
-    assert!(!results.is_empty(), "fuzzy search should find 'notes.txt' within edit distance 2");
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert!(!results.is_empty(), "fuzzy search should find 'notes.txt' within edit distance 2");
 }
 
 #[tokio::test]
 async fn test_virtual_field_filename_match() {
-    let (_, jwt_manager, engine, _temp_dir) = test_app();
-    setup_virtual_field_files(&engine);
-    let app = rebuild_app(&jwt_manager, &engine);
-    let auth = bearer_token(&jwt_manager);
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_virtual_field_files(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
 
-    let body = serde_json::json!({
-        "path": "/docs",
-        "where": [{ "field": "@filename", "op": "match", "value": "report" }]
-    });
+  let body = serde_json::json!({
+      "path": "/docs",
+      "where": [{ "field": "@filename", "op": "match", "value": "report" }]
+  });
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/files/query")
-        .header("content-type", "application/json")
-        .header("authorization", &auth)
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    let results = json["items"].as_array().unwrap();
-    assert!(!results.is_empty(), "match search should find files matching 'report'");
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert!(!results.is_empty(), "match search should find files matching 'report'");
 }
 
 #[tokio::test]
 async fn test_virtual_field_path_similar() {
-    let (_, jwt_manager, engine, _temp_dir) = test_app();
-    setup_virtual_field_files(&engine);
-    let app = rebuild_app(&jwt_manager, &engine);
-    let auth = bearer_token(&jwt_manager);
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_virtual_field_files(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
 
-    let body = serde_json::json!({
-        "path": "/docs",
-        "where": [{ "field": "@path", "op": "similar", "value": "/docs/report.pdf", "threshold": 0.3 }]
-    });
+  let body = serde_json::json!({
+      "path": "/docs",
+      "where": [{ "field": "@path", "op": "similar", "value": "/docs/report.pdf", "threshold": 0.3 }]
+  });
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/files/query")
-        .header("content-type", "application/json")
-        .header("authorization", &auth)
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
 
-    let json = body_json(response.into_body()).await;
-    let results = json["items"].as_array().unwrap();
-    assert!(!results.is_empty(), "similar search on @path should find matches");
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert!(!results.is_empty(), "similar search on @path should find matches");
 }

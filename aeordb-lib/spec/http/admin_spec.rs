@@ -13,9 +13,7 @@ use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
-  metrics_exporter_prometheus::PrometheusBuilder::new()
-    .build_recorder()
-    .handle()
+  metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
 }
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLimiter>, tempfile::TempDir) {
@@ -37,11 +35,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<RateLim
   (app, jwt_manager, engine, rate_limiter, temp_dir)
 }
 
-fn rebuild_app(
-  jwt_manager: &Arc<JwtManager>,
-  engine: &Arc<StorageEngine>,
-  rate_limiter: &Arc<RateLimiter>,
-) -> axum::Router {
+fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>, rate_limiter: &Arc<RateLimiter>) -> axum::Router {
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   create_app_with_all(
@@ -130,11 +124,7 @@ async fn test_create_user_has_uuid() {
 
   let json = body_json(response.into_body()).await;
   let user_id = json["user_id"].as_str().expect("user_id should be a string");
-  assert!(
-    uuid::Uuid::parse_str(user_id).is_ok(),
-    "user_id should be a valid UUID, got: {}",
-    user_id,
-  );
+  assert!(uuid::Uuid::parse_str(user_id).is_ok(), "user_id should be a valid UUID, got: {}", user_id,);
   assert_eq!(json["username"], "bob");
   assert_eq!(json["is_active"], true);
 }
@@ -158,12 +148,7 @@ async fn test_list_users() {
 
   // List users.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/users")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/users").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -195,12 +180,8 @@ async fn test_get_user() {
 
   // Get user.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri(format!("/system/users/{}", user_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri(format!("/system/users/{}", user_id)).header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -318,12 +299,8 @@ async fn test_deactivate_user() {
 
   // Verify user is inactive by fetching.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri(format!("/system/users/{}", user_id))
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri(format!("/system/users/{}", user_id)).header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
   let json = body_json(response.into_body()).await;
@@ -421,12 +398,7 @@ async fn test_list_groups() {
 
   // List groups.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/groups").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -457,12 +429,7 @@ async fn test_get_group() {
 
   // Get group.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups/admins")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/groups/admins").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -477,12 +444,8 @@ async fn test_get_group_404() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups/nonexistent_group")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/system/groups/nonexistent_group").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -596,12 +559,8 @@ async fn test_delete_group() {
 
   // Delete group.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/system/groups/deleteme")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/system/groups/deleteme").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
@@ -612,12 +571,7 @@ async fn test_delete_group() {
 
   // Verify it is gone.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups/deleteme")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/groups/deleteme").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
@@ -627,12 +581,8 @@ async fn test_delete_group_404() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/system/groups/nonexistent_group")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/system/groups/nonexistent_group").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -664,12 +614,7 @@ async fn test_admin_requires_root_users_get() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = non_root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/users")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/users").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -699,12 +644,7 @@ async fn test_admin_requires_root_groups_get() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = non_root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/groups")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/groups").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -731,12 +671,8 @@ async fn test_admin_requires_root_group_delete() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = non_root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/system/groups/some_group")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/system/groups/some_group").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -746,11 +682,7 @@ async fn test_admin_requires_root_group_delete() {
 async fn test_admin_requires_auth_no_token() {
   let (app, _, _, _, _temp_dir) = test_app();
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/users")
-    .body(Body::empty())
-    .unwrap();
+  let request = Request::builder().method("GET").uri("/system/users").body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -808,12 +740,8 @@ async fn test_get_user_invalid_uuid() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("GET")
-    .uri("/system/users/not-a-valid-uuid")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("GET").uri("/system/users/not-a-valid-uuid").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -834,11 +762,7 @@ async fn test_create_user_malformed_json() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -878,11 +802,7 @@ async fn test_create_group_malformed_json() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -900,11 +820,7 @@ async fn test_create_group_missing_required_fields() {
 
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
-  assert!(
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-    "Expected 400 or 422, got {}",
-    status,
-  );
+  assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "Expected 400 or 422, got {}", status,);
 }
 
 #[tokio::test]
@@ -912,12 +828,8 @@ async fn test_deactivate_user_invalid_uuid() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
-  let request = Request::builder()
-    .method("DELETE")
-    .uri("/system/users/bad-uuid")
-    .header("authorization", &auth)
-    .body(Body::empty())
-    .unwrap();
+  let request =
+    Request::builder().method("DELETE").uri("/system/users/bad-uuid").header("authorization", &auth).body(Body::empty()).unwrap();
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);

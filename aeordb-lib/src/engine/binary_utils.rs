@@ -13,12 +13,7 @@ pub fn read_u32(data: &[u8], offset: &mut usize) -> EngineResult<u32> {
   if *offset + 4 > data.len() {
     return Err(EngineError::UnexpectedEof);
   }
-  let value = u32::from_le_bytes([
-    data[*offset],
-    data[*offset + 1],
-    data[*offset + 2],
-    data[*offset + 3],
-  ]);
+  let value = u32::from_le_bytes([data[*offset], data[*offset + 1], data[*offset + 2], data[*offset + 3]]);
   *offset += 4;
   Ok(value)
 }
@@ -54,8 +49,6 @@ pub fn read_bytes(data: &[u8], offset: &mut usize, length: usize) -> EngineResul
 
 pub fn read_string(data: &[u8], offset: &mut usize, length: usize) -> EngineResult<String> {
   let bytes = read_bytes(data, offset, length)?;
-  String::from_utf8(bytes).map_err(|error| EngineError::CorruptEntry {
-    offset: *offset as u64,
-    reason: format!("Invalid UTF-8 string: {}", error),
-  })
+  String::from_utf8(bytes)
+    .map_err(|error| EngineError::CorruptEntry { offset: *offset as u64, reason: format!("Invalid UTF-8 string: {}", error) })
 }

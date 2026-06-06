@@ -13,11 +13,7 @@ pub struct KVResizeManager {
 
 impl KVResizeManager {
   pub fn new(primary: KVStore) -> Self {
-    KVResizeManager {
-      primary,
-      buffer: None,
-      is_resizing: false,
-    }
+    KVResizeManager { primary, buffer: None, is_resizing: false }
   }
 
   /// Enter resize mode: create a small buffer KVS to capture writes

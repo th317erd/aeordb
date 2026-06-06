@@ -6,20 +6,21 @@ pub mod conflict_routes;
 pub mod cors;
 pub mod download_routes;
 pub mod engine_routes;
+pub mod fetch_routes;
 pub mod gc_routes;
 pub mod json_merge_patch;
 pub mod portal_routes;
 pub mod responses;
 pub mod routes;
+pub mod settings_routes;
+pub mod share_link_routes;
+pub mod share_routes;
 pub mod sse_routes;
 pub mod state;
-pub mod task_routes;
-pub mod upload_routes;
-pub mod share_link_routes;
-pub mod settings_routes;
-pub mod share_routes;
 pub mod symlink_routes;
 pub mod sync_routes;
+pub mod task_routes;
+pub mod upload_routes;
 pub mod version_file_routes;
 pub mod version_routes;
 
@@ -61,10 +62,7 @@ pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_conf
 /// `#[test]` constructors that don't spin up tokio). Callers that need
 /// the timer in those environments should call it from within a
 /// `Runtime::block_on`.
-pub fn spawn_hot_buffer_flush_timer(
-  engine: Arc<StorageEngine>,
-  cancel: Option<tokio_util::sync::CancellationToken>,
-) {
+pub fn spawn_hot_buffer_flush_timer(engine: Arc<StorageEngine>, cancel: Option<tokio_util::sync::CancellationToken>) {
   if tokio::runtime::Handle::try_current().is_err() {
     // No runtime — silently skip. Callers that genuinely need the timer
     // (servers / long-running tasks) always run inside tokio::main.
@@ -78,7 +76,9 @@ pub fn spawn_hot_buffer_flush_timer(
     loop {
       interval.tick().await;
       if let Some(ref c) = cancel {
-        if c.is_cancelled() { break; }
+        if c.is_cancelled() {
+          break;
+        }
       }
       match weak.upgrade() {
         Some(engine) => engine.try_flush_hot_buffer(),
@@ -88,10 +88,9 @@ pub fn spawn_hot_buffer_flush_timer(
   });
 }
 
-
 // NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
-// checks: /files/query, /blobs/*, /versions/*, /plugins/*, /system/events.
+// checks: /files/query, /files/fetch, /blobs/*, /versions/*, /plugins/*, /system/events.
 // Consider expanding permission checks to these routes in a future update.
 
 /// Build the full application router with all routes and middleware.
@@ -99,8 +98,9 @@ pub fn spawn_hot_buffer_flush_timer(
 pub fn create_app(engine_path: &str) -> Router {
   let engine = create_engine_for_storage(engine_path);
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
-  let jwt_manager = Arc::new(JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
-    .expect("failed to reconstruct JWT manager from auth provider"));
+  let jwt_manager = Arc::new(
+    JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes()).expect("failed to reconstruct JWT manager from auth provider"),
+  );
   let prometheus_handle = initialize_metrics();
   create_app_with_provider_and_metrics(auth_provider, jwt_manager, prometheus_handle, engine)
 }
@@ -148,8 +148,9 @@ pub fn create_app_with_auth_mode_and_cancel(
     }
   };
 
-  let jwt_manager = Arc::new(JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
-    .expect("failed to reconstruct JWT manager from auth provider"));
+  let jwt_manager = Arc::new(
+    JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes()).expect("failed to reconstruct JWT manager from auth provider"),
+  );
   let prometheus_handle = initialize_metrics();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
@@ -157,13 +158,26 @@ pub fn create_app_with_auth_mode_and_cancel(
   let cors_state = build_cors_state(cors_flag, &engine);
   let router = match cancel {
     Some(token) => create_app_with_all_and_task_queue_with_cancel(
-      auth_provider, jwt_manager, plugin_manager, rate_limiter,
-      prometheus_handle, engine.clone(), event_bus.clone(), cors_state,
-      Some(task_queue.clone()), token,
+      auth_provider,
+      jwt_manager,
+      plugin_manager,
+      rate_limiter,
+      prometheus_handle,
+      engine.clone(),
+      event_bus.clone(),
+      cors_state,
+      Some(task_queue.clone()),
+      token,
     ),
     None => create_app_with_all_and_task_queue(
-      auth_provider, jwt_manager, plugin_manager, rate_limiter,
-      prometheus_handle, engine.clone(), event_bus.clone(), cors_state,
+      auth_provider,
+      jwt_manager,
+      plugin_manager,
+      rate_limiter,
+      prometheus_handle,
+      engine.clone(),
+      event_bus.clone(),
+      cors_state,
       Some(task_queue.clone()),
     ),
   };
@@ -180,10 +194,7 @@ pub fn create_app_with_jwt(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngi
 
 /// Build the application router with a specific JwtManager and engine (useful
 /// for tests that need to reuse the same StorageEngine across rebuilds). No CORS.
-pub fn create_app_with_jwt_and_engine(
-  jwt_manager: Arc<JwtManager>,
-  engine: Arc<StorageEngine>,
-) -> Router {
+pub fn create_app_with_jwt_and_engine(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> Router {
   let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
@@ -207,15 +218,21 @@ pub fn create_app_with_jwt_engine_and_task_queue(
   let event_bus = Arc::new(EventBus::new());
   let cors_state = CorsState { default_origins: None, rules: vec![] };
 
-  create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state, Some(task_queue))
+  create_app_with_all_and_task_queue(
+    auth_provider,
+    jwt_manager,
+    plugin_manager,
+    rate_limiter,
+    prometheus_handle,
+    engine,
+    event_bus,
+    cors_state,
+    Some(task_queue),
+  )
 }
 
 /// Build the application router with a specific JwtManager, engine, and CORS state (for CORS tests).
-pub fn create_app_with_jwt_engine_and_cors(
-  jwt_manager: Arc<JwtManager>,
-  engine: Arc<StorageEngine>,
-  cors_state: CorsState,
-) -> Router {
+pub fn create_app_with_jwt_engine_and_cors(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>, cors_state: CorsState) -> Router {
   let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
@@ -269,7 +286,17 @@ pub fn create_app_with_all(
   event_bus: Arc<EventBus>,
   cors_state: CorsState,
 ) -> Router {
-  create_app_with_all_and_task_queue(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state, None)
+  create_app_with_all_and_task_queue(
+    auth_provider,
+    jwt_manager,
+    plugin_manager,
+    rate_limiter,
+    prometheus_handle,
+    engine,
+    event_bus,
+    cors_state,
+    None,
+  )
 }
 
 /// Build the application router with all dependencies injected, including an optional TaskQueue.
@@ -288,8 +315,15 @@ pub fn create_app_with_all_and_task_queue(
   task_queue: Option<Arc<TaskQueue>>,
 ) -> Router {
   create_app_with_all_and_task_queue_inner(
-    auth_provider, jwt_manager, plugin_manager, rate_limiter,
-    prometheus_handle, engine, event_bus, cors_state, task_queue,
+    auth_provider,
+    jwt_manager,
+    plugin_manager,
+    rate_limiter,
+    prometheus_handle,
+    engine,
+    event_bus,
+    cors_state,
+    task_queue,
     None,
   )
 }
@@ -312,8 +346,15 @@ pub fn create_app_with_all_and_task_queue_with_cancel(
   cancel: tokio_util::sync::CancellationToken,
 ) -> Router {
   create_app_with_all_and_task_queue_inner(
-    auth_provider, jwt_manager, plugin_manager, rate_limiter,
-    prometheus_handle, engine, event_bus, cors_state, task_queue,
+    auth_provider,
+    jwt_manager,
+    plugin_manager,
+    rate_limiter,
+    prometheus_handle,
+    engine,
+    event_bus,
+    cors_state,
+    task_queue,
     Some(cancel),
   )
 }
@@ -331,6 +372,10 @@ fn create_app_with_all_and_task_queue_inner(
   task_queue: Option<Arc<TaskQueue>>,
   cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Router {
+  if let Err(error) = plugin_manager.install_bundled_plugins() {
+    tracing::warn!("Failed to install bundled plugins: {}", error);
+  }
+
   let group_cache = Arc::new(Cache::new(GroupLoader));
   let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
@@ -392,14 +437,8 @@ fn create_app_with_all_and_task_queue_inner(
   // If a CancellationToken was passed in (CLI path), use it so the loop
   // exits cleanly on shutdown. Tests construct the router without a token
   // and rely on runtime drop to stop the loop.
-  let sync_loop_cancel = cancel.clone()
-    .unwrap_or_default();
-  let _sync_loop_handle = crate::engine::spawn_sync_loop(
-    Arc::clone(&sync_engine),
-    30,
-    Some(Arc::clone(&event_bus)),
-    sync_loop_cancel,
-  );
+  let sync_loop_cancel = cancel.clone().unwrap_or_default();
+  let _sync_loop_handle = crate::engine::spawn_sync_loop(Arc::clone(&sync_engine), 30, Some(Arc::clone(&event_bus)), sync_loop_cancel);
 
   let app_state = AppState {
     jwt_manager,
@@ -429,14 +468,13 @@ fn create_app_with_all_and_task_queue_inner(
   // .merge() causes axum to match the wildcard instead of the specific
   // path (the wildcard wins for methods it already owns, e.g. GET/DELETE).
   let large_upload_routes = Router::new()
-    .route(
-      "/blobs/{hex_hash}",
-      get(engine_routes::engine_get_by_hash),
-    )
+    .route("/blobs/{hex_hash}", get(engine_routes::engine_get_by_hash))
     // Files: global search route (must be before /files/{*path} wildcard)
     .route("/files/search", post(engine_routes::global_search_endpoint))
     // Files: query route (must be before /files/{*path} wildcard)
     .route("/files/query", post(engine_routes::query_endpoint))
+    // Files: batch fetch route (must be before /files/{*path} wildcard)
+    .route("/files/fetch", post(fetch_routes::batch_fetch))
     // Files: ZIP download route (must be before /files/{*path} wildcard)
     .route("/files/download", post(download_routes::download_zip))
     // Files: mkdir route (must be before /files/{*path} wildcard)
@@ -478,31 +516,19 @@ fn create_app_with_all_and_task_queue_inner(
   // Routes that require authentication (default 1 MB limit)
   let protected_routes = Router::new()
     // Auth: API key self-service
-    .route("/auth/keys", post(api_key_self_service_routes::create_own_key)
-                        .get(api_key_self_service_routes::list_own_keys))
+    .route("/auth/keys", post(api_key_self_service_routes::create_own_key).get(api_key_self_service_routes::list_own_keys))
     .route("/auth/keys/{key_id}", delete(api_key_self_service_routes::revoke_own_key))
     .route("/auth/keys/users", get(api_key_self_service_routes::list_key_assignable_users))
     .route("/auth/keys/admin", post(routes::create_api_key).get(routes::list_api_keys))
-    .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key)
-                                       .patch(admin_routes::update_api_key))
+    .route("/auth/keys/admin/{key_id}", delete(routes::revoke_api_key).patch(admin_routes::update_api_key))
     // System: metrics, stats
     .route("/system/metrics", get(routes::metrics_endpoint))
     .route("/system/stats", get(portal_routes::get_stats))
     // System: user/group management
     .route("/system/users", post(admin_routes::create_user).get(admin_routes::list_users))
-    .route(
-      "/system/users/{user_id}",
-      get(admin_routes::get_user)
-        .patch(admin_routes::update_user)
-        .delete(admin_routes::deactivate_user),
-    )
+    .route("/system/users/{user_id}", get(admin_routes::get_user).patch(admin_routes::update_user).delete(admin_routes::deactivate_user))
     .route("/system/groups", post(admin_routes::create_group).get(admin_routes::list_groups))
-    .route(
-      "/system/groups/{name}",
-      get(admin_routes::get_group)
-        .patch(admin_routes::update_group)
-        .delete(admin_routes::delete_group),
-    )
+    .route("/system/groups/{name}", get(admin_routes::get_group).patch(admin_routes::update_group).delete(admin_routes::delete_group))
     // Versions: export, diff, promote
     .route("/versions/export", post(backup_routes::export_backup))
     .route("/versions/diff", post(backup_routes::diff_backup))
@@ -537,14 +563,11 @@ fn create_app_with_all_and_task_queue_inner(
     // in large_upload_routes (same router as /files/{*path} wildcard) to
     // prevent the wildcard from shadowing them after merge.
     // Versions: snapshot routes
-    .route("/versions/snapshots", post(version_routes::snapshot_create)
-                                 .get(version_routes::snapshot_list))
+    .route("/versions/snapshots", post(version_routes::snapshot_create).get(version_routes::snapshot_list))
     .route("/versions/restore", post(version_routes::snapshot_restore))
-    .route("/versions/snapshots/{name}", delete(version_routes::snapshot_delete)
-                                       .patch(version_routes::snapshot_rename))
+    .route("/versions/snapshots/{name}", delete(version_routes::snapshot_delete).patch(version_routes::snapshot_rename))
     // Versions: fork routes
-    .route("/versions/forks", post(version_routes::fork_create)
-                             .get(version_routes::fork_list))
+    .route("/versions/forks", post(version_routes::fork_create).get(version_routes::fork_list))
     .route("/versions/forks/{name}/promote", post(version_routes::fork_promote))
     .route("/versions/forks/{name}", delete(version_routes::fork_abandon))
     // Versions: file-level access routes
@@ -562,9 +585,7 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/sync/trigger", post(cluster_routes::trigger_sync))
     .route("/sync/join", post(cluster_routes::join_cluster))
     // Links: symlink routes
-    .route("/links/{*path}", put(symlink_routes::create_symlink)
-                            .get(symlink_routes::get_symlink)
-                            .delete(symlink_routes::delete_symlink))
+    .route("/links/{*path}", put(symlink_routes::create_symlink).get(symlink_routes::get_symlink).delete(symlink_routes::delete_symlink))
     // Plugin routes
     .route("/plugins/{name}", put(routes::deploy_plugin).delete(routes::remove_plugin))
     .route("/plugins/{name}/invoke", post(routes::invoke_plugin))
@@ -614,7 +635,6 @@ fn create_app_with_all_and_task_queue_inner(
   }
 }
 
-
 use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
 use crate::engine::system_store;
@@ -628,32 +648,24 @@ pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
 pub fn create_engine_with_hot_dir(engine_path: &str, hot_dir: Option<&std::path::Path>) -> Arc<StorageEngine> {
   let path = std::path::Path::new(engine_path);
   let engine = if path.exists() {
-    StorageEngine::open_with_hot_dir(engine_path, hot_dir)
-      .expect("failed to open storage engine")
+    StorageEngine::open_with_hot_dir(engine_path, hot_dir).expect("failed to open storage engine")
   } else {
-    StorageEngine::create_with_hot_dir(engine_path, hot_dir)
-      .expect("failed to create storage engine")
+    StorageEngine::create_with_hot_dir(engine_path, hot_dir).expect("failed to create storage engine")
   };
   let engine = Arc::new(engine);
   let ctx = RequestContext::system();
   let directory_ops = DirectoryOps::new(&engine);
-  directory_ops
-    .ensure_root_directory(&ctx)
-    .expect("failed to create engine root directory");
+  directory_ops.ensure_root_directory(&ctx).expect("failed to create engine root directory");
 
   // Run system path migrations (idempotent — safe on every startup).
-  system_store::migrate_system_paths(&engine)
-    .expect("failed to run system path migration");
+  system_store::migrate_system_paths(&engine).expect("failed to run system path migration");
 
   engine
 }
 
 /// Build the application router with a specific JwtManager and engine, returning
 /// the EventBus for test inspection (useful for SSE tests).
-pub fn create_app_with_jwt_engine_and_event_bus(
-  jwt_manager: Arc<JwtManager>,
-  engine: Arc<StorageEngine>,
-) -> (Router, Arc<EventBus>) {
+pub fn create_app_with_jwt_engine_and_event_bus(jwt_manager: Arc<JwtManager>, engine: Arc<StorageEngine>) -> (Router, Arc<EventBus>) {
   let prometheus_handle = initialize_metrics();
   let auth_provider: Arc<dyn AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
@@ -661,7 +673,8 @@ pub fn create_app_with_jwt_engine_and_event_bus(
   let event_bus = Arc::new(EventBus::new());
   let cors_state = CorsState { default_origins: None, rules: vec![] };
 
-  let router = create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus.clone(), cors_state);
+  let router =
+    create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus.clone(), cors_state);
   (router, event_bus)
 }
 

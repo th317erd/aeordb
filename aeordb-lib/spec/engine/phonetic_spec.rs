@@ -1,7 +1,6 @@
 use aeordb::engine::phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 use aeordb::engine::scalar_converter::{
-  ScalarConverter, PhoneticConverter, PhoneticAlgorithm,
-  CONVERTER_TYPE_PHONETIC, serialize_converter, deserialize_converter,
+  ScalarConverter, PhoneticConverter, PhoneticAlgorithm, CONVERTER_TYPE_PHONETIC, serialize_converter, deserialize_converter,
 };
 use aeordb::engine::index_config::{IndexFieldConfig, create_converter_from_config};
 
@@ -402,13 +401,7 @@ fn test_phonetic_converter_type_tag() {
 
 #[test]
 fn test_create_converter_from_config_soundex() {
-  let config = IndexFieldConfig {
-    name: "name".to_string(),
-    index_type: "soundex".to_string(),
-        source: None,
-    min: None,
-    max: None,
-  };
+  let config = IndexFieldConfig { name: "name".to_string(), index_type: "soundex".to_string(), source: None, min: None, max: None };
   let conv = create_converter_from_config(&config).expect("should create soundex");
   assert_eq!(conv.name(), "phonetic");
   assert_eq!(conv.strategy(), "soundex");
@@ -416,39 +409,21 @@ fn test_create_converter_from_config_soundex() {
 
 #[test]
 fn test_create_converter_from_config_dmetaphone() {
-  let config = IndexFieldConfig {
-    name: "name".to_string(),
-    index_type: "dmetaphone".to_string(),
-        source: None,
-    min: None,
-    max: None,
-  };
+  let config = IndexFieldConfig { name: "name".to_string(), index_type: "dmetaphone".to_string(), source: None, min: None, max: None };
   let conv = create_converter_from_config(&config).expect("should create dmetaphone");
   assert_eq!(conv.strategy(), "dmetaphone");
 }
 
 #[test]
 fn test_create_converter_from_config_phonetic() {
-  let config = IndexFieldConfig {
-    name: "name".to_string(),
-    index_type: "phonetic".to_string(),
-        source: None,
-    min: None,
-    max: None,
-  };
+  let config = IndexFieldConfig { name: "name".to_string(), index_type: "phonetic".to_string(), source: None, min: None, max: None };
   let conv = create_converter_from_config(&config).expect("should create phonetic (defaults to dmetaphone)");
   assert_eq!(conv.strategy(), "dmetaphone");
 }
 
 #[test]
 fn test_create_converter_from_config_dmetaphone_alt() {
-  let config = IndexFieldConfig {
-    name: "name".to_string(),
-    index_type: "dmetaphone_alt".to_string(),
-        source: None,
-    min: None,
-    max: None,
-  };
+  let config = IndexFieldConfig { name: "name".to_string(), index_type: "dmetaphone_alt".to_string(), source: None, min: None, max: None };
   let conv = create_converter_from_config(&config).expect("should create dmetaphone_alt");
   assert_eq!(conv.strategy(), "dmetaphone_alt");
 }
@@ -479,10 +454,7 @@ fn test_phonetic_schmidt_smith_match_dmetaphone() {
   let schmidt_alt = dmetaphone_alt("Schmidt").unwrap();
   let smith_primary = dmetaphone_primary("Smith");
   // They share the initial consonant code at least
-  assert_eq!(
-    &schmidt_alt[..1], &smith_primary[..1],
-    "Schmidt alt and Smith primary should share first char"
-  );
+  assert_eq!(&schmidt_alt[..1], &smith_primary[..1], "Schmidt alt and Smith primary should share first char");
 }
 
 // ============================================================================
@@ -491,15 +463,10 @@ fn test_phonetic_schmidt_smith_match_dmetaphone() {
 
 #[test]
 fn test_phonetic_roundtrip_via_trait_object() {
-  for algo in [
-    PhoneticAlgorithm::Soundex,
-    PhoneticAlgorithm::DoubleMetaphonePrimary,
-    PhoneticAlgorithm::DoubleMetaphoneAlt,
-  ] {
+  for algo in [PhoneticAlgorithm::Soundex, PhoneticAlgorithm::DoubleMetaphonePrimary, PhoneticAlgorithm::DoubleMetaphoneAlt] {
     let conv = PhoneticConverter::new(algo);
     let data = serialize_converter(&conv);
-    let restored = deserialize_converter(&data)
-      .unwrap_or_else(|e| panic!("roundtrip failed for {:?}: {}", algo, e));
+    let restored = deserialize_converter(&data).unwrap_or_else(|e| panic!("roundtrip failed for {:?}: {}", algo, e));
     assert_eq!(restored.type_tag(), CONVERTER_TYPE_PHONETIC);
     assert_eq!(restored.strategy(), conv.strategy());
   }

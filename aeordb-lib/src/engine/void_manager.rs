@@ -39,11 +39,7 @@ pub struct VoidManager {
 
 impl VoidManager {
   pub fn new(hash_algo: HashAlgorithm) -> Self {
-    VoidManager {
-      by_offset: BTreeMap::new(),
-      by_size: BTreeMap::new(),
-      hash_algo,
-    }
+    VoidManager { by_offset: BTreeMap::new(), by_size: BTreeMap::new(), hash_algo }
   }
 
   /// Compute the deterministic hash for a void of the given size.
@@ -67,7 +63,9 @@ impl VoidManager {
   /// is a no-op as long as the size matches. Re-registering an offset with a
   /// different size updates the entry — used when voids merge or split.
   pub fn register_void(&mut self, offset: u64, size: u32) {
-    if size < MINIMUM_VOID_SIZE { return; }
+    if size < MINIMUM_VOID_SIZE {
+      return;
+    }
     if let Some(&existing_size) = self.by_offset.get(&offset) {
       if existing_size == size {
         return; // exact duplicate
@@ -89,10 +87,7 @@ impl VoidManager {
   /// larger than needed and the remainder is at least `min_useful_size`,
   /// the remainder is re-registered as a smaller void.
   pub fn find_void(&mut self, needed_size: u32) -> Option<(u64, u32)> {
-    let matching_size = self.by_size
-      .range(needed_size..)
-      .find(|(_, offsets)| !offsets.is_empty())
-      .map(|(&size, _)| size)?;
+    let matching_size = self.by_size.range(needed_size..).find(|(_, offsets)| !offsets.is_empty()).map(|(&size, _)| size)?;
 
     let set = self.by_size.get_mut(&matching_size)?;
     let &offset = set.iter().next()?;
@@ -145,8 +140,7 @@ impl VoidManager {
   /// fixed entry header + the hash, with zero-byte key+value. Below this
   /// size, a void cannot hold any real entry — but it's still tracked.
   pub fn minimum_useful_void_size(&self) -> u32 {
-    EntryHeader::compute_total_length(self.hash_algo, 0, 0)
-      .expect("min void size with zero lengths cannot fail bounds")
+    EntryHeader::compute_total_length(self.hash_algo, 0, 0).expect("min void size with zero lengths cannot fail bounds")
   }
 
   /// Replace the current void set with the supplied (offset, size) pairs.

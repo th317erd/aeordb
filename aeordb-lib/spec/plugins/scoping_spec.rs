@@ -1,6 +1,4 @@
-use aeordb::plugins::scoping::{
-  is_scope_accessible, parse_plugin_path, resolve_function_path,
-};
+use aeordb::plugins::scoping::{is_scope_accessible, parse_plugin_path, resolve_function_path};
 
 #[test]
 fn test_resolve_function_searches_upward() {
@@ -51,19 +49,13 @@ fn test_scope_accessible_to_same_level() {
 #[test]
 fn test_scope_not_accessible_to_siblings() {
   // "mydb/public/orders" is a sibling of "mydb/public/users" — not accessible.
-  assert!(!is_scope_accessible(
-    "mydb/public/users",
-    "mydb/public/orders"
-  ));
+  assert!(!is_scope_accessible("mydb/public/users", "mydb/public/orders"));
 }
 
 #[test]
 fn test_scope_not_accessible_to_parents_children() {
   // "mydb/other/stuff" is a child of a sibling — not accessible from "mydb/public/users".
-  assert!(!is_scope_accessible(
-    "mydb/public/users",
-    "mydb/other/stuff"
-  ));
+  assert!(!is_scope_accessible("mydb/public/users", "mydb/other/stuff"));
 }
 
 #[test]

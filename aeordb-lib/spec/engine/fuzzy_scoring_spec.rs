@@ -1,9 +1,7 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::fuzzy::{damerau_levenshtein, jaro_winkler};
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
-use aeordb::engine::query_engine::{
-  FuzzyAlgorithm, FuzzyOptions, Fuzziness, QueryBuilder,
-};
+use aeordb::engine::query_engine::{FuzzyAlgorithm, FuzzyOptions, Fuzziness, QueryBuilder};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -29,9 +27,7 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
     format!("{}/.aeordb-config/indexes.json", parent_path)
   };
   let config_data = config.serialize();
-  ops
-    .store_file_buffered(&ctx, &config_path, &config_data, Some("application/json"))
-    .unwrap();
+  ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
 fn make_name_json(name: &str) -> Vec<u8> {
@@ -51,39 +47,15 @@ fn setup_fuzzy_engine(dir: &tempfile::TempDir, names: &[(&str, &str)]) -> Storag
     glob: None,
 
     indexes: vec![
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "trigram".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "soundex".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
-      IndexFieldConfig {
-        name: "name".to_string(),
-        index_type: "dmetaphone".to_string(),
-        source: None,
-        min: None,
-        max: None,
-      },
+      IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "soundex".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "name".to_string(), index_type: "dmetaphone".to_string(), source: None, min: None, max: None },
     ],
   };
   store_index_config(&engine, "/data", &config);
 
   for (filename, name) in names {
-    ops
-      .store_file_with_indexing(&ctx,
-        &format!("/data/{}", filename),
-        &make_name_json(name),
-        Some("application/json"),
-      )
-      .unwrap();
+    ops.store_file_with_indexing(&ctx, &format!("/data/{}", filename), &make_name_json(name), Some("application/json")).unwrap();
   }
 
   engine
@@ -136,10 +108,7 @@ fn test_damerau_levenshtein_both_empty() {
 #[test]
 fn test_damerau_levenshtein_symmetric() {
   // Distance should be the same in both directions
-  assert_eq!(
-    damerau_levenshtein("foo", "bar"),
-    damerau_levenshtein("bar", "foo")
-  );
+  assert_eq!(damerau_levenshtein("foo", "bar"), damerau_levenshtein("bar", "foo"));
 }
 
 #[test]
@@ -176,11 +145,7 @@ fn test_jaro_winkler_completely_different() {
 #[test]
 fn test_jaro_winkler_martha_marhta() {
   let score = jaro_winkler("MARTHA", "MARHTA");
-  assert!(
-    (score - 0.961).abs() < 0.01,
-    "Expected ~0.961, got {}",
-    score
-  );
+  assert!((score - 0.961).abs() < 0.01, "Expected ~0.961, got {}", score);
 }
 
 #[test]
@@ -205,23 +170,10 @@ fn test_jaro_winkler_prefix_bonus() {
 #[test]
 fn test_jaro_winkler_range() {
   // Score must always be in [0.0, 1.0]
-  let pairs = [
-    ("a", "b"),
-    ("abc", "def"),
-    ("hello", "world"),
-    ("test", "testing"),
-    ("", "nonempty"),
-    ("same", "same"),
-  ];
+  let pairs = [("a", "b"), ("abc", "def"), ("hello", "world"), ("test", "testing"), ("", "nonempty"), ("same", "same")];
   for (a, b) in &pairs {
     let score = jaro_winkler(a, b);
-    assert!(
-      (0.0..=1.0).contains(&score),
-      "Score out of range for ({}, {}): {}",
-      a,
-      b,
-      score
-    );
+    assert!((0.0..=1.0).contains(&score), "Score out of range for ({}, {}): {}", a, b, score);
   }
 }
 
@@ -239,16 +191,9 @@ fn test_jaro_winkler_single_char() {
 #[test]
 fn test_contains_query() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[("hello.json", "hello world"), ("other.json", "goodbye")],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("hello.json", "hello world"), ("other.json", "goodbye")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .contains("world")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").contains("world").all().unwrap();
 
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].file_record.path, "/data/hello.json");
@@ -258,16 +203,9 @@ fn test_contains_query() {
 #[test]
 fn test_contains_query_no_match() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[("hello.json", "hello world"), ("other.json", "goodbye")],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("hello.json", "hello world"), ("other.json", "goodbye")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .contains("xyz")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").contains("xyz").all().unwrap();
 
   assert_eq!(results.len(), 0);
 }
@@ -277,11 +215,7 @@ fn test_contains_case_insensitive() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("hello.json", "hello world")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .contains("WORLD")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").contains("WORLD").all().unwrap();
 
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].file_record.path, "/data/hello.json");
@@ -294,16 +228,9 @@ fn test_contains_case_insensitive() {
 #[test]
 fn test_similar_query() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[("smith.json", "Smith"), ("jones.json", "Jones")],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("smith.json", "Smith"), ("jones.json", "Jones")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .similar("Smyth", 0.2)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").similar("Smyth", 0.2).all().unwrap();
 
   // "Smith" and "Smyth" share many trigrams, should match
   assert!(!results.is_empty(), "Expected matches for 'Smyth' vs 'Smith'");
@@ -313,16 +240,9 @@ fn test_similar_query() {
 #[test]
 fn test_similar_query_below_threshold() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[("smith.json", "Smith"), ("jones.json", "Jones")],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("smith.json", "Smith"), ("jones.json", "Jones")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .similar("zzzzz", 0.9)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").similar("zzzzz", 0.9).all().unwrap();
 
   assert_eq!(results.len(), 0);
 }
@@ -336,11 +256,7 @@ fn test_fuzzy_query_dl() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("rest.json", "restaurant")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy("restarant")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy("restarant").all().unwrap();
 
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].file_record.path, "/data/rest.json");
@@ -352,16 +268,9 @@ fn test_fuzzy_query_jw() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("martha.json", "Martha")]);
 
-  let options = FuzzyOptions {
-    fuzziness: Fuzziness::Auto,
-    algorithm: FuzzyAlgorithm::JaroWinkler,
-  };
+  let options = FuzzyOptions { fuzziness: Fuzziness::Auto, algorithm: FuzzyAlgorithm::JaroWinkler };
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy_with("Marhta", options)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy_with("Marhta", options).all().unwrap();
 
   assert_eq!(results.len(), 1);
   assert!(results[0].score > 0.9, "Expected high JW score, got {}", results[0].score);
@@ -370,20 +279,9 @@ fn test_fuzzy_query_jw() {
 #[test]
 fn test_fuzzy_scoring_order() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[
-      ("smith.json", "Smith"),
-      ("smythe.json", "Smythe"),
-      ("smithson.json", "Smithson"),
-    ],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("smith.json", "Smith"), ("smythe.json", "Smythe"), ("smithson.json", "Smithson")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .similar("Smith", 0.1)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").similar("Smith", 0.1).all().unwrap();
 
   // Should have results, sorted by score descending
   assert!(!results.is_empty());
@@ -405,29 +303,15 @@ fn test_fuzzy_scoring_order() {
 #[test]
 fn test_phonetic_query() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[
-      ("smith.json", "Smith"),
-      ("schmidt.json", "Schmidt"),
-      ("jones.json", "Jones"),
-    ],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("smith.json", "Smith"), ("schmidt.json", "Schmidt"), ("jones.json", "Jones")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .phonetic("Smith")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").phonetic("Smith").all().unwrap();
 
   // At minimum "Smith" should match itself via soundex (S530)
   assert!(!results.is_empty(), "Expected phonetic matches for 'Smith'");
 
   let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
-  assert!(
-    paths.contains(&"/data/smith.json"),
-    "Expected Smith to match itself phonetically"
-  );
+  assert!(paths.contains(&"/data/smith.json"), "Expected Smith to match itself phonetically");
 }
 
 // =============================================================================
@@ -437,22 +321,9 @@ fn test_phonetic_query() {
 #[test]
 fn test_fuzzy_query_with_limit() {
   let dir = tempfile::tempdir().unwrap();
-  let engine = setup_fuzzy_engine(
-    &dir,
-    &[
-      ("a.json", "Smith"),
-      ("b.json", "Smyth"),
-      ("c.json", "Smithson"),
-      ("d.json", "Smithers"),
-    ],
-  );
+  let engine = setup_fuzzy_engine(&dir, &[("a.json", "Smith"), ("b.json", "Smyth"), ("c.json", "Smithson"), ("d.json", "Smithers")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .similar("Smith", 0.1)
-    .limit(2)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").similar("Smith", 0.1).limit(2).all().unwrap();
 
   assert!(results.len() <= 2, "Expected at most 2 results, got {}", results.len());
 }
@@ -476,27 +347,12 @@ fn test_fuzzy_query_missing_trigram_index() {
     logging: false,
     glob: None,
 
-    indexes: vec![IndexFieldConfig {
-      name: "name".to_string(),
-      index_type: "string".to_string(),
-        source: None,
-      min: None,
-      max: None,
-    }],
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/data", &config);
-  ops
-    .store_file_with_indexing(&ctx,
-      "/data/test.json",
-      &make_name_json("hello"),
-      Some("application/json"),
-    )
-    .unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/test.json", &make_name_json("hello"), Some("application/json")).unwrap();
 
-  let result = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .contains("hello")
-    .all();
+  let result = QueryBuilder::new(&engine, "/data").field("name").contains("hello").all();
 
   assert!(result.is_err(), "Expected error when trigram index is missing");
 }
@@ -515,27 +371,12 @@ fn test_phonetic_query_missing_index() {
     logging: false,
     glob: None,
 
-    indexes: vec![IndexFieldConfig {
-      name: "name".to_string(),
-      index_type: "string".to_string(),
-        source: None,
-      min: None,
-      max: None,
-    }],
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
   };
   store_index_config(&engine, "/data", &config);
-  ops
-    .store_file_with_indexing(&ctx,
-      "/data/test.json",
-      &make_name_json("hello"),
-      Some("application/json"),
-    )
-    .unwrap();
+  ops.store_file_with_indexing(&ctx, "/data/test.json", &make_name_json("hello"), Some("application/json")).unwrap();
 
-  let result = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .phonetic("hello")
-    .all();
+  let result = QueryBuilder::new(&engine, "/data").field("name").phonetic("hello").all();
 
   assert!(result.is_err(), "Expected error when phonetic index is missing");
 }
@@ -545,16 +386,9 @@ fn test_fuzzy_query_empty_results() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("a.json", "hello")]);
 
-  let options = FuzzyOptions {
-    fuzziness: Fuzziness::Fixed(0),
-    algorithm: FuzzyAlgorithm::DamerauLevenshtein,
-  };
+  let options = FuzzyOptions { fuzziness: Fuzziness::Fixed(0), algorithm: FuzzyAlgorithm::DamerauLevenshtein };
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy_with("zzzzz", options)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy_with("zzzzz", options).all().unwrap();
 
   assert_eq!(results.len(), 0);
 }
@@ -566,11 +400,7 @@ fn test_contains_empty_query_string() {
 
   // Empty string should match everything (since "" is a substring of any string)
   // but no trigrams are extracted from "", so candidates will be empty
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .contains("")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").contains("").all().unwrap();
 
   // Empty trigram set → no candidates → no results
   assert_eq!(results.len(), 0);
@@ -581,23 +411,12 @@ fn test_fuzzy_query_exact_match_scores_one() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("a.json", "hello")]);
 
-  let options = FuzzyOptions {
-    fuzziness: Fuzziness::Auto,
-    algorithm: FuzzyAlgorithm::DamerauLevenshtein,
-  };
+  let options = FuzzyOptions { fuzziness: Fuzziness::Auto, algorithm: FuzzyAlgorithm::DamerauLevenshtein };
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy_with("hello", options)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy_with("hello", options).all().unwrap();
 
   assert_eq!(results.len(), 1);
-  assert!(
-    (results[0].score - 1.0).abs() < f64::EPSILON,
-    "Expected score 1.0 for exact match, got {}",
-    results[0].score
-  );
+  assert!((results[0].score - 1.0).abs() < f64::EPSILON, "Expected score 1.0 for exact match, got {}", results[0].score);
 }
 
 #[test]
@@ -605,23 +424,12 @@ fn test_jaro_winkler_exact_match_scores_one() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("a.json", "hello")]);
 
-  let options = FuzzyOptions {
-    fuzziness: Fuzziness::Auto,
-    algorithm: FuzzyAlgorithm::JaroWinkler,
-  };
+  let options = FuzzyOptions { fuzziness: Fuzziness::Auto, algorithm: FuzzyAlgorithm::JaroWinkler };
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy_with("hello", options)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy_with("hello", options).all().unwrap();
 
   assert_eq!(results.len(), 1);
-  assert!(
-    (results[0].score - 1.0).abs() < f64::EPSILON,
-    "Expected score 1.0 for exact match, got {}",
-    results[0].score
-  );
+  assert!((results[0].score - 1.0).abs() < f64::EPSILON, "Expected score 1.0 for exact match, got {}", results[0].score);
 }
 
 #[test]
@@ -630,16 +438,9 @@ fn test_fuzzy_fixed_fuzziness() {
   let engine = setup_fuzzy_engine(&dir, &[("a.json", "cat"), ("b.json", "car"), ("c.json", "dog")]);
 
   // Fixed fuzziness of 1 should match "cat" → "car" (1 sub) but not "dog" (3 edits)
-  let options = FuzzyOptions {
-    fuzziness: Fuzziness::Fixed(1),
-    algorithm: FuzzyAlgorithm::DamerauLevenshtein,
-  };
+  let options = FuzzyOptions { fuzziness: Fuzziness::Fixed(1), algorithm: FuzzyAlgorithm::DamerauLevenshtein };
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .fuzzy_with("cat", options)
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").fuzzy_with("cat", options).all().unwrap();
 
   let paths: Vec<&str> = results.iter().map(|r| r.file_record.path.as_str()).collect();
   assert!(paths.contains(&"/data/a.json"), "Expected 'cat' exact match");
@@ -652,16 +453,8 @@ fn test_phonetic_score_is_one() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_fuzzy_engine(&dir, &[("smith.json", "Smith")]);
 
-  let results = QueryBuilder::new(&engine, "/data")
-    .field("name")
-    .phonetic("Smith")
-    .all()
-    .unwrap();
+  let results = QueryBuilder::new(&engine, "/data").field("name").phonetic("Smith").all().unwrap();
 
   assert_eq!(results.len(), 1);
-  assert!(
-    (results[0].score - 1.0).abs() < f64::EPSILON,
-    "Expected phonetic match score 1.0, got {}",
-    results[0].score
-  );
+  assert!((results[0].score - 1.0).abs() < f64::EPSILON, "Expected phonetic match score 1.0, got {}", results[0].score);
 }

@@ -10,11 +10,7 @@
 /// Returns a 4-character code: first letter + 3 digits.
 /// Empty input returns empty string.
 pub fn soundex(s: &str) -> String {
-  let chars: Vec<char> = s
-    .to_uppercase()
-    .chars()
-    .filter(|c| c.is_ascii_alphabetic())
-    .collect();
+  let chars: Vec<char> = s.to_uppercase().chars().filter(|c| c.is_ascii_alphabetic()).collect();
 
   if chars.is_empty() {
     return String::new();
@@ -85,11 +81,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
     return String::new();
   }
 
-  let chars: Vec<char> = s
-    .to_uppercase()
-    .chars()
-    .filter(|c| c.is_ascii_alphabetic())
-    .collect();
+  let chars: Vec<char> = s.to_uppercase().chars().filter(|c| c.is_ascii_alphabetic()).collect();
 
   if chars.is_empty() {
     return String::new();
@@ -132,22 +124,11 @@ pub fn dmetaphone_primary(s: &str) -> String {
           i += 2;
         } else {
           result.push('K');
-          i += if next == Some('C')
-            && !matches!(chars.get(i + 2), Some(&'I') | Some(&'E'))
-          {
-            2
-          } else {
-            1
-          };
+          i += if next == Some('C') && !matches!(chars.get(i + 2), Some(&'I') | Some(&'E')) { 2 } else { 1 };
         }
       }
       'D' => {
-        if next == Some('G')
-          && matches!(
-            chars.get(i + 2),
-            Some(&'I') | Some(&'E') | Some(&'Y')
-          )
-        {
+        if next == Some('G') && matches!(chars.get(i + 2), Some(&'I') | Some(&'E') | Some(&'Y')) {
           result.push('J');
           i += 3;
         } else {
@@ -162,12 +143,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
       'G' => {
         if next == Some('H') {
           // GH: silent if after vowel and not at start
-          if i > 0
-            && matches!(
-              prev,
-              Some('A') | Some('E') | Some('I') | Some('O') | Some('U')
-            )
-          {
+          if i > 0 && matches!(prev, Some('A') | Some('E') | Some('I') | Some('O') | Some('U')) {
             i += 2; // silent
           } else {
             result.push('K');
@@ -175,8 +151,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
           }
         } else if next == Some('N') {
           i += 2; // silent GN
-        } else if matches!(next, Some('I') | Some('E') | Some('Y')) && prev != Some('G')
-        {
+        } else if matches!(next, Some('I') | Some('E') | Some('Y')) && prev != Some('G') {
           result.push('J');
           i += 2;
         } else {
@@ -188,13 +163,9 @@ pub fn dmetaphone_primary(s: &str) -> String {
       }
       'H' => {
         // H is voiced only before a vowel and not after a vowel
-        if matches!(
-          next,
-          Some('A') | Some('E') | Some('I') | Some('O') | Some('U')
-        ) && !matches!(
-          prev,
-          Some('A') | Some('E') | Some('I') | Some('O') | Some('U')
-        ) {
+        if matches!(next, Some('A') | Some('E') | Some('I') | Some('O') | Some('U'))
+          && !matches!(prev, Some('A') | Some('E') | Some('I') | Some('O') | Some('U'))
+        {
           result.push('H');
         }
         i += 1;
@@ -243,9 +214,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
         } else if next == Some('C') && matches!(chars.get(i + 2), Some(&'H')) {
           result.push('X');
           i += 3;
-        } else if matches!(next, Some('I') | Some('E'))
-          && matches!(chars.get(i + 2), Some(&'O') | Some(&'A'))
-        {
+        } else if matches!(next, Some('I') | Some('E')) && matches!(chars.get(i + 2), Some(&'O') | Some(&'A')) {
           result.push('X');
           i += 3;
         } else {
@@ -257,9 +226,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
         if next == Some('H') {
           result.push('0'); // theta
           i += 2;
-        } else if next == Some('I')
-          && matches!(chars.get(i + 2), Some(&'O') | Some(&'A'))
-        {
+        } else if next == Some('I') && matches!(chars.get(i + 2), Some(&'O') | Some(&'A')) {
           result.push('X');
           i += 3;
         } else {
@@ -273,10 +240,7 @@ pub fn dmetaphone_primary(s: &str) -> String {
       }
       'W' | 'Y' => {
         // W/Y before vowel produce A
-        if matches!(
-          next,
-          Some('A') | Some('E') | Some('I') | Some('O') | Some('U')
-        ) {
+        if matches!(next, Some('A') | Some('E') | Some('I') | Some('O') | Some('U')) {
           result.push('A');
         }
         i += 1;
@@ -313,11 +277,7 @@ pub fn dmetaphone_alt(s: &str) -> Option<String> {
     return None;
   }
 
-  let chars: Vec<char> = s
-    .to_uppercase()
-    .chars()
-    .filter(|c| c.is_ascii_alphabetic())
-    .collect();
+  let chars: Vec<char> = s.to_uppercase().chars().filter(|c| c.is_ascii_alphabetic()).collect();
 
   // SCH: primary uses X, alternate uses SK
   if chars.len() >= 3 && chars[0] == 'S' && chars[1] == 'C' && chars[2] == 'H' {

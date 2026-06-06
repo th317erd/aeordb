@@ -7,7 +7,6 @@ use aeordb::server::create_engine_for_storage;
 /// Helper: bootstrap a root API key into a fresh engine so there is something
 /// to revoke during emergency reset.
 fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
-
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
@@ -21,8 +20,7 @@ fn bootstrap_root_key(engine: &aeordb::engine::StorageEngine) -> String {
     label: Some("test-root-key".to_string()),
     rules: vec![],
   };
-  system_store::store_api_key_for_bootstrap(engine, &RequestContext::system(), &record)
-    .expect("failed to store root key");
+  system_store::store_api_key_for_bootstrap(engine, &RequestContext::system(), &record).expect("failed to store root key");
   plaintext_key
 }
 
@@ -42,7 +40,6 @@ fn test_emergency_reset_generates_new_key() {
   assert_eq!(keys_before.len(), 1);
   assert!(!keys_before[0].is_revoked);
   assert_eq!(keys_before[0].user_id, Some(ROOT_USER_ID));
-
 
   drop(engine);
 
@@ -81,7 +78,6 @@ fn test_emergency_reset_revokes_old_key() {
   let active_count_before = keys_before.iter().filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID)).count();
   assert_eq!(active_count_before, 2, "Should have 2 active root keys before reset");
 
-
   drop(engine);
 
   // Run emergency reset.
@@ -92,14 +88,8 @@ fn test_emergency_reset_revokes_old_key() {
 
   let keys_after = system_store::list_api_keys(&engine).unwrap();
 
-  let active_root_keys: Vec<_> = keys_after
-    .iter()
-    .filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID))
-    .collect();
-  let revoked_root_keys: Vec<_> = keys_after
-    .iter()
-    .filter(|k| k.is_revoked && k.user_id == Some(ROOT_USER_ID))
-    .collect();
+  let active_root_keys: Vec<_> = keys_after.iter().filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID)).collect();
+  let revoked_root_keys: Vec<_> = keys_after.iter().filter(|k| k.is_revoked && k.user_id == Some(ROOT_USER_ID)).collect();
 
   assert_eq!(active_root_keys.len(), 1, "Should have exactly 1 active root key after reset");
   assert_eq!(revoked_root_keys.len(), 2, "Should have 2 revoked root keys after reset");
@@ -122,9 +112,6 @@ fn test_emergency_reset_on_empty_database() {
 
   let keys = system_store::list_api_keys(&engine).unwrap();
 
-  let active_root_keys: Vec<_> = keys
-    .iter()
-    .filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID))
-    .collect();
+  let active_root_keys: Vec<_> = keys.iter().filter(|k| !k.is_revoked && k.user_id == Some(ROOT_USER_ID)).collect();
   assert_eq!(active_root_keys.len(), 1, "Should have created a new root key");
 }

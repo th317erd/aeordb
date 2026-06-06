@@ -10,8 +10,8 @@ pub struct ChildEntry {
   pub updated_at: i64,
   pub name: String,
   pub content_type: Option<String>,
-  pub virtual_time: u64,  // ordering key for conflict resolution
-  pub node_id: u64,       // tiebreaker for deterministic ordering
+  pub virtual_time: u64, // ordering key for conflict resolution
+  pub node_id: u64,      // tiebreaker for deterministic ordering
 }
 
 impl ChildEntry {
@@ -20,20 +20,13 @@ impl ChildEntry {
     let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
 
     if name_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Name too long: {} bytes exceeds u16 max (65535)", name_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Name too long: {} bytes exceeds u16 max (65535)", name_bytes.len())));
     }
     if content_type_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(
-        format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len()),
-      ));
+      return Err(EngineError::InvalidInput(format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len())));
     }
 
-    let capacity = 1 + hash_length + 8 + 8 + 8
-      + 2 + name_bytes.len()
-      + 2 + content_type_bytes.len()
-      + 8 + 8;
+    let capacity = 1 + hash_length + 8 + 8 + 8 + 2 + name_bytes.len() + 2 + content_type_bytes.len() + 8 + 8;
 
     let mut buffer = Vec::with_capacity(capacity);
 
@@ -82,11 +75,7 @@ impl ChildEntry {
     let name = read_string(data, &mut offset, name_length)?;
 
     let content_type_length = read_u16(data, &mut offset)? as usize;
-    let content_type = if content_type_length == 0 {
-      None
-    } else {
-      Some(read_string(data, &mut offset, content_type_length)?)
-    };
+    let content_type = if content_type_length == 0 { None } else { Some(read_string(data, &mut offset, content_type_length)?) };
 
     let virtual_time = if offset + 8 <= data.len() {
       read_u64(data, &mut offset)?
@@ -100,17 +89,7 @@ impl ChildEntry {
       0 // default for old entries without this field
     };
 
-    let entry = ChildEntry {
-      entry_type,
-      hash,
-      total_size,
-      created_at,
-      updated_at,
-      name,
-      content_type,
-      virtual_time,
-      node_id,
-    };
+    let entry = ChildEntry { entry_type, hash, total_size, created_at, updated_at, name, content_type, virtual_time, node_id };
 
     Ok((entry, offset))
   }
@@ -124,21 +103,14 @@ pub fn serialize_child_entries(entries: &[ChildEntry], hash_length: usize) -> En
   Ok(buffer)
 }
 
-pub fn deserialize_child_entries(
-  data: &[u8],
-  hash_length: usize,
-  version: u8,
-) -> EngineResult<Vec<ChildEntry>> {
+pub fn deserialize_child_entries(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Vec<ChildEntry>> {
   match version {
     0 => deserialize_child_entries_v0(data, hash_length),
     _ => Err(crate::engine::errors::EngineError::InvalidEntryVersion(version)),
   }
 }
 
-fn deserialize_child_entries_v0(
-  data: &[u8],
-  hash_length: usize,
-) -> EngineResult<Vec<ChildEntry>> {
+fn deserialize_child_entries_v0(data: &[u8], hash_length: usize) -> EngineResult<Vec<ChildEntry>> {
   let mut entries = Vec::new();
   let mut offset = 0;
 
@@ -150,4 +122,3 @@ fn deserialize_child_entries_v0(
 
   Ok(entries)
 }
-

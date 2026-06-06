@@ -25,12 +25,6 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
   fn default() -> Self {
-    Self {
-      format: LogFormat::Pretty,
-      level: "info".to_string(),
-      show_target: true,
-      show_thread: false,
-      show_file_line: false,
-    }
+    Self { format: LogFormat::Pretty, level: "info".to_string(), show_target: true, show_thread: false, show_file_line: false }
   }
 }

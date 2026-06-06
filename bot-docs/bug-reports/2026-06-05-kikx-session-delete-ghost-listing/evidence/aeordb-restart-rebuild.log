@@ -1,0 +1,2239 @@
+  2026-06-05T06:28:54.295155793Z  INFO aeordb_cli::commands::start: AeorDB starting, port: 6830, host: 127.0.0.1, auth_mode: self-contained, db_path: .aeordb/kikx.aeordb, tls: false, version: "0.9.5"
+
+AeorDB v0.9.5
+Database: .aeordb/kikx.aeordb
+Host: 127.0.0.1
+Port: 6830
+Auth: self-contained
+Hot dir: .aeordb
+CORS: disabled
+
+  2026-06-05T06:28:54.301571227Z DEBUG aeordb::engine::storage_engine: open_internal: file header loaded, kv_block_offset: 512, kv_block_length: 4193400, kv_block_stage: 2, hot_tail_offset: 25856566, kv_block_valid: true, entry_count: 18766, writer_offset: 25856566
+
+  2026-06-05T06:28:54.30216115Z DEBUG aeordb::engine::storage_engine: open_internal: hot tail loaded, hot_writes_loaded: 0, hot_voids_loaded: 161
+
+  2026-06-05T06:28:54.302542981Z DEBUG aeordb::engine::disk_kv_store: DiskKVStore::open, kv_block_offset: 512, kv_block_length: 4194304, hot_tail_offset: 25856566, stage: 2, bucket_count: 2892, hot_entry_count: 0
+
+  2026-06-05T06:28:54.306352896Z  WARN aeordb::engine::disk_kv_store: KV bucket page failed CRC on open — triggering dirty startup, bucket: 92, error: CorruptEntry { offset: 0, reason: "page CRC mismatch (stored 0d4c7dd6, computed 43d00bf0)" }
+
+  2026-06-05T06:28:54.306872618Z  WARN aeordb::engine::disk_kv_store: KV bucket page failed CRC on open — triggering dirty startup, bucket: 96, error: CorruptEntry { offset: 0, reason: "page CRC mismatch (stored da974788, computed 387e43e1)" }
+
+  2026-06-05T06:28:54.307033808Z  WARN aeordb::engine::disk_kv_store: KV bucket page failed CRC on open — triggering dirty startup, bucket: 149, error: CorruptEntry { offset: 0, reason: "page CRC mismatch (stored 18ebd23b, computed bd97c00d)" }
+
+  2026-06-05T06:28:54.307904762Z  WARN aeordb::engine::disk_kv_store: KV bucket page failed CRC on open — triggering dirty startup, bucket: 457, error: CorruptEntry { offset: 0, reason: "page CRC mismatch (stored 2e9b9628, computed 814914f4)" }
+
+  2026-06-05T06:28:54.332144825Z  INFO aeordb::engine::storage_engine: Rebuilding KV index from append log...
+
+  2026-06-05T06:28:54.332160925Z DEBUG aeordb::engine::storage_engine: rebuild_kv: scanning WAL to EOF (dirty recovery), writer_offset: 25856566, file_path: .aeordb/kikx.aeordb
+
+  2026-06-05T06:28:54.359913712Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8440213: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.360493964Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8440214 (skipped 1 bytes from 8440213)
+
+  2026-06-05T06:28:54.360502384Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8440213: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.360512924Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8440448: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.360629724Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8440449 (skipped 1 bytes from 8440448)
+
+  2026-06-05T06:28:54.360634094Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8440448: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.360647324Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8440883: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.360771765Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8440919 (skipped 36 bytes from 8440883)
+
+  2026-06-05T06:28:54.360776265Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8440883: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.360789265Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8441387: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.360902035Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8441483 (skipped 96 bytes from 8441387)
+
+  2026-06-05T06:28:54.360905895Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8441387: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.360919056Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8441970: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361030296Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8442001 (skipped 31 bytes from 8441970)
+
+  2026-06-05T06:28:54.361034866Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8441970: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361047876Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8442261: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361158446Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8442308 (skipped 47 bytes from 8442261)
+
+  2026-06-05T06:28:54.361162446Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8442261: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361180127Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8442875: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361328177Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8442914 (skipped 39 bytes from 8442875)
+
+  2026-06-05T06:28:54.361331987Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8442875: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361371787Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8456787: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361443928Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8456882 (skipped 95 bytes from 8456787)
+
+  2026-06-05T06:28:54.361447558Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8456787: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361460728Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8457363: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361573458Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8457400 (skipped 37 bytes from 8457363)
+
+  2026-06-05T06:28:54.361577948Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8457363: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361590248Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8457660: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361721259Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8457707 (skipped 47 bytes from 8457660)
+
+  2026-06-05T06:28:54.361724779Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8457660: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.361737379Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8458301: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.361854499Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8458313 (skipped 12 bytes from 8458301)
+
+  2026-06-05T06:28:54.361858349Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8458301: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36197271Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8470741: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36209404Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8470767 (skipped 26 bytes from 8470741)
+
+  2026-06-05T06:28:54.36209916Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8470741: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36211615Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8471448: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362230811Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8471490 (skipped 42 bytes from 8471448)
+
+  2026-06-05T06:28:54.362235011Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8471448: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362244531Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8472171: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362359631Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8472178 (skipped 7 bytes from 8472171)
+
+  2026-06-05T06:28:54.362363591Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8472171: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362376791Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8472661: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362488772Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8472696 (skipped 35 bytes from 8472661)
+
+  2026-06-05T06:28:54.362492682Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8472661: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362505952Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8472956: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362617302Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8473003 (skipped 47 bytes from 8472956)
+
+  2026-06-05T06:28:54.362621142Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8472956: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362634442Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8473597: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362743793Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8473609 (skipped 12 bytes from 8473597)
+
+  2026-06-05T06:28:54.362748823Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8473597: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362796713Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8487557: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.362910583Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8487558 (skipped 1 bytes from 8487557)
+
+  2026-06-05T06:28:54.362914753Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8487557: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.362929023Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8488066: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363038114Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8488076 (skipped 10 bytes from 8488066)
+
+  2026-06-05T06:28:54.363042474Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8488066: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363056204Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8488336: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363166194Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8488383 (skipped 47 bytes from 8488336)
+
+  2026-06-05T06:28:54.363170034Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8488336: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363183944Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8488777: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363290815Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8488817 (skipped 40 bytes from 8488777)
+
+  2026-06-05T06:28:54.363294745Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8488777: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363303915Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8488950: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363411305Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8488989 (skipped 39 bytes from 8488950)
+
+  2026-06-05T06:28:54.363415515Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8488950: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363431875Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8501412: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363543836Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8501443 (skipped 31 bytes from 8501412)
+
+  2026-06-05T06:28:54.363547806Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8501412: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363566896Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8502124: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363674966Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8502166 (skipped 42 bytes from 8502124)
+
+  2026-06-05T06:28:54.363678816Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8502124: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363688716Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8502925: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363806937Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8502978 (skipped 53 bytes from 8502925)
+
+  2026-06-05T06:28:54.363818197Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8502925: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363832467Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8503474: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.363942307Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8503496 (skipped 22 bytes from 8503474)
+
+  2026-06-05T06:28:54.363945507Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8503474: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.363958907Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8503756: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.364065538Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8503803 (skipped 47 bytes from 8503756)
+
+  2026-06-05T06:28:54.364068778Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8503756: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364082488Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8504397: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.364190738Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8504409 (skipped 12 bytes from 8504397)
+
+  2026-06-05T06:28:54.364193928Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8504397: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364239298Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8518989: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.364348529Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8519000 (skipped 11 bytes from 8518989)
+
+  2026-06-05T06:28:54.364351829Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8518989: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364365199Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8519260: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.364478229Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8519307 (skipped 47 bytes from 8519260)
+
+  2026-06-05T06:28:54.364481449Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8519260: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364496259Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8520226: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36460926Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8520294 (skipped 68 bytes from 8520226)
+
+  2026-06-05T06:28:54.36461251Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8520226: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.3646418Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8522199: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36475165Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8522204 (skipped 5 bytes from 8522199)
+
+  2026-06-05T06:28:54.36475504Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8522199: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364808341Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8524024: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.364916711Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8524096 (skipped 72 bytes from 8524024)
+
+  2026-06-05T06:28:54.364921171Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8524024: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.364950611Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8525983: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365057261Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8525984 (skipped 1 bytes from 8525983)
+
+  2026-06-05T06:28:54.365061301Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8525983: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365080832Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8527378: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365191732Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8527509 (skipped 131 bytes from 8527378)
+
+  2026-06-05T06:28:54.365195742Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8527378: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365238822Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8529639: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365342623Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8529696 (skipped 57 bytes from 8529639)
+
+  2026-06-05T06:28:54.365346583Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8529639: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365360783Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8530186: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365466773Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8530214 (skipped 28 bytes from 8530186)
+
+  2026-06-05T06:28:54.365470633Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8530186: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365484373Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8530474: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365589984Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8530521 (skipped 47 bytes from 8530474)
+
+  2026-06-05T06:28:54.365593784Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8530474: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365607504Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8530905: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365715604Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8530955 (skipped 50 bytes from 8530905)
+
+  2026-06-05T06:28:54.365719524Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8530905: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365728524Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8531088: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.365846165Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8531127 (skipped 39 bytes from 8531088)
+
+  2026-06-05T06:28:54.365851085Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8531088: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.365916095Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8534439: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366021095Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8534494 (skipped 55 bytes from 8534439)
+
+  2026-06-05T06:28:54.366024925Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8534439: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366038725Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8534995: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366146516Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8535012 (skipped 17 bytes from 8534995)
+
+  2026-06-05T06:28:54.366150316Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8534995: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366173316Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8535756: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366283016Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8535769 (skipped 13 bytes from 8535756)
+
+  2026-06-05T06:28:54.366286836Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8535756: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366295786Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8535902: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366404807Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8535925 (skipped 23 bytes from 8535902)
+
+  2026-06-05T06:28:54.366408817Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8535902: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366479867Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8539197: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366586427Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8539202 (skipped 5 bytes from 8539197)
+
+  2026-06-05T06:28:54.366590547Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8539197: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366599798Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8539337: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366709908Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8539359 (skipped 22 bytes from 8539337)
+
+  2026-06-05T06:28:54.366713908Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8539337: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366723018Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8539602: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366844178Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8539682 (skipped 80 bytes from 8539602)
+
+  2026-06-05T06:28:54.366848558Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8539602: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.366872729Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8540887: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.366980129Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8540904 (skipped 17 bytes from 8540887)
+
+  2026-06-05T06:28:54.366984079Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8540887: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367007579Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8541716: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367114439Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8541722 (skipped 6 bytes from 8541716)
+
+  2026-06-05T06:28:54.367118369Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8541716: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36715574Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8543288: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36726401Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8543368 (skipped 80 bytes from 8543288)
+
+  2026-06-05T06:28:54.36726794Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8543288: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36727713Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8543633: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367388Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8543639 (skipped 6 bytes from 8543633)
+
+  2026-06-05T06:28:54.36739202Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8543633: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367400811Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8543904: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367513321Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8543910 (skipped 6 bytes from 8543904)
+
+  2026-06-05T06:28:54.367517151Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8543904: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367525871Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8544177: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367631341Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8544181 (skipped 4 bytes from 8544177)
+
+  2026-06-05T06:28:54.367635141Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8544177: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367649001Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8544651: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367763082Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8544747 (skipped 96 bytes from 8544651)
+
+  2026-06-05T06:28:54.367767212Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8544651: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367789772Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8545561: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.367899102Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8545565 (skipped 4 bytes from 8545561)
+
+  2026-06-05T06:28:54.367902872Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8545561: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.367916462Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8545995: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368024553Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8546015 (skipped 20 bytes from 8545995)
+
+  2026-06-05T06:28:54.368028783Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8545995: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368037413Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8546282: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368147473Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8546286 (skipped 4 bytes from 8546282)
+
+  2026-06-05T06:28:54.368151123Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8546282: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368159403Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8546553: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368269444Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8546557 (skipped 4 bytes from 8546553)
+
+  2026-06-05T06:28:54.368273014Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8546553: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368281584Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8546812: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368395084Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8546828 (skipped 16 bytes from 8546812)
+
+  2026-06-05T06:28:54.368398674Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8546812: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368407664Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8547548: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368519905Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8547551 (skipped 3 bytes from 8547548)
+
+  2026-06-05T06:28:54.368523575Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8547548: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368545665Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8548368: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368658375Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8548369 (skipped 1 bytes from 8548368)
+
+  2026-06-05T06:28:54.368661325Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8548368: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368674105Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8548802: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368806126Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8548819 (skipped 17 bytes from 8548802)
+
+  2026-06-05T06:28:54.368811616Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8548802: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368820166Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8549060: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.368930906Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8549090 (skipped 30 bytes from 8549060)
+
+  2026-06-05T06:28:54.368934716Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8549060: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.368941516Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8549331: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369055107Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8549361 (skipped 30 bytes from 8549331)
+
+  2026-06-05T06:28:54.369057877Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8549331: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369064537Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8549604: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369172337Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8549632 (skipped 28 bytes from 8549604)
+
+  2026-06-05T06:28:54.369178657Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8549604: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369187007Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8550469: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369290498Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8550512 (skipped 43 bytes from 8550469)
+
+  2026-06-05T06:28:54.369293218Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8550469: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369317508Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8551700: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369420698Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8551780 (skipped 80 bytes from 8551700)
+
+  2026-06-05T06:28:54.369423458Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8551700: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369430028Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8552023: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369530599Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8552051 (skipped 28 bytes from 8552023)
+
+  2026-06-05T06:28:54.369533849Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8552023: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369540389Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8552294: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.369645579Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8552322 (skipped 28 bytes from 8552294)
+
+  2026-06-05T06:28:54.369648249Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8552294: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.369654989Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8552556: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36975377Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8552593 (skipped 37 bytes from 8552556)
+
+  2026-06-05T06:28:54.36976443Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8552556: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36977595Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8553629: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.36987956Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8553630 (skipped 1 bytes from 8553629)
+
+  2026-06-05T06:28:54.369885Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8553629: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.36990181Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8554239: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370008541Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8554448 (skipped 209 bytes from 8554239)
+
+  2026-06-05T06:28:54.370011751Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8554239: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370022161Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8554862: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370123691Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8554898 (skipped 36 bytes from 8554862)
+
+  2026-06-05T06:28:54.370126391Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8554862: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370133031Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8555133: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370230341Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8555169 (skipped 36 bytes from 8555133)
+
+  2026-06-05T06:28:54.370233041Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8555133: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370239601Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8555404: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370341742Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8555440 (skipped 36 bytes from 8555404)
+
+  2026-06-05T06:28:54.370344692Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8555404: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370351492Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8555675: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370464552Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8555711 (skipped 36 bytes from 8555675)
+
+  2026-06-05T06:28:54.370467872Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8555675: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370482752Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8557025: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370588273Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8557032 (skipped 7 bytes from 8557025)
+
+  2026-06-05T06:28:54.370591333Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8557025: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370601623Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8557514: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370712303Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8557723 (skipped 209 bytes from 8557514)
+
+  2026-06-05T06:28:54.370715643Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8557514: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370737863Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8559534: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370850684Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8559621 (skipped 87 bytes from 8559534)
+
+  2026-06-05T06:28:54.370854094Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8559534: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370868874Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8560831: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.370976854Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8560857 (skipped 26 bytes from 8560831)
+
+  2026-06-05T06:28:54.370980024Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8560831: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.370993744Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8561466: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371096615Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8561675 (skipped 209 bytes from 8561466)
+
+  2026-06-05T06:28:54.371100585Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8561466: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371118575Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8562838: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371221645Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8562881 (skipped 43 bytes from 8562838)
+
+  2026-06-05T06:28:54.371224375Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8562838: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371241545Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8563683: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371338606Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8563699 (skipped 16 bytes from 8563683)
+
+  2026-06-05T06:28:54.371341266Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8563683: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371359066Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8564646: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371456166Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8564748 (skipped 102 bytes from 8564646)
+
+  2026-06-05T06:28:54.371458836Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8564646: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371472496Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8565361: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371568577Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8565566 (skipped 205 bytes from 8565361)
+
+  2026-06-05T06:28:54.371572387Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8565361: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371591157Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8566374: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371695937Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8566458 (skipped 84 bytes from 8566374)
+
+  2026-06-05T06:28:54.371699667Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8566374: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371716287Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8567062: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371829168Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8567276 (skipped 214 bytes from 8567062)
+
+  2026-06-05T06:28:54.371833398Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8567062: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371852338Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8567982: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.371956558Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8568011 (skipped 29 bytes from 8567982)
+
+  2026-06-05T06:28:54.371959798Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8567982: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.371979578Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8568825: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.372083509Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8568829 (skipped 4 bytes from 8568825)
+
+  2026-06-05T06:28:54.372086759Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8568825: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.372103429Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8569398: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.372208339Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8569407 (skipped 9 bytes from 8569398)
+
+  2026-06-05T06:28:54.372211409Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8569398: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.372244569Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8570750: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.37234632Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8570773 (skipped 23 bytes from 8570750)
+
+  2026-06-05T06:28:54.37234951Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8570750: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.37236144Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8571249: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.37246451Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8571464 (skipped 215 bytes from 8571249)
+
+  2026-06-05T06:28:54.3724681Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8571249: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.37250655Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8574628: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.372607121Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8574818 (skipped 190 bytes from 8574628)
+
+  2026-06-05T06:28:54.372611461Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8574628: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.372652971Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8577926: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.372754451Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8578045 (skipped 119 bytes from 8577926)
+
+  2026-06-05T06:28:54.372764501Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8577926: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.372817351Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8582794: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.372919122Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8582796 (skipped 2 bytes from 8582794)
+
+  2026-06-05T06:28:54.372922412Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8582794: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.372945842Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8584984: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.373050972Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8584993 (skipped 9 bytes from 8584984)
+
+  2026-06-05T06:28:54.373054542Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8584984: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.373068532Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8585602: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.373173603Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8585811 (skipped 209 bytes from 8585602)
+
+  2026-06-05T06:28:54.373177123Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8585602: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.373188683Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8586181: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.373304313Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8586190 (skipped 9 bytes from 8586181)
+
+  2026-06-05T06:28:54.373308203Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8586181: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.373323733Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8586799: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.373425014Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8587008 (skipped 209 bytes from 8586799)
+
+  2026-06-05T06:28:54.373428394Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8586799: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.373448814Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 8587979: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.373550044Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 8588048 (skipped 69 bytes from 8587979)
+
+  2026-06-05T06:28:54.373553374Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 8587979: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.387303927Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9966989: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.387683058Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9967034 (skipped 45 bytes from 9966989)
+
+  2026-06-05T06:28:54.387690638Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9966989: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.387734539Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9968472: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.387845889Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9968510 (skipped 38 bytes from 9968472)
+
+  2026-06-05T06:28:54.387850039Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9968472: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.387861509Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9969000: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.38795764Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9969069 (skipped 69 bytes from 9969000)
+
+  2026-06-05T06:28:54.38796053Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9969000: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.38796724Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9969304: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.38807019Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9969309 (skipped 5 bytes from 9969304)
+
+  2026-06-05T06:28:54.38807576Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9969304: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.38808328Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9969544: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.38818026Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9969549 (skipped 5 bytes from 9969544)
+
+  2026-06-05T06:28:54.3881831Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9969544: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.38818995Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9969748: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388287031Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9969789 (skipped 41 bytes from 9969748)
+
+  2026-06-05T06:28:54.388289901Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9969748: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388296571Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9970010: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388397581Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9970013 (skipped 3 bytes from 9970010)
+
+  2026-06-05T06:28:54.388400341Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9970010: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388411121Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9970607: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388513082Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9970614 (skipped 7 bytes from 9970607)
+
+  2026-06-05T06:28:54.388515802Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9970607: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388551642Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9972812: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388645862Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9972874 (skipped 62 bytes from 9972812)
+
+  2026-06-05T06:28:54.388648612Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9972812: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388674412Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9974833: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388802673Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9974871 (skipped 38 bytes from 9974833)
+
+  2026-06-05T06:28:54.388805523Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9974833: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388812543Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9975190: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.388946273Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9975207 (skipped 17 bytes from 9975190)
+
+  2026-06-05T06:28:54.388948993Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9975190: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.388955683Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9975505: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389052824Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9975658 (skipped 153 bytes from 9975505)
+
+  2026-06-05T06:28:54.389055464Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9975505: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389065894Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9976178: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389168154Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9976200 (skipped 22 bytes from 9976178)
+
+  2026-06-05T06:28:54.389173824Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9976178: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389181464Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9976441: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389283945Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9976471 (skipped 30 bytes from 9976441)
+
+  2026-06-05T06:28:54.389287255Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9976441: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389302175Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9977694: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389412085Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9977728 (skipped 34 bytes from 9977694)
+
+  2026-06-05T06:28:54.389415525Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9977694: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389422415Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9977953: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389521906Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9977999 (skipped 46 bytes from 9977953)
+
+  2026-06-05T06:28:54.389524846Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9977953: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389534196Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9978224: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389639576Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9978270 (skipped 46 bytes from 9978224)
+
+  2026-06-05T06:28:54.389642756Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9978224: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389649936Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9978511: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389751077Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9978541 (skipped 30 bytes from 9978511)
+
+  2026-06-05T06:28:54.389765507Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9978511: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389782877Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9979557: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389885617Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9979639 (skipped 82 bytes from 9979557)
+
+  2026-06-05T06:28:54.389889117Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9979557: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.389900257Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9980145: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.389994477Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9980226 (skipped 81 bytes from 9980145)
+
+  2026-06-05T06:28:54.389997287Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9980145: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390004478Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9980451: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390105488Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9980497 (skipped 46 bytes from 9980451)
+
+  2026-06-05T06:28:54.390108958Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9980451: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390115918Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9980738: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390209758Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9980768 (skipped 30 bytes from 9980738)
+
+  2026-06-05T06:28:54.390212708Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9980738: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390225918Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9981687: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390328579Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9981757 (skipped 70 bytes from 9981687)
+
+  2026-06-05T06:28:54.390332179Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9981687: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390343169Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9982185: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390438269Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9982339 (skipped 154 bytes from 9982185)
+
+  2026-06-05T06:28:54.390441109Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9982185: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390448709Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9982564: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39054986Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9982610 (skipped 46 bytes from 9982564)
+
+  2026-06-05T06:28:54.39055299Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9982564: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.3905599Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9982835: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39065491Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9982881 (skipped 46 bytes from 9982835)
+
+  2026-06-05T06:28:54.39065801Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9982835: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39066558Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9983122: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390773491Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9983152 (skipped 30 bytes from 9983122)
+
+  2026-06-05T06:28:54.390777151Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9983122: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390784741Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9983872: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.390886291Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9983875 (skipped 3 bytes from 9983872)
+
+  2026-06-05T06:28:54.390890191Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9983872: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.390910411Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9984806: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391016601Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9984880 (skipped 74 bytes from 9984806)
+
+  2026-06-05T06:28:54.391021161Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9984806: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391028821Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9985105: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391138862Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9985151 (skipped 46 bytes from 9985105)
+
+  2026-06-05T06:28:54.391142272Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9985105: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391149102Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9985376: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391246502Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9985422 (skipped 46 bytes from 9985376)
+
+  2026-06-05T06:28:54.391249452Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9985376: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391256522Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9985663: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391366373Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9985693 (skipped 30 bytes from 9985663)
+
+  2026-06-05T06:28:54.391370073Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9985663: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391390193Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9987206: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391500113Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9987262 (skipped 56 bytes from 9987206)
+
+  2026-06-05T06:28:54.391505803Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9987206: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391517313Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9987768: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391612924Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9987849 (skipped 81 bytes from 9987768)
+
+  2026-06-05T06:28:54.391615654Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9987768: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391622204Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9988074: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391730654Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9988120 (skipped 46 bytes from 9988074)
+
+  2026-06-05T06:28:54.391737514Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9988074: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391745954Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9988361: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391867885Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9988391 (skipped 30 bytes from 9988361)
+
+  2026-06-05T06:28:54.391872155Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9988361: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.391881655Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9989111: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.391988425Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9989189 (skipped 78 bytes from 9989111)
+
+  2026-06-05T06:28:54.391992915Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9989111: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392010805Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9990412: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392127766Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9990433 (skipped 21 bytes from 9990412)
+
+  2026-06-05T06:28:54.392133056Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9990412: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392141766Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9990658: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392251386Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9990661 (skipped 3 bytes from 9990658)
+
+  2026-06-05T06:28:54.392256376Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9990658: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392286196Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9992470: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392393787Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9992567 (skipped 97 bytes from 9992470)
+
+  2026-06-05T06:28:54.392397647Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9992470: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392415347Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9993369: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392518027Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9993444 (skipped 75 bytes from 9993369)
+
+  2026-06-05T06:28:54.392521587Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9993369: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392528697Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9993672: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392626998Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9993715 (skipped 43 bytes from 9993672)
+
+  2026-06-05T06:28:54.392629738Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9993672: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392636418Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9993943: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392738368Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9993986 (skipped 43 bytes from 9993943)
+
+  2026-06-05T06:28:54.392741918Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9993943: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392770088Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9995993: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.392870809Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9996013 (skipped 20 bytes from 9995993)
+
+  2026-06-05T06:28:54.392874159Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9995993: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.392912959Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 9998324: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393014849Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 9998383 (skipped 59 bytes from 9998324)
+
+  2026-06-05T06:28:54.393018149Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 9998324: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393047299Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10000465: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39314646Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10000480 (skipped 15 bytes from 10000465)
+
+  2026-06-05T06:28:54.39315002Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10000465: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39319083Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10002934: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39329229Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10003052 (skipped 118 bytes from 10002934)
+
+  2026-06-05T06:28:54.3932952Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10002934: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39330197Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10003280: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393401521Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10003323 (skipped 43 bytes from 10003280)
+
+  2026-06-05T06:28:54.393404901Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10003280: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393440401Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10006371: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393540991Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10006476 (skipped 105 bytes from 10006371)
+
+  2026-06-05T06:28:54.393544211Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10006371: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393554781Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10007003: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393655002Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10007018 (skipped 15 bytes from 10007003)
+
+  2026-06-05T06:28:54.393657962Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10007003: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393689992Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10009522: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393801452Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10009585 (skipped 63 bytes from 10009522)
+
+  2026-06-05T06:28:54.393805142Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10009522: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393812582Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10009892: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.393919173Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10009901 (skipped 9 bytes from 10009892)
+
+  2026-06-05T06:28:54.393922703Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10009892: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.393929673Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10010122: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394030293Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10010172 (skipped 50 bytes from 10010122)
+
+  2026-06-05T06:28:54.394033193Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10010122: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394058673Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10011906: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394159183Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10011964 (skipped 58 bytes from 10011906)
+
+  2026-06-05T06:28:54.394162273Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10011906: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394169004Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10012185: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394268824Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10012188 (skipped 3 bytes from 10012185)
+
+  2026-06-05T06:28:54.394272004Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10012185: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394283034Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10013107: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394380384Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10013167 (skipped 60 bytes from 10013107)
+
+  2026-06-05T06:28:54.394383454Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10013107: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394390844Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10013474: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394490665Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10013482 (skipped 8 bytes from 10013474)
+
+  2026-06-05T06:28:54.394494015Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10013474: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394500935Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10013703: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394600905Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10013753 (skipped 50 bytes from 10013703)
+
+  2026-06-05T06:28:54.394604125Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10013703: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394611045Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10013978: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394715386Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10014024 (skipped 46 bytes from 10013978)
+
+  2026-06-05T06:28:54.394718636Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10013978: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394738256Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10015512: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394849646Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10015545 (skipped 33 bytes from 10015512)
+
+  2026-06-05T06:28:54.394853966Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10015512: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.394877626Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10017381: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.394974257Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10017505 (skipped 124 bytes from 10017381)
+
+  2026-06-05T06:28:54.394977517Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10017381: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395009127Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10019811: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395122247Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10019873 (skipped 62 bytes from 10019811)
+
+  2026-06-05T06:28:54.395125567Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10019811: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395153527Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10022233: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395217007Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10022338 (skipped 105 bytes from 10022233)
+
+  2026-06-05T06:28:54.395220287Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10022233: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395231428Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10023257: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395332638Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10023335 (skipped 78 bytes from 10023257)
+
+  2026-06-05T06:28:54.395336218Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10023257: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395346968Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10023838: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395446898Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10023997 (skipped 159 bytes from 10023838)
+
+  2026-06-05T06:28:54.395449908Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10023838: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395461398Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10024503: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395561219Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10024519 (skipped 16 bytes from 10024503)
+
+  2026-06-05T06:28:54.395564429Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10024503: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395583529Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10025935: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.395684649Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10026012 (skipped 77 bytes from 10025935)
+
+  2026-06-05T06:28:54.395687779Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10025935: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.395698399Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10026518: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39580801Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10026543 (skipped 25 bytes from 10026518)
+
+  2026-06-05T06:28:54.39581145Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10026518: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39582267Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10027462: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39592327Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10027465 (skipped 3 bytes from 10027462)
+
+  2026-06-05T06:28:54.3959261Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10027462: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39594635Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10028385: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396045351Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10028410 (skipped 25 bytes from 10028385)
+
+  2026-06-05T06:28:54.396048491Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10028385: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396063301Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10029203: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396163831Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10029302 (skipped 99 bytes from 10029203)
+
+  2026-06-05T06:28:54.396169491Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10029203: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396184751Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10030104: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396277202Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10030120 (skipped 16 bytes from 10030104)
+
+  2026-06-05T06:28:54.396279832Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10030104: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396293932Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10030721: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396393042Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10030728 (skipped 7 bytes from 10030721)
+
+  2026-06-05T06:28:54.396395782Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10030721: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396413242Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10031659: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396509723Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10031673 (skipped 14 bytes from 10031659)
+
+  2026-06-05T06:28:54.396512363Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10031659: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396522813Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10032093: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396624973Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10032096 (skipped 3 bytes from 10032093)
+
+  2026-06-05T06:28:54.396627543Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10032093: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396634183Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10032392: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396727983Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10032547 (skipped 155 bytes from 10032392)
+
+  2026-06-05T06:28:54.396730713Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10032392: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396741233Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10033053: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396841744Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10033069 (skipped 16 bytes from 10033053)
+
+  2026-06-05T06:28:54.396844644Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10033053: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396856734Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10033467: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.396948894Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10033490 (skipped 23 bytes from 10033467)
+
+  2026-06-05T06:28:54.396951724Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10033467: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.396962604Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10034153: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397059175Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10034181 (skipped 28 bytes from 10034153)
+
+  2026-06-05T06:28:54.397061865Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10034153: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397072145Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10034551: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397167465Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10034615 (skipped 64 bytes from 10034551)
+
+  2026-06-05T06:28:54.397170195Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10034551: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397181115Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10035534: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397284785Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10035585 (skipped 51 bytes from 10035534)
+
+  2026-06-05T06:28:54.397291205Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10035534: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397302896Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10035828: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397405956Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10035892 (skipped 64 bytes from 10035828)
+
+  2026-06-05T06:28:54.397409086Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10035828: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397420536Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10036910: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397513806Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10036940 (skipped 30 bytes from 10036910)
+
+  2026-06-05T06:28:54.397516506Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10036910: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397523176Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10037183: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397620507Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10037247 (skipped 64 bytes from 10037183)
+
+  2026-06-05T06:28:54.397623357Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10037183: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397634277Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10038265: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397726367Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10038373 (skipped 108 bytes from 10038265)
+
+  2026-06-05T06:28:54.397729097Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10038265: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397735687Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10038607: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397846198Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10038680 (skipped 73 bytes from 10038607)
+
+  2026-06-05T06:28:54.397852328Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10038607: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397864398Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10039696: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.397965158Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10039884 (skipped 188 bytes from 10039696)
+
+  2026-06-05T06:28:54.397968238Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10039696: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.397975058Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10040118: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398067038Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10040191 (skipped 73 bytes from 10040118)
+
+  2026-06-05T06:28:54.398069988Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10040118: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398084448Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10041406: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398184669Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10041473 (skipped 67 bytes from 10041406)
+
+  2026-06-05T06:28:54.398190189Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10041406: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398197689Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10041708: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398290839Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10041780 (skipped 72 bytes from 10041708)
+
+  2026-06-05T06:28:54.398294159Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10041708: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398310969Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10043094: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39841881Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10043140 (skipped 46 bytes from 10043094)
+
+  2026-06-05T06:28:54.39842247Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10043094: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.3984295Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10043375: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.39852779Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10043447 (skipped 72 bytes from 10043375)
+
+  2026-06-05T06:28:54.39853068Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10043375: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.39856584Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10045656: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398666811Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10045668 (skipped 12 bytes from 10045656)
+
+  2026-06-05T06:28:54.398671371Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10045656: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398679341Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10045903: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398787681Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10045975 (skipped 72 bytes from 10045903)
+
+  2026-06-05T06:28:54.398790711Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10045903: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398797731Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10046273: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.398894442Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10046461 (skipped 188 bytes from 10046273)
+
+  2026-06-05T06:28:54.398897702Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10046273: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.398905252Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10046757: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399008802Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10046767 (skipped 10 bytes from 10046757)
+
+  2026-06-05T06:28:54.399012062Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10046757: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399074232Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10052505: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399176423Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10052654 (skipped 149 bytes from 10052505)
+
+  2026-06-05T06:28:54.399179663Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10052505: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399215783Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10055689: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399324083Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10055725 (skipped 36 bytes from 10055689)
+
+  2026-06-05T06:28:54.399330583Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10055689: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399374734Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10058859: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399481254Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10058874 (skipped 15 bytes from 10058859)
+
+  2026-06-05T06:28:54.399485144Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10058859: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399500154Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10060199: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399609614Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10060252 (skipped 53 bytes from 10060199)
+
+  2026-06-05T06:28:54.399613454Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10060199: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399644285Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10063214: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399748255Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10063317 (skipped 103 bytes from 10063214)
+
+  2026-06-05T06:28:54.399753765Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10063214: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.399884186Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10075686: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.399991436Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10075747 (skipped 61 bytes from 10075686)
+
+  2026-06-05T06:28:54.399995206Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10075686: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400011186Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10076355: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.400112586Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10076361 (skipped 6 bytes from 10076355)
+
+  2026-06-05T06:28:54.400115836Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10076355: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400147397Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10089614: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.400249227Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10089620 (skipped 6 bytes from 10089614)
+
+  2026-06-05T06:28:54.400252517Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10089614: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400398278Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10103012: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.400496108Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10103032 (skipped 20 bytes from 10103012)
+
+  2026-06-05T06:28:54.400499458Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10103012: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400515818Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10116318: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.400616648Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10116360 (skipped 42 bytes from 10116318)
+
+  2026-06-05T06:28:54.400619928Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10116318: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400630508Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10116752: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.400730309Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10116758 (skipped 6 bytes from 10116752)
+
+  2026-06-05T06:28:54.400733449Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10116752: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.400833669Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10129288: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.4009321Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10129309 (skipped 21 bytes from 10129288)
+
+  2026-06-05T06:28:54.400935Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10129288: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40094199Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10129663: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40103954Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10129772 (skipped 109 bytes from 10129663)
+
+  2026-06-05T06:28:54.40104237Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10129663: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40105261Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10130166: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40114624Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10130170 (skipped 4 bytes from 10130166)
+
+  2026-06-05T06:28:54.40114907Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10130166: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40116429Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10142808: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.401257871Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10142809 (skipped 1 bytes from 10142808)
+
+  2026-06-05T06:28:54.401260771Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10142808: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.401267741Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10143165: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.401370011Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10143272 (skipped 107 bytes from 10143165)
+
+  2026-06-05T06:28:54.401375601Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10143165: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.401417071Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10156769: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.401517812Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10156772 (skipped 3 bytes from 10156769)
+
+  2026-06-05T06:28:54.401521292Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10156769: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.401533402Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10157166: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.401633842Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10157170 (skipped 4 bytes from 10157166)
+
+  2026-06-05T06:28:54.401637272Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10157166: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.401784193Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10169572: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.401894503Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10169715 (skipped 143 bytes from 10169572)
+
+  2026-06-05T06:28:54.401900173Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10169572: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.401911683Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10170197: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402012904Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10170296 (skipped 99 bytes from 10170197)
+
+  2026-06-05T06:28:54.402016214Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10170197: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402026784Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10170690: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402127904Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10170694 (skipped 4 bytes from 10170690)
+
+  2026-06-05T06:28:54.402131104Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10170690: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402157944Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10186421: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402258995Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10186520 (skipped 99 bytes from 10186421)
+
+  2026-06-05T06:28:54.402262425Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10186421: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402273015Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10186902: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402372515Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10186918 (skipped 16 bytes from 10186902)
+
+  2026-06-05T06:28:54.402375735Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10186902: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402546836Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10199316: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402645876Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10199501 (skipped 185 bytes from 10199316)
+
+  2026-06-05T06:28:54.402648776Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10199316: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402656136Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10199726: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402753607Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10199730 (skipped 4 bytes from 10199726)
+
+  2026-06-05T06:28:54.402765047Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10199726: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402772077Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10199929: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402867437Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10199959 (skipped 30 bytes from 10199929)
+
+  2026-06-05T06:28:54.402870467Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10199929: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.402882517Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10200600: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.402986037Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10200666 (skipped 66 bytes from 10200600)
+
+  2026-06-05T06:28:54.402990057Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10200600: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403000667Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10201036: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403096598Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10201064 (skipped 28 bytes from 10201036)
+
+  2026-06-05T06:28:54.403099638Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10201036: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403141438Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10215045: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403240348Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10215125 (skipped 80 bytes from 10215045)
+
+  2026-06-05T06:28:54.403243698Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10215045: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403255908Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10215495: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403357409Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10215523 (skipped 28 bytes from 10215495)
+
+  2026-06-05T06:28:54.403364589Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10215495: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403385609Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10228075: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403484289Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10228106 (skipped 31 bytes from 10228075)
+
+  2026-06-05T06:28:54.403487029Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10228075: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403494109Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10228331: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40358961Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10228335 (skipped 4 bytes from 10228331)
+
+  2026-06-05T06:28:54.40359244Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10228331: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40359931Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10228560: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40369264Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10228564 (skipped 4 bytes from 10228560)
+
+  2026-06-05T06:28:54.40369822Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10228560: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40371034Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10228763: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403816481Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10228793 (skipped 30 bytes from 10228763)
+
+  2026-06-05T06:28:54.403819571Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10228763: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403827171Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10229591: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.403923961Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10229626 (skipped 35 bytes from 10229591)
+
+  2026-06-05T06:28:54.403926731Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10229591: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.403937191Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10229996: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404030041Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10230024 (skipped 28 bytes from 10229996)
+
+  2026-06-05T06:28:54.404033031Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10229996: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.404067152Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10244001: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404166262Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10244211 (skipped 210 bytes from 10244001)
+
+  2026-06-05T06:28:54.404169212Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10244001: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.404336643Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10257164: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404434803Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10257186 (skipped 22 bytes from 10257164)
+
+  2026-06-05T06:28:54.404437993Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10257164: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.404454583Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10257819: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404554063Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10257837 (skipped 18 bytes from 10257819)
+
+  2026-06-05T06:28:54.404557233Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10257819: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.404564843Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10258674: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404664094Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10258784 (skipped 110 bytes from 10258674)
+
+  2026-06-05T06:28:54.404667504Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10258674: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.404708064Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10273331: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.404851135Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10273441 (skipped 110 bytes from 10273331)
+
+  2026-06-05T06:28:54.404858915Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10273331: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405039805Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10286395: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405140696Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10286400 (skipped 5 bytes from 10286395)
+
+  2026-06-05T06:28:54.405144216Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10286395: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405151966Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10286625: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405251006Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10286628 (skipped 3 bytes from 10286625)
+
+  2026-06-05T06:28:54.405254216Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10286625: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405262126Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10286853: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405362397Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10286856 (skipped 3 bytes from 10286853)
+
+  2026-06-05T06:28:54.405365887Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10286853: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405372887Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10287055: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405466057Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10287084 (skipped 29 bytes from 10287055)
+
+  2026-06-05T06:28:54.405468927Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10287055: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405481527Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10288155: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405584837Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10288156 (skipped 1 bytes from 10288155)
+
+  2026-06-05T06:28:54.405591257Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10288155: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405604027Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10288548: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405710158Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10288554 (skipped 6 bytes from 10288548)
+
+  2026-06-05T06:28:54.405716748Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10288548: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405782378Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10303355: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405881699Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10303361 (skipped 6 bytes from 10303355)
+
+  2026-06-05T06:28:54.405887409Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10303355: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.405895899Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10303659: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.405995759Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10303813 (skipped 154 bytes from 10303659)
+
+  2026-06-05T06:28:54.405999219Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10303659: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406018569Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10305463: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406115779Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10305465 (skipped 2 bytes from 10305463)
+
+  2026-06-05T06:28:54.406118649Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10305463: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406126019Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10305730: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40623428Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10305736 (skipped 6 bytes from 10305730)
+
+  2026-06-05T06:28:54.40623818Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10305730: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40624682Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10306003: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40634697Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10306007 (skipped 4 bytes from 10306003)
+
+  2026-06-05T06:28:54.40635022Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10306003: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40635875Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10306274: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406456301Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10306278 (skipped 4 bytes from 10306274)
+
+  2026-06-05T06:28:54.406459471Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10306274: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406468051Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10306521: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406577061Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10306530 (skipped 9 bytes from 10306521)
+
+  2026-06-05T06:28:54.406579981Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10306521: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406596721Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10307291: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406694992Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10307348 (skipped 57 bytes from 10307291)
+
+  2026-06-05T06:28:54.406698052Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10307291: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406726092Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10308854: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406830362Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10308857 (skipped 3 bytes from 10308854)
+
+  2026-06-05T06:28:54.406833552Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10308854: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406852912Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10309635: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.406955333Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10309675 (skipped 40 bytes from 10309635)
+
+  2026-06-05T06:28:54.406958323Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10309635: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.406971143Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10310176: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407070513Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10310242 (skipped 66 bytes from 10310176)
+
+  2026-06-05T06:28:54.407073563Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10310176: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407082013Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10310476: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407179204Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10310482 (skipped 6 bytes from 10310476)
+
+  2026-06-05T06:28:54.407182174Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10310476: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407190554Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10310716: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407287554Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10310722 (skipped 6 bytes from 10310716)
+
+  2026-06-05T06:28:54.407290544Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10310716: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407303364Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10311272: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407401094Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10311315 (skipped 43 bytes from 10311272)
+
+  2026-06-05T06:28:54.407409095Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10311272: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407424985Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10312087: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407528885Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10312133 (skipped 46 bytes from 10312087)
+
+  2026-06-05T06:28:54.407535265Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10312087: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407582755Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10314440: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407688006Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10314506 (skipped 66 bytes from 10314440)
+
+  2026-06-05T06:28:54.407690866Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10314440: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407709286Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10316019: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407816046Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10316020 (skipped 1 bytes from 10316019)
+
+  2026-06-05T06:28:54.407821406Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10316019: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.407874426Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10318913: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.407980057Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10318971 (skipped 58 bytes from 10318913)
+
+  2026-06-05T06:28:54.407986187Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10318913: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408014877Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10321185: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.408138187Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10321188 (skipped 3 bytes from 10321185)
+
+  2026-06-05T06:28:54.408141487Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10321185: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408180627Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10323280: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.408294018Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10323282 (skipped 2 bytes from 10323280)
+
+  2026-06-05T06:28:54.408298528Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10323280: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408309998Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10323779: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.408428028Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10323835 (skipped 56 bytes from 10323779)
+
+  2026-06-05T06:28:54.408432628Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10323779: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408462508Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10326025: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.408562439Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10326085 (skipped 60 bytes from 10326025)
+
+  2026-06-05T06:28:54.408564649Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10326025: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408600059Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10328116: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.408701299Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10328182 (skipped 66 bytes from 10328116)
+
+  2026-06-05T06:28:54.408704309Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10328116: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.408717079Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10328776: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.40885614Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10328780 (skipped 4 bytes from 10328776)
+
+  2026-06-05T06:28:54.40886159Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10328776: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.40889572Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10330968: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409015241Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10331071 (skipped 103 bytes from 10330968)
+
+  2026-06-05T06:28:54.409018801Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10330968: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409044461Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10332413: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409151071Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10332510 (skipped 97 bytes from 10332413)
+
+  2026-06-05T06:28:54.409154861Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10332413: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409168381Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10333005: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409280402Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10333063 (skipped 58 bytes from 10333005)
+
+  2026-06-05T06:28:54.409284862Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10333005: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409303212Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10334162: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409418412Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10334168 (skipped 6 bytes from 10334162)
+
+  2026-06-05T06:28:54.409422412Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10334162: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409502372Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10346564: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409608763Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10346591 (skipped 27 bytes from 10346564)
+
+  2026-06-05T06:28:54.409612543Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10346564: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409630643Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10347240: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409730023Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10347266 (skipped 26 bytes from 10347240)
+
+  2026-06-05T06:28:54.409732293Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10347240: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409739643Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10347465: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409864374Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10347469 (skipped 4 bytes from 10347465)
+
+  2026-06-05T06:28:54.409869584Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10347465: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.409883574Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10347961: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.409981334Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10347987 (skipped 26 bytes from 10347961)
+
+  2026-06-05T06:28:54.409983554Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10347961: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410000864Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10348662: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410098445Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10348773 (skipped 111 bytes from 10348662)
+
+  2026-06-05T06:28:54.410100675Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10348662: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410133125Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10362309: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410237395Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10362313 (skipped 4 bytes from 10362309)
+
+  2026-06-05T06:28:54.410242885Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10362309: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410256125Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10362816: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410355776Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10362831 (skipped 15 bytes from 10362816)
+
+  2026-06-05T06:28:54.410357966Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10362816: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410375636Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10363732: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410472746Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10363744 (skipped 12 bytes from 10363732)
+
+  2026-06-05T06:28:54.410474926Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10363732: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410665977Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10376171: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410790508Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10376179 (skipped 8 bytes from 10376171)
+
+  2026-06-05T06:28:54.410795838Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10376171: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410817108Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10377259: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410879068Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10377364 (skipped 105 bytes from 10377259)
+
+  2026-06-05T06:28:54.410882448Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10377259: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.410891328Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10377724: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.410987448Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10377755 (skipped 31 bytes from 10377724)
+
+  2026-06-05T06:28:54.410990678Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10377724: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411010998Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10378656: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.411109639Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10378668 (skipped 12 bytes from 10378656)
+
+  2026-06-05T06:28:54.411112909Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10378656: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411142959Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10392206: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.411244579Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10392237 (skipped 31 bytes from 10392206)
+
+  2026-06-05T06:28:54.411249749Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10392206: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411261919Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10392718: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.41136735Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10392755 (skipped 37 bytes from 10392718)
+
+  2026-06-05T06:28:54.41137032Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10392718: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.4113877Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10393430: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.4114979Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10393541 (skipped 111 bytes from 10393430)
+
+  2026-06-05T06:28:54.41150095Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10393430: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411611331Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10406033: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.411722101Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10406094 (skipped 61 bytes from 10406033)
+
+  2026-06-05T06:28:54.411725881Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10406033: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411742711Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10406761: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.411857541Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10406796 (skipped 35 bytes from 10406761)
+
+  2026-06-05T06:28:54.411860681Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10406761: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.411868542Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10407161: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.411984862Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10407242 (skipped 81 bytes from 10407161)
+
+  2026-06-05T06:28:54.411994302Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10407161: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412006842Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10407725: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412120832Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10407760 (skipped 35 bytes from 10407725)
+
+  2026-06-05T06:28:54.412127483Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10407725: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412154973Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10408661: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412262443Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10408673 (skipped 12 bytes from 10408661)
+
+  2026-06-05T06:28:54.412265743Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10408661: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412298273Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10422258: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412405454Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10422328 (skipped 70 bytes from 10422258)
+
+  2026-06-05T06:28:54.412408204Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10422258: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412420484Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10422824: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412530324Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10422846 (skipped 22 bytes from 10422824)
+
+  2026-06-05T06:28:54.412533224Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10422824: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412574274Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10425351: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412680035Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10425385 (skipped 34 bytes from 10425351)
+
+  2026-06-05T06:28:54.412682825Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10425351: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.412699815Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 10426142: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.412835815Z  WARN aeordb::engine::entry_scanner: Found next valid entry at offset 10426203 (skipped 61 bytes from 10426142)
+
+  2026-06-05T06:28:54.412841155Z  WARN aeordb::engine::storage_engine: Skipping corrupt entry during KV rebuild: Corrupt entry at offset 10426142: Corrupt header: Invalid magic bytes
+
+  2026-06-05T06:28:54.522663628Z  WARN aeordb::engine::entry_scanner: Corrupt entry header at offset 25856566: Invalid magic bytes. Scanning for next valid entry...
+
+  2026-06-05T06:28:54.522698948Z  WARN aeordb::engine::entry_scanner: No valid entry found after offset 25856566. Stopping scan.
+
+  2026-06-05T06:28:54.522706758Z DEBUG aeordb::engine::storage_engine: rebuild_kv: WAL scan complete, scanned_entries: 39613
+
+  2026-06-05T06:28:54.522849179Z DEBUG aeordb::engine::storage_engine: rebuild_kv: creating new KV store, kv_offset: 512, block_size: 4194304, hot_offset: 25856566, rebuild_stage: 2, wal_end: 25856566, kv_block_offset_from_header: 512
+
+  2026-06-05T06:28:54.522867279Z DEBUG aeordb::engine::disk_kv_store: DiskKVStore::create, kv_block_offset: 512, kv_block_length: 4194304, hot_tail_offset: 25856566, stage: 2, bucket_count: 2892, psize: 1450, pages_bytes: 4193400, max_entries: 92544
+
+  2026-06-05T06:28:54.538305078Z DEBUG aeordb::engine::storage_engine: rebuild_kv: all entries inserted, flushing, inserted: 39613, write_buffer_len: 18992
+
+  2026-06-05T06:28:54.538319898Z DEBUG aeordb::engine::disk_kv_store: flush: starting, write_buffer_len: 18992, bucket_count: 2892, stage: 2, kv_block_offset: 512, kv_block_length: 4194304
+
+  2026-06-05T06:28:54.559901061Z DEBUG aeordb::engine::disk_kv_store: flush: pages written, overflow_count: 0, modified_buckets: 2884
+
+  2026-06-05T06:28:54.559920221Z DEBUG aeordb::engine::disk_kv_store: flush: all entries fit in pages, clearing hot tail, hot_tail_offset: 25856566
+
+  2026-06-05T06:28:54.574744858Z DEBUG aeordb::engine::storage_engine: rebuild_kv: flush complete, write_buffer_after_flush: 0
+
+  2026-06-05T06:28:54.576662756Z DEBUG aeordb::engine::storage_engine: rebuild_kv: updating file header, kv_block_offset: 512, kv_block_length: 4194304, hot_tail_offset: 25856566, kv_block_stage: 2, entry_count: 39613
+
+  2026-06-05T06:28:54.577882Z  INFO aeordb::engine::storage_engine: KV rebuild complete: 39613 entries indexed in 0.25s
+
+  2026-06-05T06:28:54.586523443Z  INFO aeordb::engine::storage_engine: Recovered voids via gap-scan after dirty startup, void_count: 16277, total_void_bytes: 4511187, wal_start: 4194816
+
+  2026-06-05T06:28:54.587197036Z DEBUG aeordb::engine::directory_ops: list_directory: root KV entry, kv_offset: 25855659, kv_type: 2
+
+  2026-06-05T06:28:54.587924289Z DEBUG aeordb::engine::directory_ops: list_directory: root entry, value_len: 371, is_btree: false, first_bytes: 034c5e3fd0743bb472e6bf4e8834457f
+
+  2026-06-05T06:28:54.591899094Z DEBUG aeordb::server: Loaded existing node_id, node_id: 10118061058867960926
+
+Listening on http://127.0.0.1:6830
+  2026-06-05T06:28:57.77443899Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 4106de94-f2df-429c-aa49-ba078aec0d5a, method: GET, path: /system/health
+
+  2026-06-05T06:29:07.77069767Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 02c10a49-a1ba-46e0-ad41-3b34e8b019cc, method: GET, path: /system/health
+
+  2026-06-05T06:29:17.773146592Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 0f403678-e28e-4ff2-b6f6-f23054a2ad03, method: GET, path: /system/health
+
+  2026-06-05T06:29:19.325556701Z DEBUG aeordb::logging::request_id: Request received, method: POST, path: /auth/token
+    in aeordb::logging::request_id::request with request_id: 461c915e-ac5c-4ba2-a023-f05e578730c2, method: POST, path: /auth/token
+
+  2026-06-05T06:29:19.365846963Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 045f33f0-c10f-49ab-b7d2-49dd7f8250f3, method: GET, path: /system/health
+
+  2026-06-05T06:29:19.36785297Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: fc75ea77-bd61-4bb3-aade-21d83f6e5fe6, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:29:19.368112521Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.368573813Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.371123933Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: e54cf577-3144-4dea-a640-706907866ca8, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:29:19.371241903Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.371339123Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.372565218Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: 32876928-85df-48f9-b381-5b4fdeb8fc60, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:29:19.372672108Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.372773379Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.374254624Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/agents
+    in aeordb::logging::request_id::request with request_id: 4e0f4a6a-0d64-48a8-9819-574bb1e985fc, method: GET, path: /files/kikx/agents
+
+  2026-06-05T06:29:19.374376725Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:19.374462835Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:27.769925486Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 1c4ee268-1f58-4d3a-9bd7-4cb9a25f1c05, method: GET, path: /system/health
+
+  2026-06-05T06:29:37.771549629Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 18c44033-52a4-4e88-88f0-32e704f11116, method: GET, path: /system/health
+
+  2026-06-05T06:29:43.936091226Z DEBUG aeordb::logging::request_id: Request received, method: POST, path: /auth/token
+    in aeordb::logging::request_id::request with request_id: fa192708-eea9-4248-b51e-9240238b6ac0, method: POST, path: /auth/token
+
+  2026-06-05T06:29:43.969048788Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: 32fab41f-2577-4da6-a27f-61304a8acc7e, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:29:43.969160669Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:43.969242829Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:43.970584774Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+    in aeordb::logging::request_id::request with request_id: e0181810-e68e-4e33-a9f8-c9f439a180fe, method: GET, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+
+  2026-06-05T06:29:43.970660494Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:43.970774275Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:43.971897639Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+    in aeordb::logging::request_id::request with request_id: 0c4da508-5e08-40ca-afb9-285f2804f273, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+
+  2026-06-05T06:29:43.971997999Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:43.97209106Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:44.137995623Z  INFO aeordb::engine::directory_ops: Auto-snapshot (auto-pre-delete), snapshot: auto-pre-delete 2026-06-05 06:29:44.137
+
+  2026-06-05T06:29:46.592962949Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+    in aeordb::logging::request_id::request with request_id: be541d92-737d-45f7-a7d4-00856999b149, method: GET, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+
+  2026-06-05T06:29:46.593079459Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:46.593151559Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:46.594033142Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+    in aeordb::logging::request_id::request with request_id: 135a7f3c-ebc0-4029-97a8-ef265528cda4, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+
+  2026-06-05T06:29:46.594100393Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:46.594160323Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:47.498235071Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+    in aeordb::logging::request_id::request with request_id: daa37438-1953-4f5c-aff4-da7bda99e446, method: GET, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+
+  2026-06-05T06:29:47.498345841Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:47.498415742Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:56.197768094Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 280fa41d-84ca-428d-b9d9-9f3e5ba31f54, method: GET, path: /system/health
+
+  2026-06-05T06:29:56.202365991Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+    in aeordb::logging::request_id::request with request_id: f9ef4994-0a40-4377-96f6-86753e0a375c, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+
+  2026-06-05T06:29:56.202474492Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:56.202547232Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:29:57.769961996Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 822539b7-a95f-4763-9be9-e19d39b44404, method: GET, path: /system/health
+
+  2026-06-05T06:30:06.011830689Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+    in aeordb::logging::request_id::request with request_id: 63c9ff8e-9577-4500-9154-064f4f2646a6, method: GET, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+
+  2026-06-05T06:30:06.01196634Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:06.01207093Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:20.418290279Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 90ffbe6e-c320-451b-b88d-db2d18a2ce60, method: GET, path: /system/health
+
+  2026-06-05T06:30:27.863553054Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 96d7f2e0-16f7-4f3a-acbe-ee7cc2593f63, method: GET, path: /system/health
+
+  2026-06-05T06:30:29.378359307Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+    in aeordb::logging::request_id::request with request_id: 620215e3-2e09-4f94-92f4-b4f500fa80a1, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+
+  2026-06-05T06:30:29.378482627Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:29.378588758Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:37.77398151Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 9243c6d9-5721-47a9-b3b7-2d219e32f509, method: GET, path: /system/health
+
+  2026-06-05T06:30:40.03043888Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 5262b41b-fee4-4c54-be30-3497f954d778, method: GET, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.030569781Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.030656761Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.093303783Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 2239ea3b-5154-4a00-9a5f-ede35d8cf71f, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.093419324Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.093515344Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.28395187Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 10904251-c7fb-43ae-9ad3-34e04fba86cd, method: GET, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.28406439Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.284142371Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.343944153Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 7c772fe5-87a1-4104-9aa4-8eda2c9bbe62, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.344059173Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.344139744Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.344181954Z DEBUG aeordb::engine::index_cleanup: Index cleanup: processed 1 paths
+
+  2026-06-05T06:30:40.463664478Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 51b881f9-0dbc-4fa9-b016-846c34fbb4b2, method: GET, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.463795618Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.463873059Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.524085823Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 0c6d3cfe-5840-4518-9b98-cc78f3d4a89c, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.524209893Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.524306273Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.70927901Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: a1162b5f-547d-4587-952f-aaecf2680b4e, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:40.709421111Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.709550191Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.769804345Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+    in aeordb::logging::request_id::request with request_id: f41baf50-e11e-46ce-a0ad-daad12a2c233, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+
+  2026-06-05T06:30:40.769947995Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.770040306Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.806549455Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+    in aeordb::logging::request_id::request with request_id: cb8e1c44-7c9e-4be6-9ea4-5f8123d2d27e, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+
+  2026-06-05T06:30:40.806671996Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.806751136Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.851741526Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+    in aeordb::logging::request_id::request with request_id: 77168a8d-ea0f-4aae-ab02-02ba4f94febd, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+
+  2026-06-05T06:30:40.851871066Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.851945547Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.886020408Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+    in aeordb::logging::request_id::request with request_id: a1765508-5c44-4fce-834b-6c30b45f5dbd, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+
+  2026-06-05T06:30:40.886163888Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.886264488Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.929344241Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 0dfcafc9-e033-4f94-a92d-f048975c65bd, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.929469372Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.929553242Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.964121495Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 5c7f5496-f91c-4743-8bdc-6151aca5c5fb, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:40.964278495Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:40.964388906Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.00779996Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 293e8c46-3066-4a4e-98ca-b39fc2783069, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.00795446Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.008059781Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.042301882Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: d876431a-ec98-4522-957f-1c8710124366, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:41.042436203Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.042529713Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.077428967Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+    in aeordb::logging::request_id::request with request_id: 1e509f13-c7e3-4e73-bc29-82a2d87c16dd, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+
+  2026-06-05T06:30:41.077453627Z DEBUG aeordb::engine::index_cleanup: Index cleanup: processed 4 paths
+
+  2026-06-05T06:30:41.077572787Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.077672178Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.088474306Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+    in aeordb::logging::request_id::request with request_id: 9d378066-900e-46b6-ba77-fd9bee670408, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+
+  2026-06-05T06:30:41.088621496Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.088717697Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.100162347Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+    in aeordb::logging::request_id::request with request_id: c724eda3-f9e8-40df-863f-36828a8f788d, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+
+  2026-06-05T06:30:41.100303318Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.100405978Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.111383687Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+    in aeordb::logging::request_id::request with request_id: 9846fa3c-330f-4055-b664-a43bc5857fc3, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+
+  2026-06-05T06:30:41.111521698Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.111626458Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.123000399Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 3f9c52d5-288c-4b76-8aa1-29b362ff5704, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.123139079Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.123249949Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.135612233Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: 0cd17a66-6ff6-48dd-96fa-a656c61368bf, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.135769724Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.135869814Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.170163726Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: e9c37c0d-6baa-43a9-8458-9b5bc869e3b4, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.170321476Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.170420567Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.214535063Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: a81e4251-c07c-40ae-bae5-587850821ec4, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:41.214678304Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.214789894Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.275925521Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+    in aeordb::logging::request_id::request with request_id: 5613d176-6d99-432d-9f69-9c79a1ddeb3b, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000002-b5f97bdf-5a90-4be6-ac2f-5feb2dc1f874.json
+
+  2026-06-05T06:30:41.276065481Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.276154152Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.312551501Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+    in aeordb::logging::request_id::request with request_id: da7a5e13-b6e5-42ae-8ba2-4ce2059e5910, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/interactions/126e9b8e-135b-48ec-ba8b-118fa60852d8/frames/0000000000000002-UserMessage-c1d92357-6926-4c43-aec3-f116be54e2b2.json
+
+  2026-06-05T06:30:41.312696411Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.312813102Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.357167319Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+    in aeordb::logging::request_id::request with request_id: 8a2367c0-97f6-4625-add8-0e812d6fd2b8, method: DELETE, path: /files/kikx/sessions/6e3e46d3-73de-4968-a5ee-997411e983f1/commits/0000000000000018-8676167e-2773-497f-bee3-fd4cb471479f.json
+
+  2026-06-05T06:30:41.35732391Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.35743043Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.428409792Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+    in aeordb::logging::request_id::request with request_id: cfaad53c-0b49-4609-b13d-c74728207438, method: DELETE, path: /files/kikx/sessions/bbdcfe45-b376-4286-be68-783b6a31fb13/interactions/9f0cf722-45bb-4c22-b4d2-49a84e8e3da3/frames/0000000000000259-AgentMessage-196e3a18-d98c-4930-b27d-8e9799a1c85e.json
+
+  2026-06-05T06:30:41.428547132Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.428652793Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.463040265Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: e44f7d4b-549c-43f6-9f3f-171103e34035, method: DELETE, path: /files/kikx/sessions/71916237-9891-4a6a-a31d-7e429e811661/values/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.463156065Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.463235835Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.507838684Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: b5299530-c023-4836-85c8-0c2b1ce36e41, method: DELETE, path: /files/kikx/sessions/7dfae1af-3528-46ba-ac6d-ecd436ef8b71/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.507957774Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.508041874Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.54328607Z DEBUG aeordb::logging::request_id: Request received, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+    in aeordb::logging::request_id::request with request_id: ba4495b5-602a-44f2-a0ab-60e9b6a52b7b, method: DELETE, path: /files/kikx/sessions/86892975-ef3c-403c-aa8f-c263b8ffd588/tool-log/.aeordb-config/indexes.json
+
+  2026-06-05T06:30:41.54340159Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.54347609Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.590876588Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: 9a3eb456-bc32-4a9e-9386-b3e7376c4642, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:41.591033599Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.591141459Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.652987629Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: cad34ad9-815b-48ab-95e0-c05b4c0ed250, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:41.653134459Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.65323751Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.653854462Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /files/kikx/sessions
+    in aeordb::logging::request_id::request with request_id: c93d7739-797b-48c5-8981-e56475353cdf, method: GET, path: /files/kikx/sessions
+
+  2026-06-05T06:30:41.653965092Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:41.654048292Z DEBUG aeordb::auth::middleware: JWT validation succeeded, user_id: 00000000-0000-0000-0000-000000000000
+
+  2026-06-05T06:30:42.097059074Z DEBUG aeordb::engine::index_cleanup: Index cleanup: processed 2 paths
+
+  2026-06-05T06:30:47.771116384Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 9f3f36ec-61af-4c73-8448-0542d6e07f11, method: GET, path: /system/health
+
+  2026-06-05T06:30:55.282713345Z DEBUG aeordb::logging::request_id: Request received, method: POST, path: /auth/token
+    in aeordb::logging::request_id::request with request_id: ae3e0f39-c862-4434-a997-e43c1bc88aeb, method: POST, path: /auth/token
+
+  2026-06-05T06:30:57.772129134Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 074565b7-85e0-40d0-beeb-559c6f5f7160, method: GET, path: /system/health
+
+  2026-06-05T06:31:07.772288707Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 4ff343b0-e6ce-4486-8a12-e4f5659b6f21, method: GET, path: /system/health
+
+  2026-06-05T06:31:17.775821062Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: b500b679-50cb-439b-ab7f-016159f2cb2c, method: GET, path: /system/health
+
+  2026-06-05T06:31:27.779132833Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 3a7d76ee-9bb5-4f95-8059-42606fac5146, method: GET, path: /system/health
+
+  2026-06-05T06:31:37.770242202Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 765bd223-30f9-4c80-87cf-1da8f0f6dbd7, method: GET, path: /system/health
+
+  2026-06-05T06:31:47.776008974Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 559309cf-4b87-4581-a370-53c56b42f070, method: GET, path: /system/health
+
+  2026-06-05T06:31:57.769970167Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 25757300-9730-4b27-b54d-a3d01df31d85, method: GET, path: /system/health
+
+  2026-06-05T06:32:07.773787786Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 7aa40f9e-9ccd-4e68-9cb4-866e37041983, method: GET, path: /system/health
+
+  2026-06-05T06:32:17.768930524Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 6121980f-2ef8-478d-a9f7-c3da6e31bac6, method: GET, path: /system/health
+
+  2026-06-05T06:32:27.771028127Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: c917abf3-ae26-4486-82ef-7c0211188872, method: GET, path: /system/health
+
+  2026-06-05T06:32:37.776280066Z DEBUG aeordb::logging::request_id: Request received, method: GET, path: /system/health
+    in aeordb::logging::request_id::request with request_id: 96f82a29-1b14-4465-99ff-9532de1a340b, method: GET, path: /system/health
+

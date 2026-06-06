@@ -12,10 +12,7 @@ pub fn extract_trigrams(s: &str) -> Vec<Vec<u8>> {
   let lower = s.to_lowercase();
 
   // Split into words on non-alphanumeric boundaries
-  let words: Vec<&str> = lower
-    .split(|c: char| !c.is_alphanumeric())
-    .filter(|w| !w.is_empty())
-    .collect();
+  let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
 
   if words.is_empty() {
     return Vec::new();
@@ -145,16 +142,12 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
     for j in 1..=n {
       let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
 
-      dp[i][j] = (dp[i - 1][j] + 1)           // deletion
-        .min(dp[i][j - 1] + 1)                 // insertion
-        .min(dp[i - 1][j - 1] + cost);         // substitution
+      dp[i][j] = (dp[i - 1][j] + 1) // deletion
+        .min(dp[i][j - 1] + 1) // insertion
+        .min(dp[i - 1][j - 1] + cost); // substitution
 
       // Transposition
-      if i > 1
-        && j > 1
-        && a_chars[i - 1] == b_chars[j - 2]
-        && a_chars[i - 2] == b_chars[j - 1]
-      {
+      if i > 1 && j > 1 && a_chars[i - 1] == b_chars[j - 2] && a_chars[i - 2] == b_chars[j - 1] {
         dp[i][j] = dp[i][j].min(dp[i - 2][j - 2] + 1);
       }
     }
@@ -228,12 +221,7 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
   let jaro = (m / a_len as f64 + m / b_len as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0;
 
   // Winkler prefix bonus
-  let prefix_len = a_chars
-    .iter()
-    .zip(b_chars.iter())
-    .take(4)
-    .take_while(|(a, b)| a == b)
-    .count();
+  let prefix_len = a_chars.iter().zip(b_chars.iter()).take(4).take_while(|(a, b)| a == b).count();
 
   let p = 0.1;
   jaro + prefix_len as f64 * p * (1.0 - jaro)

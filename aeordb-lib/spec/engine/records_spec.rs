@@ -1,7 +1,6 @@
 use aeordb::engine::{
-  FileRecord, DeletionRecord, ChildEntry,
-  serialize_child_entries, deserialize_child_entries,
-  normalize_path, parent_path, file_name, path_segments,
+  FileRecord, DeletionRecord, ChildEntry, serialize_child_entries, deserialize_child_entries, normalize_path, parent_path, file_name,
+  path_segments,
 };
 
 // ─── FileRecord tests ───────────────────────────────────────────────────────
@@ -29,9 +28,7 @@ fn test_file_record_serialize_deserialize_roundtrip() {
 #[test]
 fn test_file_record_with_chunks() {
   let hash_length = 32;
-  let chunks: Vec<Vec<u8>> = (0..5)
-    .map(|index| vec![index as u8; hash_length])
-    .collect();
+  let chunks: Vec<Vec<u8>> = (0..5).map(|index| vec![index as u8; hash_length]).collect();
 
   let record = FileRecord {
     path: "/files/large.bin".to_string(),
@@ -141,12 +138,7 @@ fn test_file_record_many_chunks() {
 
 #[test]
 fn test_file_record_new_sets_timestamps() {
-  let record = FileRecord::new(
-    "/test/path".to_string(),
-    Some("text/plain".to_string()),
-    100,
-    vec![vec![0xAA; 32]],
-  );
+  let record = FileRecord::new("/test/path".to_string(), Some("text/plain".to_string()), 100, vec![vec![0xAA; 32]]);
 
   assert!(record.created_at > 0);
   assert_eq!(record.created_at, record.updated_at);
@@ -190,11 +182,7 @@ fn test_file_record_deserialize_empty_data() {
 
 #[test]
 fn test_deletion_record_serialize_deserialize_roundtrip() {
-  let record = DeletionRecord {
-    path: "/myapp/old-file.json".to_string(),
-    deleted_at: 1700000005000,
-    reason: Some("cleanup".to_string()),
-  };
+  let record = DeletionRecord { path: "/myapp/old-file.json".to_string(), deleted_at: 1700000005000, reason: Some("cleanup".to_string()) };
 
   let serialized = record.serialize();
   let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
@@ -213,19 +201,12 @@ fn test_deletion_record_with_reason() {
   let serialized = record.serialize();
   let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
 
-  assert_eq!(
-    deserialized.reason,
-    Some("Expired after 30 days retention policy".to_string())
-  );
+  assert_eq!(deserialized.reason, Some("Expired after 30 days retention policy".to_string()));
 }
 
 #[test]
 fn test_deletion_record_without_reason() {
-  let record = DeletionRecord {
-    path: "/tmp/scratch".to_string(),
-    deleted_at: 1700000020000,
-    reason: None,
-  };
+  let record = DeletionRecord { path: "/tmp/scratch".to_string(), deleted_at: 1700000020000, reason: None };
 
   let serialized = record.serialize();
   let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
@@ -236,10 +217,7 @@ fn test_deletion_record_without_reason() {
 
 #[test]
 fn test_deletion_record_new_sets_timestamp() {
-  let record = DeletionRecord::new(
-    "/test/delete-me".to_string(),
-    Some("test reason".to_string()),
-  );
+  let record = DeletionRecord::new("/test/delete-me".to_string(), Some("test reason".to_string()));
 
   assert!(record.deleted_at > 0);
   assert_eq!(record.reason, Some("test reason".to_string()));
@@ -275,8 +253,7 @@ fn test_child_entry_serialize_deserialize_roundtrip() {
   };
 
   let serialized = entry.serialize(hash_length).unwrap();
-  let (deserialized, bytes_consumed) =
-    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
+  let (deserialized, bytes_consumed) = ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(entry, deserialized);
   assert_eq!(bytes_consumed, serialized.len());
@@ -298,8 +275,7 @@ fn test_child_entry_file_type() {
   };
 
   let serialized = entry.serialize(hash_length).unwrap();
-  let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
+  let (deserialized, _) = ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.entry_type, 1);
   assert_eq!(deserialized.name, "readme.md");
@@ -321,8 +297,7 @@ fn test_child_entry_directory_type() {
   };
 
   let serialized = entry.serialize(hash_length).unwrap();
-  let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
+  let (deserialized, _) = ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.entry_type, 2);
   assert_eq!(deserialized.content_type, None);
@@ -389,8 +364,7 @@ fn test_child_entry_with_64_byte_hash() {
   };
 
   let serialized = entry.serialize(hash_length).unwrap();
-  let (deserialized, _) =
-    ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
+  let (deserialized, _) = ChildEntry::deserialize(&serialized, hash_length, 0).unwrap();
 
   assert_eq!(deserialized.hash.len(), 64);
   assert_eq!(deserialized, entry);
@@ -455,10 +429,7 @@ fn test_parent_path() {
 
 #[test]
 fn test_parent_path_deep_nesting() {
-  assert_eq!(
-    parent_path("/a/b/c/d/e"),
-    Some("/a/b/c/d".to_string())
-  );
+  assert_eq!(parent_path("/a/b/c/d/e"), Some("/a/b/c/d".to_string()));
 }
 
 #[test]

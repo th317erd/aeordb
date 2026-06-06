@@ -53,13 +53,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 }
 
 /// Helper: PUT a file via HTTP, return the response status.
-async fn put_file(
-  app: axum::Router,
-  auth: &str,
-  path: &str,
-  content_type: &str,
-  body: &[u8],
-) -> StatusCode {
+async fn put_file(app: axum::Router, auth: &str, path: &str, content_type: &str, body: &[u8]) -> StatusCode {
   let request = Request::builder()
     .method("PUT")
     .uri(format!("/files/{}", path))
@@ -72,17 +66,8 @@ async fn put_file(
 }
 
 /// Helper: GET a file via HTTP with optional query string, return (status, headers, body bytes).
-async fn get_file(
-  app: axum::Router,
-  auth: &str,
-  uri: &str,
-) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-  let request = Request::builder()
-    .method("GET")
-    .uri(uri)
-    .header("authorization", auth)
-    .body(Body::empty())
-    .unwrap();
+async fn get_file(app: axum::Router, auth: &str, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+  let request = Request::builder().method("GET").uri(uri).header("authorization", auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   let status = response.status();
   let headers = response.headers().clone();

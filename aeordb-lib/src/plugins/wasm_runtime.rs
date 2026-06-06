@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use wasmi::{
-  Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store,
-};
+use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store};
 
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{DirectoryOps, EngineFileStream};
 use crate::engine::entry_type::EntryType;
-use crate::engine::query_engine::{
-  AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField,
-};
+use crate::engine::api_key_rules::{check_operation_permitted, is_ancestor_of_any_rule, match_rules, operation_to_flag_char};
+use crate::engine::cache::Cache;
+use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
+use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+use crate::engine::query_engine::{AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
@@ -17,7 +17,7 @@ use crate::engine::storage_engine::StorageEngine;
 const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default fuel budget for execution metering.
-const DEFAULT_FUEL_LIMIT: u64 = 1_000_000;
+const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
 
 /// Fixed offset in guest memory where host function responses are written.
 /// The guest SDK reads response data from this offset.
@@ -67,6 +67,10 @@ struct HostState {
   engine: Option<Arc<StorageEngine>>,
   /// Request context for permission-checked operations.
   request_context: Option<RequestContext>,
+  /// Group cache for request-scoped permission checks.
+  group_cache: Option<Arc<Cache<GroupLoader>>>,
+  /// API key cache for scoped-key path checks.
+  api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
 }
 
 /// A sandboxed WASM plugin runtime powered by wasmi.
@@ -85,24 +89,14 @@ impl WasmPluginRuntime {
   }
 
   /// Load and validate a WASM binary with custom resource limits.
-  pub fn with_limits(
-    wasm_bytes: &[u8],
-    memory_limit_bytes: usize,
-    fuel_limit: u64,
-  ) -> Result<Self, WasmRuntimeError> {
+  pub fn with_limits(wasm_bytes: &[u8], memory_limit_bytes: usize, fuel_limit: u64) -> Result<Self, WasmRuntimeError> {
     let mut config = Config::default();
     config.consume_fuel(true);
 
     let engine = Engine::new(&config);
-    let module = Module::new(&engine, wasm_bytes)
-      .map_err(|error| WasmRuntimeError::CompilationFailed(error.to_string()))?;
+    let module = Module::new(&engine, wasm_bytes).map_err(|error| WasmRuntimeError::CompilationFailed(error.to_string()))?;
 
-    Ok(Self {
-      engine,
-      module,
-      memory_limit_bytes,
-      fuel_limit,
-    })
+    Ok(Self { engine, module, memory_limit_bytes, fuel_limit })
   }
 
   /// Invoke the plugin's exported `handle` function.
@@ -113,27 +107,18 @@ impl WasmPluginRuntime {
   ///     packed i64: high 32 bits = response pointer, low 32 bits = response length.
   ///   - The host reads the response bytes from the guest's memory.
   pub fn call_handle(&self, request_bytes: &[u8]) -> Result<Vec<u8>, WasmRuntimeError> {
-    let mut store = Store::new(&self.engine, HostState {
-      memory: None,
-      engine: None,
-      request_context: None,
-    });
-    store
-      .set_fuel(self.fuel_limit)
-      .map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
+    let mut store =
+      Store::new(&self.engine, HostState { memory: None, engine: None, request_context: None, group_cache: None, api_key_cache: None });
+    store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
 
     let mut linker = <Linker<HostState>>::new(&self.engine);
     self.register_host_functions(&mut linker)?;
 
     // Provide a default "env" memory if the module imports one.
     let memory_pages = (self.memory_limit_bytes / (64 * 1024)).max(1) as u32;
-    let memory_type = MemoryType::new(1, Some(memory_pages))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    let memory = Memory::new(&mut store, memory_type)
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    linker
-      .define("env", "memory", Extern::Memory(memory))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    let memory_type = MemoryType::new(1, Some(memory_pages)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    let memory = Memory::new(&mut store, memory_type).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    linker.define("env", "memory", Extern::Memory(memory)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     let instance = linker
       .instantiate(&mut store, &self.module)
@@ -141,9 +126,7 @@ impl WasmPluginRuntime {
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // Resolve guest memory — prefer the instance's own export, fall back to the one we created.
-    let guest_memory = instance
-      .get_memory(&store, "memory")
-      .unwrap_or(memory);
+    let guest_memory = instance.get_memory(&store, "memory").unwrap_or(memory);
 
     store.data_mut().memory = Some(guest_memory);
 
@@ -153,14 +136,10 @@ impl WasmPluginRuntime {
     if request_length > memory_size {
       return Err(WasmRuntimeError::MemoryLimitExceeded);
     }
-    guest_memory
-      .write(&mut store, 0, request_bytes)
-      .map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
+    guest_memory.write(&mut store, 0, request_bytes).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
 
     // Call the exported `handle` function.
-    let handle_function = instance
-      .get_func(&store, "handle")
-      .ok_or_else(|| WasmRuntimeError::ExportNotFound("handle".to_string()))?;
+    let handle_function = instance.get_func(&store, "handle").ok_or_else(|| WasmRuntimeError::ExportNotFound("handle".to_string()))?;
 
     let handle_typed = handle_function
       .typed::<(i32, i32), i64>(&store)
@@ -170,16 +149,14 @@ impl WasmPluginRuntime {
     // message. This is brittle -- if wasmi changes the message format, fuel
     // exhaustion would be reported as a generic trap. Consider checking for
     // specific wasmi error variants when the wasmi API supports it.
-    let result = handle_typed
-      .call(&mut store, (0i32, request_length as i32))
-      .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("fuel") {
-          WasmRuntimeError::FuelLimitExceeded
-        } else {
-          WasmRuntimeError::Trap(message)
-        }
-      })?;
+    let result = handle_typed.call(&mut store, (0i32, request_length as i32)).map_err(|error| {
+      let message = error.to_string();
+      if message.contains("fuel") {
+        WasmRuntimeError::FuelLimitExceeded
+      } else {
+        WasmRuntimeError::Trap(message)
+      }
+    })?;
 
     // Unpack the response pointer and length from the i64 result.
     let response_pointer = (result >> 32) as u32 as usize;
@@ -195,9 +172,7 @@ impl WasmPluginRuntime {
     }
 
     let mut response_buffer = vec![0u8; response_length];
-    guest_memory
-      .read(&store, response_pointer, &mut response_buffer)
-      .map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
+    guest_memory.read(&store, response_pointer, &mut response_buffer).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
 
     Ok(response_buffer)
   }
@@ -212,28 +187,29 @@ impl WasmPluginRuntime {
     request_bytes: &[u8],
     engine: Arc<StorageEngine>,
     ctx: RequestContext,
+    group_cache: Arc<Cache<GroupLoader>>,
+    api_key_cache: Arc<Cache<ApiKeyLoader>>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
-    let mut store = Store::new(&self.engine, HostState {
-      memory: None,
-      engine: Some(engine),
-      request_context: Some(ctx),
-    });
-    store
-      .set_fuel(self.fuel_limit)
-      .map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
+    let mut store = Store::new(
+      &self.engine,
+      HostState {
+        memory: None,
+        engine: Some(engine),
+        request_context: Some(ctx),
+        group_cache: Some(group_cache),
+        api_key_cache: Some(api_key_cache),
+      },
+    );
+    store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
 
     let mut linker = <Linker<HostState>>::new(&self.engine);
     self.register_host_functions(&mut linker)?;
 
     // Provide a default "env" memory if the module imports one.
     let memory_pages = (self.memory_limit_bytes / (64 * 1024)).max(1) as u32;
-    let memory_type = MemoryType::new(1, Some(memory_pages))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    let memory = Memory::new(&mut store, memory_type)
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    linker
-      .define("env", "memory", Extern::Memory(memory))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    let memory_type = MemoryType::new(1, Some(memory_pages)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    let memory = Memory::new(&mut store, memory_type).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    linker.define("env", "memory", Extern::Memory(memory)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     let instance = linker
       .instantiate(&mut store, &self.module)
@@ -241,9 +217,7 @@ impl WasmPluginRuntime {
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // Resolve guest memory — prefer the instance's own export, fall back to the one we created.
-    let guest_memory = instance
-      .get_memory(&store, "memory")
-      .unwrap_or(memory);
+    let guest_memory = instance.get_memory(&store, "memory").unwrap_or(memory);
 
     store.data_mut().memory = Some(guest_memory);
 
@@ -253,14 +227,10 @@ impl WasmPluginRuntime {
     if request_length > memory_size {
       return Err(WasmRuntimeError::MemoryLimitExceeded);
     }
-    guest_memory
-      .write(&mut store, 0, request_bytes)
-      .map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
+    guest_memory.write(&mut store, 0, request_bytes).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
 
     // Call the exported `handle` function.
-    let handle_function = instance
-      .get_func(&store, "handle")
-      .ok_or_else(|| WasmRuntimeError::ExportNotFound("handle".to_string()))?;
+    let handle_function = instance.get_func(&store, "handle").ok_or_else(|| WasmRuntimeError::ExportNotFound("handle".to_string()))?;
 
     let handle_typed = handle_function
       .typed::<(i32, i32), i64>(&store)
@@ -270,16 +240,14 @@ impl WasmPluginRuntime {
     // message. This is brittle -- if wasmi changes the message format, fuel
     // exhaustion would be reported as a generic trap. Consider checking for
     // specific wasmi error variants when the wasmi API supports it.
-    let result = handle_typed
-      .call(&mut store, (0i32, request_length as i32))
-      .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("fuel") {
-          WasmRuntimeError::FuelLimitExceeded
-        } else {
-          WasmRuntimeError::Trap(message)
-        }
-      })?;
+    let result = handle_typed.call(&mut store, (0i32, request_length as i32)).map_err(|error| {
+      let message = error.to_string();
+      if message.contains("fuel") {
+        WasmRuntimeError::FuelLimitExceeded
+      } else {
+        WasmRuntimeError::Trap(message)
+      }
+    })?;
 
     // Unpack the response pointer and length from the i64 result.
     let response_pointer = (result >> 32) as u32 as usize;
@@ -295,16 +263,14 @@ impl WasmPluginRuntime {
     }
 
     let mut response_buffer = vec![0u8; response_length];
-    guest_memory
-      .read(&store, response_pointer, &mut response_buffer)
-      .map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
+    guest_memory.read(&store, response_pointer, &mut response_buffer).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
 
     Ok(response_buffer)
   }
 
   /// Register host functions that the WASM module can import.
   ///
-  /// Includes the 7 database host functions and the log_message function.
+  /// Includes the database host functions and the log_message function.
   ///
   /// **H4 — Permission gap**: These host functions currently do NOT enforce
   /// per-operation permission checks beyond what `DirectoryOps` and the
@@ -313,61 +279,58 @@ impl WasmPluginRuntime {
   /// into `HostState`. Until that refactor is done, WASM plugins operate
   /// with the permissions of the request that invoked them, validated only
   /// at the HTTP middleware level. See the TODO in `get_engine_and_context`.
-  fn register_host_functions(
-    &self,
-    linker: &mut Linker<HostState>,
-  ) -> Result<(), WasmRuntimeError> {
+  fn register_host_functions(&self, linker: &mut Linker<HostState>) -> Result<(), WasmRuntimeError> {
     // -----------------------------------------------------------------------
     // aeordb_read_file(ptr, len) -> i64
     // Reads a file from the database. Args: {"path": "/..."}
     // Returns: {"data": "<base64>", "content_type": "...", "size": N}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_read_file",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_read_file", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let path = match args_json.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'path' argument"),
-          };
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
 
-          let engine = match caller.data().engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-          };
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
 
-          let dir_ops = DirectoryOps::new(&engine);
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          // Read file content
-          let data = match dir_ops.read_file_buffered(&path) {
-            Ok(d) => d,
-            Err(e) => return write_error_response(&mut caller, &format!("Read failed: {}", e)),
-          };
+        let dir_ops = DirectoryOps::new(&engine);
 
-          // Get metadata for content_type
-          let content_type = match dir_ops.get_metadata(&path) {
-            Ok(Some(record)) => record.content_type.unwrap_or_default(),
-            _ => String::new(),
-          };
+        // Read file content
+        let data = match dir_ops.read_file_buffered(&path) {
+          Ok(d) => d,
+          Err(e) => return write_error_response(&mut caller, &format!("Read failed: {}", e)),
+        };
 
-          let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-          let size = data.len();
+        // Get metadata for content_type
+        let content_type = match dir_ops.get_metadata(&path) {
+          Ok(Some(record)) => record.content_type.unwrap_or_default(),
+          _ => String::new(),
+        };
 
-          let response = serde_json::json!({
-            "data": encoded,
-            "content_type": content_type,
-            "size": size,
-          });
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let size = data.len();
 
-          write_json_response(&mut caller, &response)
-        },
-      )
+        let response = serde_json::json!({
+          "data": encoded,
+          "content_type": content_type,
+          "size": size,
+        });
+
+        write_json_response(&mut caller, &response)
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -377,52 +340,86 @@ impl WasmPluginRuntime {
     // Returns: {"ok": true, "size": N}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_write_file",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_write_file", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let path = match args_json.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'path' argument"),
-          };
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
 
-          let data_b64 = match args_json.get("data").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'data' argument"),
-          };
+        let data_b64 = match args_json.get("data").and_then(|v| v.as_str()) {
+          Some(d) => d.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'data' argument"),
+        };
 
-          let content_type = args_json.get("content_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let content_type = args_json.get("content_type").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-          let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
-            Ok(d) => d,
-            Err(e) => return write_error_response(&mut caller, &format!("Base64 decode failed: {}", e)),
-          };
+        let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
+          Ok(d) => d,
+          Err(e) => return write_error_response(&mut caller, &format!("Base64 decode failed: {}", e)),
+        };
 
-          let (engine, ctx) = match get_engine_and_context(&caller) {
-            Ok(pair) => pair,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+        let (engine, ctx) = match get_engine_and_context(&caller) {
+          Ok(pair) => pair,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let dir_ops = DirectoryOps::new(&engine);
-          let size = data.len();
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Create) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          match dir_ops.store_file_buffered(&ctx, &path, &data, content_type.as_deref()) {
-            Ok(_) => {
-              let response = serde_json::json!({
-                "ok": true,
-                "size": size,
-              });
-              write_json_response(&mut caller, &response)
-            }
-            Err(e) => write_error_response(&mut caller, &format!("Write failed: {}", e)),
+        let dir_ops = DirectoryOps::new(&engine);
+        let size = data.len();
+
+        match dir_ops.store_file_buffered(&ctx, &path, &data, content_type.as_deref()) {
+          Ok(_) => {
+            let response = serde_json::json!({
+              "ok": true,
+              "size": size,
+            });
+            write_json_response(&mut caller, &response)
           }
-        },
-      )
+          Err(e) => write_error_response(&mut caller, &format!("Write failed: {}", e)),
+        }
+      })
+      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+
+    // -----------------------------------------------------------------------
+    // aeordb_extract_file(ptr, len) -> i64
+    // Extracts text ranges without buffering the full file.
+    // Args: {"path": "/...", "mode": "lines"|"chars", "start": N, "end": N, "max_bytes": N}
+    // Returns: {"text": "...", "content_type": "...", "source_size": N, "truncated": bool}
+    // -----------------------------------------------------------------------
+    linker
+      .func_wrap("aeordb", "aeordb_extract_file", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
+
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
+
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &e);
+        }
+
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
+
+        match extract_file_text(&engine, &path, &args_json) {
+          Ok(response) => write_json_response(&mut caller, &response),
+          Err(e) => write_error_response(&mut caller, &e),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -431,36 +428,36 @@ impl WasmPluginRuntime {
     // Returns: {"ok": true}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_delete_file",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_delete_file", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let path = match args_json.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'path' argument"),
-          };
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
 
-          let (engine, ctx) = match get_engine_and_context(&caller) {
-            Ok(pair) => pair,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+        let (engine, ctx) = match get_engine_and_context(&caller) {
+          Ok(pair) => pair,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let dir_ops = DirectoryOps::new(&engine);
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Delete) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          match dir_ops.delete_file(&ctx, &path) {
-            Ok(()) => {
-              let response = serde_json::json!({"ok": true});
-              write_json_response(&mut caller, &response)
-            }
-            Err(e) => write_error_response(&mut caller, &format!("Delete failed: {}", e)),
+        let dir_ops = DirectoryOps::new(&engine);
+
+        match dir_ops.delete_file(&ctx, &path) {
+          Ok(()) => {
+            let response = serde_json::json!({"ok": true});
+            write_json_response(&mut caller, &response)
           }
-        },
-      )
+          Err(e) => write_error_response(&mut caller, &format!("Delete failed: {}", e)),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -469,43 +466,43 @@ impl WasmPluginRuntime {
     // Returns: {"path": "...", "size": N, "content_type": "...", "created_at": N, "updated_at": N}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_file_metadata",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_file_metadata", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let path = match args_json.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'path' argument"),
-          };
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
 
-          let engine = match caller.data().engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-          };
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
 
-          let dir_ops = DirectoryOps::new(&engine);
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          match dir_ops.get_metadata(&path) {
-            Ok(Some(record)) => {
-              let response = serde_json::json!({
-                "path": record.path,
-                "size": record.total_size,
-                "content_type": record.content_type,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at,
-              });
-              write_json_response(&mut caller, &response)
-            }
-            Ok(None) => write_error_response(&mut caller, &format!("File not found: {}", path)),
-            Err(e) => write_error_response(&mut caller, &format!("Metadata failed: {}", e)),
+        let dir_ops = DirectoryOps::new(&engine);
+
+        match dir_ops.get_metadata(&path) {
+          Ok(Some(record)) => {
+            let response = serde_json::json!({
+              "path": record.path,
+              "size": record.total_size,
+              "content_type": record.content_type,
+              "created_at": record.created_at,
+              "updated_at": record.updated_at,
+            });
+            write_json_response(&mut caller, &response)
           }
-        },
-      )
+          Ok(None) => write_error_response(&mut caller, &format!("File not found: {}", path)),
+          Err(e) => write_error_response(&mut caller, &format!("Metadata failed: {}", e)),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -514,49 +511,48 @@ impl WasmPluginRuntime {
     // Returns: {"entries": [{"name": "...", "type": "file"|"directory", "size": N}, ...]}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_list_directory",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_list_directory", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let path = match args_json.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return write_error_response(&mut caller, "Missing 'path' argument"),
-          };
+        let path = match args_json.get("path").and_then(|v| v.as_str()) {
+          Some(p) => p.to_string(),
+          None => return write_error_response(&mut caller, "Missing 'path' argument"),
+        };
 
-          let engine = match caller.data().engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-          };
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
 
-          let dir_ops = DirectoryOps::new(&engine);
+        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          match dir_ops.list_directory(&path) {
-            Ok(children) => {
-              let entries: Vec<serde_json::Value> = children.iter().map(|child| {
-                let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() {
-                  "directory"
-                } else {
-                  "file"
-                };
+        let dir_ops = DirectoryOps::new(&engine);
+
+        match dir_ops.list_directory(&path) {
+          Ok(children) => {
+            let entries: Vec<serde_json::Value> = children
+              .iter()
+              .map(|child| {
+                let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() { "directory" } else { "file" };
                 serde_json::json!({
                   "name": child.name,
                   "type": entry_type,
                   "size": child.total_size,
                 })
-              }).collect();
+              })
+              .collect();
 
-              let response = serde_json::json!({"entries": entries});
-              write_json_response(&mut caller, &response)
-            }
-            Err(e) => write_error_response(&mut caller, &format!("List failed: {}", e)),
+            let response = serde_json::json!({"entries": entries});
+            write_json_response(&mut caller, &response)
           }
-        },
-      )
+          Err(e) => write_error_response(&mut caller, &format!("List failed: {}", e)),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -565,59 +561,62 @@ impl WasmPluginRuntime {
     // Returns: {"items": [...], "total": N, "has_more": bool}
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_query",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_query", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let engine = match caller.data().engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-          };
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
 
-          // Parse the query from JSON
-          let query = match parse_query_from_json(&args_json) {
-            Ok(q) => q,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+        // Parse the query from JSON
+        let query = match parse_query_from_json(&args_json) {
+          Ok(q) => q,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let query_engine = QueryEngine::new(&engine);
-          match query_engine.execute_paginated(&query) {
-            Ok(paginated) => {
-              let result_items: Vec<serde_json::Value> = paginated.results
-                .iter()
-                .map(|r| {
-                  serde_json::json!({
-                    "path": r.file_record.path,
-                    "score": r.score,
-                    "total_size": r.file_record.total_size,
-                    "content_type": r.file_record.content_type,
-                    "created_at": r.file_record.created_at,
-                    "updated_at": r.file_record.updated_at,
-                    "matched_by": r.matched_by,
-                  })
+        if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &e);
+        }
+
+        let query_engine = QueryEngine::new(&engine);
+        match query_engine.execute_paginated(&query) {
+          Ok(paginated) => {
+            let result_items: Vec<serde_json::Value> = paginated
+              .results
+              .iter()
+              .filter(|r| authorize_plugin_path(&caller, &r.file_record.path, CrudlifyOp::Read).is_ok())
+              .map(|r| {
+                serde_json::json!({
+                  "path": r.file_record.path,
+                  "score": r.score,
+                  "total_size": r.file_record.total_size,
+                  "content_type": r.file_record.content_type,
+                  "created_at": r.file_record.created_at,
+                  "updated_at": r.file_record.updated_at,
+                  "matched_by": r.matched_by,
                 })
-                .collect();
+              })
+              .collect();
+            let visible_count = result_items.len();
 
-              let mut response = serde_json::json!({
-                "items": result_items,
-                "has_more": paginated.has_more,
-              });
+            let mut response = serde_json::json!({
+              "items": result_items,
+              "has_more": paginated.has_more,
+            });
 
-              if let Some(total) = paginated.total_count {
-                response["total"] = serde_json::json!(total);
-              }
-
-              write_json_response(&mut caller, &response)
+            if let Some(total) = paginated.total_count {
+              response["total"] = serde_json::json!(std::cmp::min(total, visible_count as u64));
             }
-            Err(e) => write_error_response(&mut caller, &format!("Query failed: {}", e)),
+
+            write_json_response(&mut caller, &response)
           }
-        },
-      )
+          Err(e) => write_error_response(&mut caller, &format!("Query failed: {}", e)),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -626,42 +625,43 @@ impl WasmPluginRuntime {
     // Returns: the aggregate result as JSON.
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "aeordb_aggregate",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
-          let args_json = match read_guest_json(&caller, ptr, len) {
-            Ok(v) => v,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+      .func_wrap("aeordb", "aeordb_aggregate", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+        let args_json = match read_guest_json(&caller, ptr, len) {
+          Ok(v) => v,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          let engine = match caller.data().engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-          };
+        let engine = match caller.data().engine.as_ref() {
+          Some(e) => Arc::clone(e),
+          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        };
 
-          // Parse the query from JSON (must include aggregate section)
-          let query = match parse_query_from_json(&args_json) {
-            Ok(q) => q,
-            Err(e) => return write_error_response(&mut caller, &e),
-          };
+        // Parse the query from JSON (must include aggregate section)
+        let query = match parse_query_from_json(&args_json) {
+          Ok(q) => q,
+          Err(e) => return write_error_response(&mut caller, &e),
+        };
 
-          if query.aggregate.is_none() {
-            return write_error_response(&mut caller, "Missing 'aggregate' section in query");
-          }
+        if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &e);
+        }
 
-          let query_engine = QueryEngine::new(&engine);
-          match query_engine.execute_aggregate(&query) {
-            Ok(result) => {
-              match serde_json::to_value(&result) {
-                Ok(v) => write_json_response(&mut caller, &v),
-                Err(e) => write_error_response(&mut caller, &format!("Serialization failed: {}", e)),
-              }
-            }
-            Err(e) => write_error_response(&mut caller, &format!("Aggregate failed: {}", e)),
-          }
-        },
-      )
+        if query.aggregate.is_none() {
+          return write_error_response(&mut caller, "Missing 'aggregate' section in query");
+        }
+        if !is_unrestricted_plugin_context(&caller) {
+          return write_error_response(&mut caller, "Aggregate host function requires root or system context");
+        }
+
+        let query_engine = QueryEngine::new(&engine);
+        match query_engine.execute_aggregate(&query) {
+          Ok(result) => match serde_json::to_value(&result) {
+            Ok(v) => write_json_response(&mut caller, &v),
+            Err(e) => write_error_response(&mut caller, &format!("Serialization failed: {}", e)),
+          },
+          Err(e) => write_error_response(&mut caller, &format!("Aggregate failed: {}", e)),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     // -----------------------------------------------------------------------
@@ -669,62 +669,57 @@ impl WasmPluginRuntime {
     // Reads level and message strings from guest memory and emits a tracing event.
     // -----------------------------------------------------------------------
     linker
-      .func_wrap(
-        "aeordb",
-        "log_message",
-        |caller: Caller<'_, HostState>,
-         level_ptr: i32,
-         level_len: i32,
-         msg_ptr: i32,
-         msg_len: i32| {
-          // M12: Reject negative pointer or length values.
-          if level_ptr < 0 || level_len < 0 || msg_ptr < 0 || msg_len < 0 {
-            tracing::warn!(
-              "log_message: negative ptr/len (level_ptr={}, level_len={}, msg_ptr={}, msg_len={})",
-              level_ptr, level_len, msg_ptr, msg_len
-            );
+      .func_wrap("aeordb", "log_message", |caller: Caller<'_, HostState>, level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32| {
+        // M12: Reject negative pointer or length values.
+        if level_ptr < 0 || level_len < 0 || msg_ptr < 0 || msg_len < 0 {
+          tracing::warn!(
+            "log_message: negative ptr/len (level_ptr={}, level_len={}, msg_ptr={}, msg_len={})",
+            level_ptr,
+            level_len,
+            msg_ptr,
+            msg_len
+          );
+          return;
+        }
+
+        // M13: Clamp lengths to prevent unbounded allocations from a buggy guest.
+        let level_len_clamped = (level_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
+        let msg_len_clamped = (msg_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
+
+        let memory = match caller.data().memory {
+          Some(mem) => mem,
+          None => {
+            tracing::warn!("log_message called before memory was set");
             return;
           }
+        };
 
-          // M13: Clamp lengths to prevent unbounded allocations from a buggy guest.
-          let level_len_clamped = (level_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
-          let msg_len_clamped = (msg_len as usize).min(MAX_GUEST_MESSAGE_SIZE);
-
-          let memory = match caller.data().memory {
-            Some(mem) => mem,
-            None => {
-              tracing::warn!("log_message called before memory was set");
-              return;
-            }
-          };
-
-          let level_str = {
-            let mut buf = vec![0u8; level_len_clamped];
-            if memory.read(&caller, level_ptr as usize, &mut buf).is_ok() {
-              String::from_utf8_lossy(&buf).to_string()
-            } else {
-              "unknown".to_string()
-            }
-          };
-
-          let msg_str = {
-            let mut buf = vec![0u8; msg_len_clamped];
-            if memory.read(&caller, msg_ptr as usize, &mut buf).is_ok() {
-              String::from_utf8_lossy(&buf).to_string()
-            } else {
-              "<unreadable>".to_string()
-            }
-          };
-
-          match level_str.to_lowercase().as_str() {
-            "error" => tracing::error!(target: "wasm_plugin", "{}", msg_str),
-            "warn" | "warning" => tracing::warn!(target: "wasm_plugin", "{}", msg_str),
-            "debug" => tracing::debug!(target: "wasm_plugin", "{}", msg_str),
-            "trace" => tracing::trace!(target: "wasm_plugin", "{}", msg_str),
-            _ => tracing::info!(target: "wasm_plugin", "{}", msg_str),
+        let level_str = {
+          let mut buf = vec![0u8; level_len_clamped];
+          if memory.read(&caller, level_ptr as usize, &mut buf).is_ok() {
+            String::from_utf8_lossy(&buf).to_string()
+          } else {
+            "unknown".to_string()
           }
-        },
-      )
+        };
+
+        let msg_str = {
+          let mut buf = vec![0u8; msg_len_clamped];
+          if memory.read(&caller, msg_ptr as usize, &mut buf).is_ok() {
+            String::from_utf8_lossy(&buf).to_string()
+          } else {
+            "<unreadable>".to_string()
+          }
+        };
+
+        match level_str.to_lowercase().as_str() {
+          "error" => tracing::error!(target: "wasm_plugin", "{}", msg_str),
+          "warn" | "warning" => tracing::warn!(target: "wasm_plugin", "{}", msg_str),
+          "debug" => tracing::debug!(target: "wasm_plugin", "{}", msg_str),
+          "trace" => tracing::trace!(target: "wasm_plugin", "{}", msg_str),
+          _ => tracing::info!(target: "wasm_plugin", "{}", msg_str),
+        }
+      })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     Ok(())
@@ -738,11 +733,8 @@ impl WasmPluginRuntime {
 /// Get the engine and a RequestContext from the host state.
 /// Uses the stored request_context's user_id and event_bus to build a proper
 /// context that preserves the caller's identity for auditing and permissions.
-fn get_engine_and_context(
-  caller: &Caller<'_, HostState>,
-) -> Result<(Arc<StorageEngine>, RequestContext), String> {
-  let engine = caller.data().engine.as_ref()
-    .ok_or_else(|| "Database access not available in this plugin context".to_string())?;
+fn get_engine_and_context(caller: &Caller<'_, HostState>) -> Result<(Arc<StorageEngine>, RequestContext), String> {
+  let engine = caller.data().engine.as_ref().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
 
   // Build a RequestContext preserving the caller's user_id and event_bus.
   // Falls back to a system context only when no request context is stored.
@@ -759,11 +751,278 @@ fn get_engine_and_context(
     }
     None => RequestContext::system(),
   };
-  // TODO(H4): Integrate PermissionResolver to enforce per-operation permission
-  // checks inside WASM host functions, rather than relying solely on the
-  // request-level middleware. This requires threading the PermissionResolver
-  // (or at minimum group_cache + permissions_cache) into the HostState.
   Ok((Arc::clone(engine), ctx))
+}
+
+fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: CrudlifyOp) -> Result<(), String> {
+  let engine = caller.data().engine.as_ref().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
+  let ctx = caller.data().request_context.as_ref().ok_or_else(|| "Request context not available in this plugin context".to_string())?;
+
+  if ctx.user_id == "system" {
+    return Ok(());
+  }
+
+  let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
+
+  if crate::engine::directory_ops::is_system_path(&normalized) {
+    return Err(format!("Permission denied: {}", normalized));
+  }
+
+  if let Some(key_id) = ctx.key_id.as_ref() {
+    let api_key_cache =
+      caller.data().api_key_cache.as_ref().ok_or_else(|| "API key cache not available in this plugin context".to_string())?;
+    let key_record = api_key_cache
+      .get(key_id, engine)
+      .map_err(|error| format!("Failed to verify API key: {}", error))?
+      .ok_or_else(|| "API key not found".to_string())?;
+
+    if key_record.is_revoked {
+      return Err("API key has been revoked".to_string());
+    }
+    if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
+      return Err("API key expired".to_string());
+    }
+
+    if !key_record.rules.is_empty() {
+      let flag_char = operation_to_flag_char(&operation);
+      let is_ancestor = is_ancestor_of_any_rule(&key_record.rules, &normalized);
+      let ancestor_allowed = is_ancestor && matches!(operation, CrudlifyOp::Read | CrudlifyOp::List);
+
+      if !ancestor_allowed {
+        match match_rules(&key_record.rules, &normalized) {
+          Some(rule) if check_operation_permitted(&rule.permitted, flag_char) => {}
+          _ => return Err(format!("Permission denied: {}", normalized)),
+        }
+      }
+    }
+
+    if ctx.user_id.starts_with("share:") {
+      return Ok(());
+    }
+  }
+
+  let user_id = uuid::Uuid::parse_str(&ctx.user_id).map_err(|_| "Invalid user identity".to_string())?;
+  let group_cache = caller.data().group_cache.as_ref().ok_or_else(|| "Group cache not available in this plugin context".to_string())?;
+  let resolver = PermissionResolver::new(engine, group_cache);
+  let allowed =
+    resolver.check_path_permission(&user_id, &normalized, operation).map_err(|error| format!("Permission check failed: {}", error))?;
+
+  if allowed {
+    Ok(())
+  } else {
+    Err(format!("Permission denied: {}", normalized))
+  }
+}
+
+fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
+  let Some(ctx) = caller.data().request_context.as_ref() else {
+    return false;
+  };
+  if ctx.user_id == "system" {
+    return true;
+  }
+  if ctx.key_id.is_some() {
+    return false;
+  }
+  uuid::Uuid::parse_str(&ctx.user_id).map(|user_id| user_id.is_nil()).unwrap_or(false)
+}
+
+const DEFAULT_EXTRACT_MAX_BYTES: usize = 4 * 1024 * 1024;
+const ABSOLUTE_EXTRACT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+fn extract_file_text(engine: &StorageEngine, path: &str, args_json: &serde_json::Value) -> Result<serde_json::Value, String> {
+  let mode = args_json.get("mode").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'mode' argument".to_string())?;
+  let max_bytes = args_json.get("max_bytes").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(DEFAULT_EXTRACT_MAX_BYTES);
+  if max_bytes == 0 || max_bytes > ABSOLUTE_EXTRACT_MAX_BYTES {
+    return Err(format!("Invalid max_bytes: must be between 1 and {}", ABSOLUTE_EXTRACT_MAX_BYTES));
+  }
+
+  let directory_ops = DirectoryOps::new(engine);
+  let file_record = directory_ops
+    .get_metadata(path)
+    .map_err(|error| format!("Metadata failed: {}", error))?
+    .ok_or_else(|| format!("File not found: {}", path))?;
+  let content_type = file_record.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string());
+  let source_size = file_record.total_size;
+  let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, engine).map_err(|error| format!("Read failed: {}", error))?;
+
+  let extracted = match mode {
+    "lines" => {
+      let start = args_json.get("start").and_then(|v| v.as_u64()).unwrap_or(1);
+      let end = args_json.get("end").and_then(|v| v.as_u64());
+      if start == 0 {
+        return Err("Line ranges are 1-based; start must be at least 1".to_string());
+      }
+      if let Some(end) = end {
+        if end < start {
+          return Err("Range end must be greater than or equal to start".to_string());
+        }
+      }
+      extract_lines_from_stream(stream, start, end, max_bytes)?
+    }
+    "chars" => {
+      let start = args_json.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
+      let end = args_json.get("end").and_then(|v| v.as_u64());
+      if let Some(end) = end {
+        if end < start {
+          return Err("Range end must be greater than or equal to start".to_string());
+        }
+      }
+      extract_chars_from_stream(stream, start, end, max_bytes)?
+    }
+    _ => return Err("Unsupported extract mode; expected 'lines' or 'chars'".to_string()),
+  };
+
+  engine.counters().record_read(extracted.text.len() as u64);
+
+  Ok(serde_json::json!({
+    "text": extracted.text,
+    "content_type": content_type,
+    "source_size": source_size,
+    "mode": mode,
+    "start": args_json.get("start").and_then(|v| v.as_u64()),
+    "end": args_json.get("end").and_then(|v| v.as_u64()),
+    "truncated": extracted.truncated,
+  }))
+}
+
+struct ExtractedText {
+  text: String,
+  truncated: bool,
+}
+
+fn extract_lines_from_stream(
+  stream: EngineFileStream<'_>,
+  start: u64,
+  end: Option<u64>,
+  max_bytes: usize,
+) -> Result<ExtractedText, String> {
+  let mut text = String::new();
+  let mut truncated = false;
+  let mut current_line = 1u64;
+  let mut pending_cr = false;
+  let mut pending_cr_selected = false;
+
+  for_each_utf8_char(stream, |character| {
+    if pending_cr {
+      if character == '\n' {
+        if pending_cr_selected && !push_limited(&mut text, character, max_bytes) {
+          truncated = true;
+          return Ok(false);
+        }
+        current_line += 1;
+        pending_cr = false;
+        return Ok(!end.map(|end| current_line > end).unwrap_or(false));
+      }
+
+      current_line += 1;
+      pending_cr = false;
+      if end.map(|end| current_line > end).unwrap_or(false) {
+        return Ok(false);
+      }
+    }
+
+    let selected = current_line >= start && end.map(|end| current_line <= end).unwrap_or(true);
+    if selected && !push_limited(&mut text, character, max_bytes) {
+      truncated = true;
+      return Ok(false);
+    }
+
+    if character == '\r' {
+      pending_cr = true;
+      pending_cr_selected = selected;
+    } else if character == '\n' {
+      current_line += 1;
+      if end.map(|end| current_line > end).unwrap_or(false) {
+        return Ok(false);
+      }
+    }
+
+    Ok(true)
+  })?;
+
+  Ok(ExtractedText { text, truncated })
+}
+
+fn extract_chars_from_stream(
+  stream: EngineFileStream<'_>,
+  start: u64,
+  end: Option<u64>,
+  max_bytes: usize,
+) -> Result<ExtractedText, String> {
+  let mut text = String::new();
+  let mut truncated = false;
+  let mut current_char = 0u64;
+
+  for_each_utf8_char(stream, |character| {
+    if end.map(|end| current_char >= end).unwrap_or(false) {
+      return Ok(false);
+    }
+    if current_char >= start {
+      if !push_limited(&mut text, character, max_bytes) {
+        truncated = true;
+        return Ok(false);
+      }
+    }
+    current_char += 1;
+    Ok(true)
+  })?;
+
+  Ok(ExtractedText { text, truncated })
+}
+
+fn push_limited(text: &mut String, character: char, max_bytes: usize) -> bool {
+  if text.len() + character.len_utf8() > max_bytes {
+    return false;
+  }
+  text.push(character);
+  true
+}
+
+fn for_each_utf8_char<F>(stream: EngineFileStream<'_>, mut handle: F) -> Result<(), String>
+where
+  F: FnMut(char) -> Result<bool, String>,
+{
+  let mut pending = Vec::new();
+
+  for chunk in stream {
+    let chunk = chunk.map_err(|error| format!("Read failed: {}", error))?;
+    pending.extend_from_slice(&chunk);
+
+    loop {
+      match std::str::from_utf8(&pending) {
+        Ok(valid) => {
+          for character in valid.chars() {
+            if !handle(character)? {
+              return Ok(());
+            }
+          }
+          pending.clear();
+          break;
+        }
+        Err(error) if error.error_len().is_none() => {
+          let valid_up_to = error.valid_up_to();
+          if valid_up_to > 0 {
+            let valid = std::str::from_utf8(&pending[..valid_up_to]).map_err(|error| format!("Invalid UTF-8: {}", error))?;
+            for character in valid.chars() {
+              if !handle(character)? {
+                return Ok(());
+              }
+            }
+          }
+          pending = pending[valid_up_to..].to_vec();
+          break;
+        }
+        Err(error) => return Err(format!("Invalid UTF-8: {}", error)),
+      }
+    }
+  }
+
+  if !pending.is_empty() {
+    return Err("Invalid UTF-8: incomplete trailing character".to_string());
+  }
+
+  Ok(())
 }
 
 /// Maximum size for a single guest message read (16 MB).
@@ -775,47 +1034,30 @@ const MAX_GUEST_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Validates that ptr and len are non-negative and that len does not exceed
 /// `MAX_GUEST_MESSAGE_SIZE` to prevent unbounded allocations from a buggy or
 /// malicious guest module.
-fn read_guest_json(
-  caller: &Caller<'_, HostState>,
-  ptr: i32,
-  len: i32,
-) -> Result<serde_json::Value, String> {
+fn read_guest_json(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Result<serde_json::Value, String> {
   // M12: Reject negative pointer or length (i32 -> usize cast would wrap).
   if ptr < 0 || len < 0 {
-    return Err(format!(
-      "Invalid guest memory access: ptr={}, len={} (negative values not allowed)",
-      ptr, len
-    ));
+    return Err(format!("Invalid guest memory access: ptr={}, len={} (negative values not allowed)", ptr, len));
   }
 
   let len_usize = len as usize;
 
   // M13: Reject unreasonably large allocations.
   if len_usize > MAX_GUEST_MESSAGE_SIZE {
-    return Err(format!(
-      "Guest message too large: {} bytes (max {} bytes)",
-      len_usize, MAX_GUEST_MESSAGE_SIZE
-    ));
+    return Err(format!("Guest message too large: {} bytes (max {} bytes)", len_usize, MAX_GUEST_MESSAGE_SIZE));
   }
 
-  let memory = caller.data().memory
-    .ok_or_else(|| "Memory not available".to_string())?;
+  let memory = caller.data().memory.ok_or_else(|| "Memory not available".to_string())?;
 
   let mut buf = vec![0u8; len_usize];
-  memory
-    .read(caller, ptr as usize, &mut buf)
-    .map_err(|_| "Failed to read from guest memory".to_string())?;
+  memory.read(caller, ptr as usize, &mut buf).map_err(|_| "Failed to read from guest memory".to_string())?;
 
-  serde_json::from_slice(&buf)
-    .map_err(|e| format!("Failed to parse JSON arguments: {}", e))
+  serde_json::from_slice(&buf).map_err(|e| format!("Failed to parse JSON arguments: {}", e))
 }
 
 /// Write a JSON response into guest memory at HOST_RESPONSE_OFFSET.
 /// Returns packed i64: (ptr << 32) | len.
-fn write_json_response(
-  caller: &mut Caller<'_, HostState>,
-  value: &serde_json::Value,
-) -> i64 {
+fn write_json_response(caller: &mut Caller<'_, HostState>, value: &serde_json::Value) -> i64 {
   let bytes = match serde_json::to_vec(value) {
     Ok(b) => b,
     Err(_) => return 0i64,
@@ -835,10 +1077,7 @@ fn write_json_response(
 }
 
 /// Write an error response as {"error": "message"} into guest memory.
-fn write_error_response(
-  caller: &mut Caller<'_, HostState>,
-  message: &str,
-) -> i64 {
+fn write_error_response(caller: &mut Caller<'_, HostState>, message: &str) -> i64 {
   let response = serde_json::json!({"error": message});
   write_json_response(caller, &response)
 }
@@ -849,10 +1088,7 @@ fn write_error_response(
 
 /// Parse a Query struct from JSON in the same format as POST /query.
 fn parse_query_from_json(json: &serde_json::Value) -> Result<Query, String> {
-  let path = json.get("path")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| "Missing 'path' in query".to_string())?
-    .to_string();
+  let path = json.get("path").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'path' in query".to_string())?.to_string();
 
   let where_clause = json.get("where").cloned().unwrap_or(serde_json::json!([]));
   let query_node = parse_where_clause(&where_clause)?;
@@ -865,30 +1101,32 @@ fn parse_query_from_json(json: &serde_json::Value) -> Result<Query, String> {
   let include_total = json.get("include_total").and_then(|v| v.as_bool()).unwrap_or(false);
 
   // Parse order_by
-  let order_by: Vec<SortField> = json.get("order_by")
+  let order_by: Vec<SortField> = json
+    .get("order_by")
     .and_then(|v| v.as_array())
     .map(|fields| {
-      fields.iter().filter_map(|f| {
-        let field = f.get("field")?.as_str()?.to_string();
-        let direction = match f.get("direction").and_then(|d| d.as_str()) {
-          Some("desc") => SortDirection::Desc,
-          _ => SortDirection::Asc,
-        };
-        Some(SortField { field, direction })
-      }).collect()
+      fields
+        .iter()
+        .filter_map(|f| {
+          let field = f.get("field")?.as_str()?.to_string();
+          let direction = match f.get("direction").and_then(|d| d.as_str()) {
+            Some("desc") => SortDirection::Desc,
+            _ => SortDirection::Asc,
+          };
+          Some(SortField { field, direction })
+        })
+        .collect()
     })
     .unwrap_or_default();
 
   // Parse aggregate section
-  let aggregate = json.get("aggregate").map(|agg| {
-    AggregateQuery {
-      count: agg.get("count").and_then(|v| v.as_bool()).unwrap_or(false),
-      sum: parse_string_array(agg.get("sum")),
-      avg: parse_string_array(agg.get("avg")),
-      min: parse_string_array(agg.get("min")),
-      max: parse_string_array(agg.get("max")),
-      group_by: parse_string_array(agg.get("group_by")),
-    }
+  let aggregate = json.get("aggregate").map(|agg| AggregateQuery {
+    count: agg.get("count").and_then(|v| v.as_bool()).unwrap_or(false),
+    sum: parse_string_array(agg.get("sum")),
+    avg: parse_string_array(agg.get("avg")),
+    min: parse_string_array(agg.get("min")),
+    max: parse_string_array(agg.get("max")),
+    group_by: parse_string_array(agg.get("group_by")),
   });
 
   Ok(Query {
@@ -911,11 +1149,7 @@ fn parse_query_from_json(json: &serde_json::Value) -> Result<Query, String> {
 fn parse_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
   value
     .and_then(|v| v.as_array())
-    .map(|arr| {
-      arr.iter()
-        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-        .collect()
-    })
+    .map(|arr| arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
     .unwrap_or_default()
 }
 
@@ -943,72 +1177,53 @@ fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 fn parse_single_field_query(value: &serde_json::Value) -> Result<crate::engine::query_engine::QueryNode, String> {
   use crate::engine::query_engine::*;
 
-  let field = value.get("field")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| "Missing 'field' in where clause".to_string())?;
-  let op = value.get("op")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
-  let raw_value = value.get("value")
-    .ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
+  let field = value.get("field").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'field' in where clause".to_string())?;
+  let op = value.get("op").and_then(|v| v.as_str()).ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
+  let raw_value = value.get("value").ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
 
   let operation = match op {
     "eq" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
       QueryOp::Eq(bytes)
     }
     "gt" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
       QueryOp::Gt(bytes)
     }
     "lt" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
       QueryOp::Lt(bytes)
     }
     "between" => {
-      let bytes = json_value_to_bytes(raw_value)
-        .map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
-      let raw_value2 = value.get("value2")
-        .ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
-      let bytes2 = json_value_to_bytes(raw_value2)
-        .map_err(|msg| format!("Invalid value2 for field '{}': {}", field, msg))?;
+      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
+      let raw_value2 = value.get("value2").ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
+      let bytes2 = json_value_to_bytes(raw_value2).map_err(|msg| format!("Invalid value2 for field '{}': {}", field, msg))?;
       QueryOp::Between(bytes, bytes2)
     }
     "in" => {
-      let array = raw_value.as_array()
-        .ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
+      let array = raw_value.as_array().ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
       let mut byte_values = Vec::with_capacity(array.len());
       for item in array {
-        let bytes = json_value_to_bytes(item)
-          .map_err(|msg| format!("Invalid value in 'in' array for field '{}': {}", field, msg))?;
+        let bytes = json_value_to_bytes(item).map_err(|msg| format!("Invalid value in 'in' array for field '{}': {}", field, msg))?;
         byte_values.push(bytes);
       }
       QueryOp::In(byte_values)
     }
     "contains" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
       QueryOp::Contains(s.to_string())
     }
     "similar" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
-      let threshold = value.get("threshold")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.3);
+      let s = raw_value.as_str().ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
+      let threshold = value.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
       QueryOp::Similar(s.to_string(), threshold)
     }
     "phonetic" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
       QueryOp::Phonetic(s.to_string())
     }
     "fuzzy" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
 
       let fuzziness = match value.get("fuzziness") {
         Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
@@ -1025,8 +1240,7 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<crate::engine::
       QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
     }
     "match" => {
-      let s = raw_value.as_str()
-        .ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
+      let s = raw_value.as_str().ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
       QueryOp::Match(s.to_string())
     }
     unknown => {
@@ -1034,10 +1248,7 @@ fn parse_single_field_query(value: &serde_json::Value) -> Result<crate::engine::
     }
   };
 
-  Ok(QueryNode::Field(FieldQuery {
-    field_name: field.to_string(),
-    operation,
-  }))
+  Ok(QueryNode::Field(FieldQuery { field_name: field.to_string(), operation }))
 }
 
 /// Recursively parse a where clause JSON value into a QueryNode tree.
@@ -1046,27 +1257,19 @@ fn parse_where_clause(value: &serde_json::Value) -> Result<crate::engine::query_
 
   if value.is_array() {
     let array = value.as_array().unwrap();
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
-      .collect();
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
     return Ok(QueryNode::And(children?));
   }
 
   if let Some(and_array) = value.get("and") {
-    let array = and_array.as_array()
-      .ok_or_else(|| "'and' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
-      .collect();
+    let array = and_array.as_array().ok_or_else(|| "'and' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
     return Ok(QueryNode::And(children?));
   }
 
   if let Some(or_array) = value.get("or") {
-    let array = or_array.as_array()
-      .ok_or_else(|| "'or' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter()
-      .map(parse_where_clause)
-      .collect();
+    let array = or_array.as_array().ok_or_else(|| "'or' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
     return Ok(QueryNode::Or(children?));
   }
 

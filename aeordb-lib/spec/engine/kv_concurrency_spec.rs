@@ -27,13 +27,9 @@ fn test_concurrent_readers_dont_block() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..20 {
         let path = format!("/files/doc-{}.txt", i);
-        let data = ops.read_file_buffered(&path)
-          .unwrap_or_else(|e| panic!("thread {} failed to read {}: {:?}", thread_id, path, e));
+        let data = ops.read_file_buffered(&path).unwrap_or_else(|e| panic!("thread {} failed to read {}: {:?}", thread_id, path, e));
         let expected = format!("content-for-file-{}", i);
-        assert_eq!(
-          data, expected.as_bytes(),
-          "thread {} got wrong content for {}", thread_id, path,
-        );
+        assert_eq!(data, expected.as_bytes(), "thread {} got wrong content for {}", thread_id, path,);
       }
     });
     handles.push(handle);
@@ -69,13 +65,9 @@ fn test_readers_and_writer_concurrent() {
       for _iteration in 0..50 {
         for i in 0..10 {
           let path = format!("/seed/file-{}.txt", i);
-          let data = ops.read_file_buffered(&path)
-            .unwrap_or_else(|e| panic!("reader {} failed on {}: {:?}", thread_id, path, e));
+          let data = ops.read_file_buffered(&path).unwrap_or_else(|e| panic!("reader {} failed on {}: {:?}", thread_id, path, e));
           let expected = format!("seed-content-{}", i);
-          assert_eq!(
-            data, expected.as_bytes(),
-            "reader {} got wrong content for {}", thread_id, path,
-          );
+          assert_eq!(data, expected.as_bytes(), "reader {} got wrong content for {}", thread_id, path,);
         }
       }
     });
@@ -91,7 +83,8 @@ fn test_readers_and_writer_concurrent() {
       for i in 0..50 {
         let path = format!("/new/written-{}.txt", i);
         let content = format!("new-content-{}", i);
-        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
+        ops
+          .store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });
@@ -106,8 +99,7 @@ fn test_readers_and_writer_concurrent() {
   let ops = DirectoryOps::new(&engine);
   for i in 0..50 {
     let path = format!("/new/written-{}.txt", i);
-    let data = ops.read_file_buffered(&path)
-      .unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
+    let data = ops.read_file_buffered(&path).unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
     let expected = format!("new-content-{}", i);
     assert_eq!(data, expected.as_bytes(), "wrong content for {}", path);
   }
@@ -135,13 +127,10 @@ fn test_long_reader_doesnt_block_writer() {
     let engine_clone = Arc::clone(&engine);
     let handle = thread::spawn(move || {
       for iteration in 0..10 {
-        let entries = engine_clone.iter_kv_entries()
-          .unwrap_or_else(|e| panic!("iter_kv_entries failed on iteration {}: {:?}", iteration, e));
+        let entries =
+          engine_clone.iter_kv_entries().unwrap_or_else(|e| panic!("iter_kv_entries failed on iteration {}: {:?}", iteration, e));
         // Should have a reasonable number of entries from our 100 seed files
-        assert!(
-          !entries.is_empty(),
-          "iter_kv_entries returned empty on iteration {}", iteration,
-        );
+        assert!(!entries.is_empty(), "iter_kv_entries returned empty on iteration {}", iteration,);
       }
     });
     handles.push(handle);
@@ -156,7 +145,8 @@ fn test_long_reader_doesnt_block_writer() {
       for i in 0..50 {
         let path = format!("/extra/added-{}.txt", i);
         let content = format!("extra-content-{}", i);
-        ops.store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
+        ops
+          .store_file_buffered(&ctx, &path, content.as_bytes(), Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });
@@ -171,8 +161,7 @@ fn test_long_reader_doesnt_block_writer() {
   let ops = DirectoryOps::new(&engine);
   for i in 0..50 {
     let path = format!("/extra/added-{}.txt", i);
-    let data = ops.read_file_buffered(&path)
-      .unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
+    let data = ops.read_file_buffered(&path).unwrap_or_else(|e| panic!("post-join read failed for {}: {:?}", path, e));
     let expected = format!("extra-content-{}", i);
     assert_eq!(data, expected.as_bytes(), "wrong content for {}", path);
   }
@@ -189,10 +178,7 @@ fn test_snapshot_isolation_during_write() {
   // Store a file, verify it exists via has_entry
   ops.store_file_buffered(&ctx, "/alpha.txt", b"alpha-data", Some("text/plain")).unwrap();
   let alpha_hash = engine.compute_hash(b"file:/alpha.txt").unwrap();
-  assert!(
-    engine.has_entry(&alpha_hash).unwrap(),
-    "alpha.txt should exist after store",
-  );
+  assert!(engine.has_entry(&alpha_hash).unwrap(), "alpha.txt should exist after store",);
 
   // Read it back to confirm data integrity
   let alpha_data = ops.read_file_buffered("/alpha.txt").unwrap();
@@ -201,14 +187,8 @@ fn test_snapshot_isolation_during_write() {
   // Store another file, verify both exist
   ops.store_file_buffered(&ctx, "/beta.txt", b"beta-data", Some("text/plain")).unwrap();
   let beta_hash = engine.compute_hash(b"file:/beta.txt").unwrap();
-  assert!(
-    engine.has_entry(&beta_hash).unwrap(),
-    "beta.txt should exist after store",
-  );
-  assert!(
-    engine.has_entry(&alpha_hash).unwrap(),
-    "alpha.txt should still exist after storing beta.txt",
-  );
+  assert!(engine.has_entry(&beta_hash).unwrap(), "beta.txt should exist after store",);
+  assert!(engine.has_entry(&alpha_hash).unwrap(), "alpha.txt should still exist after storing beta.txt",);
 
   // Read both back
   let alpha_data = ops.read_file_buffered("/alpha.txt").unwrap();
@@ -241,18 +221,20 @@ fn test_no_data_corruption_under_contention() {
       for _iteration in 0..20 {
         for i in 0..20 {
           let path = format!("/verified/entry-{}.txt", i);
-          let data = ops.read_file_buffered(&path)
-            .unwrap_or_else(|e| panic!(
-              "thread {} failed to read {} on iteration {}: {:?}",
-              thread_id, path, _iteration, e,
-            ));
+          let data = ops
+            .read_file_buffered(&path)
+            .unwrap_or_else(|e| panic!("thread {} failed to read {} on iteration {}: {:?}", thread_id, path, _iteration, e,));
           let expected = format!("exact-content-{}", i);
           assert_eq!(
-            data, expected.as_bytes(),
+            data,
+            expected.as_bytes(),
             "DATA CORRUPTION: thread {} got wrong content for {} on iteration {}. \
              Expected {:?}, got {:?}",
-            thread_id, path, _iteration,
-            expected.as_bytes(), data,
+            thread_id,
+            path,
+            _iteration,
+            expected.as_bytes(),
+            data,
           );
         }
       }
@@ -284,14 +266,10 @@ fn test_concurrent_readers_on_same_file() {
     let handle = thread::spawn(move || {
       let ops = DirectoryOps::new(&engine_clone);
       for iteration in 0..100 {
-        let data = ops.read_file_buffered("/shared/big.bin")
-          .unwrap_or_else(|e| panic!(
-            "thread {} failed read iteration {}: {:?}", thread_id, iteration, e,
-          ));
-        assert_eq!(
-          data, expected,
-          "thread {} got corrupted data on iteration {}", thread_id, iteration,
-        );
+        let data = ops
+          .read_file_buffered("/shared/big.bin")
+          .unwrap_or_else(|e| panic!("thread {} failed read iteration {}: {:?}", thread_id, iteration, e,));
+        assert_eq!(data, expected, "thread {} got corrupted data on iteration {}", thread_id, iteration,);
       }
     });
     handles.push(handle);
@@ -319,15 +297,10 @@ fn test_writer_doesnt_corrupt_concurrent_reader_results() {
     let handle = thread::spawn(move || {
       let ops = DirectoryOps::new(&engine_clone);
       for iteration in 0..100 {
-        let data = ops.read_file_buffered("/stable.txt")
-          .unwrap_or_else(|e| panic!(
-            "reader {} failed on iteration {}: {:?}", thread_id, iteration, e,
-          ));
-        assert_eq!(
-          data, b"stable-content",
-          "reader {} got wrong data on iteration {} while writer was active",
-          thread_id, iteration,
-        );
+        let data = ops
+          .read_file_buffered("/stable.txt")
+          .unwrap_or_else(|e| panic!("reader {} failed on iteration {}: {:?}", thread_id, iteration, e,));
+        assert_eq!(data, b"stable-content", "reader {} got wrong data on iteration {} while writer was active", thread_id, iteration,);
       }
     });
     handles.push(handle);
@@ -341,7 +314,8 @@ fn test_writer_doesnt_corrupt_concurrent_reader_results() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..100 {
         let path = format!("/noise/file-{}.txt", i);
-        ops.store_file_buffered(&ctx, &path, b"noise", Some("text/plain"))
+        ops
+          .store_file_buffered(&ctx, &path, b"noise", Some("text/plain"))
           .unwrap_or_else(|e| panic!("writer failed on iteration {}: {:?}", i, e));
       }
     });
@@ -377,16 +351,10 @@ fn test_has_entry_concurrent_with_writes() {
     let handle = thread::spawn(move || {
       for iteration in 0..50 {
         for (i, hash) in hashes_clone.iter().enumerate() {
-          let exists = engine_clone.has_entry(hash)
-            .unwrap_or_else(|e| panic!(
-              "thread {} has_entry failed for item {} on iteration {}: {:?}",
-              thread_id, i, iteration, e,
-            ));
-          assert!(
-            exists,
-            "thread {} found item {} missing on iteration {}",
-            thread_id, i, iteration,
-          );
+          let exists = engine_clone
+            .has_entry(hash)
+            .unwrap_or_else(|e| panic!("thread {} has_entry failed for item {} on iteration {}: {:?}", thread_id, i, iteration, e,));
+          assert!(exists, "thread {} found item {} missing on iteration {}", thread_id, i, iteration,);
         }
       }
     });
@@ -401,8 +369,7 @@ fn test_has_entry_concurrent_with_writes() {
       let ops = DirectoryOps::new(&engine_clone);
       for i in 0..50 {
         let path = format!("/other/new-{}.txt", i);
-        ops.store_file_buffered(&ctx, &path, b"new", Some("text/plain"))
-          .unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
+        ops.store_file_buffered(&ctx, &path, b"new", Some("text/plain")).unwrap_or_else(|e| panic!("writer failed on {}: {:?}", path, e));
       }
     });
     handles.push(handle);

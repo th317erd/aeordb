@@ -36,27 +36,17 @@ pub struct FieldIndex {
 impl FieldIndex {
   /// Create an empty index with the given converter.
   pub fn new(field_name: String, converter: Box<dyn ScalarConverter>) -> Self {
-    let nvt_converter = deserialize_converter(&converter.serialize())
-      .expect("converter roundtrip for NVT should never fail");
+    let nvt_converter = deserialize_converter(&converter.serialize()).expect("converter roundtrip for NVT should never fail");
     let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
-    FieldIndex {
-      field_name,
-      converter,
-      entries: Vec::new(),
-      nvt,
-      values: HashMap::new(),
-      dirty: false,
-    }
+    FieldIndex { field_name, converter, entries: Vec::new(), nvt, values: HashMap::new(), dirty: false }
   }
 
   /// Convert value to scalar and insert in sorted position. Marks NVT dirty.
   pub fn insert(&mut self, value: &[u8], file_hash: Vec<u8>) {
     let scalar = self.converter.to_scalar(value);
-    let entry = IndexEntry {
-      scalar,
-      file_hash,
-    };
-    let position = self.entries
+    let entry = IndexEntry { scalar, file_hash };
+    let position = self
+      .entries
       .binary_search_by(|probe| probe.scalar.partial_cmp(&scalar).unwrap_or(std::cmp::Ordering::Equal))
       .unwrap_or_else(|position| position);
     self.entries.insert(position, entry);
@@ -73,11 +63,9 @@ impl FieldIndex {
     let expanded = self.converter.expand_value(value);
     for entry_value in expanded {
       let scalar = self.converter.to_scalar(&entry_value);
-      let entry = IndexEntry {
-        scalar,
-        file_hash: file_hash.clone(),
-      };
-      let position = self.entries
+      let entry = IndexEntry { scalar, file_hash: file_hash.clone() };
+      let position = self
+        .entries
         .binary_search_by(|probe| probe.scalar.partial_cmp(&scalar).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or_else(|position| position);
       self.entries.insert(position, entry);
@@ -198,9 +186,7 @@ impl FieldIndex {
   /// in a [0, u64::MAX] range where scalars are indistinguishable).
   pub fn lookup_range(&mut self, min_value: &[u8], max_value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
-      return Err(EngineError::RangeQueryNotSupported(
-        self.converter.name().to_string(),
-      ));
+      return Err(EngineError::RangeQueryNotSupported(self.converter.name().to_string()));
     }
     self.ensure_nvt_current();
 
@@ -251,9 +237,7 @@ impl FieldIndex {
   /// issues (same fix as lookup_exact and lookup_range).
   pub fn lookup_gt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
-      return Err(EngineError::RangeQueryNotSupported(
-        self.converter.name().to_string(),
-      ));
+      return Err(EngineError::RangeQueryNotSupported(self.converter.name().to_string()));
     }
     self.ensure_nvt_current();
 
@@ -292,9 +276,7 @@ impl FieldIndex {
   /// issues (same fix as lookup_exact and lookup_range).
   pub fn lookup_lt(&mut self, value: &[u8]) -> EngineResult<Vec<&IndexEntry>> {
     if !self.converter.is_order_preserving() {
-      return Err(EngineError::RangeQueryNotSupported(
-        self.converter.name().to_string(),
-      ));
+      return Err(EngineError::RangeQueryNotSupported(self.converter.name().to_string()));
     }
     self.ensure_nvt_current();
 
@@ -345,10 +327,7 @@ impl FieldIndex {
     let start = bucket.kv_block_offset as usize;
     let end = (start + bucket.entry_count as usize).min(self.entries.len());
 
-    self.entries[start..end]
-      .iter()
-      .filter(|entry| (entry.scalar - scalar).abs() < 1e-10)
-      .collect()
+    self.entries[start..end].iter().filter(|entry| (entry.scalar - scalar).abs() < 1e-10).collect()
   }
 
   /// Direct scalar range — mark start/end buckets, return entries in range.
@@ -402,16 +381,18 @@ impl FieldIndex {
     let nvt_data = self.nvt.serialize();
     let field_name_bytes = self.field_name.as_bytes();
 
-    let values_size: usize = self.values.iter()
-      .map(|(k, v)| k.len() + 4 + v.len())
-      .sum();
+    let values_size: usize = self.values.iter().map(|(k, v)| k.len() + 4 + v.len()).sum();
     let capacity = 1
-      + 2 + field_name_bytes.len()
-      + 4 + converter_data.len()
-      + 4 + nvt_data.len()
+      + 2
+      + field_name_bytes.len()
+      + 4
+      + converter_data.len()
+      + 4
+      + nvt_data.len()
       + 4
       + self.entries.len() * (8 + hash_length)
-      + 4 + values_size;
+      + 4
+      + values_size;
     let mut buffer = Vec::with_capacity(capacity);
 
     // Schema version byte at offset 0. The reader checks this FIRST and
@@ -454,10 +435,7 @@ impl FieldIndex {
   /// offset 0 and dispatches to the matching `deserialize_v{n}`.
   pub fn deserialize(data: &[u8], hash_length: usize) -> EngineResult<Self> {
     if data.is_empty() {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data is empty".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data is empty".to_string() });
     }
     let version = data[0];
     match version {
@@ -471,53 +449,34 @@ impl FieldIndex {
 
     // Field name
     if data.len() < cursor + 2 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data too short for field name length".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data too short for field name length".to_string() });
     }
     let field_name_length = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
     cursor += 2;
 
     if data.len() < cursor + field_name_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data too short for field name".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data too short for field name".to_string() });
     }
     let field_name = String::from_utf8(data[cursor..cursor + field_name_length].to_vec())
-      .map_err(|error| EngineError::CorruptEntry {
-        offset: cursor as u64,
-        reason: format!("Invalid UTF-8 field name: {}", error),
-      })?;
+      .map_err(|error| EngineError::CorruptEntry { offset: cursor as u64, reason: format!("Invalid UTF-8 field name: {}", error) })?;
     cursor += field_name_length;
 
     // Converter section
     if data.len() < cursor + 4 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data too short for converter length".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data too short for converter length".to_string() });
     }
-    let converter_length = u32::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-    ]) as usize;
+    let converter_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     if data.len() < cursor + converter_length {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data too short for converter data".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data too short for converter data".to_string() });
     }
     let converter = deserialize_converter(&data[cursor..cursor + converter_length])?;
     cursor += converter_length;
 
     // NVT section (optional for backward compatibility with old format)
     let nvt = if data.len() >= cursor + 4 {
-      let nvt_length = u32::from_le_bytes([
-        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-      ]) as usize;
+      let nvt_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
 
       // Heuristic: if nvt_length is unreasonably large or would exceed remaining data
       // minus what we need for entries, this is likely the old format where this u32
@@ -544,14 +503,9 @@ impl FieldIndex {
 
     // Entry count
     if data.len() < cursor + 4 {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "FieldIndex data too short for entry count".to_string(),
-      });
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "FieldIndex data too short for entry count".to_string() });
     }
-    let entry_count = u32::from_le_bytes([
-      data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-    ]) as usize;
+    let entry_count = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
     cursor += 4;
 
     let entry_size = 8 + hash_length;
@@ -570,8 +524,14 @@ impl FieldIndex {
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
       let scalar = f64::from_le_bytes([
-        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-        data[cursor + 4], data[cursor + 5], data[cursor + 6], data[cursor + 7],
+        data[cursor],
+        data[cursor + 1],
+        data[cursor + 2],
+        data[cursor + 3],
+        data[cursor + 4],
+        data[cursor + 5],
+        data[cursor + 6],
+        data[cursor + 7],
       ]);
       cursor += 8;
 
@@ -584,9 +544,7 @@ impl FieldIndex {
     // Read values map (backward compatible — empty if no data remains)
     let mut values = HashMap::new();
     if data.len() > cursor + 4 {
-      let value_count = u32::from_le_bytes([
-        data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-      ]) as usize;
+      let value_count = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
       cursor += 4;
 
       for _ in 0..value_count {
@@ -596,9 +554,7 @@ impl FieldIndex {
         let file_hash = data[cursor..cursor + hash_length].to_vec();
         cursor += hash_length;
 
-        let value_length = u32::from_le_bytes([
-          data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-        ]) as usize;
+        let value_length = u32::from_le_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]]) as usize;
         cursor += 4;
 
         if data.len() < cursor + value_length {
@@ -615,22 +571,14 @@ impl FieldIndex {
     let resolved_nvt = match nvt {
       Some(deserialized_nvt) => deserialized_nvt,
       None => {
-        let nvt_converter = deserialize_converter(&converter.serialize())
-          .expect("converter roundtrip for NVT should never fail");
+        let nvt_converter = deserialize_converter(&converter.serialize()).expect("converter roundtrip for NVT should never fail");
         NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT)
       }
     };
 
     // Always rebuild NVT from entries on deserialize, since the serialized NVT
     // may be stale (entries modified after last NVT rebuild before serialization).
-    let mut index = FieldIndex {
-      field_name,
-      converter,
-      entries,
-      nvt: resolved_nvt,
-      values,
-      dirty: true,
-    };
+    let mut index = FieldIndex { field_name, converter, entries, nvt: resolved_nvt, values, dirty: true };
     index.rebuild_nvt();
     Ok(index)
   }
@@ -657,31 +605,19 @@ impl<'a> IndexManager<'a> {
 
   /// Build the index file path for a field at a given path (old format, no strategy).
   fn index_file_path_legacy(path: &str, field_name: &str) -> String {
-    let base = if path.ends_with('/') {
-      path.to_string()
-    } else {
-      format!("{}/", path)
-    };
+    let base = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
     format!("{}.aeordb-indexes/{}.idx", base, field_name)
   }
 
   /// Build the index file path for a field at a given path with strategy.
   fn index_file_path(path: &str, field_name: &str, strategy: &str) -> String {
-    let base = if path.ends_with('/') {
-      path.to_string()
-    } else {
-      format!("{}/", path)
-    };
+    let base = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
     format!("{}.aeordb-indexes/{}.{}.idx", base, field_name, strategy)
   }
 
   /// Build the indexes directory path for a given path.
   fn indexes_dir_path(path: &str) -> String {
-    let base = if path.ends_with('/') {
-      path.to_string()
-    } else {
-      format!("{}/", path)
-    };
+    let base = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
     format!("{}.aeordb-indexes", base)
   }
 
@@ -787,12 +723,7 @@ impl<'a> IndexManager<'a> {
   }
 
   /// Create an empty index for a field at the given path.
-  pub fn create_index(
-    &self,
-    path: &str,
-    field_name: &str,
-    converter: Box<dyn ScalarConverter>,
-  ) -> EngineResult<FieldIndex> {
+  pub fn create_index(&self, path: &str, field_name: &str, converter: Box<dyn ScalarConverter>) -> EngineResult<FieldIndex> {
     let index = FieldIndex::new(field_name.to_string(), converter);
     self.save_index(path, &index)?;
     Ok(index)
@@ -803,10 +734,7 @@ impl<'a> IndexManager<'a> {
   /// Scans `base_path` recursively for files whose path includes
   /// `/.aeordb-indexes/`, extracts the parent directory of each
   /// `.aeordb-indexes` segment, and returns a deduplicated, sorted list.
-  pub fn discover_indexed_directories(
-    &self,
-    base_path: &str,
-  ) -> EngineResult<Vec<String>> {
+  pub fn discover_indexed_directories(&self, base_path: &str) -> EngineResult<Vec<String>> {
     use std::collections::BTreeSet;
     use crate::engine::directory_listing::list_directory_recursive;
 
@@ -835,11 +763,7 @@ impl<'a> IndexManager<'a> {
         }
       }
       Err(e) => {
-        tracing::warn!(
-          base_path,
-          "discover_indexed_directories: recursive scan failed ({}). Returning base-path results only.",
-          e,
-        );
+        tracing::warn!(base_path, "discover_indexed_directories: recursive scan failed ({}). Returning base-path results only.", e,);
       }
     }
 
@@ -853,8 +777,7 @@ impl<'a> IndexManager<'a> {
 
     for index_name in &indexes {
       // index_name is either "field" (old) or "field.strategy" (new)
-      let is_match = index_name == field_name
-        || index_name.starts_with(&format!("{}.", field_name));
+      let is_match = index_name == field_name || index_name.starts_with(&format!("{}.", field_name));
 
       if is_match {
         // Determine strategy from the name

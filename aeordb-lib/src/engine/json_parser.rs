@@ -5,20 +5,15 @@ use crate::engine::errors::{EngineError, EngineResult};
 /// For numbers, serializes as big-endian bytes. For strings, returns UTF-8 bytes.
 /// Fields not found in the JSON are silently skipped.
 pub fn parse_json_fields(data: &[u8], field_names: &[&str]) -> EngineResult<Vec<(String, Vec<u8>)>> {
-  let text = std::str::from_utf8(data).map_err(|error| {
-    EngineError::JsonParseError(format!("Invalid UTF-8: {}", error))
-  })?;
+  let text = std::str::from_utf8(data).map_err(|error| EngineError::JsonParseError(format!("Invalid UTF-8: {}", error)))?;
 
-  let parsed: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-    EngineError::JsonParseError(format!("Invalid JSON: {}", error))
-  })?;
+  let parsed: serde_json::Value =
+    serde_json::from_str(text).map_err(|error| EngineError::JsonParseError(format!("Invalid JSON: {}", error)))?;
 
   let object = match parsed.as_object() {
     Some(object) => object,
     None => {
-      return Err(EngineError::JsonParseError(
-        "JSON root is not an object".to_string(),
-      ));
+      return Err(EngineError::JsonParseError("JSON root is not an object".to_string()));
     }
   };
 

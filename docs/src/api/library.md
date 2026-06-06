@@ -14,7 +14,7 @@ aeordb = { path = "../aeordb/aeordb-lib" }
 Basic usage:
 
 ```rust,ignore
-use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext};
+use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext, BufferedFile, JsonMergeFilePatch, MergeDepth};
 
 // Create or open a database
 let engine = StorageEngine::create("my.aeordb").unwrap();
@@ -24,6 +24,30 @@ ops.ensure_root_directory(&ctx).unwrap();
 
 // Store a small file (full content in memory — fine for KB-range data)
 ops.store_file_buffered(&ctx, "/hello.txt", b"Hello, world!", Some("text/plain")).unwrap();
+
+// Store several small files in one embedded batch
+ops.store_files_buffered_batch(&ctx, vec![
+    BufferedFile {
+        path: "/sync/a.json".to_string(),
+        data: br#"{"dirty":false}"#.to_vec(),
+        content_type: Some("application/json".to_string()),
+    },
+    BufferedFile {
+        path: "/sync/b.txt".to_string(),
+        data: b"short text".to_vec(),
+        content_type: Some("text/plain".to_string()),
+    },
+]).unwrap();
+
+// Merge JSON documents without an HTTP round trip
+ops.merge_json_file(&ctx, "/sync/a.json", serde_json::json!({"seen": true}), MergeDepth::Unbounded).unwrap();
+ops.merge_json_files_batch(&ctx, vec![
+    JsonMergeFilePatch {
+        path: "/sync/a.json".to_string(),
+        patch: serde_json::json!({"count": 2}),
+        depth: MergeDepth::Unbounded,
+    },
+]).unwrap();
 
 // Read it back into a single Vec
 let data = ops.read_file_buffered("/hello.txt").unwrap();
@@ -52,14 +76,79 @@ let ops = DirectoryOps::new(&engine);
 | Function | Description |
 |----------|-------------|
 | `store_file_buffered(ctx, path, data, content_type)` | Store a file at the given path. **Buffered — loads `data` fully into memory; use only for small payloads.** |
+| `store_files_buffered_batch(ctx, files)` | Store multiple fully-buffered small files in one embedded batch. Validates every path before writing, preserves created timestamps on overwrite, and supports trusted system paths. |
 | `store_file_from_reader(ctx, path, reader, content_type)` | Store a file by streaming chunks from any `Read` source. Bounded memory. Use for arbitrary-size content. |
 | `read_file_buffered(path)` | Read a file's content into a single `Vec<u8>`. **Buffered — materializes the full file; use only for small payloads.** |
 | `read_file_streaming(path)` | Read a file as a streaming iterator of chunks. Bounded memory. Use for arbitrary-size content. |
+| `merge_json_file(ctx, path, patch, depth)` | Apply an RFC 7396 JSON merge patch to one JSON file. Missing files start as `{}` and are created as `application/json`. |
+| `merge_json_files_batch(ctx, patches)` | Apply multiple JSON merge patches, validate/parse every target first, then write the merged documents in one embedded batch. |
 | `delete_file(ctx, path)` | Delete a file |
 | `exists(path)` | Check if a file or directory exists |
 | `get_metadata(path)` | Get file metadata without reading content |
 | `list_directory(path)` | List immediate children of a directory |
 | `create_directory(ctx, path)` | Create an empty directory |
+
+### Buffered Batch Writes
+
+`store_files_buffered_batch` is for trusted embedded callers that already have small file bodies in memory. It is not a replacement for streaming uploads of arbitrary-size data.
+
+```rust,ignore
+use aeordb::engine::BufferedFile;
+
+let result = ops.store_files_buffered_batch(&ctx, vec![
+    BufferedFile {
+        path: "/buckets/users.json".to_string(),
+        data: br#"{"updated":true}"#.to_vec(),
+        content_type: Some("application/json".to_string()),
+    },
+    BufferedFile {
+        path: "/buckets/index.txt".to_string(),
+        data: b"user-bucket\n".to_vec(),
+        content_type: Some("text/plain".to_string()),
+    },
+]).unwrap();
+
+assert_eq!(result.committed, 2);
+```
+
+Batch validation rejects empty batches, root writes, and duplicate normalized paths before writing any entries. Unlike the HTTP `/blobs/commit` endpoint, this embedded helper supports internal system paths because any caller with direct `StorageEngine` access is already trusted code.
+
+### JSON Merge Patch
+
+The RFC 7396 merge primitive is exported from the engine layer:
+
+```rust,ignore
+use aeordb::engine::{apply_merge_patch, MergeDepth};
+
+let mut target = serde_json::json!({"a": 1, "nested": {"x": 1}});
+apply_merge_patch(&mut target, serde_json::json!({"nested": {"y": 2}}), MergeDepth::Unbounded);
+assert_eq!(target, serde_json::json!({"a": 1, "nested": {"x": 1, "y": 2}}));
+```
+
+For stored JSON files, use the `DirectoryOps` helpers:
+
+```rust,ignore
+use aeordb::engine::{JsonMergeFilePatch, MergeDepth};
+
+let single = ops.merge_json_file(
+    &ctx,
+    "/state/session.json",
+    serde_json::json!({"title": "Scratch"}),
+    MergeDepth::Unbounded,
+).unwrap();
+assert!(single.created);
+
+let batch = ops.merge_json_files_batch(&ctx, vec![
+    JsonMergeFilePatch {
+        path: "/state/session.json".to_string(),
+        patch: serde_json::json!({"count": 7}),
+        depth: MergeDepth::Unbounded,
+    },
+]).unwrap();
+assert_eq!(batch.merged, 1);
+```
+
+Existing target files must contain valid JSON. If any target in `merge_json_files_batch` is invalid, the batch fails before writing any merged output.
 
 ### Directory Listing
 
@@ -71,6 +160,9 @@ let entries = list_directory_recursive(&engine, "/assets", -1, None).unwrap();
 
 // List with glob filter
 let psds = list_directory_recursive(&engine, "/assets", -1, Some("*.psd")).unwrap();
+
+// List with a recursive path-shaped glob under the requested directory
+let frames = list_directory_recursive(&engine, "/sessions", -1, Some("**/frames/*.json")).unwrap();
 
 // List one level deep
 let shallow = list_directory_recursive(&engine, "/assets", 1, None).unwrap();
