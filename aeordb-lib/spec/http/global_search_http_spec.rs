@@ -258,6 +258,45 @@ async fn test_structured_search_across_directories() {
 }
 
 #[tokio::test]
+async fn test_structured_search_exact_punctuated_name_uses_stored_values_when_field_has_trigram_index() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/agents", &config);
+
+  ops
+    .store_file_with_indexing(&ctx, "/agents/mr-bennett.json", br#"{"id":"agent-1","name":"Mr. Bennett"}"#, Some("application/json"))
+    .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/agents",
+      "where": {"field": "name", "op": "eq", "value": "Mr. Bennett"},
+      "limit": 10
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK);
+  let results = json["results"].as_array().unwrap();
+  assert_eq!(results.len(), 1, "exact search must recheck stored raw values instead of trigram token scalars: {}", json);
+  assert_eq!(results[0]["path"].as_str().unwrap(), "/agents/mr-bennett.json");
+}
+
+#[tokio::test]
 async fn test_structured_search_numeric_field() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_multi_directory(&engine);

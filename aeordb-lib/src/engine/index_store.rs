@@ -4,7 +4,9 @@ use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::request_context::RequestContext;
-use crate::engine::scalar_converter::{deserialize_converter, serialize_converter, ScalarConverter};
+use crate::engine::scalar_converter::{
+  deserialize_converter, serialize_converter, ScalarConverter, CONVERTER_TYPE_PHONETIC, CONVERTER_TYPE_TRIGRAM,
+};
 use crate::engine::storage_engine::StorageEngine;
 
 /// Default number of NVT buckets for a new FieldIndex.
@@ -86,6 +88,28 @@ impl FieldIndex {
   /// Get the raw field value for a file hash (for fuzzy query recheck).
   pub fn get_value(&self, file_hash: &[u8]) -> Option<&[u8]> {
     self.values.get(file_hash).map(|v| v.as_slice())
+  }
+
+  /// Return true when this index stores one scalar for the complete raw field
+  /// value, making scalar `lookup_exact` a valid exact-match accelerator.
+  pub fn supports_scalar_exact_lookup(&self) -> bool {
+    !matches!(self.converter.type_tag(), CONVERTER_TYPE_TRIGRAM | CONVERTER_TYPE_PHONETIC)
+  }
+
+  /// Find file hashes whose stored raw field value exactly matches one of the
+  /// requested values.
+  ///
+  /// This is the correctness path for exact equality on tokenizing indexes
+  /// such as trigram and phonetic. Those indexes store entries for expanded
+  /// tokens, so scalar lookup with the full query string is not meaningful.
+  /// The raw values map preserves the original field value for exact recheck.
+  pub fn lookup_stored_values_exact(&self, values: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    self
+      .values
+      .iter()
+      .filter(|(_file_hash, stored_value)| values.iter().any(|value| stored_value.as_slice() == value.as_slice()))
+      .map(|(file_hash, _stored_value)| file_hash.clone())
+      .collect()
   }
 
   /// Returns true if entries have changed since the last NVT rebuild.

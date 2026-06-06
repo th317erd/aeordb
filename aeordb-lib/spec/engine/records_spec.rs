@@ -185,7 +185,7 @@ fn test_deletion_record_serialize_deserialize_roundtrip() {
   let record = DeletionRecord { path: "/myapp/old-file.json".to_string(), deleted_at: 1700000005000, reason: Some("cleanup".to_string()) };
 
   let serialized = record.serialize();
-  let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
+  let deserialized = DeletionRecord::deserialize(&serialized, 0).unwrap();
 
   assert_eq!(record, deserialized);
 }
@@ -199,7 +199,7 @@ fn test_deletion_record_with_reason() {
   };
 
   let serialized = record.serialize();
-  let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
+  let deserialized = DeletionRecord::deserialize(&serialized, 0).unwrap();
 
   assert_eq!(deserialized.reason, Some("Expired after 30 days retention policy".to_string()));
 }
@@ -209,7 +209,7 @@ fn test_deletion_record_without_reason() {
   let record = DeletionRecord { path: "/tmp/scratch".to_string(), deleted_at: 1700000020000, reason: None };
 
   let serialized = record.serialize();
-  let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
+  let deserialized = DeletionRecord::deserialize(&serialized, 0).unwrap();
 
   assert_eq!(deserialized.reason, None);
   assert_eq!(deserialized.path, "/tmp/scratch");
@@ -225,13 +225,13 @@ fn test_deletion_record_new_sets_timestamp() {
 
 #[test]
 fn test_deletion_record_deserialize_truncated_data() {
-  let result = DeletionRecord::deserialize(&[0x00]);
+  let result = DeletionRecord::deserialize(&[0x00], 0);
   assert!(result.is_err());
 }
 
 #[test]
 fn test_deletion_record_deserialize_empty_data() {
-  let result = DeletionRecord::deserialize(&[]);
+  let result = DeletionRecord::deserialize(&[], 0);
   assert!(result.is_err());
 }
 

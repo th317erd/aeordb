@@ -1330,14 +1330,13 @@ impl<'a> DirectoryOps<'a> {
     let file_key = file_path_hash(&normalized, &algo)?;
 
     // Try to read the file record even though it's marked deleted.
-    // get_raw bypasses the deleted flag check.
+    // The engine read validates that the KV offset still points into the
+    // current WAL region before touching disk.
     let file_record = {
-      let snapshot = self.engine.kv_snapshot.load();
-      let kv_entry =
-        snapshot.get_raw(&file_key).ok_or_else(|| EngineError::NotFound(format!("No record found for deleted file: {}", normalized)))?;
-
-      let writer = self.engine.writer_read_lock()?;
-      let (header, _key, value) = writer.read_entry_at_shared(kv_entry.offset)?;
+      let (header, _key, value) = self
+        .engine
+        .get_entry_including_deleted(&file_key)?
+        .ok_or_else(|| EngineError::NotFound(format!("No record found for deleted file: {}", normalized)))?;
       FileRecord::deserialize(&value, hash_length, header.entry_version)?
     };
 
@@ -2139,8 +2138,14 @@ impl<'a> DirectoryOps<'a> {
 
       let dir_key = directory_path_hash(&parent, &algo)?;
 
-      // Read existing directory via cache-aware, hard-link-following reader
-      let existing = self.read_directory_data(&dir_key)?;
+      // Read existing directory via the HEAD-canonical recovery path first.
+      // A crash can leave a mutable dir:{path} hard link behind or ahead of
+      // HEAD. Mutating from that stale body would publish a new HEAD that
+      // drops committed siblings.
+      let existing = match self.recover_directory_data_if_stale(&parent, &dir_key)? {
+        Some(pair) => Some(pair),
+        None => self.read_directory_data(&dir_key)?,
+      };
 
       let (dir_value, content_key) = match existing {
         Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
@@ -2239,7 +2244,10 @@ impl<'a> DirectoryOps<'a> {
     let dir_key = directory_path_hash(&parent, &algo)?;
     let child_name = file_name(child_path).unwrap_or("").to_string();
 
-    let existing = self.read_directory_data(&dir_key)?;
+    let existing = match self.recover_directory_data_if_stale(&parent, &dir_key)? {
+      Some(pair) => Some(pair),
+      None => self.read_directory_data(&dir_key)?,
+    };
 
     let mut batch = WriteBatch::new();
 

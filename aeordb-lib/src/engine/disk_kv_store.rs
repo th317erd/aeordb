@@ -75,6 +75,37 @@ pub struct DiskKVStore {
 }
 
 impl DiskKVStore {
+  fn valid_void_range_for_layout(kv_block_offset: u64, kv_block_length: u64, hot_tail_offset: u64, offset: u64, size: u32) -> bool {
+    if size == 0 {
+      return false;
+    }
+    let wal_start = kv_block_offset.saturating_add(kv_block_length);
+    let Some(end) = offset.checked_add(size as u64) else {
+      return false;
+    };
+    offset >= wal_start && end <= hot_tail_offset
+  }
+
+  fn sanitize_pending_voids(&mut self, context: &str) {
+    let before = self.pending_voids.len();
+    let kv_block_offset = self.kv_block_offset;
+    let kv_block_length = self.kv_block_length;
+    let hot_tail_offset = self.hot_tail_offset;
+    self
+      .pending_voids
+      .retain(|void| Self::valid_void_range_for_layout(kv_block_offset, kv_block_length, hot_tail_offset, void.offset, void.size));
+    let dropped = before.saturating_sub(self.pending_voids.len());
+    if dropped > 0 {
+      tracing::warn!(
+        context,
+        dropped,
+        wal_start = self.kv_block_offset.saturating_add(self.kv_block_length),
+        hot_tail_offset = self.hot_tail_offset,
+        "Dropped invalid pending void records before hot-tail persistence"
+      );
+    }
+  }
+
   /// Create a new in-file KV store. Writes empty bucket pages at kv_block_offset.
   ///
   /// `db_file` is a clone of the main .aeordb file handle.
@@ -162,6 +193,7 @@ impl DiskKVStore {
     hot_tail_offset: u64,
     stage: usize,
     hot_entries: Vec<KVEntry>,
+    hot_voids: Vec<crate::engine::hot_tail::VoidRecord>,
     kv_block_version: u8,
   ) -> EngineResult<Self> {
     if kv_block_version != Self::CURRENT_KV_BLOCK_VERSION {
@@ -233,8 +265,38 @@ impl DiskKVStore {
     }
     let hot_count = write_buffer.len();
 
+    // Hot-tail voids are durable tombstones for WAL ranges reclaimed by GC.
+    // Bucket pages may still contain old live KV entries for those ranges if
+    // the process crashed after the hot tail was flushed but before the KV
+    // write buffer was flushed to pages. Mask those page entries with deleted
+    // buffer entries so clean startup never serves data from reusable space.
+    let mut voided_page_entries = 0usize;
+    if !hot_voids.is_empty() {
+      for page_data in pages.iter() {
+        if let Ok(entries) = deserialize_page(page_data, hash_length) {
+          for entry in entries {
+            if write_buffer.contains_key(&entry.hash) {
+              continue;
+            }
+            let entry_end = entry.offset.saturating_add(entry.total_length as u64);
+            let overlaps_void = hot_voids.iter().any(|void| {
+              let void_end = void.offset.saturating_add(void.size as u64);
+              entry.offset < void_end && void.offset < entry_end
+            });
+            if overlaps_void {
+              let mut deleted = entry.clone();
+              deleted.type_flags |= KV_FLAG_DELETED;
+              write_buffer.insert(deleted.hash.clone(), deleted);
+              voided_page_entries += 1;
+            }
+          }
+        }
+      }
+    }
+
+    let effective_entry_count = entry_count.saturating_sub(voided_page_entries) + hot_count;
     let initial_snapshot =
-      ReadSnapshot::new(write_buffer.clone(), Arc::clone(&shared_nvt), bucket_count, hash_algo, entry_count + hot_count, pages);
+      ReadSnapshot::new(write_buffer.clone(), Arc::clone(&shared_nvt), bucket_count, hash_algo, effective_entry_count, pages);
     let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
 
     Ok(DiskKVStore {
@@ -247,7 +309,7 @@ impl DiskKVStore {
       hot_tail_enabled: true,
       stage,
       hash_algo,
-      entry_count: entry_count + hot_count,
+      entry_count: effective_entry_count,
       bucket_count,
       hot_buffer: Vec::new(),
       snapshot,
@@ -255,7 +317,7 @@ impl DiskKVStore {
       needs_rebuild: detected_page_corruption,
       needs_expansion: None,
       transaction_depth: 0,
-      pending_voids: Vec::new(),
+      pending_voids: hot_voids,
     })
   }
 
@@ -486,6 +548,7 @@ impl DiskKVStore {
             hot_tail_offset = self.hot_tail_offset,
             "flush: writing overflow entries to hot tail (resize blocked)"
           );
+          self.sanitize_pending_voids("resize-blocked hot-tail flush");
           let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
           let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
           self.db_file.set_len(end)?; // Truncate stale trailing data
@@ -510,6 +573,7 @@ impl DiskKVStore {
       // pointing at WAL offsets that have since been overwritten.
       // Even when all KV writes flushed to pages, we keep the void
       // snapshot in the hot tail so void state survives.
+      self.sanitize_pending_voids("kv flush page-hot-tail update");
       let payload = hot_tail::HotTailPayload { writes: Vec::new(), voids: self.pending_voids.clone() };
       hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)
         .map_err(|e| EngineError::IoError(std::io::Error::other(format!("Failed to write hot tail after page flush: {}", e))))?;
@@ -844,21 +908,29 @@ impl DiskKVStore {
   ///
   /// `target_stage`: the new KV stage to expand to
   /// `old_kv_end`: the old end of the KV block (where growth zone started)
-  /// `new_kv_end`: the new end of the KV block
+  /// `relocation_end`: the end of the old WAL region relocated out of the
+  /// expanded KV block. This can extend beyond the new KV block when an entry
+  /// straddles the boundary.
   /// `offset_delta`: how much relocated entries' offsets shifted (copy_dst - old_kv_end)
   /// `new_hot_tail`: the new hot tail offset after relocation
+  /// `pending_voids`: adjusted void snapshot for the new WAL layout
   pub fn finalize_expansion(
     &mut self,
     target_stage: usize,
     old_kv_end: u64,
-    new_kv_end: u64,
+    relocation_end: u64,
     offset_delta: i64,
     new_hot_tail: u64,
+    pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
   ) -> EngineResult<()> {
     let hash_length = self.hash_algo.hash_length();
     let psize = page_size(hash_length);
-    let (_block_size, new_bucket_count) = stage_params(target_stage, psize);
+    let (new_block_size, new_bucket_count) = stage_params(target_stage, psize);
     let new_pages_size = (new_bucket_count as u64) * (psize as u64);
+
+    // Capture the complete live KV view before changing layout state or
+    // zeroing pages. This includes entries still in the write buffer.
+    let all_entries = self.iter_all()?;
 
     // Zero-fill all KV bucket pages in the expanded region
     let empty_page = vec![0u8; psize];
@@ -867,25 +939,30 @@ impl DiskKVStore {
       self.db_file.seek(SeekFrom::Start(offset))?;
       self.db_file.write_all(&empty_page)?;
     }
+    if new_block_size > new_pages_size {
+      let slack_offset = self.kv_block_offset + new_pages_size;
+      let slack_len = (new_block_size - new_pages_size) as usize;
+      self.db_file.seek(SeekFrom::Start(slack_offset))?;
+      self.db_file.write_all(&vec![0u8; slack_len])?;
+    }
     self.db_file.sync_data()?;
 
     // Update internal state
-    self.kv_block_length = new_pages_size;
+    self.kv_block_length = new_block_size;
     self.stage = target_stage;
     self.bucket_count = new_bucket_count;
     self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
     self.hot_tail_offset = new_hot_tail;
     self.entry_count = 0;
+    self.pending_voids = pending_voids;
+    self.write_buffer.clear();
+    self.hot_buffer.clear();
 
-    // Collect all entries and adjust offsets for relocated ones
-    let all_entries: Vec<KVEntry> = {
-      let snap = self.snapshot.load();
-      snap.iter_all().unwrap_or_default()
-    };
+    // Adjust offsets for relocated entries.
     let adjusted: Vec<KVEntry> = all_entries
       .into_iter()
       .map(|mut e| {
-        if e.offset >= old_kv_end && e.offset < new_kv_end {
+        if e.offset >= old_kv_end && e.offset < relocation_end {
           e.offset = (e.offset as i64 + offset_delta) as u64;
         }
         e
@@ -897,6 +974,15 @@ impl DiskKVStore {
     self.flush_no_snapshot()?;
     self.entry_count = adjusted.len();
 
+    // The entries are now durable in the expanded KV pages. Publish a clean
+    // hot tail for the new header rather than carrying pre-expansion hot
+    // writes that may still point at the old growth zone.
+    self.sanitize_pending_voids("finalize expansion hot-tail clear");
+    let payload = hot_tail::HotTailPayload { writes: Vec::new(), voids: self.pending_voids.clone() };
+    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
+    self.db_file.set_len(end)?;
+    self.db_file.sync_data()?;
+
     // Update file header. The bucket pages were already zero-filled and
     // populated + fsync'd above; we now write a new header advertising
     // the new layout to the INACTIVE slot. v3 A/B double-buffer leaves
@@ -904,7 +990,7 @@ impl DiskKVStore {
     {
       self.db_file.sync_all()?;
       let (mut header, active_slot) = crate::engine::file_header::read_active_header(&mut self.db_file)?;
-      header.kv_block_length = new_pages_size;
+      header.kv_block_length = new_block_size;
       header.kv_block_stage = target_stage as u8;
       header.resize_in_progress = false;
       header.resize_target_stage = 0;
@@ -917,7 +1003,7 @@ impl DiskKVStore {
     self.publish_full_snapshot_with_new_nvt();
     self.needs_expansion = None;
 
-    tracing::info!(target_stage, new_bucket_count, new_pages_size, "KV block expansion finalized");
+    tracing::info!(target_stage, new_bucket_count, new_block_size, new_pages_size, "KV block expansion finalized");
 
     Ok(())
   }
@@ -931,6 +1017,7 @@ impl DiskKVStore {
   /// void consumption during writes, etc.).
   pub fn set_pending_voids(&mut self, voids: Vec<crate::engine::hot_tail::VoidRecord>) {
     self.pending_voids = voids;
+    self.sanitize_pending_voids("set pending voids");
   }
 
   /// Force a hot tail flush even if hot_buffer is below threshold. Used by
@@ -942,6 +1029,7 @@ impl DiskKVStore {
     }
     let hash_length = self.hash_algo.hash_length();
     let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+    self.sanitize_pending_voids("force hot-tail flush");
     let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?;
@@ -964,6 +1052,7 @@ impl DiskKVStore {
     // Include the current void snapshot — the engine keeps `pending_voids`
     // in sync with VoidManager state via `set_pending_voids` whenever the
     // void set changes (GC sweep, void consumption, etc.).
+    self.sanitize_pending_voids("hot-buffer flush");
     let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?; // Truncate stale trailing data

@@ -71,7 +71,8 @@ async fn test_metrics_pulse_payload_structure() {
   assert!(sizes["chunk_data"].is_number());
   assert!(sizes["void_space"].is_number());
   assert!(sizes["dedup_savings"].is_number());
-  assert!(sizes["db_file_size"].is_number());
+  assert!(sizes["disk_total"].is_number());
+  assert!(sizes["kv_file"].is_number());
 
   // Verify throughput section
   let throughput = &payload["throughput"];
@@ -87,6 +88,7 @@ async fn test_metrics_pulse_payload_structure() {
   let health = &payload["health"];
   assert!(health["write_buffer_depth"].is_number());
   assert!(health["dedup_hit_rate"].is_number());
+  assert!(health["kv_fill_ratio"].is_number());
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
@@ -272,9 +274,9 @@ async fn test_metrics_pulse_db_file_size_from_disk() {
   let event = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv()).await.unwrap().unwrap();
 
   // The db file was created by create_temp_engine_for_tests, so it should have a non-zero size.
-  let db_file_size = event.payload["sizes"]["db_file_size"].as_u64().unwrap();
+  let db_file_size = event.payload["sizes"]["disk_total"].as_u64().unwrap();
   let actual_size = std::fs::metadata(&db_path_str).unwrap().len();
-  assert_eq!(db_file_size, actual_size, "db_file_size should match actual file metadata");
+  assert_eq!(db_file_size, actual_size, "disk_total should match actual file metadata");
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
@@ -282,7 +284,8 @@ async fn test_metrics_pulse_db_file_size_from_disk() {
 
 #[tokio::test]
 async fn test_metrics_pulse_nonexistent_db_path() {
-  // When the db_path doesn't exist, db_file_size should be 0 (not panic).
+  // When the db_path doesn't exist, disk_total should be 0 (not panic).
+  let (engine, _temp) = create_temp_engine_for_tests();
   let bus = Arc::new(EventBus::new());
   let mut rx = bus.subscribe();
   let counters = Arc::new(EngineCounters::new());
@@ -300,7 +303,7 @@ async fn test_metrics_pulse_nonexistent_db_path() {
 
   let event = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv()).await.unwrap().unwrap();
 
-  assert_eq!(event.payload["sizes"]["db_file_size"].as_u64().unwrap(), 0);
+  assert_eq!(event.payload["sizes"]["disk_total"].as_u64().unwrap(), 0);
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

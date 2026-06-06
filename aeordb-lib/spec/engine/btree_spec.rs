@@ -47,7 +47,7 @@ const HASH_LENGTH: usize = 32;
 fn test_leaf_serialize_deserialize_empty() {
   let leaf = BTreeNode::Leaf(LeafNode::new());
   let data = leaf.serialize(HASH_LENGTH).unwrap();
-  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
+  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH, 0).unwrap();
   match deserialized {
     BTreeNode::Leaf(l) => assert!(l.entries.is_empty()),
     _ => panic!("Expected Leaf node"),
@@ -59,7 +59,7 @@ fn test_leaf_serialize_deserialize_with_entries() {
   let entries = vec![make_entry("alpha"), make_entry("bravo"), make_entry("charlie"), make_entry("delta"), make_entry("echo")];
   let leaf = BTreeNode::Leaf(LeafNode { entries: entries.clone() });
   let data = leaf.serialize(HASH_LENGTH).unwrap();
-  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
+  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH, 0).unwrap();
   match deserialized {
     BTreeNode::Leaf(l) => {
       assert_eq!(l.entries.len(), 5);
@@ -81,7 +81,7 @@ fn test_internal_serialize_deserialize() {
   let children = vec![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32], vec![4u8; 32]];
   let internal = BTreeNode::Internal(InternalNode { keys: keys.clone(), children: children.clone() });
   let data = internal.serialize(HASH_LENGTH).unwrap();
-  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH).unwrap();
+  let deserialized = BTreeNode::deserialize(&data, HASH_LENGTH, 0).unwrap();
   match deserialized {
     BTreeNode::Internal(n) => {
       assert_eq!(n.keys, keys);
@@ -326,14 +326,14 @@ fn test_internal_is_full() {
 
 #[test]
 fn test_deserialize_empty_data() {
-  let result = BTreeNode::deserialize(&[], HASH_LENGTH);
+  let result = BTreeNode::deserialize(&[], HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
 #[test]
 fn test_deserialize_unknown_marker() {
   let data = vec![0xFF, 0x00, 0x00];
-  let result = BTreeNode::deserialize(&data, HASH_LENGTH);
+  let result = BTreeNode::deserialize(&data, HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
@@ -341,7 +341,7 @@ fn test_deserialize_unknown_marker() {
 fn test_deserialize_truncated_leaf() {
   // Only marker byte, missing count
   let data = vec![BTREE_LEAF_MARKER];
-  let result = BTreeNode::deserialize(&data, HASH_LENGTH);
+  let result = BTreeNode::deserialize(&data, HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
@@ -349,7 +349,7 @@ fn test_deserialize_truncated_leaf() {
 fn test_deserialize_truncated_internal() {
   // Only marker byte, missing count
   let data = vec![BTREE_INTERNAL_MARKER];
-  let result = BTreeNode::deserialize(&data, HASH_LENGTH);
+  let result = BTreeNode::deserialize(&data, HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
@@ -358,7 +358,7 @@ fn test_deserialize_internal_truncated_key() {
   // Marker + key_count=1, but no key data
   let mut data = vec![BTREE_INTERNAL_MARKER];
   data.extend_from_slice(&1u16.to_le_bytes());
-  let result = BTreeNode::deserialize(&data, HASH_LENGTH);
+  let result = BTreeNode::deserialize(&data, HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
@@ -371,7 +371,7 @@ fn test_deserialize_internal_truncated_child_hash() {
   data.extend_from_slice(&(key.len() as u16).to_le_bytes());
   data.extend_from_slice(key);
   // Need 2 child hashes (key_count + 1), but provide none
-  let result = BTreeNode::deserialize(&data, HASH_LENGTH);
+  let result = BTreeNode::deserialize(&data, HASH_LENGTH, 0);
   assert!(result.is_err());
 }
 
@@ -453,7 +453,7 @@ fn test_btree_insert_causes_split() {
 
   // The root should now be an internal node (tree grew)
   let root_data = engine.get_entry(&root).unwrap().unwrap();
-  let root_node = BTreeNode::deserialize(&root_data.2, hl).unwrap();
+  let root_node = BTreeNode::deserialize(&root_data.2, hl, 0).unwrap();
   assert!(!root_node.is_leaf(), "Root should be internal after split");
 
   // All entries should still be findable
@@ -692,7 +692,7 @@ fn test_btree_delete_from_multi_level() {
 
   // Verify it's multi-level
   let root_data = engine.get_entry(&root).unwrap().unwrap();
-  let root_node = BTreeNode::deserialize(&root_data.2, hl).unwrap();
+  let root_node = BTreeNode::deserialize(&root_data.2, hl, 0).unwrap();
   assert!(!root_node.is_leaf(), "Should be multi-level tree");
 
   // Delete entries from various positions
@@ -794,7 +794,7 @@ fn test_btree_from_entries_exact_leaf_size() {
 
   // Should be a single leaf (no internal nodes needed)
   let root_data = engine.get_entry(&root).unwrap().unwrap();
-  let root_node = BTreeNode::deserialize(&root_data.2, hl).unwrap();
+  let root_node = BTreeNode::deserialize(&root_data.2, hl, 0).unwrap();
   assert!(root_node.is_leaf(), "Should be a single leaf for exactly MAX_LEAF entries");
 
   let listed = btree_list(&engine, &root, hl, false).unwrap();
@@ -1003,7 +1003,7 @@ fn test_btree_insert_batched_multiple_sequential() {
   }
 
   // Verify all entries
-  let last_hash = BTreeNode::deserialize(&current_data, hash_length).unwrap().content_hash(hash_length, &algo).unwrap();
+  let last_hash = BTreeNode::deserialize(&current_data, hash_length, 0).unwrap().content_hash(hash_length, &algo).unwrap();
   let all = btree_list(&engine, &last_hash, hash_length, false).unwrap();
   assert_eq!(all.len(), 20);
 }
@@ -1028,7 +1028,7 @@ fn test_btree_insert_batched_causes_split() {
 
   // Root should now be an internal node (split happened)
   let root_data = engine.get_entry(&last_hash).unwrap().unwrap();
-  let root_node = BTreeNode::deserialize(&root_data.2, hash_length).unwrap();
+  let root_node = BTreeNode::deserialize(&root_data.2, hash_length, 0).unwrap();
   assert!(!root_node.is_leaf(), "Root should be internal after split");
 
   // All entries findable

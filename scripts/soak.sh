@@ -4,34 +4,64 @@
 # Usage:
 #   ./scripts/soak.sh s1                      # steady-state, no chaos
 #   ./scripts/soak.sh s2                      # crash injection during sustained load
+#   ./scripts/soak.sh s3                      # aggressive tiny JSON + merge crash stress
+#   ./scripts/soak.sh s3 /tmp/aeordb-soak     # use /tmp/aeordb-soak/soak.aeordb
+#   ./scripts/soak.sh s3 /tmp/soak.aeordb     # use an explicit DB path
 #   ./scripts/soak.sh summarize <metrics.tsv>
 #
 # Environment:
 #   AEORDB_SOAK_DB         (default: /media/wyatt/Elements/wyatt-desktop/AEORDB-TEST/soak.aeordb)
 #   AEORDB_SOAK_SOURCE     (default: /media/Data/Remote/Seafile/wyatt-desktop/)
 #   AEORDB_SOAK_HOURS      (default: 12)
+#   AEORDB_SOAK_DURATION_SECS (optional; overrides HOURS for s2/s3 loop duration)
 #   AEORDB_SOAK_KILL_MIN   (default: 5)   only used by s2; minutes between SIGKILLs (random N..M)
 #   AEORDB_SOAK_KILL_MAX   (default: 15)
+#   AEORDB_SOAK_S2_KILL_MIN_SECS (optional) only used by s2; overrides minute window
+#   AEORDB_SOAK_S2_KILL_MAX_SECS (optional)
+#   AEORDB_SOAK_S3_KILL_MIN_SECS (default: 5)  only used by s3; seconds between SIGKILLs
+#   AEORDB_SOAK_S3_KILL_MAX_SECS (default: 30)
 #
 # Outputs land beside the DB file: <db>.checkpoint.tsv, <db>.metrics.tsv.
 
 set -uo pipefail
 
 MODE="${1:-}"
-DB="${AEORDB_SOAK_DB:-/media/wyatt/Elements/wyatt-desktop/AEORDB-TEST/soak.aeordb}"
+DEFAULT_DB="/media/wyatt/Elements/wyatt-desktop/AEORDB-TEST/soak.aeordb"
+DB="${AEORDB_SOAK_DB:-$DEFAULT_DB}"
+if [ "$MODE" != "summarize" ] && [ -n "${2:-}" ]; then
+  if [[ "$2" == *.aeordb ]]; then
+    DB="$2"
+  else
+    DB="$2/soak.aeordb"
+  fi
+fi
 SOURCE="${AEORDB_SOAK_SOURCE:-/media/Data/Remote/Seafile/wyatt-desktop/}"
 HOURS="${AEORDB_SOAK_HOURS:-12}"
+LOOP_DURATION_SECS="${AEORDB_SOAK_DURATION_SECS:-$(( HOURS * 3600 ))}"
 KILL_MIN="${AEORDB_SOAK_KILL_MIN:-5}"
 KILL_MAX="${AEORDB_SOAK_KILL_MAX:-15}"
+S2_KILL_MIN_SECS="${AEORDB_SOAK_S2_KILL_MIN_SECS:-}"
+S2_KILL_MAX_SECS="${AEORDB_SOAK_S2_KILL_MAX_SECS:-}"
+S3_KILL_MIN_SECS="${AEORDB_SOAK_S3_KILL_MIN_SECS:-5}"
+S3_KILL_MAX_SECS="${AEORDB_SOAK_S3_KILL_MAX_SECS:-30}"
 
 cd "$(dirname "$0")/.."
 
 if [ "$MODE" != "summarize" ]; then
-  echo "Building release worker..."
-  cargo build --release --bin soak-worker >/dev/null || { echo "build failed"; exit 1; }
+  case "$MODE" in
+    s1|s2)
+      echo "Building release soak worker and CLI..."
+      cargo build --release --bin soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
+      ;;
+    s3)
+      echo "Building release crash worker and CLI..."
+      cargo build --release --bin crash-soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
+      ;;
+  esac
 fi
 
 WORKER="$(pwd)/target/release/soak-worker"
+CRASH_WORKER="$(pwd)/target/release/crash-soak-worker"
 LOG_DIR="$(dirname "$DB")"
 WORKER_LOG="$LOG_DIR/soak.worker.log"
 PMAP_LOG="$LOG_DIR/soak.pmap.log"
@@ -74,6 +104,15 @@ start_pmap_recorder() {
   echo $!
 }
 
+copy_db_for_diagnostic() {
+  local src="$1"
+  local dest="$2"
+  if cp -a --reflink=auto "$src" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  cp -a "$src" "$dest"
+}
+
 case "$MODE" in
   s1)
     mkdir -p "$LOG_DIR"
@@ -113,20 +152,31 @@ case "$MODE" in
     echo "== S2 crash-injection soak =="
     echo "  database:    $DB"
     echo "  source:      $SOURCE"
-    echo "  duration:    ${HOURS}h"
-    echo "  kill window: random ${KILL_MIN}..${KILL_MAX} min between SIGKILLs"
+    echo "  duration:    ${LOOP_DURATION_SECS}s loop window (${HOURS}h worker duration)"
+    if [ -n "$S2_KILL_MIN_SECS" ]; then
+      if [ -z "$S2_KILL_MAX_SECS" ] || [ "$S2_KILL_MAX_SECS" -lt "$S2_KILL_MIN_SECS" ]; then
+        S2_KILL_MAX_SECS="$S2_KILL_MIN_SECS"
+      fi
+      echo "  kill window: random ${S2_KILL_MIN_SECS}..${S2_KILL_MAX_SECS} sec between SIGKILLs"
+    else
+      echo "  kill window: random ${KILL_MIN}..${KILL_MAX} min between SIGKILLs"
+    fi
     echo "  worker log:  $WORKER_LOG"
     echo "  pmap log:    $PMAP_LOG  (every ${PMAP_INTERVAL_SECS}s)"
     echo
 
-    end_epoch=$(( $(date +%s) + HOURS * 3600 ))
+    end_epoch=$(( $(date +%s) + LOOP_DURATION_SECS ))
     iteration=0
 
     while [ "$(date +%s)" -lt "$end_epoch" ]; do
       iteration=$((iteration + 1))
 
-      # Random sleep in [KILL_MIN, KILL_MAX] minutes, in seconds.
-      kill_after_secs=$(( ( RANDOM % ((KILL_MAX - KILL_MIN + 1) * 60) ) + KILL_MIN * 60 ))
+      if [ -n "$S2_KILL_MIN_SECS" ]; then
+        kill_after_secs=$(( ( RANDOM % (S2_KILL_MAX_SECS - S2_KILL_MIN_SECS + 1) ) + S2_KILL_MIN_SECS ))
+      else
+        # Random sleep in [KILL_MIN, KILL_MAX] minutes, in seconds.
+        kill_after_secs=$(( ( RANDOM % ((KILL_MAX - KILL_MIN + 1) * 60) ) + KILL_MIN * 60 ))
+      fi
       remaining=$(( end_epoch - $(date +%s) ))
       slot=$(( kill_after_secs < remaining ? kill_after_secs : remaining ))
       [ "$slot" -le 0 ] && break
@@ -184,15 +234,19 @@ case "$MODE" in
       missing_children=$(get_field "Missing children")
       unlisted_files=$(get_field "Unlisted files")
       broken_snapshots=$(get_field "Broken snapshots")
+      invalid_offsets=$(get_field "Invalid offsets")
+      invalid_voids=$(get_field "Invalid voids")
       if [ "${corrupt_hash:-0}" = "0" ] && [ "${stale:-0}" = "0" ] \
         && [ "${missing_kv:-0}" = "0" ] && [ "${missing_children:-0}" = "0" ] \
-        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ]; then
+        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ] \
+        && [ "${invalid_offsets:-0}" = "0" ] && [ "${invalid_voids:-0}" = "0" ]; then
         echo "[$(date +%T)] iteration $iteration: verify OK (corrupt_header=${corrupt_header:-0} — expected SIGKILL tail)"
         rm -f "$verify_log"
       else
         echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
         echo "  corrupt_hash=${corrupt_hash:-?} stale=${stale:-?} missing_kv=${missing_kv:-?} \
-missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?}"
+missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} \
+invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
         echo "  (continuing soak; collect failures at the end)"
       fi
     done
@@ -200,6 +254,109 @@ missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_sna
     echo
     echo "S2 complete. $iteration kill cycles executed."
     echo "  Run: $0 summarize ${DB}.metrics.tsv"
+    ;;
+
+  s3)
+    mkdir -p "$LOG_DIR"
+    : > "$PMAP_LOG"
+    CHECKPOINT="${AEORDB_SOAK_CHECKPOINT:-${DB}.crash.checkpoint.tsv}"
+    if [ "$S3_KILL_MAX_SECS" -lt "$S3_KILL_MIN_SECS" ]; then
+      S3_KILL_MAX_SECS="$S3_KILL_MIN_SECS"
+    fi
+    echo "== S3 aggressive crash stress =="
+    echo "  database:    $DB"
+    echo "  duration:    ${LOOP_DURATION_SECS}s"
+    echo "  workload:    crash-soak-worker --mode stress"
+    echo "  kill window: random ${S3_KILL_MIN_SECS}..${S3_KILL_MAX_SECS} sec between SIGKILLs"
+    echo "  checkpoint:  $CHECKPOINT"
+    echo "  worker log:  $WORKER_LOG"
+    echo "  pmap log:    $PMAP_LOG  (every ${PMAP_INTERVAL_SECS}s)"
+    echo
+
+    end_epoch=$(( $(date +%s) + LOOP_DURATION_SECS ))
+    iteration=0
+
+    while [ "$(date +%s)" -lt "$end_epoch" ]; do
+      iteration=$((iteration + 1))
+
+      kill_after_secs=$(( ( RANDOM % (S3_KILL_MAX_SECS - S3_KILL_MIN_SECS + 1) ) + S3_KILL_MIN_SECS ))
+      remaining=$(( end_epoch - $(date +%s) ))
+      slot=$(( kill_after_secs < remaining ? kill_after_secs : remaining ))
+      [ "$slot" -le 0 ] && break
+
+      echo "[$(date +%T)] iteration $iteration: spawning stress worker for ${slot}s"
+      "$CRASH_WORKER" \
+        --database "$DB" \
+        --checkpoint "$CHECKPOINT" \
+        --mode stress >> "$WORKER_LOG" 2>&1 &
+      worker_pid=$!
+      sleep 1
+      pmap_pid=$(start_pmap_recorder "$worker_pid")
+
+      remaining_slot=$(( slot - 1 ))
+      [ "$remaining_slot" -gt 0 ] && sleep "$remaining_slot"
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        echo "[$(date +%T)] iteration $iteration: SIGKILL pid=$worker_pid"
+        kill -KILL "$worker_pid" 2>/dev/null
+        wait "$worker_pid" 2>/dev/null
+      else
+        echo "[$(date +%T)] iteration $iteration: worker already exited"
+      fi
+      kill "$pmap_pid" 2>/dev/null
+      wait "$pmap_pid" 2>/dev/null
+
+      diag_dir="$(mktemp -d)"
+      verify_db="$diag_dir/verify.aeordb"
+      probe_db="$diag_dir/probe.aeordb"
+      checkpoint_copy="$diag_dir/checkpoint.tsv"
+      copy_db_for_diagnostic "$DB" "$verify_db"
+      copy_db_for_diagnostic "$DB" "$probe_db"
+      cp -a "$CHECKPOINT" "$checkpoint_copy"
+      diag_ok=1
+
+      verify_log="$diag_dir/verify.log"
+      ./target/release/aeordb verify -D "$verify_db" > "$verify_log" 2>&1
+      get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
+      corrupt_hash=$(get_field "Corrupt hash")
+      corrupt_header=$(get_field "Corrupt header")
+      stale=$(get_field "Stale entries")
+      missing_kv=$(get_field "Missing entries")
+      missing_children=$(get_field "Missing children")
+      unlisted_files=$(get_field "Unlisted files")
+      broken_snapshots=$(get_field "Broken snapshots")
+      invalid_offsets=$(get_field "Invalid offsets")
+      invalid_voids=$(get_field "Invalid voids")
+      if [ "${corrupt_hash:-0}" = "0" ] && [ "${stale:-0}" = "0" ] \
+        && [ "${missing_kv:-0}" = "0" ] && [ "${missing_children:-0}" = "0" ] \
+        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ] \
+        && [ "${invalid_offsets:-0}" = "0" ] && [ "${invalid_voids:-0}" = "0" ]; then
+        echo "[$(date +%T)] iteration $iteration: verify OK (corrupt_header=${corrupt_header:-0} — expected SIGKILL tail)"
+      else
+        echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
+        echo "  corrupt_hash=${corrupt_hash:-?} stale=${stale:-?} missing_kv=${missing_kv:-?} \
+missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} \
+invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
+        diag_ok=0
+      fi
+
+      probe_log="$diag_dir/probe.log"
+      if ./target/release/aeordb probe -D "$probe_db" --diff-checkpoint "$checkpoint_copy" > "$probe_log" 2>&1; then
+        echo "[$(date +%T)] iteration $iteration: checkpoint diff OK"
+      else
+        echo "[$(date +%T)] iteration $iteration: checkpoint diff reported loss — see $probe_log"
+        diag_ok=0
+      fi
+
+      if [ "$diag_ok" = "1" ]; then
+        rm -rf "$diag_dir"
+      else
+        echo "[$(date +%T)] iteration $iteration: preserved diagnostic copies in $diag_dir"
+      fi
+    done
+
+    echo
+    echo "S3 complete. $iteration kill cycles executed."
+    echo "  Checkpoint: $CHECKPOINT"
     ;;
 
   summarize)
@@ -212,7 +369,7 @@ missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_sna
     ;;
 
   *)
-    echo "Usage: $0 {s1|s2|summarize [metrics.tsv]}"
+    echo "Usage: $0 {s1|s2|s3|summarize [metrics.tsv]}"
     exit 2
     ;;
 esac

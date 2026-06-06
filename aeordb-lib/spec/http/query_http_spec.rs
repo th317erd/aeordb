@@ -516,6 +516,50 @@ async fn test_query_with_string_value() {
 }
 
 #[tokio::test]
+async fn test_query_exact_punctuated_string_uses_stored_values_when_field_has_trigram_index() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/agents", &config);
+
+  ops
+    .store_file_with_indexing(&ctx, "/agents/mr-bennett.json", br#"{"id":"agent-1","name":"Mr. Bennett"}"#, Some("application/json"))
+    .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+  let body = serde_json::json!({
+    "path": "/agents",
+    "where": { "field": "name", "op": "eq", "value": "Mr. Bennett" },
+    "limit": 10
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert_eq!(results.len(), 1, "exact eq must not depend on trigram token scalars: {}", json);
+  assert_eq!(results[0]["path"], "/agents/mr-bennett.json");
+}
+
+#[tokio::test]
 async fn test_query_with_boolean_value() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);

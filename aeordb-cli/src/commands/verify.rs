@@ -226,7 +226,21 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
   println!("KV Index:");
   println!("  KV entries:         {:>8}", report.kv_entries);
   println!("  Stale entries:      {:>8}", report.stale_kv_entries);
+  for stale in &report.stale_kv_details {
+    println!("    - {}", stale);
+  }
   println!("  Missing entries:    {:>8}", report.missing_kv_entries);
+  for missing in &report.missing_kv_details {
+    println!("    - {}", missing);
+  }
+  println!("  Invalid offsets:    {:>8}", report.invalid_kv_offsets.len());
+  for invalid in &report.invalid_kv_offsets {
+    println!("    - {}", invalid);
+  }
+  println!("  Invalid voids:      {:>8}", report.invalid_hot_tail_voids.len());
+  for invalid in &report.invalid_hot_tail_voids {
+    println!("    - {}", invalid);
+  }
   println!();
 
   println!("Snapshot Integrity:");
@@ -268,6 +282,14 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
       if report.stale_kv_entries > 0 {
         println!("  KV index has {} stale entries pointing to outdated data.", report.stale_kv_entries);
         println!("  Repair will rebuild the KV index from the WAL.");
+      }
+      if !report.invalid_kv_offsets.is_empty() {
+        println!("  {} KV entries point outside the current WAL region.", report.invalid_kv_offsets.len());
+        println!("  Repair should rebuild the KV index from the WAL.");
+      }
+      if !report.invalid_hot_tail_voids.is_empty() {
+        println!("  {} hot-tail void records point outside the current WAL region.", report.invalid_hot_tail_voids.len());
+        println!("  These voids will be ignored by newer runtimes and should be removed by repair.");
       }
       if report.corrupt_hash > 0 {
         println!("  {} entries have corrupt content (hash mismatch).", report.corrupt_hash);

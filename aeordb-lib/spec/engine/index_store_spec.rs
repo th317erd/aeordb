@@ -1,6 +1,6 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_store::{FieldIndex, IndexManager};
-use aeordb::engine::scalar_converter::{HashConverter, U64Converter, StringConverter};
+use aeordb::engine::scalar_converter::{HashConverter, PhoneticConverter, StringConverter, TrigramConverter, U64Converter};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -21,6 +21,19 @@ fn test_create_empty_index() {
   assert_eq!(index.field_name, "age");
   assert_eq!(index.len(), 0);
   assert!(index.is_empty());
+}
+
+#[test]
+fn test_scalar_exact_lookup_capability_excludes_tokenizing_indexes() {
+  let string_index = FieldIndex::new("name".to_string(), Box::new(StringConverter::new(256)));
+  let u64_index = FieldIndex::new("age".to_string(), Box::new(U64Converter::with_range(0, 200)));
+  let trigram_index = FieldIndex::new("name".to_string(), Box::new(TrigramConverter));
+  let phonetic_index = FieldIndex::new("name".to_string(), Box::new(PhoneticConverter::soundex()));
+
+  assert!(string_index.supports_scalar_exact_lookup());
+  assert!(u64_index.supports_scalar_exact_lookup());
+  assert!(!trigram_index.supports_scalar_exact_lookup());
+  assert!(!phonetic_index.supports_scalar_exact_lookup());
 }
 
 #[test]

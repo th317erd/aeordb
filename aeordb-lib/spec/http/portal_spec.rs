@@ -243,6 +243,7 @@ async fn test_stats_has_enhanced_structure() {
   // Health fields
   let health = &json["health"];
   assert!(health.get("disk_usage_percent").is_some(), "health.disk_usage_percent missing");
+  assert!(health.get("kv_fill_ratio").is_some(), "health.kv_fill_ratio missing");
   assert!(health.get("dedup_hit_rate").is_some(), "health.dedup_hit_rate missing");
   assert!(health.get("write_buffer_depth").is_some(), "health.write_buffer_depth missing");
 }
@@ -294,7 +295,7 @@ async fn test_stats_identity_chunk_size_is_default() {
 
 #[tokio::test]
 async fn test_stats_counts_zero_on_fresh_db() {
-  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
   let request = Request::builder().method("GET").uri("/system/stats").header("authorization", &auth).body(Body::empty()).unwrap();
@@ -303,10 +304,10 @@ async fn test_stats_counts_zero_on_fresh_db() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
-  let chunks = json["counts"]["chunks"].as_u64().unwrap_or(0);
-  // A fresh database may have a small number of entries from root directory
-  // initialization and system bootstrap. Verify the count is reasonable.
-  assert!(chunks <= 5, "Fresh db should have very few chunks, got {}", chunks);
+  let snapshot = engine.counters().snapshot();
+  assert_eq!(json["counts"]["files"].as_u64().unwrap(), snapshot.files);
+  assert_eq!(json["counts"]["directories"].as_u64().unwrap(), snapshot.directories);
+  assert_eq!(json["counts"]["chunks"].as_u64().unwrap(), snapshot.chunks);
 }
 
 #[tokio::test]

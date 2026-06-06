@@ -105,6 +105,7 @@ impl AppendWriter {
     // Carry the current sequence forward — write_header_to_inactive_slot
     // increments it for us.
     new_header.sequence = self.file_header.sequence;
+    new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
 
     write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
 
@@ -132,7 +133,7 @@ impl AppendWriter {
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = self.next_entry_timestamp();
 
     let header = EntryHeader {
       entry_version: CURRENT_ENTRY_VERSION,
@@ -163,7 +164,6 @@ impl AppendWriter {
 
     self.current_offset = entry_offset + total_length as u64;
     self.file_header.entry_count += 1;
-    self.file_header.updated_at = now;
 
     Ok((entry_offset, total_length))
   }
@@ -231,7 +231,7 @@ impl AppendWriter {
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = self.next_entry_timestamp();
 
     let header = EntryHeader {
       entry_version: CURRENT_ENTRY_VERSION,
@@ -254,6 +254,13 @@ impl AppendWriter {
     self.file.write_all(value)?;
 
     Ok(total_length)
+  }
+
+  fn next_entry_timestamp(&mut self) -> i64 {
+    let now = chrono::Utc::now().timestamp_millis();
+    let next = if now <= self.file_header.updated_at { self.file_header.updated_at.saturating_add(1) } else { now };
+    self.file_header.updated_at = next;
+    next
   }
 
   /// Sync WAL data to disk. Uses sync_data() (skips metadata fsync).
@@ -502,6 +509,17 @@ impl AppendWriter {
     &self.file_header
   }
 
+  /// Update the in-memory header without writing either on-disk header slot.
+  ///
+  /// Transactional callers use this to make the current engine instance see
+  /// the new HEAD immediately while keeping crash recovery pinned to the last
+  /// committed on-disk header until the outer transaction commits.
+  pub fn set_header_in_memory(&mut self, header: FileHeader) {
+    let mut header = header;
+    header.updated_at = header.updated_at.max(self.file_header.updated_at);
+    self.file_header = header;
+  }
+
   pub fn file_size(&self) -> u64 {
     self.current_offset
   }
@@ -514,6 +532,7 @@ impl AppendWriter {
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
     let mut new_header = header.clone();
     new_header.sequence = self.file_header.sequence;
+    new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
     write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
     // sync_all for the full-durability semantics the old API promised.
     self.file.sync_all()?;

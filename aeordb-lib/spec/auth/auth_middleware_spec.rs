@@ -181,8 +181,8 @@ async fn test_auth_token_endpoint_exempt_from_auth() {
 
   let json = body_json(response.into_body()).await;
   assert!(
-    json["error"].as_str().unwrap().contains("Invalid API key"),
-    "Expected error to contain 'Invalid API key', got: {}",
+    json["error"].as_str().unwrap().contains("API key didn't work"),
+    "Expected error to contain current invalid-key message, got: {}",
     json["error"]
   );
 }

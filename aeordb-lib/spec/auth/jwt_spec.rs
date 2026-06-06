@@ -108,7 +108,7 @@ fn test_jwt_contains_correct_claims() {
 
 #[test]
 fn test_jwt_default_expiry() {
-  assert_eq!(DEFAULT_EXPIRY_SECONDS, 3600);
+  assert_eq!(DEFAULT_EXPIRY_SECONDS, 7 * 24 * 3600);
 }
 
 #[test]

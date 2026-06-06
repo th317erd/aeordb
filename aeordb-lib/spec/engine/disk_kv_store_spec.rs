@@ -69,7 +69,8 @@ fn open_test_kv_at_stage(dir: &std::path::Path, stage: usize) -> DiskKVStore {
   let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
   let kv_block_offset = 256u64;
   let hot_tail_offset = kv_block_offset + block_size;
-  DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, stage, vec![]).unwrap()
+  DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, stage, vec![], vec![], DiskKVStore::CURRENT_KV_BLOCK_VERSION)
+    .unwrap()
 }
 
 // ============================================================================

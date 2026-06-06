@@ -917,7 +917,7 @@ fn test_stress_snapshot_at_scale() {
 
 // ─── 11. Query with many results ─────────────────────────────────────────────
 //
-// Stores 2000 indexed files, queries that match 1800 results (tag=common),
+// Stores indexed files, queries that match many results (tag=common),
 // tests limit capping, range queries, and rare-tag filtering.
 
 #[test]
@@ -942,9 +942,16 @@ fn test_stress_query_many_results() {
     )
     .unwrap();
 
-  // Store 2000 files — most with tag "common", every 10th with "rare"
+  // Store enough files to exercise high-result query paths while keeping the
+  // default debug-mode test suite bounded. Larger crash/write stress lives in
+  // scripts/soak.sh S3.
+  let file_count = 300u64;
+  let rare_count = (file_count + 9) / 10;
+  let common_count = file_count - rare_count;
+
+  // Most files have tag "common", every 10th has "rare".
   let start = std::time::Instant::now();
-  for i in 0..2000u64 {
+  for i in 0..file_count {
     let tag = if i % 10 == 0 { "rare" } else { "common" };
     let data = serde_json::json!({"score": i, "tag": tag});
     ops
@@ -956,7 +963,7 @@ fn test_stress_query_many_results() {
       )
       .unwrap();
   }
-  println!("Stored 2000 indexed files in {:.1}s", start.elapsed().as_secs_f64(),);
+  println!("Stored {} indexed files in {:.1}s", file_count, start.elapsed().as_secs_f64(),);
 
   let qe = QueryEngine::new(&engine);
 
@@ -968,32 +975,32 @@ fn test_stress_query_many_results() {
   println!("tag=common (limit 50): {} results in {:.1}ms", results.len(), start.elapsed().as_millis(),);
   assert_eq!(results.len(), 50, "should return 50 (limited)");
 
-  // Query tag=common with large limit — should return all 1800
+  // Query tag=common with large limit — should return all common items.
   let node = QueryNode::Field(FieldQuery { field_name: "tag".to_string(), operation: QueryOp::Eq(b"common".to_vec()) });
   let start = std::time::Instant::now();
   let query = make_query("/many", node, Some(5000));
   let results = qe.execute(&query).unwrap();
   println!("tag=common (limit 5000): {} results in {:.1}ms", results.len(), start.elapsed().as_millis(),);
-  assert_eq!(results.len(), 1800, "should return 1800 common items");
+  assert_eq!(results.len() as u64, common_count, "should return all common items");
 
-  // Range query — score between 500 and 1500 (1001 results)
+  // Range query — score between 100 and 250 (151 results).
   let node = QueryNode::Field(FieldQuery {
     field_name: "score".to_string(),
-    operation: QueryOp::Between(500u64.to_be_bytes().to_vec(), 1500u64.to_be_bytes().to_vec()),
+    operation: QueryOp::Between(100u64.to_be_bytes().to_vec(), 250u64.to_be_bytes().to_vec()),
   });
   let start = std::time::Instant::now();
   let query = make_query("/many", node, Some(5000));
   let results = qe.execute(&query).unwrap();
-  println!("score 500-1500 (limit 5000): {} results in {:.1}ms", results.len(), start.elapsed().as_millis(),);
-  assert_eq!(results.len(), 1001, "should return 1001 items in range");
+  println!("score 100-250 (limit 5000): {} results in {:.1}ms", results.len(), start.elapsed().as_millis(),);
+  assert_eq!(results.len(), 151, "should return 151 items in range");
 
-  // Query tag=rare — should return 200
+  // Query tag=rare — should return every 10th file.
   let node = QueryNode::Field(FieldQuery { field_name: "tag".to_string(), operation: QueryOp::Eq(b"rare".to_vec()) });
   let start = std::time::Instant::now();
   let query = make_query("/many", node, Some(5000));
   let results = qe.execute(&query).unwrap();
   println!("tag=rare: {} results in {:.1}ms", results.len(), start.elapsed().as_millis(),);
-  assert_eq!(results.len(), 200, "should return 200 rare items");
+  assert_eq!(results.len() as u64, rare_count, "should return every 10th rare item");
 }
 
 // ─── 12. WASM plugin under load ──────────────────────────────────────────────

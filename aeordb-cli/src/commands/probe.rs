@@ -1,7 +1,8 @@
+use std::fs::File;
 use std::time::Instant;
 
-use aeordb::engine::{DirectoryOps, EngineFileStream, StorageEngine};
 use aeordb::engine::file_record::FileRecord;
+use aeordb::engine::{DirectoryOps, EngineFileStream, EntryType, StorageEngine};
 
 pub struct ProbeConfig<'a> {
   pub database: &'a str,
@@ -15,6 +16,7 @@ pub struct ProbeConfig<'a> {
   pub wal_dump: bool,
   pub wal_tail_bytes: Option<usize>,
   pub diff_checkpoint: Option<&'a str>,
+  pub path_history: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +126,10 @@ pub fn run(config: ProbeConfig<'_>) {
       );
     }
     return;
+  }
+
+  if config.path_history {
+    return print_path_history(&engine, &config);
   }
 
   if config.http_path.is_some() || probe_path.is_some() {
@@ -294,6 +300,144 @@ fn print_path_probe(engine: &StorageEngine, ops: &DirectoryOps<'_>, config: &Pro
   print_file_record_diagnostics(engine, ops, &normalized, config);
   print_parent_listing(engine, ops, &normalized);
   print_snapshot_records(engine);
+}
+
+fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
+  let Some(path) = config.path else {
+    eprintln!("--path-history requires --path");
+    std::process::exit(2);
+  };
+
+  let normalized = aeordb::engine::path_utils::normalize_path(path);
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = aeordb::engine::directory_path_hash(&normalized, &algo).unwrap();
+  let file_key = aeordb::engine::file_path_hash(&normalized, &algo).unwrap();
+
+  println!("=== Path history ===");
+  println!("Input path:    {}", path);
+  println!("DB path:       {}", normalized);
+  println!("dir path key:  {}", hex::encode(&dir_key));
+  println!("file path key: {}", hex::encode(&file_key));
+  println!();
+  println!("--- Current KV ---");
+  println!("dir path key:  {}", kv_summary(engine, &dir_key));
+  println!("file path key: {}", kv_summary(engine, &file_key));
+  println!();
+  println!("--- WAL matches ---");
+  let hot_tail_voids = load_hot_tail_voids(config.database);
+
+  let writer = match engine.writer_read_lock() {
+    Ok(writer) => writer,
+    Err(error) => {
+      eprintln!("writer lock: {}", error);
+      std::process::exit(1);
+    }
+  };
+  let mut scanner = match writer.scan_entries_reporting() {
+    Ok(scanner) => scanner,
+    Err(error) => {
+      eprintln!("scan entries: {}", error);
+      std::process::exit(1);
+    }
+  };
+
+  let mut matches = 0usize;
+  for result in scanner.by_ref() {
+    let scanned = match result {
+      Ok(scanned) => scanned,
+      Err(_) => continue,
+    };
+
+    let mut reasons = Vec::new();
+    if scanned.key == dir_key {
+      reasons.push("dir_path_key");
+    }
+    if scanned.key == file_key {
+      reasons.push("file_path_key");
+    }
+
+    let mut file_record_summary = None;
+    if scanned.header.entry_type == EntryType::FileRecord {
+      if let Ok(record) = FileRecord::deserialize(&scanned.value, hash_length, scanned.header.entry_version) {
+        if record.path == normalized {
+          reasons.push("file_record_value_path");
+          file_record_summary = Some(format!(
+            " path={} size={} chunks={} updated_at={}",
+            record.path,
+            record.total_size,
+            record.chunk_hashes.len(),
+            format_timestamp_millis(record.updated_at)
+          ));
+        }
+      }
+    }
+
+    if reasons.is_empty() {
+      continue;
+    }
+
+    matches += 1;
+    let live = match engine.get_kv_entry(&scanned.key) {
+      Some(entry) if entry.offset == scanned.offset && entry.total_length == scanned.header.total_length => "LIVE exact".to_string(),
+      Some(entry) => format!("not live; current offset={} len={} deleted={}", entry.offset, entry.total_length, entry.is_deleted()),
+      None => "not live; key missing from KV".to_string(),
+    };
+    let value_summary = if scanned.value.len() == hash_length {
+      format!(" hard-link={}", hex::encode(&scanned.value))
+    } else {
+      file_record_summary.unwrap_or_default()
+    };
+    let void_summary = match first_overlapping_void(scanned.offset, scanned.header.total_length, &hot_tail_voids) {
+      Some((offset, size)) => format!(" voided_by={}..{}", offset, offset.saturating_add(size as u64)),
+      None => String::new(),
+    };
+    println!(
+      "offset={} len={} ts={} type={:?} key={} reasons={} status={}{}{}",
+      scanned.offset,
+      scanned.header.total_length,
+      format_timestamp_millis(scanned.header.timestamp),
+      scanned.header.entry_type,
+      hex::encode(&scanned.key[..8.min(scanned.key.len())]),
+      reasons.join(","),
+      live,
+      value_summary,
+      void_summary,
+    );
+  }
+
+  println!();
+  println!("matches: {}", matches);
+  if !scanner.skipped_regions.is_empty() {
+    println!("skipped regions: {}", scanner.skipped_regions.len());
+  }
+}
+
+fn load_hot_tail_voids(database: &str) -> Vec<aeordb::engine::hot_tail::VoidRecord> {
+  let mut file = match File::open(database) {
+    Ok(file) => file,
+    Err(_) => return Vec::new(),
+  };
+  let Ok((header, _slot)) = aeordb::engine::file_header::read_active_header(&mut file) else {
+    return Vec::new();
+  };
+  if header.hot_tail_offset == 0 {
+    return Vec::new();
+  }
+  aeordb::engine::hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length())
+    .map(|payload| payload.voids)
+    .unwrap_or_default()
+}
+
+fn first_overlapping_void(offset: u64, length: u32, voids: &[aeordb::engine::hot_tail::VoidRecord]) -> Option<(u64, u32)> {
+  let end = offset.saturating_add(length as u64);
+  voids
+    .iter()
+    .find(|void| {
+      let void_end = void.offset.saturating_add(void.size as u64);
+      offset < void_end && void.offset < end
+    })
+    .map(|void| (void.offset, void.size))
 }
 
 fn print_dir_entry_diagnostics(engine: &StorageEngine, dir_key: &[u8], hash_length: usize) {
@@ -668,11 +812,16 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
   for line in BufReader::new(file).lines().map_while(Result::ok) {
     lines += 1;
     if let Some(rest) = line.strip_prefix("+\t") {
-      committed.insert(rest.to_string());
+      let path = rest.split_once('\t').map(|(path, _)| path).unwrap_or(rest);
+      committed.insert(path.to_string());
       adds += 1;
     } else if let Some(rest) = line.strip_prefix("-\t") {
       committed.remove(rest);
       dels += 1;
+    } else if let Some((path, _body)) = line.split_once('\t') {
+      // crash-soak-worker records committed content as path<TAB>body.
+      committed.insert(path.to_string());
+      adds += 1;
     }
   }
 

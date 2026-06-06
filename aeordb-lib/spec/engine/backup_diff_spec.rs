@@ -348,7 +348,7 @@ fn test_patch_writes_deletion_records() {
   // Test that DeletionRecord serialize/deserialize works correctly
   let record = DeletionRecord::new("/data/remove.txt".to_string(), Some("patch-deletion".to_string()));
   let serialized = record.serialize();
-  let deserialized = DeletionRecord::deserialize(&serialized).unwrap();
+  let deserialized = DeletionRecord::deserialize(&serialized, 0).unwrap();
   assert_eq!(deserialized.path, "/data/remove.txt");
   assert_eq!(deserialized.reason, Some("patch-deletion".to_string()));
 }

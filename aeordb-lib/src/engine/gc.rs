@@ -546,8 +546,18 @@ pub fn gc_sweep(engine: &StorageEngine, live: &HashSet<Vec<u8>>, dry_run: bool) 
   for (hash, offset, entry_size) in &garbage_candidates {
     match engine.get_kv_entry(hash) {
       Some(fresh) if fresh.offset == *offset => {
-        verified_hashes.push(hash.clone());
-        freed_regions.push((*offset, *entry_size));
+        if engine.is_current_reusable_range(*offset, *entry_size)? {
+          verified_hashes.push(hash.clone());
+          freed_regions.push((*offset, *entry_size));
+        } else {
+          tracing::warn!(
+            offset = *offset,
+            entry_size = *entry_size,
+            "GC candidate points outside current WAL region; skipping void registration"
+          );
+          garbage_count -= 1;
+          reclaimed_bytes -= *entry_size as u64;
+        }
       }
       _ => {
         // Re-created since mark — skip and rollback the size accounting.

@@ -44,6 +44,7 @@ pub fn spawn_metrics_pulse(
       let kv = engine.kv_snapshot.load();
       let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
       let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
+      let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
 
       // Get the db file size from disk metadata.
       let disk_total = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -73,6 +74,7 @@ pub fn spawn_metrics_pulse(
               "void_space": snapshot.void_space,
               "dedup_savings": dedup_savings,
               "disk_total": disk_total,
+              "kv_file": kv_file,
           },
           "throughput": {
               "writes_per_sec": {
@@ -103,6 +105,7 @@ pub fn spawn_metrics_pulse(
           "health": {
               "write_buffer_depth": snapshot.write_buffer_depth,
               "dedup_hit_rate": dedup_hit_rate,
+              "kv_fill_ratio": kv_fill_ratio,
               "disk_usage_percent": disk_health.usage_percent,
           },
       });

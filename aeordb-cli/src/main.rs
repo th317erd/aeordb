@@ -226,6 +226,9 @@ enum Commands {
     /// Diff a checkpoint TSV against DB file records.
     #[arg(long)]
     diff_checkpoint: Option<String>,
+    /// Print WAL history for the probed path's file and directory keys.
+    #[arg(long)]
+    path_history: bool,
   },
 }
 
@@ -362,6 +365,7 @@ async fn main() {
       wal_dump,
       wal_tail_bytes,
       diff_checkpoint,
+      path_history,
     } => {
       commands::probe::run(commands::probe::ProbeConfig {
         database: &database,
@@ -375,6 +379,7 @@ async fn main() {
         wal_dump,
         wal_tail_bytes,
         diff_checkpoint: diff_checkpoint.as_deref(),
+        path_history,
       });
     }
   }

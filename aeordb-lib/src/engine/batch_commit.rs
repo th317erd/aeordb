@@ -8,7 +8,7 @@ use crate::engine::content_type::detect_content_type;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::directory_ops::{
   chunk_content_hash, directory_content_hash, directory_path_hash, file_content_hash, file_identity_hash, file_path_hash, is_system_path,
-  DEFAULT_CHUNK_SIZE,
+  DirectoryOps, DEFAULT_CHUNK_SIZE,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_header::FLAG_SYSTEM;
@@ -444,13 +444,18 @@ fn update_directory(
 
   // Follow hard links: dir_key may contain a 32-byte content hash pointer
   let existing = {
-    let raw = engine.get_entry(&dir_key)?;
-    match raw {
-      Some((_header, _key, value)) if value.len() == hash_length => {
-        // Hard link — follow to actual content
-        engine.get_entry(&value)?
+    let ops = DirectoryOps::new(engine);
+    if let Some((header, value)) = ops.recover_directory_data_if_stale(dir_path, &dir_key)? {
+      Some((header, dir_key.clone(), value))
+    } else {
+      let raw = engine.get_entry(&dir_key)?;
+      match raw {
+        Some((_header, _key, value)) if value.len() == hash_length => {
+          // Hard link — follow to actual content
+          engine.get_entry(&value)?
+        }
+        other => other,
       }
-      other => other,
     }
   };
 
@@ -503,8 +508,12 @@ fn update_directory(
     }
   };
 
-  // Store at path-based key
-  engine.store_entry(EntryType::DirectoryIndex, &dir_key, &dir_value)?;
+  // Store a path-key hard link to the content entry, matching
+  // DirectoryOps::update_parent_directories. If a process dies after this
+  // path key lands but before HEAD advances, list_directory can detect the
+  // divergence and serve the canonical HEAD tree instead of stale directory
+  // bytes.
+  engine.store_entry(EntryType::DirectoryIndex, &dir_key, &content_key)?;
 
   Ok((content_key, dir_value.len() as u64))
 }

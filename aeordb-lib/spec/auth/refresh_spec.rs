@@ -94,7 +94,7 @@ async fn test_auth_token_endpoint_returns_refresh_token() {
     .method("POST")
     .uri("/auth/token")
     .header("content-type", "application/json")
-    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, plaintext_key)))
+    .body(Body::from(format!(r#"{{"api_key":"{}","include_refresh":true}}"#, plaintext_key)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
@@ -105,6 +105,27 @@ async fn test_auth_token_endpoint_returns_refresh_token() {
   assert!(json["refresh_token"].is_string(), "should contain a refresh token");
   let refresh_token = json["refresh_token"].as_str().unwrap();
   assert!(refresh_token.starts_with("aeor_r_"), "refresh token should have correct prefix");
+}
+
+#[tokio::test]
+async fn test_auth_token_endpoint_omits_refresh_token_by_default() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let plaintext_key = seed_api_key(&engine);
+
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/auth/token")
+    .header("content-type", "application/json")
+    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, plaintext_key)))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert!(json["token"].is_string(), "should contain a JWT");
+  assert!(json.get("refresh_token").is_none(), "refresh token should be opt-in");
 }
 
 #[tokio::test]
@@ -300,7 +321,7 @@ async fn test_full_refresh_flow_from_api_key() {
     .method("POST")
     .uri("/auth/token")
     .header("content-type", "application/json")
-    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, plaintext_key)))
+    .body(Body::from(format!(r#"{{"api_key":"{}","include_refresh":true}}"#, plaintext_key)))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();

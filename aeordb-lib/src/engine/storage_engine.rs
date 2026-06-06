@@ -17,6 +17,7 @@ use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::hot_tail::VoidRecord;
 use crate::engine::kv_snapshot::ReadSnapshot;
 use serde::Serialize;
 
@@ -67,6 +68,34 @@ impl WriteBatch {
 
 /// Result type for entry retrieval: (header, key, value).
 pub type EntryData = (EntryHeader, Vec<u8>, Vec<u8>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RebuildOrder {
+  timestamp: i64,
+  offset: u64,
+}
+
+impl RebuildOrder {
+  fn is_after(self, other: Self) -> bool {
+    (self.timestamp, self.offset) > (other.timestamp, other.offset)
+  }
+}
+
+#[derive(Debug, Clone)]
+struct RebuildKvRecord {
+  type_flags: u8,
+  hash: Vec<u8>,
+  offset: u64,
+  value_length: u32,
+  total_length: u32,
+  order: RebuildOrder,
+}
+
+impl RebuildKvRecord {
+  fn to_kv_entry(&self) -> KVEntry {
+    KVEntry { type_flags: self.type_flags, hash: self.hash.clone(), offset: self.offset, total_length: self.total_length }
+  }
+}
 
 /// Aggregate statistics about the database, returned by [`StorageEngine::stats`].
 #[derive(Debug, Clone, Serialize)]
@@ -120,11 +149,9 @@ pub struct StorageEngine {
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   pub(crate) kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
-  // The VoidManager tracks reclaimable space for future void-reuse optimization.
-  // Currently, find_void is not called by any production code -- new entries always
-  // append. When void reuse is implemented, store_entry will check find_void
-  // before appending, writing into reclaimed space to reduce file growth.
-  // TODO: Wire into store_entry/delete_entry to reclaim void space before appending.
+  // The VoidManager tracks reclaimable WAL space that can be reused by new
+  // writes. Every void must remain outside the file header, KV block, and hot
+  // tail; violating that invariant can overwrite storage metadata.
   #[allow(dead_code)]
   pub(crate) void_manager: RwLock<VoidManager>,
   hash_algo: HashAlgorithm,
@@ -156,6 +183,116 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+  pub(crate) fn valid_reusable_range(offset: u64, size: u32, wal_start: u64, wal_end: u64) -> bool {
+    if size == 0 || wal_end < wal_start || offset < wal_start {
+      return false;
+    }
+    let Some(end) = offset.checked_add(size as u64) else {
+      return false;
+    };
+    end <= wal_end
+  }
+
+  fn writer_wal_bounds(writer: &AppendWriter) -> (u64, u64) {
+    let header = writer.file_header();
+    let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
+    let wal_end = writer.current_offset();
+    (wal_start, wal_end)
+  }
+
+  pub(crate) fn is_current_reusable_range(&self, offset: u64, size: u32) -> EngineResult<bool> {
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    Ok(Self::valid_reusable_range(offset, size, wal_start, wal_end))
+  }
+
+  fn validate_kv_entry_offset(writer: &AppendWriter, kv_entry: &KVEntry, hash: &[u8], context: &str) -> EngineResult<()> {
+    let (wal_start, wal_end) = Self::writer_wal_bounds(writer);
+    if Self::valid_reusable_range(kv_entry.offset, kv_entry.total_length, wal_start, wal_end) {
+      return Ok(());
+    }
+
+    tracing::warn!(
+      context,
+      offset = kv_entry.offset,
+      total_length = kv_entry.total_length,
+      hash = %hex::encode(&hash[..8.min(hash.len())]),
+      wal_start,
+      wal_end,
+      "KV entry points outside current WAL region"
+    );
+    Err(EngineError::CorruptEntry {
+      offset: kv_entry.offset,
+      reason: format!("KV entry points outside current WAL region {}..{} for hash {}", wal_start, wal_end, hex::encode(hash)),
+    })
+  }
+
+  fn filter_voids_for_bounds(voids: impl IntoIterator<Item = VoidRecord>, wal_start: u64, wal_end: u64, context: &str) -> Vec<VoidRecord> {
+    let mut kept = Vec::new();
+    let mut dropped = 0usize;
+    for void in voids {
+      if Self::valid_reusable_range(void.offset, void.size, wal_start, wal_end) {
+        kept.push(void);
+      } else {
+        dropped += 1;
+      }
+    }
+    if dropped > 0 {
+      tracing::warn!(context, dropped, wal_start, wal_end, "Dropped invalid void records outside the current WAL region");
+    }
+    kept
+  }
+
+  fn adjust_voids_for_expansion(
+    voids: impl IntoIterator<Item = VoidRecord>,
+    old_kv_end: u64,
+    relocated_end: u64,
+    offset_delta: i64,
+    new_wal_start: u64,
+    new_wal_end: u64,
+  ) -> Vec<VoidRecord> {
+    let mut adjusted = Vec::new();
+    let mut dropped = 0usize;
+
+    for mut void in voids {
+      let Some(end) = void.offset.checked_add(void.size as u64) else {
+        dropped += 1;
+        continue;
+      };
+
+      if void.offset >= old_kv_end && end <= relocated_end {
+        let shifted = (void.offset as i128) + (offset_delta as i128);
+        if shifted < 0 || shifted > u64::MAX as i128 {
+          dropped += 1;
+          continue;
+        }
+        void.offset = shifted as u64;
+      } else if void.offset < new_wal_start {
+        dropped += 1;
+        continue;
+      }
+
+      if Self::valid_reusable_range(void.offset, void.size, new_wal_start, new_wal_end) {
+        adjusted.push(void);
+      } else {
+        dropped += 1;
+      }
+    }
+
+    if dropped > 0 {
+      tracing::warn!(
+        dropped,
+        old_kv_end,
+        relocated_end,
+        new_wal_start,
+        new_wal_end,
+        "Dropped invalid void records while adjusting for KV expansion"
+      );
+    }
+
+    adjusted
+  }
+
   /// Acquire an exclusive advisory file lock. Returns the locked file handle
   /// which must be kept alive for the duration of the engine's lifetime.
   /// If another process already holds the lock, returns an error immediately.
@@ -351,6 +488,8 @@ impl StorageEngine {
     };
     let hot_entries = hot_payload.writes.clone();
     let hot_voids = hot_payload.voids;
+    let wal_start = file_header.kv_block_offset.saturating_add(file_header.kv_block_length);
+    let hot_voids = Self::filter_voids_for_bounds(hot_voids, wal_start, hot_tail_offset, "startup hot-tail load");
 
     // Populate void_manager from the hot tail's void section (clean startup).
     // On dirty startup hot_voids is empty; we re-derive via gap-scan later.
@@ -362,8 +501,16 @@ impl StorageEngine {
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-      let kv =
-        DiskKVStore::open(kv_file, hash_algo, kv_block_offset, hot_tail_offset, kv_block_stage, hot_entries, file_header.kv_block_version)?;
+      let kv = DiskKVStore::open(
+        kv_file,
+        hash_algo,
+        kv_block_offset,
+        hot_tail_offset,
+        kv_block_stage,
+        hot_entries,
+        hot_voids.clone(),
+        file_header.kv_block_version,
+      )?;
       // If any bucket page failed CRC on open, the KV index is unreliable
       // for the buckets involved — trigger dirty startup below so the WAL
       // scan is the source of truth.
@@ -389,9 +536,10 @@ impl StorageEngine {
       let mut kv = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
 
       // First pass: rebuild KV store from entry headers, collecting deletion records.
-      // Each deletion record stores (path, scan_offset) so we can avoid re-deleting
-      // files that were recreated after the deletion.
-      let mut deletion_records: Vec<(String, u64)> = Vec::new();
+      // Entry offsets are not chronology once GC starts reusing voids, so
+      // duplicate mutable keys are resolved by entry timestamp before flush.
+      let mut deletion_records: Vec<(String, RebuildOrder)> = Vec::new();
+      let mut rebuild_records = Vec::new();
       let scanner = writer.scan_entries()?;
       for scanned_result in scanner {
         let scanned = match scanned_result {
@@ -404,24 +552,26 @@ impl StorageEngine {
         // Collect deletion records. Voids are recovered via gap-scan
         // (recover_voids_via_gap_scan) on dirty startup — the WAL void
         // entries we used to register here are not the source of truth.
+        let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
         if scanned.header.entry_type == EntryType::DeletionRecord {
           if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version) {
-            deletion_records.push((record.path, scanned.offset));
+            deletion_records.push((record.path, order));
           }
         }
         let kv_type = scanned.header.entry_type.to_kv_type();
 
-        let entry =
-          KVEntry { type_flags: kv_type, hash: scanned.key.clone(), offset: scanned.offset, total_length: scanned.header.total_length };
-        kv.insert(entry)?;
+        rebuild_records.push(RebuildKvRecord {
+          type_flags: kv_type,
+          hash: scanned.key.clone(),
+          offset: scanned.offset,
+          value_length: scanned.header.value_length,
+          total_length: scanned.header.total_length,
+          order,
+        });
       }
 
-      // Flush write buffer to disk before deletion replay
-      kv.flush()?;
-
-      Self::replay_deletion_records(&mut kv, hash_algo, &deletion_records)?;
-
-      // Flush any deletion flag updates
+      let resolved = Self::resolve_rebuild_records(rebuild_records, hash_algo, &deletion_records)?;
+      kv.bulk_insert(&resolved);
       kv.flush()?;
 
       kv
@@ -492,31 +642,49 @@ impl StorageEngine {
   /// first entry.
   pub(crate) fn recover_voids_via_gap_scan(&self) -> EngineResult<()> {
     // WAL begins immediately after the KV block.
-    let wal_start: u64 = {
+    let (wal_start, wal_end): (u64, u64) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      let hdr = writer.file_header();
-      hdr.kv_block_offset + hdr.kv_block_length
+      Self::writer_wal_bounds(&writer)
     };
 
     // Collect (offset, total_length) of all live (non-deleted) entries.
     let mut ranges: Vec<(u64, u32)> = {
       let snapshot = self.kv_snapshot.load();
       let entries = snapshot.iter_all()?;
-      entries.iter().filter(|e| !e.is_deleted()).map(|e| (e.offset, e.total_length)).collect()
+      entries
+        .iter()
+        .filter(|e| !e.is_deleted())
+        .filter_map(|e| {
+          if Self::valid_reusable_range(e.offset, e.total_length, wal_start, wal_end) {
+            Some((e.offset, e.total_length))
+          } else {
+            tracing::warn!(
+              offset = e.offset,
+              total_length = e.total_length,
+              wal_start,
+              wal_end,
+              "Skipping live KV entry outside current WAL region during void gap-scan"
+            );
+            None
+          }
+        })
+        .collect()
     };
     ranges.sort_by_key(|(offset, _)| *offset);
 
     let mut vm = self.void_manager.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
 
+    let mut recovered = Vec::new();
     let mut cursor: u64 = wal_start;
     for (offset, total_length) in &ranges {
       if *offset > cursor {
         let gap_size = *offset - cursor;
         let gap_size_u32 = u32::try_from(gap_size).unwrap_or(u32::MAX);
-        vm.register_void(cursor, gap_size_u32);
+        recovered.push(VoidRecord { offset: cursor, size: gap_size_u32 });
       }
-      cursor = offset + *total_length as u64;
+      cursor = offset.saturating_add(*total_length as u64).max(cursor);
     }
+    vm.replace_all(recovered.into_iter().map(|void| (void.offset, void.size)));
 
     tracing::info!(
       void_count = vm.void_count(),
@@ -532,8 +700,27 @@ impl StorageEngine {
   /// new voids so the void state is durable without waiting for the normal
   /// threshold trigger.
   pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
-    let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-    kv.force_flush_hot_buffer()
+    {
+      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      writer.sync()?;
+    }
+
+    let (hot_tail_offset, entry_count, in_transaction) = {
+      let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      kv.force_flush_hot_buffer()?;
+      (kv.hot_tail_offset(), kv.len() as u64, kv.transaction_depth > 0)
+    };
+
+    if in_transaction {
+      return Ok(());
+    }
+
+    let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    let mut header = writer.file_header().clone();
+    header.hot_tail_offset = hot_tail_offset;
+    header.entry_count = entry_count;
+    writer.update_header(&header)?;
+    Ok(())
   }
 
   /// Mirror VoidManager state into the DiskKVStore's pending_voids so the
@@ -684,8 +871,28 @@ impl StorageEngine {
     // `value` holds the compressed payload, so compute_total_length gives
     // the right disk size.
     let needed = crate::engine::entry_header::EntryHeader::compute_total_length(self.hash_algo, key.len(), value.len())?;
-    let void_slot = if let Ok(mut vm) = self.void_manager.write() { vm.find_void(needed) } else { None };
-    let voids_changed_via_consume = void_slot.is_some();
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    let mut voids_changed_via_consume = false;
+    let void_slot = if Self::can_reuse_void_for_entry(entry_type) {
+      if let Ok(mut vm) = self.void_manager.write() {
+        loop {
+          match vm.find_void(needed) {
+            Some((void_offset, void_size)) => {
+              voids_changed_via_consume = true;
+              if Self::valid_reusable_range(void_offset, void_size, wal_start, wal_end) {
+                break Some((void_offset, void_size));
+              }
+              tracing::warn!(void_offset, void_size, wal_start, wal_end, "Discarding invalid void outside current WAL region before reuse");
+            }
+            None => break None,
+          }
+        }
+      } else {
+        None
+      }
+    } else {
+      None
+    };
 
     let (offset, total_length) = if let Some((void_offset, _void_size)) = void_slot {
       // In-place write at the void's offset. The void is already removed
@@ -733,6 +940,10 @@ impl StorageEngine {
     self.record_gc_recheck(key);
 
     Ok(offset)
+  }
+
+  fn can_reuse_void_for_entry(entry_type: EntryType) -> bool {
+    matches!(entry_type, EntryType::Chunk)
   }
 
   /// Record a write into the GC recheck set if GC mark+sweep is active.
@@ -797,13 +1008,18 @@ impl StorageEngine {
     // Use a READ lock — read_entry_at_shared uses a cloned file handle
     // so it doesn't disturb the writer's seek position.
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry")?;
     let result = writer.read_entry_at_shared(kv_entry.offset);
     if result.is_err() {
+      let kv_block_end = {
+        let header = writer.file_header();
+        header.kv_block_offset.saturating_add(header.kv_block_length)
+      };
       tracing::debug!(
         offset = kv_entry.offset,
         hash = %hex::encode(&hash[..8.min(hash.len())]),
         type_flags = kv_entry.type_flags,
-        kv_block_end = 256 + 65536,
+        kv_block_end,
         "get_entry: read failed at KV offset"
       );
     }
@@ -821,6 +1037,7 @@ impl StorageEngine {
     };
 
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_including_deleted")?;
     let result = writer.read_entry_at_shared(kv_entry.offset);
     result.map(Some)
   }
@@ -836,6 +1053,7 @@ impl StorageEngine {
     };
 
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_verified")?;
     let (header, key, value) = writer.read_entry_at_shared_verified(kv_entry.offset)?;
 
     Ok(Some((header, key, value)))
@@ -851,6 +1069,7 @@ impl StorageEngine {
     };
 
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_verified_including_deleted")?;
     let (header, key, value) = writer.read_entry_at_shared_verified(kv_entry.offset)?;
 
     Ok(Some((header, key, value)))
@@ -904,9 +1123,17 @@ impl StorageEngine {
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let in_transaction =
+      self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
     let mut header = writer.file_header().clone();
     header.head_hash = head_hash.to_vec();
-    writer.update_file_header(&header)?;
+    header.hot_tail_offset = writer.current_offset();
+    header.updated_at = chrono::Utc::now().timestamp_millis();
+    if in_transaction {
+      writer.set_header_in_memory(header);
+    } else {
+      writer.update_file_header(&header)?;
+    }
     Ok(())
   }
 
@@ -1040,13 +1267,21 @@ impl StorageEngine {
       kv.insert(kv_entry)?;
     }
 
-    // Update HEAD and hot_tail_offset in the same lock hold.
-    // Including hot_tail_offset ensures the header always points to
-    // where the hot tail actually is — prevents stale pointer on crash.
+    // Update HEAD and hot_tail_offset in the same lock hold. Inside a
+    // transaction this is in-memory only: the durable A/B header must not
+    // advertise the new root until the outer transaction has synced WAL and
+    // flushed the hot tail. Otherwise a SIGKILL can leave HEAD pointing at
+    // FileRecords whose chunks never reached recoverable storage.
+    let in_transaction = kv.transaction_depth > 0;
     let mut header = writer.file_header().clone();
     header.head_hash = head_hash.to_vec();
     header.hot_tail_offset = writer.current_offset();
-    writer.update_file_header(&header)?;
+    header.updated_at = chrono::Utc::now().timestamp_millis();
+    if in_transaction {
+      writer.set_header_in_memory(header);
+    } else {
+      writer.update_file_header(&header)?;
+    }
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
@@ -1092,6 +1327,28 @@ impl StorageEngine {
     (perms, idx, dirc)
   }
 
+  /// Best-effort O(1) metrics for the in-file KV block.
+  ///
+  /// Returns `(kv_block_size_bytes, kv_fill_ratio)`. The ratio is based on the
+  /// current snapshot's live KV entries against the current bucket-page
+  /// capacity, so it avoids the old full stats scan while still reflecting
+  /// resize pressure.
+  pub fn kv_layout_metrics(&self) -> (u64, f64) {
+    let kv_size_bytes = match self.writer.read() {
+      Ok(writer) => writer.file_header().kv_block_length,
+      Err(e) => {
+        tracing::error!("writer lock poisoned in kv_layout_metrics(): {}", e);
+        0
+      }
+    };
+
+    let snapshot = self.kv_snapshot.load();
+    let capacity = snapshot.bucket_count().saturating_mul(crate::engine::kv_pages::MAX_ENTRIES_PER_PAGE);
+    let fill_ratio = if capacity > 0 { snapshot.len() as f64 / capacity as f64 } else { 0.0 };
+
+    (kv_size_bytes, fill_ratio)
+  }
+
   /// Perform online KV block expansion. Called after a KV flush detects
   /// that the block needs to grow (kv.needs_expansion is Some).
   ///
@@ -1104,8 +1361,7 @@ impl StorageEngine {
   pub fn expand_kv_block_online(&self, target_stage: usize) -> EngineResult<()> {
     let hash_length = self.hash_algo.hash_length();
     let psize = crate::engine::kv_pages::page_size(hash_length);
-    let (_block_size, new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
-    let new_pages_size = (new_bucket_count as u64) * (psize as u64);
+    let (new_block_size, _new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
 
     // Acquire both locks: writer first, then KV
     let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
@@ -1113,7 +1369,7 @@ impl StorageEngine {
 
     let header = writer.file_header().clone();
     let old_kv_end = header.kv_block_offset + header.kv_block_length;
-    let new_kv_end = header.kv_block_offset + new_pages_size;
+    let new_kv_end = header.kv_block_offset + new_block_size;
     // Use the writer's current offset (end of WAL) as the actual hot tail position,
     // NOT the header's hot_tail_offset which may be stale.
     let hot_tail_offset = writer.current_offset();
@@ -1163,11 +1419,21 @@ impl StorageEngine {
 
     // Step 2: Read hot tail into memory, then copy growth zone data to
     // where the hot tail was. The hot tail gets rewritten after.
-    let hot_payload = writer.read_hot_tail_payload(hot_tail_offset, hash_length);
+    let mut hot_payload = writer.read_hot_tail_payload(hot_tail_offset, hash_length);
 
-    // Copy growth zone [old_kv_end .. new_kv_end] to [hot_tail_offset ..]
+    // Copy growth zone [old_kv_end .. actual_copy_end] to [hot_tail_offset ..]
     let copy_dst = hot_tail_offset;
     let new_hot_tail = hot_tail_offset + growth_zone_size;
+    let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
+
+    let adjusted_voids = {
+      let mut vm = self.void_manager.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let current_voids = vm.iter().map(|(offset, size)| VoidRecord { offset, size }).collect::<Vec<_>>();
+      let adjusted = Self::adjust_voids_for_expansion(current_voids, old_kv_end, actual_copy_end, offset_delta, new_kv_end, new_hot_tail);
+      vm.replace_all(adjusted.iter().map(|void| (void.offset, void.size)));
+      adjusted
+    };
+    hot_payload.voids = adjusted_voids.clone();
 
     writer.copy_region(old_kv_end, copy_dst, growth_zone_size)?;
 
@@ -1192,14 +1458,13 @@ impl StorageEngine {
     writer.set_offset(new_hot_tail);
 
     // Step 4-8: KV finalization (zero pages, rehash, update header, publish snapshot)
-    let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
     // Use actual_copy_end (not new_kv_end) for offset adjustment range —
     // entries straddling the boundary were also relocated.
-    kv.finalize_expansion(target_stage, old_kv_end, actual_copy_end, offset_delta, new_hot_tail)?;
+    kv.finalize_expansion(target_stage, old_kv_end, actual_copy_end, offset_delta, new_hot_tail, adjusted_voids)?;
 
     // Update writer's header to match what KV wrote
     let mut final_header = writer.file_header().clone();
-    final_header.kv_block_length = new_pages_size;
+    final_header.kv_block_length = new_block_size;
     final_header.kv_block_stage = target_stage as u8;
     final_header.resize_in_progress = false;
     final_header.resize_target_stage = 0;
@@ -1233,36 +1498,76 @@ impl StorageEngine {
     Ok(())
   }
 
-  fn replay_deletion_records(kv: &mut DiskKVStore, hash_algo: HashAlgorithm, deletion_records: &[(String, u64)]) -> EngineResult<()> {
-    for (path, deletion_offset) in deletion_records {
+  fn resolve_rebuild_records(
+    records: Vec<RebuildKvRecord>,
+    hash_algo: HashAlgorithm,
+    deletion_records: &[(String, RebuildOrder)],
+  ) -> EngineResult<Vec<KVEntry>> {
+    let mut resolved: HashMap<Vec<u8>, RebuildKvRecord> = HashMap::new();
+
+    for record in records {
+      let replace = match resolved.get(&record.hash) {
+        Some(existing) => Self::should_replace_rebuild_record(existing, &record),
+        None => true,
+      };
+      if replace {
+        resolved.insert(record.hash.clone(), record);
+      }
+    }
+
+    Self::replay_deletion_records_on_rebuild_records(&mut resolved, hash_algo, deletion_records)?;
+    Ok(resolved.into_values().map(|record| record.to_kv_entry()).collect())
+  }
+
+  fn should_replace_rebuild_record(existing: &RebuildKvRecord, candidate: &RebuildKvRecord) -> bool {
+    let existing_type = existing.type_flags & 0x0F;
+    let candidate_type = candidate.type_flags & 0x0F;
+    if existing_type == KV_TYPE_DIRECTORY && candidate_type == KV_TYPE_DIRECTORY {
+      if candidate.value_length == 0 && existing.value_length > 0 {
+        return false;
+      }
+      if candidate.value_length > 0 && existing.value_length == 0 {
+        return true;
+      }
+    }
+
+    candidate.order.is_after(existing.order)
+  }
+
+  fn replay_deletion_records_on_rebuild_records(
+    records: &mut HashMap<Vec<u8>, RebuildKvRecord>,
+    hash_algo: HashAlgorithm,
+    deletion_records: &[(String, RebuildOrder)],
+  ) -> EngineResult<()> {
+    for (path, deletion_order) in deletion_records {
       let normalized = crate::engine::path_utils::normalize_path(path);
 
       // File, directory, and symlink deletes all write DeletionRecords keyed
       // by user path. Re-mark only if the current path entry predates the
       // deletion, so delete-then-recreate remains live after rebuild.
       let file_key = crate::engine::directory_ops::file_path_hash(&normalized, &hash_algo)?;
-      Self::mark_kv_entry_deleted_if_older(kv, &file_key, *deletion_offset);
+      Self::mark_rebuild_record_deleted_if_older(records, &file_key, *deletion_order);
 
       let dir_key = crate::engine::directory_ops::directory_path_hash(&normalized, &hash_algo)?;
-      Self::mark_kv_entry_deleted_if_older(kv, &dir_key, *deletion_offset);
+      Self::mark_rebuild_record_deleted_if_older(records, &dir_key, *deletion_order);
 
       let symlink_key = crate::engine::symlink_record::symlink_path_hash(&normalized, &hash_algo)?;
-      Self::mark_kv_entry_deleted_if_older(kv, &symlink_key, *deletion_offset);
+      Self::mark_rebuild_record_deleted_if_older(records, &symlink_key, *deletion_order);
 
       // Some system records (snapshots/forks/GC records) store a domain
       // key string directly in the DeletionRecord path. Preserve that legacy
       // replay path without normalizing the string.
       let raw_key = hash_algo.compute_hash(path.as_bytes())?;
-      Self::mark_kv_entry_deleted_if_older(kv, &raw_key, *deletion_offset);
+      Self::mark_rebuild_record_deleted_if_older(records, &raw_key, *deletion_order);
     }
 
     Ok(())
   }
 
-  fn mark_kv_entry_deleted_if_older(kv: &mut DiskKVStore, key: &[u8], deletion_offset: u64) {
-    if let Some(entry) = kv.get(key) {
-      if entry.offset < deletion_offset {
-        kv.update_flags(key, KV_FLAG_DELETED);
+  fn mark_rebuild_record_deleted_if_older(records: &mut HashMap<Vec<u8>, RebuildKvRecord>, key: &[u8], deletion_order: RebuildOrder) {
+    if let Some(entry) = records.get_mut(key) {
+      if deletion_order.is_after(entry.order) {
+        entry.type_flags = (entry.type_flags & 0x0F) | KV_FLAG_DELETED;
       }
     }
   }
@@ -1272,7 +1577,20 @@ impl StorageEngine {
   pub fn read_entry_header_at(&self, offset: u64) -> EngineResult<EntryHeader> {
     // Use a READ lock — read_entry_at_shared uses a cloned file handle.
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    if offset < wal_start || offset >= wal_end {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("entry header offset is outside current WAL region {}..{}", wal_start, wal_end),
+      });
+    }
     let (header, _key, _value) = writer.read_entry_at_shared(offset)?;
+    if !Self::valid_reusable_range(offset, header.total_length, wal_start, wal_end) {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("entry range is outside current WAL region {}..{}", wal_start, wal_end),
+      });
+    }
     Ok(header)
   }
 
@@ -1282,14 +1600,35 @@ impl StorageEngine {
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
+    let needed = EntryHeader::compute_total_length(self.hash_algo, key.len(), value.len())?;
 
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    if !Self::valid_reusable_range(offset, needed, wal_start, wal_end) {
+      return Err(EngineError::InvalidInput(format!(
+        "deletion range {}..{} is outside current WAL region {}..{}",
+        offset,
+        offset.saturating_add(needed as u64),
+        wal_start,
+        wal_end
+      )));
+    }
     writer.write_entry_at(offset, EntryType::DeletionRecord, &key, &value)
   }
 
   /// Write a void entry at a specific file offset (in-place).
   pub fn write_void_at(&self, offset: u64, size: u32) -> EngineResult<()> {
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
+      return Err(EngineError::InvalidInput(format!(
+        "void range {}..{} is outside current WAL region {}..{}",
+        offset,
+        offset.saturating_add(size as u64),
+        wal_start,
+        wal_end
+      )));
+    }
     writer.write_void_at(offset, size)?;
 
     let mut vm = self.void_manager.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -1303,14 +1642,35 @@ impl StorageEngine {
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
+    let needed = EntryHeader::compute_total_length(self.hash_algo, key.len(), value.len())?;
 
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    if !Self::valid_reusable_range(offset, needed, wal_start, wal_end) {
+      return Err(EngineError::InvalidInput(format!(
+        "deletion range {}..{} is outside current WAL region {}..{}",
+        offset,
+        offset.saturating_add(needed as u64),
+        wal_start,
+        wal_end
+      )));
+    }
     writer.write_entry_at_nosync(offset, EntryType::DeletionRecord, &key, &value)
   }
 
   /// Write a void in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_void_at_nosync(&self, offset: u64, size: u32) -> EngineResult<()> {
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
+      return Err(EngineError::InvalidInput(format!(
+        "void range {}..{} is outside current WAL region {}..{}",
+        offset,
+        offset.saturating_add(size as u64),
+        wal_start,
+        wal_end
+      )));
+    }
     writer.write_void_at_nosync(offset, size)?;
 
     let mut vm = self.void_manager.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -1356,23 +1716,27 @@ impl StorageEngine {
   /// Uses the prebuilt type index for O(k) lookup where k is the number of
   /// entries of the target type. Reads each entry's value from disk.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    let entries: Vec<(Vec<u8>, u64)> = {
+    let entries: Vec<KVEntry> = {
       let snapshot = self.kv_snapshot.load();
-      snapshot.iter_by_type(target_type).into_iter().map(|entry| (entry.hash, entry.offset)).collect()
+      snapshot.iter_by_type(target_type)
     };
 
     let mut results = Vec::with_capacity(entries.len());
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
 
-    for (hash, offset) in entries {
-      let (_header, _key, value) = match writer.read_entry_at_shared(offset) {
+    for entry in entries {
+      if let Err(e) = Self::validate_kv_entry_offset(&writer, &entry, &entry.hash, "entries_by_type") {
+        tracing::warn!("Skipping corrupt KV entry during entries_by_type: {}", e);
+        continue;
+      }
+      let (_header, _key, value) = match writer.read_entry_at_shared(entry.offset) {
         Ok(entry) => entry,
         Err(e) => {
-          tracing::warn!("Skipping corrupt entry at offset {} during entries_by_type: {}", offset, e);
+          tracing::warn!("Skipping corrupt entry at offset {} during entries_by_type: {}", entry.offset, e);
           continue;
         }
       };
-      results.push((hash, value));
+      results.push((entry.hash, value));
     }
 
     Ok(results)
@@ -1449,12 +1813,10 @@ impl StorageEngine {
     // Scan the append log (needs read lock on writer)
     // For directory entries, we track value_length so we can prefer
     // entries with children over empty entries (e.g., root directory
-    // overwritten by ensure_root_directory on a corrupt session).
-    // Tuple: (type_flags, hash, offset, value_length, total_length).
-    // value_length is used for the empty-directory dedup heuristic;
-    // total_length is needed to populate KVEntry.total_length for the
-    // void-manager gap-scan that runs on dirty startup.
-    let (entries, deletion_records): (Vec<(u8, Vec<u8>, u64, u32, u32)>, Vec<(String, u64)>) = {
+    // overwritten by ensure_root_directory on a corrupt session). We also
+    // track entry timestamp because WAL offset order stops being chronology
+    // once GC reuses lower void ranges for newer writes.
+    let (scanned_records, deletion_records): (Vec<RebuildKvRecord>, Vec<(String, RebuildOrder)>) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       tracing::debug!(
         writer_offset = writer.current_offset(),
@@ -1467,19 +1829,21 @@ impl StorageEngine {
       for result in scanner {
         match result {
           Ok(scanned) => {
+            let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
             if scanned.header.entry_type == EntryType::DeletionRecord {
               if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version)
               {
-                deletions.push((record.path, scanned.offset));
+                deletions.push((record.path, order));
               }
             }
-            collected.push((
-              scanned.header.entry_type.to_kv_type(),
-              scanned.key.clone(),
-              scanned.offset,
-              scanned.header.value_length,
-              scanned.header.total_length,
-            ));
+            collected.push(RebuildKvRecord {
+              type_flags: scanned.header.entry_type.to_kv_type(),
+              hash: scanned.key.clone(),
+              offset: scanned.offset,
+              value_length: scanned.header.value_length,
+              total_length: scanned.header.total_length,
+              order,
+            });
           }
           Err(e) => {
             tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
@@ -1489,7 +1853,8 @@ impl StorageEngine {
       (collected, deletions)
     };
     // Writer lock released here
-    tracing::debug!(scanned_entries = entries.len(), "rebuild_kv: WAL scan complete");
+    tracing::debug!(scanned_entries = scanned_records.len(), "rebuild_kv: WAL scan complete");
+    let scanned_count = scanned_records.len() as u64;
 
     // Read layout info from the file header
     let (kv_block_offset, file_path, existing_stage) = {
@@ -1514,7 +1879,7 @@ impl StorageEngine {
     //
     // The real end of the WAL is one byte past the last byte of the
     // furthest-out entry the scanner returned.
-    let dirty_max_end: u64 = entries.iter().map(|(_, _, offset, _, total_length)| offset + *total_length as u64).max().unwrap_or(0);
+    let dirty_max_end: u64 = scanned_records.iter().map(|record| record.offset + record.total_length as u64).max().unwrap_or(0);
     let wal_end = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       writer.current_offset().max(dirty_max_end)
@@ -1529,7 +1894,7 @@ impl StorageEngine {
       // Place KV block at the end of the WAL, sized to fit all entries.
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let wal_end = writer.current_offset();
-      let target_stage = crate::engine::kv_pages::stage_for_count(entries.len(), hash_length);
+      let target_stage = crate::engine::kv_pages::stage_for_count(scanned_records.len(), hash_length);
       let (bs, _) = crate::engine::kv_stages::stage_params(target_stage, psize);
       tracing::info!("Legacy database: placing KV block at WAL end (offset {}), stage {} ({}B)", wal_end, target_stage, bs);
       (wal_end, bs, wal_end + bs, target_stage)
@@ -1552,38 +1917,19 @@ impl StorageEngine {
     // at the end so that page writes don't clobber each other across
     // multiple auto-flush cycles (each auto-flush overwrites the same
     // bucket pages, potentially evicting entries from earlier flushes).
-    let mut count = 0;
-    let dir_type = crate::engine::kv_store::KV_TYPE_DIRECTORY;
-    for (type_flags, hash, offset, value_length, total_length) in &entries {
-      let kv_type = *type_flags & 0x0F;
-
-      // For directory entries: if we already have a non-empty version,
-      // don't overwrite it with an empty one. This prevents
-      // ensure_root_directory's empty write from clobbering a valid
-      // directory with children.
-      if kv_type == dir_type && *value_length == 0 {
-        if let Some(existing) = new_kv.get_buffered(hash) {
-          if existing.offset != *offset {
-            // Already have a (possibly non-empty) version — skip the empty one
-            count += 1;
-            continue;
-          }
-        }
-      }
-
-      let kv_entry = KVEntry { type_flags: *type_flags, hash: hash.clone(), offset: *offset, total_length: *total_length };
-      new_kv.buffer_only(kv_entry);
-      count += 1;
+    let resolved_entries = Self::resolve_rebuild_records(scanned_records, hash_algo, &deletion_records)?;
+    let inserted_count = resolved_entries.len();
+    for kv_entry in &resolved_entries {
+      new_kv.buffer_only(kv_entry.clone());
     }
 
     tracing::debug!(
-      inserted = count,
+      inserted = inserted_count,
       write_buffer_len = new_kv.write_buffer_len(),
       deletion_records = deletion_records.len(),
       "rebuild_kv: all entries inserted, replaying deletions and flushing"
     );
 
-    Self::replay_deletion_records(&mut new_kv, hash_algo, &deletion_records)?;
     new_kv.flush()?;
     new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot));
 
@@ -1610,7 +1956,7 @@ impl StorageEngine {
       header.kv_block_length = final_block_size;
       // Hot tail goes after the WAL, not after the KV block
       header.hot_tail_offset = wal_end;
-      header.entry_count = count as u64;
+      header.entry_count = scanned_count;
       header.kv_block_stage = final_stage as u8;
       writer.set_offset(wal_end);
       tracing::debug!(
@@ -1625,7 +1971,7 @@ impl StorageEngine {
     }
 
     let elapsed = timer.elapsed();
-    tracing::info!("KV rebuild complete: {} entries indexed in {:.2}s", count, elapsed.as_secs_f64());
+    tracing::info!("KV rebuild complete: {} entries indexed in {:.2}s", inserted_count, elapsed.as_secs_f64());
 
     Ok(())
   }
@@ -1642,11 +1988,56 @@ impl StorageEngine {
   /// it reaches zero, truncate the hot file (completing the deferred work
   /// that `flush()` skipped while the transaction was active).
   pub fn end_transaction(&self) {
-    if let Ok(mut kv) = self.kv_writer.lock() {
-      kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
-      if kv.transaction_depth == 0 {
-        if let Err(e) = kv.flush_hot_buffer() {
+    let should_commit = match self.kv_writer.lock() {
+      Ok(mut kv) => {
+        kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
+        kv.transaction_depth == 0
+      }
+      Err(e) => {
+        tracing::warn!("Failed to end transaction: {}", e);
+        return;
+      }
+    };
+
+    if !should_commit {
+      return;
+    }
+
+    if let Ok(mut writer) = self.writer.write() {
+      if let Err(e) = writer.sync() {
+        tracing::warn!("Transaction WAL sync failed: {}", e);
+      }
+    }
+
+    let header_update = match self.kv_writer.lock() {
+      Ok(mut kv) => {
+        if kv.transaction_depth != 0 {
+          None
+        } else if let Err(e) = kv.force_flush_hot_buffer() {
           tracing::warn!("Failed to flush hot buffer after transaction: {}", e);
+          None
+        } else {
+          Some((kv.hot_tail_offset(), kv.len() as u64))
+        }
+      }
+      Err(e) => {
+        tracing::warn!("Failed to flush transaction hot tail: {}", e);
+        None
+      }
+    };
+
+    if let Some((hot_tail_offset, entry_count)) = header_update {
+      match self.writer.write() {
+        Ok(mut writer) => {
+          let mut header = writer.file_header().clone();
+          header.hot_tail_offset = hot_tail_offset;
+          header.entry_count = entry_count;
+          if let Err(e) = writer.update_header(&header) {
+            tracing::warn!("Failed to update header after transaction hot-tail flush: {}", e);
+          }
+        }
+        Err(e) => {
+          tracing::warn!("Failed to update transaction header: {}", e);
         }
       }
     }
@@ -1702,7 +2093,11 @@ impl StorageEngine {
         if let Err(e) = kv.flush_hot_buffer() {
           tracing::warn!("Timer flush failed: {}", e);
         }
-        Some((kv.hot_tail_offset(), kv.len() as u64))
+        if kv.transaction_depth == 0 {
+          Some((kv.hot_tail_offset(), kv.len() as u64))
+        } else {
+          None
+        }
       } else {
         None
       }

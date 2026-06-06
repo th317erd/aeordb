@@ -33,6 +33,7 @@
 //!   -- --ignored --nocapture
 //! ```
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -101,16 +102,22 @@ fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
 /// are skipped.
 fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
   let file = File::open(checkpoint_path).expect("open checkpoint");
-  let mut entries = Vec::new();
+  let mut entries = BTreeMap::new();
   for line in BufReader::new(file).lines().map_while(Result::ok) {
     if line.starts_with('#') || line.is_empty() {
       continue;
     }
-    if let Some((path, body)) = line.split_once('\t') {
-      entries.push((path.to_string(), body.to_string()));
+    if let Some(path) = line.strip_prefix("-\t") {
+      entries.remove(path);
+    } else if let Some(rest) = line.strip_prefix("+\t") {
+      if let Some((path, body)) = rest.split_once('\t') {
+        entries.insert(path.to_string(), body.to_string());
+      }
+    } else if let Some((path, body)) = line.split_once('\t') {
+      entries.insert(path.to_string(), body.to_string());
     }
   }
-  entries
+  entries.into_iter().collect()
 }
 
 /// Open the DB after a crash, falling back to the repair path if a normal
@@ -192,6 +199,24 @@ fn test_crash_inject_sigkill_during_mixed_workload() {
   let delays = [400, 900, 1500, 2200, 700];
   for (i, ms) in delays.iter().enumerate() {
     run_sigkill_iteration(i, "mixed", Duration::from_millis(*ms));
+  }
+}
+
+#[test]
+#[ignore]
+fn test_crash_inject_sigkill_during_gc_workload() {
+  let delays = [700, 1300, 2100, 3200];
+  for (i, ms) in delays.iter().enumerate() {
+    run_sigkill_iteration(i, "gc", Duration::from_millis(*ms));
+  }
+}
+
+#[test]
+#[ignore]
+fn test_crash_inject_sigkill_during_stress_workload() {
+  let delays = [800, 1600, 2600, 3800];
+  for (i, ms) in delays.iter().enumerate() {
+    run_sigkill_iteration(i, "stress", Duration::from_millis(*ms));
   }
 }
 

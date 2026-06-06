@@ -310,6 +310,17 @@ fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &s
   changes.symlinks_deleted.retain(|e| is_allowed(&e.path));
 }
 
+fn user_has_grant_scope(user_id_str: &str, state: &AppState) -> bool {
+  use crate::engine::permission_resolver::PermissionResolver;
+
+  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
+    return true;
+  };
+
+  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+  resolver.has_descendant_grants(&user_id, "/").unwrap_or(false)
+}
+
 /// Build a full sync response (no since_root_hash -- everything is "added").
 /// When `include_system` is false, entries under /.aeordb-system/ are excluded.
 fn build_full_sync_response(tree: &VersionTree, path_filter: &Option<Vec<String>>, include_system: bool) -> (SyncChanges, Vec<String>) {
@@ -570,13 +581,14 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
   // Apply API key rule filtering for scoped users.
   filter_changes_by_key_rules(&mut changes, caller.key_rules());
 
-  // Apply user/group permission filtering. Without this, a non-root
-  // user with no API key rules but with directory shares would receive
-  // metadata for the entire database — a path/size/hash leak even
-  // though GET /files/{path} correctly 403s the content. Peers and
-  // root admin sync skip this branch.
-  if let SyncCaller::ScopedUser { user_id, .. } = &caller {
-    filter_changes_by_user_permissions(&mut changes, user_id, &state);
+  // Apply user/group permission filtering only for plain JWT callers that
+  // actually have grant-scoped access. API-key rules are explicit sync
+  // scope and are applied above; non-root JWTs with no grants keep the
+  // existing client-sync contract of seeing non-system files.
+  if let SyncCaller::ScopedUser { user_id, key_rules } = &caller {
+    if key_rules.is_empty() && user_has_grant_scope(user_id, &state) {
+      filter_changes_by_user_permissions(&mut changes, user_id, &state);
+    }
   }
 
   // H4: Rebuild chunk hashes from the FILTERED changes so scoped users

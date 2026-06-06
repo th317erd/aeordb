@@ -52,7 +52,7 @@ fn test_append_entry_returns_offset() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let offset = writer.append_entry(EntryType::Chunk, b"key1", b"value1", 0).expect("Failed to append entry");
+  let (offset, _) = writer.append_entry(EntryType::Chunk, b"key1", b"value1", 0).expect("Failed to append entry");
 
   // First entry should start right after the header region (both A/B slots)
   assert_eq!(offset, HEADER_REGION_SIZE as u64);
@@ -66,7 +66,7 @@ fn test_append_and_read_back_roundtrip() {
 
   let key = b"my-key";
   let value = b"my-value-data";
-  let offset = writer.append_entry(EntryType::FileRecord, key, value, 0x42).expect("Failed to append entry");
+  let (offset, _) = writer.append_entry(EntryType::FileRecord, key, value, 0x42).expect("Failed to append entry");
 
   let (header, read_key, read_value) = writer.read_entry_at(offset).expect("Failed to read entry");
 
@@ -84,9 +84,9 @@ fn test_append_multiple_entries() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let offset1 = writer.append_entry(EntryType::Chunk, b"key1", b"value1", 0).expect("Failed to append entry 1");
-  let offset2 = writer.append_entry(EntryType::Chunk, b"key2", b"value2", 0).expect("Failed to append entry 2");
-  let offset3 = writer.append_entry(EntryType::FileRecord, b"key3", b"value3", 0).expect("Failed to append entry 3");
+  let (offset1, _) = writer.append_entry(EntryType::Chunk, b"key1", b"value1", 0).expect("Failed to append entry 1");
+  let (offset2, _) = writer.append_entry(EntryType::Chunk, b"key2", b"value2", 0).expect("Failed to append entry 2");
+  let (offset3, _) = writer.append_entry(EntryType::FileRecord, b"key3", b"value3", 0).expect("Failed to append entry 3");
 
   // Offsets should be strictly increasing
   assert!(offset2 > offset1);
@@ -138,9 +138,9 @@ fn test_scan_skips_corrupt_entries() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let _offset1 = writer.append_entry(EntryType::Chunk, b"good1", b"val1", 0).unwrap();
-  let offset2 = writer.append_entry(EntryType::Chunk, b"corrupt", b"will-be-bad", 0).unwrap();
-  let _offset3 = writer.append_entry(EntryType::Chunk, b"good2", b"val2", 0).unwrap();
+  let (_offset1, _) = writer.append_entry(EntryType::Chunk, b"good1", b"val1", 0).unwrap();
+  let (offset2, _) = writer.append_entry(EntryType::Chunk, b"corrupt", b"will-be-bad", 0).unwrap();
+  let (_offset3, _) = writer.append_entry(EntryType::Chunk, b"good2", b"val2", 0).unwrap();
 
   // Read entry 2's header to get its size, then corrupt the value portion
   let (header2, _, _) = writer.read_entry_at(offset2).unwrap();
@@ -173,7 +173,7 @@ fn test_write_void_entry() {
 
   // Minimum size = 31 (fixed header) + 32 (blake3 hash) = 63
   let void_size: u32 = 100;
-  let offset = writer.write_void(void_size).expect("Failed to write void");
+  let (offset, _) = writer.write_void(void_size).expect("Failed to write void");
 
   let (header, key, value) = writer.read_entry_at(offset).expect("Failed to read void");
   assert_eq!(header.entry_type, EntryType::Void);
@@ -224,9 +224,9 @@ fn test_entry_at_offset() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let _offset1 = writer.append_entry(EntryType::Chunk, b"first", b"data1", 0).unwrap();
-  let offset2 = writer.append_entry(EntryType::FileRecord, b"second", b"data2", 0).unwrap();
-  let _offset3 = writer.append_entry(EntryType::Chunk, b"third", b"data3", 0).unwrap();
+  let (_offset1, _) = writer.append_entry(EntryType::Chunk, b"first", b"data1", 0).unwrap();
+  let (offset2, _) = writer.append_entry(EntryType::FileRecord, b"second", b"data2", 0).unwrap();
+  let (_offset3, _) = writer.append_entry(EntryType::Chunk, b"third", b"data3", 0).unwrap();
 
   // Read specifically entry 2
   let (header, key, value) = writer.read_entry_at(offset2).expect("Failed to read entry at offset");
@@ -244,7 +244,7 @@ fn test_append_chunk_entry() {
   let chunk_data = b"This is raw chunk data for a file.";
   let chunk_key = blake3::hash(chunk_data).as_bytes().to_vec();
 
-  let offset = writer.append_entry(EntryType::Chunk, &chunk_key, chunk_data, 0).expect("Failed to append chunk");
+  let (offset, _) = writer.append_entry(EntryType::Chunk, &chunk_key, chunk_data, 0).expect("Failed to append chunk");
 
   let (header, key, value) = writer.read_entry_at(offset).unwrap();
   assert_eq!(header.entry_type, EntryType::Chunk);
@@ -262,7 +262,7 @@ fn test_append_file_record_entry() {
   let file_key = b"file:/documents/readme.txt";
   let file_metadata = b"{\"content_type\":\"text/plain\",\"size\":1024}";
 
-  let offset = writer.append_entry(EntryType::FileRecord, file_key, file_metadata, 0).expect("Failed to append file record");
+  let (offset, _) = writer.append_entry(EntryType::FileRecord, file_key, file_metadata, 0).expect("Failed to append file record");
 
   let (header, key, value) = writer.read_entry_at(offset).unwrap();
   assert_eq!(header.entry_type, EntryType::FileRecord);
@@ -276,7 +276,7 @@ fn test_empty_key_empty_value_entry() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let offset = writer.append_entry(EntryType::Snapshot, b"", b"", 0).expect("Failed to append empty entry");
+  let (offset, _) = writer.append_entry(EntryType::Snapshot, b"", b"", 0).expect("Failed to append empty entry");
 
   let (header, key, value) = writer.read_entry_at(offset).unwrap();
   assert_eq!(header.entry_type, EntryType::Snapshot);
@@ -297,7 +297,7 @@ fn test_large_value_entry() {
   // 1 MB of data
   let large_value = vec![0xAB; 1024 * 1024];
 
-  let offset = writer.append_entry(EntryType::Chunk, key, &large_value, 0).expect("Failed to append large entry");
+  let (offset, _) = writer.append_entry(EntryType::Chunk, key, &large_value, 0).expect("Failed to append large entry");
 
   let (header, read_key, read_value) = writer.read_entry_at(offset).unwrap();
   assert_eq!(read_key, key);
@@ -336,7 +336,8 @@ fn test_reopen_after_writes_preserves_data() {
   let offset;
   {
     let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
-    offset = writer.append_entry(EntryType::Chunk, b"persist-key", b"persist-value", 0).expect("Failed to append entry");
+    let (written_offset, _) = writer.append_entry(EntryType::Chunk, b"persist-key", b"persist-value", 0).expect("Failed to append entry");
+    offset = written_offset;
   }
 
   // Reopen and read
@@ -355,13 +356,15 @@ fn test_append_after_reopen_continues_at_end() {
   let offset1;
   {
     let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
-    offset1 = writer.append_entry(EntryType::Chunk, b"first", b"data1", 0).expect("Failed to append entry");
+    let (written_offset, _) = writer.append_entry(EntryType::Chunk, b"first", b"data1", 0).expect("Failed to append entry");
+    offset1 = written_offset;
   }
 
   let offset2;
   {
     let mut writer = AppendWriter::open(&file_path).expect("Failed to reopen file");
-    offset2 = writer.append_entry(EntryType::Chunk, b"second", b"data2", 0).expect("Failed to append entry");
+    let (written_offset, _) = writer.append_entry(EntryType::Chunk, b"second", b"data2", 0).expect("Failed to append entry");
+    offset2 = written_offset;
   }
 
   assert!(offset2 > offset1);
@@ -409,9 +412,9 @@ fn test_void_and_data_entries_interleaved() {
   let file_path = temp_directory.path().join("test.aeor");
   let mut writer = AppendWriter::create(&file_path).expect("Failed to create file");
 
-  let offset1 = writer.append_entry(EntryType::Chunk, b"k1", b"v1", 0).unwrap();
-  let void_offset = writer.write_void(100).unwrap();
-  let offset2 = writer.append_entry(EntryType::Chunk, b"k2", b"v2", 0).unwrap();
+  let (offset1, _) = writer.append_entry(EntryType::Chunk, b"k1", b"v1", 0).unwrap();
+  let (void_offset, _) = writer.write_void(100).unwrap();
+  let (offset2, _) = writer.append_entry(EntryType::Chunk, b"k2", b"v2", 0).unwrap();
 
   assert!(void_offset > offset1);
   assert!(offset2 > void_offset);

@@ -3,9 +3,30 @@
 //! Scans the append log, verifies entry hashes, checks directory consistency,
 //! validates KV index, and produces a structured report.
 
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
+use crate::engine::file_header::read_active_header;
+use crate::engine::hot_tail;
+use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_VOID};
 use crate::engine::storage_engine::StorageEngine;
+
+#[derive(Debug, Clone, Default)]
+struct ExpectedKvEntry {
+  offset: u64,
+  total_length: u32,
+  value_length: u32,
+  kv_type: u8,
+  timestamp: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExpectedKvIndex {
+  entries: HashMap<Vec<u8>, ExpectedKvEntry>,
+  deletion_records: Vec<(String, i64, u64)>,
+}
 
 /// Result of a full database integrity check.
 #[derive(Debug, Clone)]
@@ -47,6 +68,10 @@ pub struct VerifyReport {
   pub kv_entries: u64,
   pub stale_kv_entries: u64,
   pub missing_kv_entries: u64,
+  pub stale_kv_details: Vec<String>,
+  pub missing_kv_details: Vec<String>,
+  pub invalid_kv_offsets: Vec<String>,
+  pub invalid_hot_tail_voids: Vec<String>,
 
   /// Directories whose `dir:{path}` entry hard-links to a content hash
   /// that's been swept by GC. The directory is reachable through its
@@ -94,6 +119,10 @@ impl VerifyReport {
       kv_entries: 0,
       stale_kv_entries: 0,
       missing_kv_entries: 0,
+      stale_kv_details: Vec::new(),
+      missing_kv_details: Vec::new(),
+      invalid_kv_offsets: Vec::new(),
+      invalid_hot_tail_voids: Vec::new(),
       stale_dir_path_keys: Vec::new(),
       snapshots_checked: 0,
       broken_snapshots: Vec::new(),
@@ -108,6 +137,8 @@ impl VerifyReport {
       || !self.unlisted_files.is_empty()
       || self.stale_kv_entries > 0
       || self.missing_kv_entries > 0
+      || !self.invalid_kv_offsets.is_empty()
+      || !self.invalid_hot_tail_voids.is_empty()
       || !self.broken_snapshots.is_empty()
       || !self.stale_dir_path_keys.is_empty()
   }
@@ -122,12 +153,18 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
   report.hash_algorithm = format!("{:?}", engine.hash_algo());
 
   // Phase 1: Scan all entries from the append log. Also collects the
-  // unique-hash count so check_kv_index doesn't need a second WAL pass.
-  let unique_hashes = scan_entries(engine, &mut report);
+  // expected live KV hashes so check_kv_index doesn't need a second WAL pass.
+  let mut expected = scan_entries(engine, &mut report);
+
+  // Current hot-tail void records are durable tombstones for GC-swept WAL
+  // ranges. The old bytes may still contain valid-looking entry headers, but
+  // they are intentionally absent from the live KV index.
+  let hot_tail_voids = check_hot_tail_voids(db_path, &mut report);
+  remove_expected_entries_in_voids(&mut expected, &hot_tail_voids);
 
   // Phase 2: Check KV index consistency — uses the unique_hashes count
   // from Phase 1 (no WAL re-scan).
-  check_kv_index(engine, &mut report, unique_hashes);
+  check_kv_index(engine, &mut report, expected);
 
   // Phase 3: Check directory consistency
   check_directories(engine, &mut report);
@@ -222,22 +259,20 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
 }
 
 /// Scan the WAL, accumulating per-type counts, integrity counts, and
-/// the set of unique hash keys seen. Returns the unique-hash count so
-/// `check_kv_index` can compare against the live KV snapshot without
-/// re-scanning. Previous behavior was two full WAL passes (one here,
-/// one in check_kv_index); on a dirty-startup verify against a fat DB
-/// that doubled wall-clock time for no new information.
-fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> u64 {
+/// the set of KV hash keys expected to be live. Void entries are storage
+/// bookkeeping, not user/content records, so they are counted in the storage
+/// summary but excluded from live-KV completeness checks.
+fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> ExpectedKvIndex {
   use crate::engine::errors::EngineError;
 
   // Use the writer to scan entries — reporting mode yields errors
   // for corrupt entries instead of silently skipping them.
   let writer = match engine.writer_read_lock() {
     Ok(w) => w,
-    Err(_) => return 0,
+    Err(_) => return ExpectedKvIndex::default(),
   };
 
-  let mut unique_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+  let mut expected = ExpectedKvIndex::default();
 
   if let Ok(mut scanner) = writer.scan_entries_reporting() {
     for result in scanner.by_ref() {
@@ -245,7 +280,6 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> u64 {
         Ok(scanned) => {
           report.total_entries += 1;
           report.valid_entries += 1;
-          unique_hashes.insert(scanned.key);
 
           match scanned.header.entry_type {
             EntryType::Chunk => {
@@ -261,9 +295,30 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> u64 {
             EntryType::Snapshot => report.snapshots += 1,
             EntryType::DeletionRecord => report.deletion_records += 1,
             EntryType::Fork => report.forks += 1,
-            EntryType::Void => {
-              report.voids += 1;
-              report.void_bytes += scanned.header.total_length as u64;
+            // Void WAL records are historical bookkeeping. The current
+            // reusable-space state lives in the hot-tail void snapshot and is
+            // counted in check_hot_tail_voids().
+            EntryType::Void => {}
+          }
+
+          if scanned.header.entry_type == EntryType::DeletionRecord {
+            if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version) {
+              expected.deletion_records.push((record.path, scanned.header.timestamp, scanned.offset));
+            }
+          }
+
+          if scanned.header.entry_type != EntryType::Void {
+            let candidate = ExpectedKvEntry {
+              offset: scanned.offset,
+              total_length: scanned.header.total_length,
+              value_length: scanned.header.value_length,
+              kv_type: scanned.header.entry_type.to_kv_type(),
+              timestamp: scanned.header.timestamp,
+            };
+            let replace =
+              expected.entries.get(&scanned.key).map(|existing| should_replace_expected_entry(existing, &candidate)).unwrap_or(true);
+            if replace {
+              expected.entries.insert(scanned.key, candidate);
             }
           }
         }
@@ -289,21 +344,155 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> u64 {
   }
 
   report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
-  unique_hashes.len() as u64
+  expected
 }
 
-fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport, unique_hashes: u64) {
+fn should_replace_expected_entry(existing: &ExpectedKvEntry, candidate: &ExpectedKvEntry) -> bool {
+  if existing.kv_type == KV_TYPE_DIRECTORY && candidate.kv_type == KV_TYPE_DIRECTORY {
+    if candidate.value_length == 0 && existing.value_length > 0 {
+      return false;
+    }
+    if candidate.value_length > 0 && existing.value_length == 0 {
+      return true;
+    }
+  }
+
+  (candidate.timestamp, candidate.offset) > (existing.timestamp, existing.offset)
+}
+
+fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport, mut expected: ExpectedKvIndex) {
+  apply_deletion_records(engine, &mut expected);
+
   // Count KV entries from snapshot
   let snapshot = engine.kv_snapshot.load();
   if let Ok(entries) = snapshot.iter_all() {
-    report.kv_entries = entries.len() as u64;
+    let live_entries: Vec<_> = entries.into_iter().filter(|entry| entry.entry_type() != KV_TYPE_VOID).collect();
+    report.kv_entries = live_entries.len() as u64;
+    if let Ok(writer) = engine.writer_read_lock() {
+      let header = writer.file_header();
+      let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
+      let wal_end = writer.current_offset();
+      for entry in &live_entries {
+        if !StorageEngine::valid_reusable_range(entry.offset, entry.total_length, wal_start, wal_end) {
+          report.invalid_kv_offsets.push(format!(
+            "hash {} offset {} length {} outside WAL region {}..{}",
+            hex::encode(&entry.hash[..8.min(entry.hash.len())]),
+            entry.offset,
+            entry.total_length,
+            wal_start,
+            wal_end
+          ));
+        }
+      }
+    }
+
+    let expected_hashes: HashSet<Vec<u8>> = expected.entries.keys().cloned().collect();
+    let mut actual_by_hash = HashMap::with_capacity(live_entries.len());
+    for entry in live_entries {
+      actual_by_hash.insert(entry.hash.clone(), entry);
+    }
+    let actual_hashes: HashSet<Vec<u8>> = actual_by_hash.keys().cloned().collect();
+
+    report.missing_kv_entries = expected_hashes.difference(&actual_hashes).count() as u64;
+    report.stale_kv_entries = actual_hashes.difference(&expected_hashes).count() as u64;
+    for hash in expected_hashes.difference(&actual_hashes).take(20) {
+      if let Some(entry) = expected.entries.get(hash) {
+        report.missing_kv_details.push(format!(
+          "hash {} offset {} length {}",
+          hex::encode(&hash[..8.min(hash.len())]),
+          entry.offset,
+          entry.total_length
+        ));
+      }
+    }
+    for hash in actual_hashes.difference(&expected_hashes).take(20) {
+      if let Some(entry) = actual_by_hash.get(hash) {
+        report.stale_kv_details.push(format!(
+          "hash {} type_flags=0x{:02x} offset {} length {}",
+          hex::encode(&hash[..8.min(hash.len())]),
+          entry.type_flags,
+          entry.offset,
+          entry.total_length
+        ));
+      }
+    }
+  }
+}
+
+fn apply_deletion_records(engine: &StorageEngine, expected: &mut ExpectedKvIndex) {
+  let hash_algo = engine.hash_algo();
+  for (path, deletion_timestamp, deletion_offset) in expected.deletion_records.clone() {
+    let normalized = crate::engine::path_utils::normalize_path(&path);
+
+    if let Ok(file_key) = crate::engine::directory_ops::file_path_hash(&normalized, &hash_algo) {
+      remove_expected_if_older(expected, &file_key, deletion_timestamp, deletion_offset);
+    }
+    if let Ok(dir_key) = crate::engine::directory_ops::directory_path_hash(&normalized, &hash_algo) {
+      remove_expected_if_older(expected, &dir_key, deletion_timestamp, deletion_offset);
+    }
+    if let Ok(symlink_key) = crate::engine::symlink_record::symlink_path_hash(&normalized, &hash_algo) {
+      remove_expected_if_older(expected, &symlink_key, deletion_timestamp, deletion_offset);
+    }
+    if let Ok(raw_key) = hash_algo.compute_hash(path.as_bytes()) {
+      remove_expected_if_older(expected, &raw_key, deletion_timestamp, deletion_offset);
+    }
+  }
+}
+
+fn remove_expected_if_older(expected: &mut ExpectedKvIndex, key: &[u8], deletion_timestamp: i64, deletion_offset: u64) {
+  if expected.entries.get(key).map(|entry| (deletion_timestamp, deletion_offset) > (entry.timestamp, entry.offset)).unwrap_or(false) {
+    expected.entries.remove(key);
+  }
+}
+
+fn remove_expected_entries_in_voids(expected: &mut ExpectedKvIndex, voids: &[hot_tail::VoidRecord]) {
+  if voids.is_empty() {
+    return;
   }
 
-  if report.kv_entries < unique_hashes {
-    report.missing_kv_entries = unique_hashes - report.kv_entries;
-  } else if report.kv_entries > unique_hashes {
-    report.stale_kv_entries = report.kv_entries - unique_hashes;
+  expected.entries.retain(|_hash, entry| {
+    let entry_end = entry.offset.saturating_add(entry.total_length as u64);
+    !voids.iter().any(|void| {
+      let void_end = void.offset.saturating_add(void.size as u64);
+      entry.offset < void_end && void.offset < entry_end
+    })
+  });
+}
+
+fn check_hot_tail_voids(db_path: &str, report: &mut VerifyReport) -> Vec<hot_tail::VoidRecord> {
+  let mut file = match File::open(db_path) {
+    Ok(file) => file,
+    Err(_) => return Vec::new(),
+  };
+  let (header, _) = match read_active_header(&mut file) {
+    Ok(header) => header,
+    Err(_) => return Vec::new(),
+  };
+  if header.hot_tail_offset == 0 {
+    return Vec::new();
   }
+
+  let hash_length = header.hash_algo.hash_length();
+  let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
+  let hot_tail_offset = header.hot_tail_offset;
+  let payload = match hot_tail::read_hot_tail(&mut file, hot_tail_offset, hash_length) {
+    Some(payload) => payload,
+    None => return Vec::new(),
+  };
+
+  let mut valid_voids = Vec::new();
+  for (index, void) in payload.voids.iter().enumerate() {
+    report.voids += 1;
+    report.void_bytes += void.size as u64;
+    if !StorageEngine::valid_reusable_range(void.offset, void.size, wal_start, hot_tail_offset) {
+      report
+        .invalid_hot_tail_voids
+        .push(format!("void #{} offset {} length {} outside WAL region {}..{}", index, void.offset, void.size, wal_start, hot_tail_offset));
+    } else {
+      valid_voids.push(*void);
+    }
+  }
+  valid_voids
 }
 
 fn check_directories(engine: &StorageEngine, report: &mut VerifyReport) {

@@ -18,6 +18,7 @@ fn make_counters(writes: u64, reads: u64, bytes_w: u64, bytes_r: u64) -> Counter
     bytes_read_total: bytes_r,
     chunks_deduped_total: 0,
     write_buffer_depth: 0,
+    void_count: 0,
   }
 }
 

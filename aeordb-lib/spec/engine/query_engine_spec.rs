@@ -134,6 +134,32 @@ fn test_query_multiple_fields_intersection() {
 }
 
 #[test]
+fn test_query_exact_punctuated_string_against_trigram_index_uses_stored_values() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/agents", &config);
+
+  ops
+    .store_file_with_indexing(&ctx, "/agents/mr-bennett.json", br#"{"id":"agent-1","name":"Mr. Bennett"}"#, Some("application/json"))
+    .unwrap();
+
+  let results = QueryBuilder::new(&engine, "/agents").field("name").eq(b"Mr. Bennett").all().unwrap();
+
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/agents/mr-bennett.json");
+}
+
+#[test]
 fn test_query_with_limit() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);

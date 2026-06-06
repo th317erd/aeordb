@@ -348,6 +348,7 @@ pub struct StatsThroughput {
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsHealth {
   pub disk_usage_percent: f64,
+  pub kv_fill_ratio: f64,
   pub dedup_hit_rate: f64,
   pub write_buffer_depth: u64,
 }
@@ -394,9 +395,8 @@ fn get_stats_inner(
   let db_path = &db_path_string;
   let disk_total = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
-  // KV file size: single stat() call
-  let kv_path = format!("{}.kv", db_path);
-  let kv_file = std::fs::metadata(&kv_path).map(|m| m.len()).unwrap_or(0);
+  // In-file KV block metrics: O(1) writer header read + snapshot counts.
+  let (kv_file, kv_fill_ratio) = state.engine.kv_layout_metrics();
 
   // Dedup savings
   let dedup_savings = counters.logical_data_size.saturating_sub(counters.chunk_data_size);
@@ -470,7 +470,12 @@ fn get_stats_inner(
       dedup_savings,
     },
     throughput,
-    health: StatsHealth { disk_usage_percent: disk_health.usage_percent, dedup_hit_rate, write_buffer_depth: counters.write_buffer_depth },
+    health: StatsHealth {
+      disk_usage_percent: disk_health.usage_percent,
+      kv_fill_ratio,
+      dedup_hit_rate,
+      write_buffer_depth: counters.write_buffer_depth,
+    },
   };
 
   Json(stats)

@@ -950,6 +950,14 @@ impl<'a> QueryEngine<'a> {
       return self.evaluate_virtual_field_query(field_query, path);
     }
 
+    match &field_query.operation {
+      QueryOp::Eq(value) => {
+        return self.evaluate_exact_field_values(&field_query.field_name, path, std::slice::from_ref(value), index_manager)
+      }
+      QueryOp::In(values) => return self.evaluate_exact_field_values(&field_query.field_name, path, values, index_manager),
+      _ => {}
+    }
+
     let index = index_manager.load_index(path, &field_query.field_name)?;
     let mut index = match index {
       Some(index) => index,
@@ -965,22 +973,57 @@ impl<'a> QueryEngine<'a> {
       QueryOp::Between(min, max) => {
         index.lookup_range(min, max)?.into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>()
       }
-      QueryOp::In(values) => {
-        let mut result = HashSet::new();
-        for value in values {
-          for entry in index.lookup_exact(value) {
-            result.insert(entry.file_hash.clone());
-          }
-        }
-        result
-      }
       // Fuzzy ops are handled by execute_with_recheck, not here.
-      QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
+      QueryOp::In(_) | QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_) => {
         return Err(EngineError::NotFound("Fuzzy operations should use the recheck execution path".to_string()));
       }
     };
 
     Ok(matching_entries)
+  }
+
+  /// Evaluate exact equality or set-membership against every strategy for a field.
+  ///
+  /// Exact-capable scalar indexes (`string`, numeric, timestamp, etc.) remain
+  /// the fast path. Tokenizing indexes (`trigram`, phonetic) are only scanned
+  /// by stored raw value when no exact-capable strategy exists for the field.
+  fn evaluate_exact_field_values(
+    &self,
+    field_name: &str,
+    path: &str,
+    values: &[Vec<u8>],
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let mut indexes = index_manager.load_indexes_for_field(path, field_name)?;
+    if indexes.is_empty() {
+      return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_name, path,)));
+    }
+
+    let mut result = HashSet::new();
+    let has_exact_capable_index = indexes.iter().any(|index| index.supports_scalar_exact_lookup());
+
+    if has_exact_capable_index {
+      for index in indexes.iter_mut().filter(|index| index.supports_scalar_exact_lookup()) {
+        for value in values {
+          for entry in index.lookup_exact(value) {
+            result.insert(entry.file_hash.clone());
+          }
+        }
+      }
+      return Ok(result);
+    }
+
+    // No exact-capable index exists. Tokenizing indexes cannot answer exact
+    // queries through scalar lookup, because their entries are expanded tokens.
+    // Use persisted raw values when present; legacy tokenizing indexes without
+    // values have no safe exact-match accelerator and return no matches.
+    for index in indexes.iter().filter(|index| !index.values.is_empty()) {
+      for file_hash in index.lookup_stored_values_exact(values) {
+        result.insert(file_hash);
+      }
+    }
+
+    Ok(result)
   }
 
   /// Collect all file hashes from all indexed fields at a path.

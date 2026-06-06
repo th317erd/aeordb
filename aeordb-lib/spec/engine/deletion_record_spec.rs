@@ -40,7 +40,7 @@ fn new_sets_deleted_at_to_current_time() {
 fn roundtrip_with_reason() {
   let record = make_record("/deleted.txt", Some("user request"));
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored, record);
 }
 
@@ -48,7 +48,7 @@ fn roundtrip_with_reason() {
 fn roundtrip_without_reason() {
   let record = make_record("/deleted.txt", None);
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored, record);
   assert_eq!(restored.reason, None);
 }
@@ -60,7 +60,7 @@ fn roundtrip_empty_reason_becomes_none() {
   let mut record = make_record("/x.txt", Some(""));
   // With Some(""), serialize writes 0-length reason bytes.
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   // Empty reason deserializes as None per the implementation.
   assert_eq!(restored.reason, None);
   // Adjust for equality check.
@@ -72,7 +72,7 @@ fn roundtrip_empty_reason_becomes_none() {
 fn roundtrip_unicode_path() {
   let record = make_record("/\u{30D5}\u{30A1}\u{30A4}\u{30EB}/\u{524A}\u{9664}.txt", Some("\u{671F}\u{9650}\u{5207}\u{308C}"));
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored, record);
 }
 
@@ -81,7 +81,7 @@ fn roundtrip_long_reason() {
   let reason = "x".repeat(10_000);
   let record = make_record("/big_reason.txt", Some(&reason));
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored.reason.as_deref(), Some(reason.as_str()));
 }
 
@@ -90,7 +90,7 @@ fn roundtrip_preserves_deleted_at() {
   let mut record = make_record("/ts.txt", None);
   record.deleted_at = 9_876_543_210;
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored.deleted_at, 9_876_543_210);
 }
 
@@ -99,7 +99,7 @@ fn roundtrip_negative_timestamp() {
   let mut record = make_record("/neg.txt", None);
   record.deleted_at = -1_000_000;
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored.deleted_at, -1_000_000);
 }
 
@@ -107,7 +107,7 @@ fn roundtrip_negative_timestamp() {
 fn roundtrip_root_path() {
   let record = make_record("/", None);
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored.path, "/");
 }
 
@@ -116,7 +116,7 @@ fn roundtrip_deeply_nested_path() {
   let path = "/a/b/c/d/e/f/g/h/i/j/k/l/m/n.txt";
   let record = make_record(path, Some("cleanup"));
   let data = record.serialize();
-  let restored = DeletionRecord::deserialize(&data).unwrap();
+  let restored = DeletionRecord::deserialize(&data, 0).unwrap();
   assert_eq!(restored.path, path);
 }
 
@@ -126,13 +126,13 @@ fn roundtrip_deeply_nested_path() {
 
 #[test]
 fn deserialize_empty_data_fails() {
-  let result = DeletionRecord::deserialize(&[]);
+  let result = DeletionRecord::deserialize(&[], 0);
   assert!(result.is_err());
 }
 
 #[test]
 fn deserialize_single_byte_fails() {
-  let result = DeletionRecord::deserialize(&[0x00]);
+  let result = DeletionRecord::deserialize(&[0x00], 0);
   assert!(result.is_err());
 }
 
@@ -142,7 +142,7 @@ fn deserialize_truncated_path_fails() {
   let mut data = Vec::new();
   data.extend_from_slice(&20u16.to_le_bytes());
   data.extend_from_slice(b"abc");
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -153,7 +153,7 @@ fn deserialize_truncated_after_path_fails() {
   let path = b"/test";
   data.extend_from_slice(&(path.len() as u16).to_le_bytes());
   data.extend_from_slice(path);
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -165,7 +165,7 @@ fn deserialize_truncated_deleted_at_fails() {
   data.extend_from_slice(&(path.len() as u16).to_le_bytes());
   data.extend_from_slice(path);
   data.extend_from_slice(&[0x00; 4]); // only 4 bytes of i64
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -178,7 +178,7 @@ fn deserialize_truncated_reason_length_fails() {
   data.extend_from_slice(path);
   data.extend_from_slice(&0i64.to_le_bytes());
   // No reason_length follows.
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -192,7 +192,7 @@ fn deserialize_truncated_reason_data_fails() {
   data.extend_from_slice(&0i64.to_le_bytes());
   data.extend_from_slice(&10u16.to_le_bytes()); // reason_length = 10
   data.extend_from_slice(b"abc"); // only 3 bytes
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -205,7 +205,7 @@ fn deserialize_invalid_utf8_path_fails() {
   // Even if we add the rest, the path should fail UTF-8 validation.
   data.extend_from_slice(&0i64.to_le_bytes());
   data.extend_from_slice(&0u16.to_le_bytes());
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 
@@ -219,7 +219,7 @@ fn deserialize_invalid_utf8_reason_fails() {
   let bad_reason: &[u8] = &[0xFF, 0xFE, 0x80];
   data.extend_from_slice(&(bad_reason.len() as u16).to_le_bytes());
   data.extend_from_slice(bad_reason);
-  let result = DeletionRecord::deserialize(&data);
+  let result = DeletionRecord::deserialize(&data, 0);
   assert!(result.is_err());
 }
 

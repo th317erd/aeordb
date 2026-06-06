@@ -1,6 +1,11 @@
+use std::fs::File;
+
 use aeordb::engine::{
-  apply_merge_patch, BufferedFile, DirectoryOps, EngineError, JsonMergeFilePatch, MergeDepth, RequestContext, StorageEngine,
+  apply_merge_patch, directory_content_hash, directory_path_hash, BufferedFile, DirectoryOps, EngineError, EntryType, JsonMergeFilePatch,
+  MergeDepth, RequestContext, StorageEngine,
 };
+use aeordb::engine::file_header::read_active_header;
+use aeordb::engine::storage_engine::TransactionGuard;
 use serde_json::json;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
@@ -15,6 +20,12 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
 fn read_json(ops: &DirectoryOps<'_>, path: &str) -> serde_json::Value {
   let bytes = ops.read_file_buffered(path).expect("file should exist");
   serde_json::from_slice(&bytes).expect("stored content should be JSON")
+}
+
+fn disk_head_hash(dir: &tempfile::TempDir) -> Vec<u8> {
+  let mut file = File::open(dir.path().join("test.aeor")).unwrap();
+  let (header, _) = read_active_header(&mut file).unwrap();
+  header.head_hash
 }
 
 fn invalid_message(result: Result<impl std::fmt::Debug, EngineError>) -> String {
@@ -93,6 +104,185 @@ fn store_files_buffered_batch_stores_multiple_small_files() {
   let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
   assert!(names.contains(&"a.txt"));
   assert!(names.contains(&"nested"));
+}
+
+#[test]
+fn store_files_buffered_batch_writes_directory_path_keys_as_hard_links() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops
+    .store_files_buffered_batch(
+      &ctx,
+      vec![
+        BufferedFile {
+          path: "/bulk/nested/a.json".to_string(),
+          data: br#"{"a":1}"#.to_vec(),
+          content_type: Some("application/json".to_string()),
+        },
+        BufferedFile {
+          path: "/bulk/nested/b.json".to_string(),
+          data: br#"{"b":2}"#.to_vec(),
+          content_type: Some("application/json".to_string()),
+        },
+      ],
+    )
+    .unwrap();
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  for path in ["/", "/bulk", "/bulk/nested"] {
+    let dir_key = directory_path_hash(path, &algo).unwrap();
+    let (_header, _key, value) = engine.get_entry(&dir_key).unwrap().expect("directory path key should exist");
+    assert_eq!(value.len(), hash_length, "{} should store a content-hash hard link", path);
+    assert!(engine.has_entry(&value).unwrap(), "{} hard-link target should exist", path);
+  }
+
+  let nested = ops.list_directory("/bulk/nested").unwrap();
+  let names: Vec<&str> = nested.iter().map(|child| child.name.as_str()).collect();
+  assert!(names.contains(&"a.json"));
+  assert!(names.contains(&"b.json"));
+}
+
+#[test]
+fn store_files_buffered_batch_publishes_hot_tail_after_large_transaction() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let files: Vec<BufferedFile> = (0..160)
+    .map(|i| BufferedFile {
+      path: format!("/large-batch/file-{i:04}.json"),
+      data: format!(r#"{{"i":{i}}}"#).into_bytes(),
+      content_type: Some("application/json".to_string()),
+    })
+    .collect();
+
+  ops.store_files_buffered_batch(&ctx, files).unwrap();
+
+  let writer = engine.writer_read_lock().unwrap();
+  let header = writer.file_header().clone();
+  assert_eq!(
+    header.hot_tail_offset,
+    writer.current_offset(),
+    "batch commit must publish the current WAL end even if the hot buffer flushed during the transaction"
+  );
+}
+
+#[test]
+fn store_file_buffered_defers_durable_head_until_outer_transaction_commits() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let initial_disk_head = disk_head_hash(&dir);
+
+  {
+    let _outer = TransactionGuard::new(&engine);
+    ops.store_file_buffered(&ctx, "/txn/a.json", br#"{"a":1}"#, Some("application/json")).unwrap();
+
+    let in_memory_head = engine.head_hash().unwrap();
+    assert_ne!(in_memory_head, initial_disk_head, "the active engine should see the new HEAD before commit");
+
+    engine.try_flush_hot_buffer();
+    assert_eq!(disk_head_hash(&dir), initial_disk_head, "timer hot-tail flushing must not durably publish an in-flight transaction HEAD");
+  }
+
+  assert_eq!(disk_head_hash(&dir), engine.head_hash().unwrap(), "outer transaction drop should durably publish HEAD");
+  assert_eq!(ops.read_file_buffered("/txn/a.json").unwrap(), br#"{"a":1}"#);
+}
+
+#[test]
+fn store_files_buffered_batch_defers_durable_head_until_outer_transaction_commits() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let initial_disk_head = disk_head_hash(&dir);
+
+  {
+    let _outer = TransactionGuard::new(&engine);
+    ops
+      .store_files_buffered_batch(
+        &ctx,
+        vec![
+          BufferedFile {
+            path: "/txn/batch/a.json".to_string(),
+            data: br#"{"a":1}"#.to_vec(),
+            content_type: Some("application/json".to_string()),
+          },
+          BufferedFile {
+            path: "/txn/batch/b.json".to_string(),
+            data: br#"{"b":2}"#.to_vec(),
+            content_type: Some("application/json".to_string()),
+          },
+        ],
+      )
+      .unwrap();
+
+    let in_memory_head = engine.head_hash().unwrap();
+    assert_ne!(in_memory_head, initial_disk_head, "the active engine should see the batched HEAD before commit");
+
+    engine.try_flush_hot_buffer();
+    assert_eq!(disk_head_hash(&dir), initial_disk_head, "timer hot-tail flushing must not durably publish an in-flight batch HEAD");
+  }
+
+  assert_eq!(disk_head_hash(&dir), engine.head_hash().unwrap(), "outer transaction drop should durably publish batched HEAD");
+  assert_eq!(ops.read_file_buffered("/txn/batch/a.json").unwrap(), br#"{"a":1}"#);
+  assert_eq!(ops.read_file_buffered("/txn/batch/b.json").unwrap(), br#"{"b":2}"#);
+}
+
+#[test]
+fn store_file_buffered_merges_against_head_when_dir_path_key_is_stale() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/stale/a.txt", b"a", Some("text/plain")).unwrap();
+  poison_directory_path_key_with_empty_hard_link(&engine, "/stale");
+
+  ops.store_file_buffered(&ctx, "/stale/b.txt", b"b", Some("text/plain")).unwrap();
+
+  let children = ops.list_directory("/stale").unwrap();
+  let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
+  assert!(names.contains(&"a.txt"), "existing HEAD child should survive stale dir_key mutation");
+  assert!(names.contains(&"b.txt"));
+}
+
+#[test]
+fn store_files_buffered_batch_merges_against_head_when_dir_path_key_is_stale() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/stale/a.txt", b"a", Some("text/plain")).unwrap();
+  poison_directory_path_key_with_empty_hard_link(&engine, "/stale");
+
+  ops
+    .store_files_buffered_batch(
+      &ctx,
+      vec![BufferedFile { path: "/stale/c.txt".to_string(), data: b"c".to_vec(), content_type: Some("text/plain".to_string()) }],
+    )
+    .unwrap();
+
+  let children = ops.list_directory("/stale").unwrap();
+  let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
+  assert!(names.contains(&"a.txt"), "existing HEAD child should survive stale batch dir_key mutation");
+  assert!(names.contains(&"c.txt"));
+}
+
+fn poison_directory_path_key_with_empty_hard_link(engine: &StorageEngine, path: &str) {
+  let algo = engine.hash_algo();
+  let empty_dir = Vec::new();
+  let empty_content_key = directory_content_hash(&empty_dir, &algo).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &empty_content_key, &empty_dir).unwrap();
+  let dir_key = directory_path_hash(path, &algo).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &dir_key, &empty_content_key).unwrap();
 }
 
 #[test]

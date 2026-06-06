@@ -171,7 +171,7 @@ fn test_event_timestamp_millis() {
   let path = dir.path().join("test.aeor");
   let mut writer = AppendWriter::create(&path).unwrap();
 
-  let offset = writer.append_entry(EntryType::Chunk, b"chunk_key", b"chunk_data", 0).unwrap();
+  let (offset, _) = writer.append_entry(EntryType::Chunk, b"chunk_key", b"chunk_data", 0).unwrap();
   let (entry_header, _key, _value) = writer.read_entry_at(offset).unwrap();
 
   let now_millis = chrono::Utc::now().timestamp_millis();
