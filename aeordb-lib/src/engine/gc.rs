@@ -8,7 +8,7 @@ use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
 use crate::engine::engine_counters::CountersSnapshot;
 use crate::engine::kv_store::{
-  KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
+  KVEntry, KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
 };
 use crate::engine::request_context::RequestContext;
 use crate::engine::rss_sampler::PhaseSampler;
@@ -99,11 +99,22 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
     eprintln!("[gc-timing] mark.tasks: {:?}", task_start.elapsed());
   }
 
+  let all_entries = engine.iter_kv_entries()?;
+
+  // Mark current path-key FileRecords as live even if HEAD temporarily
+  // diverged from the path index. User-facing reads resolve `file:{path}`
+  // directly, so sweeping chunks referenced by a live path-key record creates
+  // a dangling file that still appears readable until chunk lookup fails.
+  let path_file_start = std::time::Instant::now();
+  let path_file_count = mark_live_path_file_records(engine, hash_length, &mut live, &all_entries)?;
+  if timing {
+    eprintln!("[gc-timing] mark.path-files: {:?} (path_records={})", path_file_start.elapsed(), path_file_count);
+  }
+
   // Mark DeletionRecord entries as live — they are needed for KV rebuild
   // from a full .aeordb scan (deletion replay) and must not be swept.
   let del_start = std::time::Instant::now();
   let del_mem = PhaseSampler::start("mark.deletion-pass", std::time::Duration::from_millis(50));
-  let all_entries = engine.iter_kv_entries()?;
   let mut deletion_count = 0usize;
   for entry in &all_entries {
     if entry.entry_type() == KV_TYPE_DELETION {
@@ -118,6 +129,51 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   }
 
   Ok(live)
+}
+
+fn mark_live_path_file_records(
+  engine: &StorageEngine,
+  hash_length: usize,
+  live: &mut HashSet<Vec<u8>>,
+  all_entries: &[KVEntry],
+) -> EngineResult<usize> {
+  let algo = engine.hash_algo();
+  let mut marked = 0usize;
+
+  for entry in all_entries {
+    if entry.entry_type() != KV_TYPE_FILE_RECORD {
+      continue;
+    }
+
+    let Some((header, _key, value)) = engine.get_entry(&entry.hash)? else {
+      continue;
+    };
+    let Ok(file_record) = FileRecord::deserialize(&value, hash_length, header.entry_version) else {
+      continue;
+    };
+    let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
+    if entry.hash != path_key {
+      continue;
+    }
+
+    live.insert(entry.hash.clone());
+    for chunk_hash in &file_record.chunk_hashes {
+      live.insert(chunk_hash.clone());
+    }
+
+    let content_key = crate::engine::directory_ops::file_content_hash(&value, &algo)?;
+    live.insert(content_key);
+    let identity_key = crate::engine::directory_ops::file_identity_hash(
+      &file_record.path,
+      file_record.content_type.as_deref(),
+      &file_record.chunk_hashes,
+      &algo,
+    )?;
+    live.insert(identity_key);
+    marked += 1;
+  }
+
+  Ok(marked)
 }
 
 /// Walk all version roots level-by-level, sorting each level by KV offset
@@ -792,8 +848,8 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
     match entry.entry_type() {
       KV_TYPE_FILE_RECORD => {
         files += 1;
-        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-          if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
+        if let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) {
+          if let Ok(record) = FileRecord::deserialize(&value, hash_length, header.entry_version) {
             logical_data_size += record.total_size;
           }
         }

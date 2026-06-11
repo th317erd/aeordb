@@ -1,8 +1,8 @@
 use std::fs::File;
 
 use aeordb::engine::{
-  apply_merge_patch, directory_content_hash, directory_path_hash, BufferedFile, DirectoryOps, EngineError, EntryType, JsonMergeFilePatch,
-  MergeDepth, RequestContext, StorageEngine,
+  apply_merge_patch, directory_content_hash, directory_path_hash, file_path_hash, BufferedFile, DirectoryOps, EngineError, EntryType,
+  JsonMergeFilePatch, MergeDepth, RequestContext, StorageEngine, CURRENT_FILE_RECORD_VERSION,
 };
 use aeordb::engine::file_header::read_active_header;
 use aeordb::engine::storage_engine::TransactionGuard;
@@ -99,6 +99,10 @@ fn store_files_buffered_batch_stores_multiple_small_files() {
   let metadata = ops.get_metadata("/bulk/nested/b.json").unwrap().unwrap();
   assert_eq!(metadata.total_size, br#"{"beta":true}"#.len() as u64);
   assert_eq!(metadata.content_type.as_deref(), Some("application/json"));
+  assert_eq!(metadata.content_hash, blake3::hash(br#"{"beta":true}"#).as_bytes().to_vec());
+  let file_key = file_path_hash("/bulk/nested/b.json", &engine.hash_algo()).unwrap();
+  let (header, _key, _value) = engine.get_entry(&file_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
 
   let children = ops.list_directory("/bulk").unwrap();
   let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();

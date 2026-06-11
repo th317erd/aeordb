@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use base64::Engine as _;
 
 use super::responses::ErrorResponse;
+use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
-use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::file_record::FileRecord;
 use crate::engine::symlink_record::SymlinkRecord;
 use crate::engine::tree_walker::{diff_trees, walk_version_tree, TreeDiff, VersionTree};
@@ -272,7 +272,7 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
 /// entries: those are engine-internal and must never reach a user's
 /// filesystem, regardless of permissions.
 fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &str, state: &AppState) {
-  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+  use crate::engine::permission_resolver::CrudlifyOp;
 
   // Root short-circuits in the resolver, but we want belt-and-suspenders:
   // root callers never reach this path (Peer/RootUser handled separately).
@@ -287,7 +287,7 @@ fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &s
     return;
   };
 
-  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+  let permissions = RoutePermissionChecker::for_user(state, user_id);
   let is_allowed = |path: &str| -> bool {
     if crate::engine::directory_ops::is_system_path(path) {
       return false;
@@ -299,7 +299,7 @@ fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &s
     // path lacks a trailing slash still see grants stored at the
     // directory itself. Same bug pattern as the share-Susan repro
     // (2026-05-22) — directory-form fallback is needed.
-    resolver.check_path_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
+    permissions.has_path_permission(path, CrudlifyOp::Read)
   };
 
   changes.files_added.retain(|e| is_allowed(&e.path));
@@ -656,19 +656,15 @@ pub async fn sync_chunks(State(state): State<AppState>, headers: HeaderMap, Json
       Err(_) => continue,
     };
 
-    if let Ok(Some((header, _key, value))) = state.engine.get_entry_including_deleted(&hash) {
+    if let Ok(Some((header, _key, _value))) = state.engine.get_entry_including_deleted(&hash) {
       // Skip system entries for non-root/non-peer callers.
       if filter_system && header.is_system_entry() {
         continue;
       }
 
-      let data = if header.compression_algo != CompressionAlgorithm::None {
-        match decompress(&value, header.compression_algo) {
-          Ok(d) => d,
-          Err(_) => continue,
-        }
-      } else {
-        value
+      let data = match state.engine.read_chunk_including_deleted(&hash) {
+        Ok(Some(data)) => data,
+        _ => continue,
       };
       state.engine.counters().record_read(data.len() as u64);
 

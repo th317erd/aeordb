@@ -1,4 +1,3 @@
-use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::merge::MergeOp;
@@ -74,14 +73,9 @@ fn verify_chunks_exist(engine: &StorageEngine, operations: &[MergeOp]) -> Engine
 fn reassemble_file_data(engine: &StorageEngine, chunk_hashes: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
   let mut data = Vec::new();
   for chunk_hash in chunk_hashes {
-    let (header, _key, value) = engine
-      .get_entry(chunk_hash)?
+    let chunk_data = engine
+      .read_chunk(chunk_hash)?
       .ok_or_else(|| EngineError::NotFound(format!("Missing chunk during reassembly: {}", hex::encode(chunk_hash))))?;
-    let chunk_data = if header.compression_algo != CompressionAlgorithm::None {
-      crate::engine::decompress(&value, header.compression_algo)?
-    } else {
-      value
-    };
     data.extend_from_slice(&chunk_data);
   }
   Ok(data)

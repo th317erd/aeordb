@@ -129,6 +129,18 @@ impl AppendWriter {
     flags: u8,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<(u64, u32)> {
+    self.append_entry_with_compression_and_version(entry_type, key, value, flags, compression_algo, CURRENT_ENTRY_VERSION)
+  }
+
+  pub fn append_entry_with_compression_and_version(
+    &mut self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+    entry_version: u8,
+  ) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
@@ -136,7 +148,7 @@ impl AppendWriter {
     let now = self.next_entry_timestamp();
 
     let header = EntryHeader {
-      entry_version: CURRENT_ENTRY_VERSION,
+      entry_version,
       entry_type,
       flags,
       hash_algo,
@@ -227,6 +239,19 @@ impl AppendWriter {
     flags: u8,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u32> {
+    self.write_entry_at_nosync_full_with_version(offset, entry_type, key, value, flags, compression_algo, CURRENT_ENTRY_VERSION)
+  }
+
+  pub fn write_entry_at_nosync_full_with_version(
+    &mut self,
+    offset: u64,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    compression_algo: CompressionAlgorithm,
+    entry_version: u8,
+  ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
@@ -234,7 +259,7 @@ impl AppendWriter {
     let now = self.next_entry_timestamp();
 
     let header = EntryHeader {
-      entry_version: CURRENT_ENTRY_VERSION,
+      entry_version,
       entry_type,
       flags,
       hash_algo,

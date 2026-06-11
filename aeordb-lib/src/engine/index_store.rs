@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::index_config::{IndexFieldConfig, create_converter_from_config};
 use crate::engine::nvt::NormalizedVectorTable;
+use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::scalar_converter::{
   deserialize_converter, serialize_converter, ScalarConverter, CONVERTER_TYPE_PHONETIC, CONVERTER_TYPE_TRIGRAM,
@@ -11,6 +14,10 @@ use crate::engine::storage_engine::StorageEngine;
 
 /// Default number of NVT buckets for a new FieldIndex.
 const DEFAULT_NVT_BUCKET_COUNT: usize = 1024;
+/// Default number of in-memory index mutations before buffered index flush.
+pub const DEFAULT_INDEX_BUFFER_FLUSH_WRITES: usize = 262_144;
+/// Default maximum age of unflushed buffered index mutations.
+pub const DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
@@ -33,6 +40,331 @@ pub struct FieldIndex {
   /// Consider capping or implementing lazy loading from disk during recheck.
   pub values: HashMap<Vec<u8>, Vec<u8>>,
   dirty: bool,
+}
+
+/// Flush policy for buffered index updates.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexWriteBufferOptions {
+  /// Flush after this many index mutations. One mutation is one file update
+  /// against one field/strategy index.
+  pub flush_after_writes: usize,
+  /// Flush when unpersisted mutations have lived at least this long.
+  pub flush_after: Duration,
+}
+
+impl Default for IndexWriteBufferOptions {
+  fn default() -> Self {
+    Self { flush_after_writes: DEFAULT_INDEX_BUFFER_FLUSH_WRITES, flush_after: DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL }
+  }
+}
+
+impl IndexWriteBufferOptions {
+  pub fn new(flush_after_writes: usize, flush_after: Duration) -> Self {
+    Self { flush_after_writes: flush_after_writes.max(1), flush_after }
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IndexWriteBufferStats {
+  pub mutations: usize,
+  pub flushes: usize,
+  pub flushed_indexes: usize,
+  pub cached_indexes: usize,
+  pub pending_mutations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BufferedIndexKey {
+  parent: String,
+  field_name: String,
+  strategy: String,
+}
+
+pub(crate) struct IndexFlushSnapshot {
+  saves: Vec<(BufferedIndexKey, Vec<u8>)>,
+  deletes: Vec<BufferedIndexKey>,
+}
+
+/// Shared in-memory index mutation buffer.
+///
+/// Indexes are recoverable from file records, so every code path that mutates
+/// indexes should update this shared in-memory state first and let the flush
+/// policy persist dirty field/strategy indexes in batches.
+pub(crate) struct SharedIndexWriteBuffer {
+  options: IndexWriteBufferOptions,
+  indexes: HashMap<BufferedIndexKey, FieldIndex>,
+  dirty_keys: HashSet<BufferedIndexKey>,
+  deleted_keys: HashSet<BufferedIndexKey>,
+  pending_mutations: usize,
+  total_mutations: usize,
+  flush_count: usize,
+  flushed_indexes: usize,
+  last_flush: Instant,
+}
+
+impl Default for SharedIndexWriteBuffer {
+  fn default() -> Self {
+    Self::new(IndexWriteBufferOptions::default())
+  }
+}
+
+impl SharedIndexWriteBuffer {
+  pub(crate) fn new(options: IndexWriteBufferOptions) -> Self {
+    SharedIndexWriteBuffer {
+      options,
+      indexes: HashMap::new(),
+      dirty_keys: HashSet::new(),
+      deleted_keys: HashSet::new(),
+      pending_mutations: 0,
+      total_mutations: 0,
+      flush_count: 0,
+      flushed_indexes: 0,
+      last_flush: Instant::now(),
+    }
+  }
+
+  fn options(&self) -> IndexWriteBufferOptions {
+    self.options
+  }
+
+  fn effective_options(&self, override_options: Option<IndexWriteBufferOptions>) -> IndexWriteBufferOptions {
+    override_options.unwrap_or_else(|| self.options())
+  }
+
+  fn should_flush(&self, override_options: Option<IndexWriteBufferOptions>) -> bool {
+    let options = self.effective_options(override_options);
+    self.pending_mutations > 0 && (self.pending_mutations >= options.flush_after_writes || self.last_flush.elapsed() >= options.flush_after)
+  }
+
+  fn stats(&self) -> IndexWriteBufferStats {
+    IndexWriteBufferStats {
+      mutations: self.total_mutations,
+      flushes: self.flush_count,
+      flushed_indexes: self.flushed_indexes,
+      cached_indexes: self.indexes.len(),
+      pending_mutations: self.pending_mutations,
+    }
+  }
+
+  fn get_index_clone(&self, key: &BufferedIndexKey, hash_length: usize) -> EngineResult<Option<FieldIndex>> {
+    if self.deleted_keys.contains(key) {
+      return Ok(None);
+    }
+    match self.indexes.get(key) {
+      Some(index) => Ok(Some(index.deep_clone(hash_length)?)),
+      None => Ok(None),
+    }
+  }
+
+  fn list_index_names(&self, parent: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for key in self.indexes.keys() {
+      if key.parent == parent && !self.deleted_keys.contains(key) {
+        names.push(format!("{}.{}", key.field_name, key.strategy));
+      }
+    }
+    names
+  }
+
+  fn indexed_parents(&self) -> Vec<String> {
+    let mut parents = Vec::new();
+    for key in self.indexes.keys() {
+      if !self.deleted_keys.contains(key) {
+        parents.push(key.parent.clone());
+      }
+    }
+    parents
+  }
+
+  fn put_index(&mut self, key: BufferedIndexKey, index: FieldIndex) {
+    self.deleted_keys.remove(&key);
+    self.indexes.insert(key.clone(), index);
+    self.dirty_keys.insert(key);
+    self.pending_mutations += 1;
+    self.total_mutations += 1;
+  }
+
+  fn update_index(
+    &mut self,
+    key: BufferedIndexKey,
+    initial_index: Option<FieldIndex>,
+    create_index: impl FnOnce() -> EngineResult<FieldIndex>,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+  ) -> EngineResult<()> {
+    self.deleted_keys.remove(&key);
+    if !self.indexes.contains_key(&key) {
+      let index = match initial_index {
+        Some(index) => index,
+        None => create_index()?,
+      };
+      self.indexes.insert(key.clone(), index);
+    }
+
+    let index = self.indexes.get_mut(&key).expect("buffered index exists after insertion");
+    index.remove(file_key);
+    for value in field_values {
+      index.insert_expanded(value, file_key.to_vec());
+    }
+
+    self.dirty_keys.insert(key);
+    self.pending_mutations += 1;
+    self.total_mutations += 1;
+    Ok(())
+  }
+
+  fn remove_file_from_index(&mut self, key: BufferedIndexKey, initial_index: Option<FieldIndex>, file_key: &[u8]) {
+    if self.deleted_keys.contains(&key) {
+      return;
+    }
+    if !self.indexes.contains_key(&key) {
+      if let Some(index) = initial_index {
+        self.indexes.insert(key.clone(), index);
+      } else {
+        return;
+      }
+    }
+
+    let Some(index) = self.indexes.get_mut(&key) else {
+      return;
+    };
+    let before_entries = index.len();
+    let before_values = index.values.len();
+    index.remove(file_key);
+    if index.len() != before_entries || index.values.len() != before_values {
+      self.dirty_keys.insert(key);
+      self.pending_mutations += 1;
+      self.total_mutations += 1;
+    }
+  }
+
+  fn delete_index(&mut self, key: BufferedIndexKey) {
+    self.indexes.remove(&key);
+    self.dirty_keys.remove(&key);
+    self.deleted_keys.insert(key);
+    self.pending_mutations += 1;
+    self.total_mutations += 1;
+  }
+
+  fn snapshot_flush(&mut self, hash_length: usize) -> EngineResult<IndexFlushSnapshot> {
+    let dirty_keys = std::mem::take(&mut self.dirty_keys);
+    let deleted_keys = std::mem::take(&mut self.deleted_keys);
+    let mut saves = Vec::new();
+
+    for key in dirty_keys {
+      if deleted_keys.contains(&key) {
+        continue;
+      }
+      if let Some(index) = self.indexes.get_mut(&key) {
+        index.ensure_nvt_current();
+        saves.push((key, index.serialize(hash_length)));
+      }
+    }
+
+    let deletes: Vec<BufferedIndexKey> = deleted_keys.into_iter().collect();
+    if !saves.is_empty() || !deletes.is_empty() || self.pending_mutations > 0 {
+      self.flush_count += 1;
+      self.flushed_indexes += saves.len();
+      self.pending_mutations = 0;
+      self.last_flush = Instant::now();
+    }
+
+    Ok(IndexFlushSnapshot { saves, deletes })
+  }
+
+  fn restore_failed_flush(&mut self, snapshot: &IndexFlushSnapshot) {
+    for (key, _) in &snapshot.saves {
+      if self.indexes.contains_key(key) && !self.deleted_keys.contains(key) {
+        self.dirty_keys.insert(key.clone());
+      }
+    }
+    for key in &snapshot.deletes {
+      if !self.indexes.contains_key(key) {
+        self.deleted_keys.insert(key.clone());
+      }
+    }
+    self.pending_mutations = self.pending_mutations.saturating_add(snapshot.saves.len() + snapshot.deletes.len());
+  }
+}
+
+/// Compatibility handle for bulk callers.
+///
+/// The handle no longer owns a separate cache. It forwards updates to the
+/// engine-wide shared index buffer so live writes, reindexing, delete cleanup,
+/// and manual index operations all use the same mutation/flush path.
+pub struct IndexWriteBuffer<'a> {
+  manager: IndexManager<'a>,
+  options: IndexWriteBufferOptions,
+  pending_mutations: usize,
+  total_mutations: usize,
+  flush_count: usize,
+  flushed_indexes: usize,
+  last_flush: Instant,
+}
+
+impl<'a> IndexWriteBuffer<'a> {
+  pub fn new(engine: &'a StorageEngine, options: IndexWriteBufferOptions) -> Self {
+    Self {
+      manager: IndexManager::new(engine),
+      options,
+      pending_mutations: 0,
+      total_mutations: 0,
+      flush_count: 0,
+      flushed_indexes: 0,
+      last_flush: Instant::now(),
+    }
+  }
+
+  pub fn update_index(
+    &mut self,
+    parent: &str,
+    field_name: &str,
+    field_config: &IndexFieldConfig,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+  ) -> EngineResult<()> {
+    self.manager.update_index_with_options(parent, field_name, field_config, field_values, file_key, Some(self.options))?;
+    self.pending_mutations += 1;
+    self.total_mutations += 1;
+    Ok(())
+  }
+
+  pub fn should_flush(&self) -> bool {
+    self.pending_mutations > 0
+      && (self.pending_mutations >= self.options.flush_after_writes || self.last_flush.elapsed() >= self.options.flush_after)
+  }
+
+  pub fn flush_if_due(&mut self) -> EngineResult<bool> {
+    if self.should_flush() {
+      self.flush_all()?;
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+
+  pub fn flush_all(&mut self) -> EngineResult<usize> {
+    if self.pending_mutations == 0 {
+      return Ok(0);
+    }
+
+    let flushed = self.manager.flush_buffered_indexes()?;
+    self.pending_mutations = 0;
+    self.flush_count += 1;
+    self.flushed_indexes += flushed;
+    self.last_flush = Instant::now();
+    Ok(flushed)
+  }
+
+  pub fn stats(&self) -> IndexWriteBufferStats {
+    IndexWriteBufferStats {
+      mutations: self.total_mutations,
+      flushes: self.flush_count,
+      flushed_indexes: self.flushed_indexes,
+      cached_indexes: self.manager.buffered_index_stats().cached_indexes,
+      pending_mutations: self.pending_mutations,
+    }
+  }
 }
 
 impl FieldIndex {
@@ -393,6 +725,12 @@ impl FieldIndex {
     self.entries.is_empty()
   }
 
+  /// Clone through the stable serialized representation so the boxed
+  /// converter and NVT state are copied without sharing mutable query state.
+  pub fn deep_clone(&self, hash_length: usize) -> EngineResult<Self> {
+    FieldIndex::deserialize(&self.serialize(hash_length), hash_length)
+  }
+
   /// Current on-disk schema version for a FieldIndex blob. Bump alongside
   /// a new `deserialize_v{n}` arm when the layout changes.
   pub const SCHEMA_VERSION: u8 = 0;
@@ -645,67 +983,47 @@ impl<'a> IndexManager<'a> {
     format!("{}.aeordb-indexes", base)
   }
 
-  /// Load an index for a field at the given path.
-  /// Tries the old naming format ({field_name}.idx) first for backward compatibility,
-  /// then scans for new-format files ({field_name}.{strategy}.idx).
-  pub fn load_index(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
-    // Try old format first: {field_name}.idx
+  fn buffer_key(path: &str, field_name: &str, strategy: &str) -> BufferedIndexKey {
+    BufferedIndexKey { parent: normalize_path(path), field_name: field_name.to_string(), strategy: strategy.to_string() }
+  }
+
+  fn split_index_name(index_name: &str) -> Option<(&str, &str)> {
+    index_name.rsplit_once('.')
+  }
+
+  fn lock_buffer(&self) -> EngineResult<std::sync::MutexGuard<'_, SharedIndexWriteBuffer>> {
+    self.engine.index_write_buffer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
+  }
+
+  fn load_index_legacy_from_disk(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
     let old_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
 
     match ops.read_file_buffered(&old_path) {
       Ok(data) => {
         let hash_length = self.engine.hash_algo().hash_length();
-        let index = FieldIndex::deserialize(&data, hash_length)?;
-        return Ok(Some(index));
-      }
-      Err(EngineError::NotFound(_)) => {} // fall through to scan
-      Err(error) => return Err(error),
-    }
-
-    // Try new format: scan for {field_name}.{strategy}.idx
-    let indexes = self.list_indexes(path)?;
-    for index_name in &indexes {
-      if index_name.starts_with(&format!("{}.", field_name)) {
-        let strategy = index_name.split_once('.').map(|x| x.1).unwrap_or("string");
-        return self.load_index_by_strategy(path, field_name, strategy);
-      }
-    }
-
-    Ok(None)
-  }
-
-  /// Load an index by field name and strategy.
-  pub fn load_index_by_strategy(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<Option<FieldIndex>> {
-    let index_path = Self::index_file_path(path, field_name, strategy);
-    let ops = DirectoryOps::new(self.engine);
-
-    match ops.read_file_buffered(&index_path) {
-      Ok(data) => {
-        let hash_length = self.engine.hash_algo().hash_length();
-        let index = FieldIndex::deserialize(&data, hash_length)?;
-        Ok(Some(index))
+        Ok(Some(FieldIndex::deserialize(&data, hash_length)?))
       }
       Err(EngineError::NotFound(_)) => Ok(None),
       Err(error) => Err(error),
     }
   }
 
-  /// Save an index to `.indexes/{field_name}.{strategy}.idx` at the given path.
-  pub fn save_index(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
-    let strategy = index.converter.strategy();
-    let index_path = Self::index_file_path(path, &index.field_name, strategy);
-    let hash_length = self.engine.hash_algo().hash_length();
-    let data = index.serialize(hash_length);
-    let ctx = RequestContext::system();
+  fn load_index_by_strategy_from_disk(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<Option<FieldIndex>> {
+    let index_path = Self::index_file_path(path, field_name, strategy);
     let ops = DirectoryOps::new(self.engine);
-    ops.store_file_buffered(&ctx, &index_path, &data, Some("application/octet-stream"))?;
-    Ok(())
+
+    match ops.read_file_buffered(&index_path) {
+      Ok(data) => {
+        let hash_length = self.engine.hash_algo().hash_length();
+        Ok(Some(FieldIndex::deserialize(&data, hash_length)?))
+      }
+      Err(EngineError::NotFound(_)) => Ok(None),
+      Err(error) => Err(error),
+    }
   }
 
-  /// List index names at this path.
-  /// Returns names in the format "field.strategy" (new format) or "field" (old format).
-  pub fn list_indexes(&self, path: &str) -> EngineResult<Vec<String>> {
+  fn list_indexes_from_disk(&self, path: &str) -> EngineResult<Vec<String>> {
     let indexes_dir = Self::indexes_dir_path(path);
     let ops = DirectoryOps::new(self.engine);
 
@@ -730,12 +1048,111 @@ impl<'a> IndexManager<'a> {
     }
   }
 
+  fn save_index_bytes_to_disk(&self, key: &BufferedIndexKey, data: &[u8]) -> EngineResult<()> {
+    let index_path = Self::index_file_path(&key.parent, &key.field_name, &key.strategy);
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(self.engine);
+    ops.store_file_buffered(&ctx, &index_path, data, Some("application/octet-stream"))?;
+    Ok(())
+  }
+
+  fn delete_index_from_disk(&self, key: &BufferedIndexKey) -> EngineResult<()> {
+    let ctx = RequestContext::system();
+    let index_path = Self::index_file_path(&key.parent, &key.field_name, &key.strategy);
+    let ops = DirectoryOps::new(self.engine);
+    match ops.delete_file(&ctx, &index_path) {
+      Ok(()) | Err(EngineError::NotFound(_)) => Ok(()),
+      Err(error) => Err(error),
+    }
+  }
+
+  /// Load an index for a field at the given path.
+  /// Tries the old naming format ({field_name}.idx) first for backward compatibility,
+  /// then scans for new-format files ({field_name}.{strategy}.idx).
+  pub fn load_index(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
+    // Try old format first: {field_name}.idx
+    if let Some(index) = self.load_index_legacy_from_disk(path, field_name)? {
+      return Ok(Some(index));
+    }
+
+    // Try new format: scan for {field_name}.{strategy}.idx
+    let indexes = self.list_indexes(path)?;
+    for index_name in &indexes {
+      if index_name.starts_with(&format!("{}.", field_name)) {
+        let strategy = index_name.rsplit_once('.').map(|x| x.1).unwrap_or("string");
+        return self.load_index_by_strategy(path, field_name, strategy);
+      }
+    }
+
+    Ok(None)
+  }
+
+  /// Load an index by field name and strategy.
+  pub fn load_index_by_strategy(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<Option<FieldIndex>> {
+    let key = Self::buffer_key(path, field_name, strategy);
+    let hash_length = self.engine.hash_algo().hash_length();
+    {
+      let buffer = self.lock_buffer()?;
+      if let Some(index) = buffer.get_index_clone(&key, hash_length)? {
+        return Ok(Some(index));
+      }
+      if buffer.deleted_keys.contains(&key) {
+        return Ok(None);
+      }
+    }
+    self.load_index_by_strategy_from_disk(&key.parent, field_name, strategy)
+  }
+
+  /// Buffer an index save to `.indexes/{field_name}.{strategy}.idx` at the given path.
+  pub fn save_index(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
+    let strategy = index.converter.strategy();
+    let key = Self::buffer_key(path, &index.field_name, strategy);
+    let hash_length = self.engine.hash_algo().hash_length();
+    let index_clone = index.deep_clone(hash_length)?;
+    {
+      let mut buffer = self.lock_buffer()?;
+      buffer.put_index(key, index_clone);
+    }
+    self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
+  }
+
+  /// List index names at this path.
+  /// Returns names in the format "field.strategy" (new format) or "field" (old format).
+  pub fn list_indexes(&self, path: &str) -> EngineResult<Vec<String>> {
+    let parent = normalize_path(path);
+    let mut names = self.list_indexes_from_disk(&parent)?;
+    {
+      let buffer = self.lock_buffer()?;
+      names.extend(buffer.list_index_names(&parent));
+      names.retain(|name| {
+        if let Some((field_name, strategy)) = Self::split_index_name(name) {
+          let key = Self::buffer_key(&parent, field_name, strategy);
+          !buffer.deleted_keys.contains(&key)
+        } else {
+          true
+        }
+      });
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+  }
+
   /// Delete an index for a field and strategy at the given path.
   pub fn delete_index(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
-    let ctx = RequestContext::system();
-    let index_path = Self::index_file_path(path, field_name, strategy);
-    let ops = DirectoryOps::new(self.engine);
-    ops.delete_file(&ctx, &index_path)
+    let key = Self::buffer_key(path, field_name, strategy);
+    let exists_in_buffer = {
+      let buffer = self.lock_buffer()?;
+      buffer.indexes.contains_key(&key) && !buffer.deleted_keys.contains(&key)
+    };
+    if !exists_in_buffer && self.load_index_by_strategy_from_disk(&key.parent, field_name, strategy)?.is_none() {
+      return Err(EngineError::NotFound(Self::index_file_path(&key.parent, field_name, strategy)));
+    }
+    {
+      let mut buffer = self.lock_buffer()?;
+      buffer.delete_index(key);
+    }
+    self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
   }
 
   /// Delete an index using the legacy path format (no strategy).
@@ -751,6 +1168,165 @@ impl<'a> IndexManager<'a> {
     let index = FieldIndex::new(field_name.to_string(), converter);
     self.save_index(path, &index)?;
     Ok(index)
+  }
+
+  /// Update one field/strategy index through the shared buffered write path.
+  pub fn update_index(
+    &self,
+    parent: &str,
+    field_name: &str,
+    field_config: &IndexFieldConfig,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+  ) -> EngineResult<()> {
+    self.update_index_with_options(parent, field_name, field_config, field_values, file_key, None)
+  }
+
+  pub(crate) fn update_index_with_options(
+    &self,
+    parent: &str,
+    field_name: &str,
+    field_config: &IndexFieldConfig,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+    options: Option<IndexWriteBufferOptions>,
+  ) -> EngineResult<()> {
+    let converter = create_converter_from_config(field_config)?;
+    let strategy = converter.strategy().to_string();
+    let key = Self::buffer_key(parent, field_name, &strategy);
+
+    let needs_load = {
+      let buffer = self.lock_buffer()?;
+      !buffer.indexes.contains_key(&key)
+    };
+    let initial_index = if needs_load { self.load_index_by_strategy_from_disk(&key.parent, field_name, &strategy)? } else { None };
+
+    {
+      let mut buffer = self.lock_buffer()?;
+      let create_index = || {
+        let converter = create_converter_from_config(field_config)?;
+        Ok(FieldIndex::new(field_name.to_string(), converter))
+      };
+      buffer.update_index(key, initial_index, create_index, field_values, file_key)?;
+    }
+
+    self.flush_buffered_indexes_if_due_with_options(options).map(|_| ())
+  }
+
+  /// Remove a file hash from an index name returned by `list_indexes`, using
+  /// the same buffered mutation path as inserts and saves.
+  pub fn remove_file_from_index_name(&self, parent: &str, index_name: &str, file_key: &[u8]) -> EngineResult<()> {
+    if let Some((field_name, strategy)) = Self::split_index_name(index_name) {
+      self.remove_file_from_index(parent, field_name, strategy, file_key)
+    } else {
+      let Some(index) = self.load_index(parent, index_name)? else {
+        return Ok(());
+      };
+      let strategy = index.converter.strategy().to_string();
+      let key = Self::buffer_key(parent, &index.field_name, &strategy);
+      {
+        let mut buffer = self.lock_buffer()?;
+        buffer.remove_file_from_index(key, Some(index), file_key);
+      }
+      self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
+    }
+  }
+
+  pub fn remove_file_from_index(&self, parent: &str, field_name: &str, strategy: &str, file_key: &[u8]) -> EngineResult<()> {
+    let key = Self::buffer_key(parent, field_name, strategy);
+    let needs_load = {
+      let buffer = self.lock_buffer()?;
+      !buffer.indexes.contains_key(&key) && !buffer.deleted_keys.contains(&key)
+    };
+    let initial_index = if needs_load { self.load_index_by_strategy_from_disk(&key.parent, field_name, strategy)? } else { None };
+    {
+      let mut buffer = self.lock_buffer()?;
+      buffer.remove_file_from_index(key, initial_index, file_key);
+    }
+    self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
+  }
+
+  pub fn buffered_index_stats(&self) -> IndexWriteBufferStats {
+    match self.lock_buffer() {
+      Ok(buffer) => buffer.stats(),
+      Err(_) => IndexWriteBufferStats::default(),
+    }
+  }
+
+  pub fn flush_buffered_indexes_if_due(&self) -> EngineResult<bool> {
+    self.flush_buffered_indexes_if_due_with_options(None)
+  }
+
+  pub(crate) fn flush_buffered_indexes_if_due_with_options(&self, options: Option<IndexWriteBufferOptions>) -> EngineResult<bool> {
+    match self.take_flush_snapshot(false, options)? {
+      Some(snapshot) => {
+        self.write_flush_snapshot(snapshot)?;
+        Ok(true)
+      }
+      None => Ok(false),
+    }
+  }
+
+  pub fn flush_buffered_indexes(&self) -> EngineResult<usize> {
+    match self.take_flush_snapshot(true, None)? {
+      Some(snapshot) => self.write_flush_snapshot(snapshot),
+      None => Ok(0),
+    }
+  }
+
+  fn take_flush_snapshot(&self, force: bool, options: Option<IndexWriteBufferOptions>) -> EngineResult<Option<IndexFlushSnapshot>> {
+    let hash_length = self.engine.hash_algo().hash_length();
+    let snapshot = {
+      let mut buffer = self.lock_buffer()?;
+      if force && buffer.pending_mutations == 0 && buffer.dirty_keys.is_empty() && buffer.deleted_keys.is_empty() {
+        return Ok(None);
+      }
+      if !force && !buffer.should_flush(options) {
+        return Ok(None);
+      }
+      let effective_options = buffer.effective_options(options);
+      tracing::debug!(
+        force,
+        pending_mutations = buffer.pending_mutations,
+        dirty_indexes = buffer.dirty_keys.len(),
+        deleted_indexes = buffer.deleted_keys.len(),
+        cached_indexes = buffer.indexes.len(),
+        elapsed_ms = buffer.last_flush.elapsed().as_millis(),
+        flush_after_writes = effective_options.flush_after_writes,
+        flush_after_ms = effective_options.flush_after.as_millis(),
+        "Taking buffered index flush snapshot"
+      );
+      buffer.snapshot_flush(hash_length)?
+    };
+    Ok(Some(snapshot))
+  }
+
+  fn write_flush_snapshot(&self, snapshot: IndexFlushSnapshot) -> EngineResult<usize> {
+    let mut result = Ok(());
+    for (key, data) in &snapshot.saves {
+      if let Err(error) = self.save_index_bytes_to_disk(key, data) {
+        result = Err(error);
+        break;
+      }
+    }
+    if result.is_ok() {
+      for key in &snapshot.deletes {
+        if let Err(error) = self.delete_index_from_disk(key) {
+          result = Err(error);
+          break;
+        }
+      }
+    }
+
+    match result {
+      Ok(()) => Ok(snapshot.saves.len()),
+      Err(error) => {
+        if let Ok(mut buffer) = self.lock_buffer() {
+          buffer.restore_failed_flush(&snapshot);
+        }
+        Err(error)
+      }
+    }
   }
 
   /// Discover all directories that contain indexes under `base_path`.
@@ -788,6 +1364,15 @@ impl<'a> IndexManager<'a> {
       }
       Err(e) => {
         tracing::warn!(base_path, "discover_indexed_directories: recursive scan failed ({}). Returning base-path results only.", e,);
+      }
+    }
+
+    if let Ok(buffer) = self.lock_buffer() {
+      for parent in buffer.indexed_parents() {
+        let normalized_base = crate::engine::path_utils::normalize_path(base_path);
+        if parent == normalized_base || parent.starts_with(&format!("{}/", normalized_base.trim_end_matches('/'))) {
+          indexed_dirs.insert(parent);
+        }
       }
     }
 

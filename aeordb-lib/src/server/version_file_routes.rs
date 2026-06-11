@@ -8,11 +8,13 @@ use axum::{
 use serde::Deserialize;
 
 use super::responses::ErrorResponse;
+use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::version_access::resolve_file_at_version;
 use crate::engine::version_manager::VersionManager;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
+use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::request_context::RequestContext;
 use crate::engine::user::is_root;
 
@@ -61,12 +63,10 @@ pub async fn file_history(
     return ErrorResponse::new(format!("Not found: /{}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
   if let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) {
-    if !crate::engine::user::is_root(&user_id) {
-      use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    let permissions = RoutePermissionChecker::for_user(&state, user_id);
+    if !permissions.is_root() {
       let absolute = if path.starts_with('/') { path.clone() } else { format!("/{}", path) };
-      let allowed = resolver.check_path_permission(&user_id, &absolute, CrudlifyOp::Read).unwrap_or(false);
-      if !allowed {
+      if !permissions.has_path_permission(&absolute, CrudlifyOp::Read) {
         return ErrorResponse::new(format!("Not found: /{}", path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }

@@ -1,15 +1,14 @@
-use crate::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
+use crate::engine::compression::{compress, CompressionAlgorithm};
 use crate::engine::batch_commit::{commit_buffered_files, BufferedFile, CommitResult};
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_record::FileRecord;
+use crate::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
-use crate::engine::index_config::PathIndexConfig;
-use crate::engine::index_store::IndexManager;
+use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
@@ -122,6 +121,166 @@ pub fn system_file_identity_hash(
   algo.compute_hash(&input)
 }
 
+/// Compute the raw whole-file content hash from unprefixed file bytes.
+///
+/// This is intentionally distinct from [`chunk_content_hash`] and
+/// [`file_content_hash`]: chunk hashes use the `chunk:` domain prefix and
+/// file content-addressed keys hash the serialized `FileRecord`. `@hash`
+/// exposes this raw file-byte hash so clients can ask "where does this
+/// exact content exist?" independent of path and MIME type.
+pub fn whole_file_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+  algo.compute_hash(data)
+}
+
+/// Compute the raw whole-file content hash by streaming stored chunks in
+/// order. Used by commit paths that only receive chunk hashes.
+pub fn whole_file_content_hash_from_chunks(engine: &StorageEngine, chunk_hashes: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
+  let algo = engine.hash_algo();
+  let mut hasher = algo.incremental_hasher()?;
+
+  for hash in chunk_hashes {
+    let Some(chunk) = engine.read_chunk(hash)? else {
+      return Err(EngineError::NotFound(format!("Chunk not found while computing file content hash: {}", hex::encode(hash))));
+    };
+    hasher.update(&chunk);
+  }
+
+  Ok(hasher.finalize())
+}
+
+fn ensure_file_record_content_hash(engine: &StorageEngine, record: &mut FileRecord) -> EngineResult<()> {
+  let hash_length = engine.hash_algo().hash_length();
+  if record.content_hash.len() == hash_length {
+    return Ok(());
+  }
+  if !record.content_hash.is_empty() {
+    return Err(EngineError::InvalidInput(format!(
+      "FileRecord content hash length {} does not match expected hash length {}",
+      record.content_hash.len(),
+      hash_length,
+    )));
+  }
+  record.content_hash = whole_file_content_hash_from_chunks(engine, &record.chunk_hashes)?;
+  Ok(())
+}
+
+fn store_file_record_entry(engine: &StorageEngine, key: &[u8], value: &[u8], flags: u8) -> EngineResult<()> {
+  if flags != 0 {
+    engine.store_entry_with_flags_and_version(EntryType::FileRecord, key, value, flags, CURRENT_FILE_RECORD_VERSION)?;
+  } else {
+    engine.store_entry_with_version(EntryType::FileRecord, key, value, CURRENT_FILE_RECORD_VERSION)?;
+  }
+  Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileRecordKeys {
+  pub identity_key: Vec<u8>,
+}
+
+pub(crate) fn materialize_file_record_entries(
+  engine: &StorageEngine,
+  normalized_path: &str,
+  record: &mut FileRecord,
+  flags: u8,
+) -> EngineResult<FileRecordKeys> {
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  ensure_file_record_content_hash(engine, record)?;
+
+  let file_value = record.serialize(hash_length)?;
+  let content_key = file_content_hash(&file_value, &algo)?;
+  let identity_key = file_identity_hash(normalized_path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
+  let file_key = file_path_hash(normalized_path, &algo)?;
+
+  store_file_record_entry(engine, &content_key, &file_value, flags)?;
+  store_file_record_entry(engine, &identity_key, &file_value, flags)?;
+  store_file_record_entry(engine, &file_key, &file_value, flags)?;
+
+  Ok(FileRecordKeys { identity_key })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileRecordPublishInput {
+  pub normalized_path: String,
+  pub content_type: Option<String>,
+  pub total_size: u64,
+  pub chunk_hashes: Vec<Vec<u8>>,
+  pub content_hash: Vec<u8>,
+  pub flags: u8,
+  pub created_at_override: Option<i64>,
+  pub prefer_existing_created_at: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileRecordPublishResult {
+  pub normalized_path: String,
+  pub file_record: FileRecord,
+  pub child_entry: ChildEntry,
+  pub event_entry: EntryEventData,
+  pub existing_total_size: Option<u64>,
+}
+
+pub(crate) fn publish_file_record_entries(engine: &StorageEngine, input: FileRecordPublishInput) -> EngineResult<FileRecordPublishResult> {
+  let normalized = normalize_path(&input.normalized_path);
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let file_key = file_path_hash(&normalized, &algo)?;
+  let (existing_created_at, existing_total_size) = match engine.get_entry(&file_key)? {
+    Some((header, _key, value)) => {
+      let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      (Some(existing.created_at), Some(existing.total_size))
+    }
+    None => (None, None),
+  };
+
+  let mut file_record = FileRecord::new(normalized.clone(), input.content_type.clone(), input.total_size, input.chunk_hashes);
+  file_record.content_hash = input.content_hash;
+
+  if input.prefer_existing_created_at {
+    if let Some(original_created_at) = existing_created_at {
+      file_record.created_at = original_created_at;
+    } else if let Some(created_at_override) = input.created_at_override {
+      file_record.created_at = created_at_override;
+    }
+  } else if let Some(created_at_override) = input.created_at_override {
+    file_record.created_at = created_at_override;
+  }
+
+  let keys = materialize_file_record_entries(engine, &normalized, &mut file_record, input.flags)?;
+  let content_type = file_record.content_type.clone();
+  let child_entry = ChildEntry {
+    entry_type: EntryType::FileRecord.to_u8(),
+    hash: keys.identity_key,
+    total_size: file_record.total_size,
+    created_at: file_record.created_at,
+    updated_at: file_record.updated_at,
+    name: file_name(&normalized).unwrap_or("").to_string(),
+    content_type: content_type.clone(),
+    virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+    node_id: 0,
+  };
+  let event_entry = EntryEventData {
+    path: normalized.clone(),
+    entry_type: "file".to_string(),
+    content_type,
+    size: file_record.total_size,
+    hash: file_record.content_hash_hex(),
+    created_at: file_record.created_at,
+    updated_at: file_record.updated_at,
+    previous_hash: None,
+  };
+
+  Ok(FileRecordPublishResult { normalized_path: normalized, file_record, child_entry, event_entry, existing_total_size })
+}
+
+fn file_record_header_needs_migration(engine: &StorageEngine, key: &[u8]) -> EngineResult<bool> {
+  match engine.get_entry(key)? {
+    Some((header, _key, _value)) => Ok(header.entry_version < CURRENT_FILE_RECORD_VERSION),
+    None => Ok(true),
+  }
+}
+
 /// Check if a path is under one of the protected system roots:
 ///   - `/.aeordb-system/...` (user/group records, api keys, refresh tokens,
 ///     snapshots, internal config like jwt_signing_key)
@@ -221,15 +380,10 @@ impl<'a> EngineFileStream<'a> {
 
   fn fetch_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
     let engine = self.engine.engine();
-    let entry = if self.include_deleted { engine.get_entry_verified_including_deleted(hash)? } else { engine.get_entry_verified(hash)? };
+    let entry =
+      if self.include_deleted { engine.read_chunk_verified_including_deleted(hash)? } else { engine.read_chunk_verified(hash)? };
     match entry {
-      Some((header, _key, value)) => {
-        if header.compression_algo != CompressionAlgorithm::None {
-          decompress(&value, header.compression_algo)
-        } else {
-          Ok(value)
-        }
-      }
+      Some(value) => Ok(value),
       None => Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash)))),
     }
   }
@@ -434,6 +588,7 @@ impl<'a> DirectoryOps<'a> {
     let mut total_size: u64 = 0;
     let mut buffer = vec![0u8; chunk_size];
     let mut filled = 0usize;
+    let mut content_hasher = self.engine.hash_algo().incremental_hasher()?;
 
     loop {
       // Top up the buffer to a full chunk before emitting, so we end up with
@@ -456,6 +611,7 @@ impl<'a> DirectoryOps<'a> {
       }
 
       let hash = self.store_chunk(&buffer[..filled])?;
+      content_hasher.update(&buffer[..filled]);
       chunk_hashes.push(hash);
       total_size += filled as u64;
 
@@ -466,7 +622,11 @@ impl<'a> DirectoryOps<'a> {
       filled = 0;
     }
 
-    self.finalize_file(ctx, path, chunk_hashes, total_size, content_type, &first_bytes)
+    let content_hash = content_hasher.finalize();
+    let file_record =
+      self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, &first_bytes, content_hash)?;
+    self.index_metadata_after_streaming_store(ctx, path);
+    Ok(file_record)
   }
 
   /// Store a single data chunk and return its hash. Deduplicates automatically.
@@ -497,89 +657,69 @@ impl<'a> DirectoryOps<'a> {
     content_type: Option<&str>,
     first_bytes: &[u8],
   ) -> EngineResult<FileRecord> {
+    let content_hash = whole_file_content_hash_from_chunks(self.engine, &chunk_hashes)?;
+    let file_record = self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, first_bytes, content_hash)?;
+    self.index_metadata_after_streaming_store(ctx, path);
+    Ok(file_record)
+  }
+
+  fn index_metadata_after_streaming_store(&self, ctx: &RequestContext, path: &str) {
+    if is_internal_path(path) {
+      return;
+    }
+
+    let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
+    if let Err(error) = pipeline.run_metadata_only(ctx, path) {
+      tracing::warn!("Metadata indexing failed for streamed file '{}': {}", path, error);
+    }
+  }
+
+  fn finalize_file_with_content_hash(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    chunk_hashes: Vec<Vec<u8>>,
+    total_size: u64,
+    content_type: Option<&str>,
+    first_bytes: &[u8],
+    content_hash: Vec<u8>,
+  ) -> EngineResult<FileRecord> {
     let _mem = PhaseSampler::start("finalize_file", std::time::Duration::from_millis(50));
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     if normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
     }
 
-    let algo = self.engine.hash_algo();
+    let _namespace = self.engine.namespace_write_guard()?;
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
-    let hash_length = algo.hash_length();
 
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        (Some(existing.created_at), Some(existing.total_size))
-      }
-      None => (None, None),
-    };
+    let published = publish_file_record_entries(
+      self.engine,
+      FileRecordPublishInput {
+        normalized_path: normalized,
+        content_type: Some(detected_content_type),
+        total_size,
+        chunk_hashes,
+        content_hash,
+        flags: sys_flags,
+        created_at_override: None,
+        prefer_existing_created_at: true,
+      },
+    )?;
 
-    let mut file_record = FileRecord::new(normalized.clone(), Some(detected_content_type.clone()), total_size, chunk_hashes);
-
-    if let Some(original_created_at) = existing_created_at {
-      file_record.created_at = original_created_at;
-    }
-
-    let file_value = file_record.serialize(hash_length)?;
-    let file_content_key = file_content_hash(&file_value, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_content_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
-    }
-
-    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
-    }
-
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
-    }
-
-    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
-      total_size,
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: Some(detected_content_type.clone()),
-      virtual_time: now_vt,
-      node_id: 0,
-    };
-
-    self.update_parent_directories(&normalized, child)?;
-
-    self.engine.counters().record_file_write(existing_total_size, total_size, total_size);
-
-    let entry_data = EntryEventData {
-      path: normalized,
-      entry_type: "file".to_string(),
-      content_type: file_record.content_type.clone(),
-      size: file_record.total_size,
-      hash: hex::encode(file_record.chunk_hashes.first().unwrap_or(&vec![])),
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      previous_hash: None,
-    };
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
+    self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
 
-    Ok(file_record)
+    Ok(published.file_record)
   }
 
   /// Store a file with compression at the given path, splitting data into chunks.
@@ -632,7 +772,6 @@ impl<'a> DirectoryOps<'a> {
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     // M15: Reject storing at root path — it would create a ghost entry.
     if normalized == "/" {
@@ -644,7 +783,6 @@ impl<'a> DirectoryOps<'a> {
 
     // Detect content type from magic bytes when not explicitly provided
     let detected_content_type = crate::engine::content_type::detect_content_type(data, content_type);
-    let hash_length = algo.hash_length();
 
     // Split data into chunks and store each one
     let mut chunk_hashes = Vec::new();
@@ -685,82 +823,29 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    // Check if file already exists (for preserving created_at on overwrite)
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        (Some(existing.created_at), Some(existing.total_size))
-      }
-      None => (None, None),
-    };
+    let _namespace = self.engine.namespace_write_guard()?;
+    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
-    // Create the FileRecord with detected content type
-    let mut file_record = FileRecord::new(normalized.clone(), Some(detected_content_type.clone()), data.len() as u64, chunk_hashes);
+    let total_size = data.len() as u64;
+    let published = publish_file_record_entries(
+      self.engine,
+      FileRecordPublishInput {
+        normalized_path: normalized,
+        content_type: Some(detected_content_type),
+        total_size,
+        chunk_hashes,
+        content_hash: whole_file_content_hash(data, &algo)?,
+        flags: sys_flags,
+        created_at_override: None,
+        prefer_existing_created_at: true,
+      },
+    )?;
 
-    // Preserve original created_at on overwrite
-    if let Some(original_created_at) = existing_created_at {
-      file_record.created_at = original_created_at;
-    }
+    self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
-    let file_value = file_record.serialize(hash_length)?;
-
-    // Content-addressed key (immutable — for KV store entry)
-    let file_content_key = file_content_hash(&file_value, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_content_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
-    }
-
-    // Identity hash (for ChildEntry.hash — excludes timestamps)
-    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
-    }
-
-    // Path-based key (mutable — for reads, indexing, deletion)
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &file_key, &file_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
-    }
-
-    // Build child entry with identity hash (not content hash)
-    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
-      total_size: data.len() as u64,
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: Some(detected_content_type.clone()),
-      virtual_time: now_vt,
-      node_id: 0,
-    };
-
-    self.update_parent_directories(&normalized, child)?;
-
-    self.engine.counters().record_file_write(existing_total_size, data.len() as u64, data.len() as u64);
-
-    // Emit entry event after successful store
-    let event_type = EVENT_ENTRIES_CREATED;
-    let entry_data = EntryEventData {
-      path: normalized,
-      entry_type: "file".to_string(),
-      content_type: file_record.content_type.clone(),
-      size: file_record.total_size,
-      hash: hex::encode(file_record.chunk_hashes.first().unwrap_or(&vec![])),
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      previous_hash: None,
-    };
-    ctx.emit(event_type, serde_json::json!({"entries": [entry_data]}));
-
-    Ok(file_record)
+    Ok(published.file_record)
   }
 
   /// Restore a file from an existing FileRecord without re-reading chunk data.
@@ -768,64 +853,28 @@ impl<'a> DirectoryOps<'a> {
   /// This avoids loading the entire file into memory for large file restores.
   pub fn restore_file_from_record(&self, ctx: &RequestContext, path: &str, source_record: &FileRecord) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
-    let algo = self.engine.hash_algo();
-    let hash_length = algo.hash_length();
 
     let content_type = source_record.content_type.as_deref().unwrap_or("application/octet-stream");
-
-    // Preserve created_at if file already exists
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let (existing_created_at, existing_total_size) = match self.engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        (Some(existing.created_at), Some(existing.total_size))
-      }
-      None => (None, None),
-    };
-
-    // Create new FileRecord pointing to the same chunks
-    let mut file_record =
-      FileRecord::new(normalized.clone(), Some(content_type.to_string()), source_record.total_size, source_record.chunk_hashes.clone());
-    if let Some(original_created_at) = existing_created_at {
-      file_record.created_at = original_created_at;
-    }
-
-    let file_value = file_record.serialize(hash_length)?;
-
-    // Store at all three keys (content, identity, path)
-    let file_content_key = file_content_hash(&file_value, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
-
-    let identity_key = file_identity_hash(&normalized, Some(content_type), &file_record.chunk_hashes, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
-    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
-
-    // Update parent directories
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
-      total_size: source_record.total_size,
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: Some(content_type.to_string()),
-      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
-      node_id: 0,
-    };
-    self.update_parent_directories(&normalized, child)?;
-
-    self.engine.counters().record_file_write(existing_total_size, source_record.total_size, 0);
-
-    ctx.emit(
-      crate::engine::engine_event::EVENT_ENTRIES_CREATED,
-      serde_json::json!({"entries": [{
-        "path": normalized,
-        "entry_type": "file",
-        "content_type": content_type,
-        "size": source_record.total_size,
-      }]}),
+    let published = publish_file_record_entries(
+      self.engine,
+      FileRecordPublishInput {
+        normalized_path: normalized,
+        content_type: Some(content_type.to_string()),
+        total_size: source_record.total_size,
+        chunk_hashes: source_record.chunk_hashes.clone(),
+        content_hash: source_record.content_hash.clone(),
+        flags: 0,
+        created_at_override: Some(source_record.created_at),
+        prefer_existing_created_at: true,
+      },
     );
+    let published = published?;
+
+    self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    self.engine.counters().record_file_write(published.existing_total_size, source_record.total_size, 0);
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
     Ok(())
   }
@@ -869,6 +918,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
 
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -917,9 +967,9 @@ impl<'a> DirectoryOps<'a> {
       let entry_data = EntryEventData {
         path: normalized,
         entry_type: "file".to_string(),
-        content_type: record.content_type,
+        content_type: record.content_type.clone(),
         size: record.total_size,
-        hash: hex::encode(record.chunk_hashes.first().unwrap_or(&vec![])),
+        hash: record.content_hash_hex(),
         created_at: record.created_at,
         updated_at: record.updated_at,
         previous_hash: None,
@@ -940,6 +990,7 @@ impl<'a> DirectoryOps<'a> {
   /// the condition is observable (and GC will eventually reclaim them).
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -1140,6 +1191,7 @@ impl<'a> DirectoryOps<'a> {
   /// Create an empty directory at the given path.
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
 
@@ -1201,6 +1253,54 @@ impl<'a> DirectoryOps<'a> {
       }
       None => Ok(None),
     }
+  }
+
+  /// Rewrite a stored FileRecord to the current payload version if any of its
+  /// materialized keys are missing or still point at an older entry version.
+  ///
+  /// This is a schema migration helper, not a user file write. It preserves the
+  /// FileRecord timestamps, metadata, chunks, and parent directory entries while
+  /// refreshing the path, identity, and current content-addressed FileRecord
+  /// keys. Old content-addressed keys are left as garbage for normal GC.
+  pub fn migrate_file_record_to_current_version(&self, path: &str) -> EngineResult<bool> {
+    let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let file_key = file_path_hash(&normalized, &algo)?;
+
+    let (path_header, _stored_key, value) = self.engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+    let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version)?;
+
+    let mut needs_migration = path_header.entry_version < CURRENT_FILE_RECORD_VERSION;
+    if record.path != normalized {
+      record.path = normalized.clone();
+      needs_migration = true;
+    }
+
+    if record.content_hash.len() != hash_length {
+      needs_migration = true;
+    }
+    ensure_file_record_content_hash(self.engine, &mut record)?;
+
+    let identity_key = file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
+    if file_record_header_needs_migration(self.engine, &identity_key)? {
+      needs_migration = true;
+    }
+
+    let file_value = record.serialize(hash_length)?;
+    let content_key = file_content_hash(&file_value, &algo)?;
+    if file_record_header_needs_migration(self.engine, &content_key)? {
+      needs_migration = true;
+    }
+
+    if !needs_migration {
+      return Ok(false);
+    }
+
+    materialize_file_record_entries(self.engine, &normalized, &mut record, path_header.flags)?;
+
+    Ok(true)
   }
 
   /// Check if a file or directory exists at the given path.
@@ -1323,6 +1423,7 @@ impl<'a> DirectoryOps<'a> {
   /// it to its parent directory.
   pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -1332,33 +1433,22 @@ impl<'a> DirectoryOps<'a> {
     // Try to read the file record even though it's marked deleted.
     // The engine read validates that the KV offset still points into the
     // current WAL region before touching disk.
-    let file_record = {
+    let mut file_record = {
       let (header, _key, value) = self
         .engine
         .get_entry_including_deleted(&file_key)?
         .ok_or_else(|| EngineError::NotFound(format!("No record found for deleted file: {}", normalized)))?;
       FileRecord::deserialize(&value, hash_length, header.entry_version)?
     };
+    ensure_file_record_content_hash(self.engine, &mut file_record)?;
 
-    // Re-store the file record at the path key (this creates a new WAL
-    // entry and un-marks the KV entry)
-    let file_value = file_record.serialize(hash_length)?;
-    self.engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
-
-    // Also store at the identity key (immutable, used by ChildEntry.hash
-    // for version tree walks and GC marking — mirrors store_file_internal)
-    let identity_key = file_identity_hash(&normalized, file_record.content_type.as_deref(), &file_record.chunk_hashes, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
-
-    // Also store at the content key (immutable content-addressed entry)
-    let content_key = file_content_hash(&file_value, &algo)?;
-    self.engine.store_entry(EntryType::FileRecord, &content_key, &file_value)?;
+    let keys = materialize_file_record_entries(self.engine, &normalized, &mut file_record, 0)?;
 
     // Re-add to parent directory using identity_key (not file_key)
     let child = ChildEntry {
       name: crate::engine::path_utils::file_name(&normalized).unwrap_or("").to_string(),
       entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
+      hash: keys.identity_key,
       total_size: file_record.total_size,
       content_type: file_record.content_type.clone(),
       created_at: file_record.created_at,
@@ -1422,18 +1512,32 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Rebuild the directory tree by scanning all file records in the KV and
-  /// re-propagating their parent directories up to root. Used by `verify --repair`
-  /// when the root directory is empty but files exist (e.g., after a KV rebuild
-  /// where the root directory entry was overwritten by a prior corrupt session).
+  /// writing a canonical directory tree bottom-up. Used by `verify --repair`
+  /// when directory indexes are missing or stale after recovery.
+  ///
+  /// This intentionally uses only current path-key FileRecords (`file:{path}`).
+  /// Content-key and identity-key FileRecords are historical/addressable copies;
+  /// rebuilding directories from them can resurrect stale paths and rewrites
+  /// every ancestor repeatedly. A bottom-up rebuild writes each directory once.
   pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
+    let _namespace = self.engine.namespace_write_guard()?;
+    let algo = self.engine.hash_algo();
     let hash_length = self.engine.hash_algo().hash_length();
     let snapshot = self.engine.kv_snapshot.load();
     let all_entries = snapshot.iter_all()?;
 
-    let mut paths_propagated = 0;
+    let mut children_by_dir: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ChildEntry>> =
+      std::collections::BTreeMap::new();
+    let mut all_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    all_dirs.insert("/".to_string());
+
     let mut file_records_found = 0;
+    let mut path_records_found = 0;
     let mut skipped_system = 0;
+    let mut skipped_non_path_key = 0;
+    let mut skipped_dangling = 0;
     let mut skipped_error = 0;
+
     for entry in &all_entries {
       let kv_type = entry.type_flags & 0x0F;
       if kv_type != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
@@ -1446,17 +1550,33 @@ impl<'a> DirectoryOps<'a> {
         Ok(Some((header, _key, value))) => {
           match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
             Ok(record) => {
-              let path = &record.path;
-              if path.is_empty() || path.starts_with("/.aeordb-") {
+              let path = normalize_path(&record.path);
+              if path == "/" || path.starts_with("/.aeordb-") {
                 skipped_system += 1;
                 continue;
               }
 
-              // Build child entry and propagate to parents
+              let path_key = file_path_hash(&path, &algo)?;
+              if entry.hash != path_key {
+                skipped_non_path_key += 1;
+                continue;
+              }
+              path_records_found += 1;
+
+              if !self.file_record_chunks_live(&record)? {
+                skipped_dangling += 1;
+                continue;
+              }
+
+              let identity_key = file_identity_hash(&path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
+              let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
+              let parent = parent_path(&path).unwrap_or_else(|| "/".to_string());
+              Self::collect_directory_ancestors(&parent, &mut all_dirs);
+
               let child = ChildEntry {
-                name: crate::engine::path_utils::file_name(path).unwrap_or("").to_string(),
+                name: crate::engine::path_utils::file_name(&path).unwrap_or("").to_string(),
                 entry_type: crate::engine::entry_type::EntryType::FileRecord.to_u8(),
-                hash: entry.hash.clone(),
+                hash: child_hash,
                 total_size: record.total_size,
                 content_type: record.content_type.clone(),
                 created_at: record.created_at,
@@ -1464,11 +1584,7 @@ impl<'a> DirectoryOps<'a> {
                 virtual_time: 0,
                 node_id: 0,
               };
-              if let Err(e) = self.update_parent_directories(path, child) {
-                tracing::debug!("Skipping path '{}' during rebuild: {}", path, e);
-                continue;
-              }
-              paths_propagated += 1;
+              children_by_dir.entry(parent).or_default().insert(child.name.clone(), child);
             }
             Err(_) => {
               skipped_error += 1;
@@ -1483,27 +1599,128 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    // Also discover directories from KV entries and propagate them up
-    // to root. This rebuilds the root directory even when file records
-    // are at corrupt offsets.
-    let mut dirs_propagated = 0;
-    self.rebuild_dirs_from_kv(&mut dirs_propagated);
+    let mut dirs: Vec<String> = all_dirs.into_iter().collect();
+    dirs.sort_by(|a, b| Self::directory_depth(b).cmp(&Self::directory_depth(a)).then_with(|| b.cmp(a)));
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut dirs_written = 0usize;
+    for dir_path in dirs {
+      let mut children: Vec<ChildEntry> = children_by_dir.remove(&dir_path).unwrap_or_default().into_values().collect();
+      Self::sort_rebuilt_children(&mut children);
+      let (content_key, dir_size) = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo)?;
+      dirs_written += 1;
+
+      if dir_path != "/" {
+        let parent = parent_path(&dir_path).unwrap_or_else(|| "/".to_string());
+        let child = ChildEntry {
+          name: crate::engine::path_utils::file_name(&dir_path).unwrap_or("").to_string(),
+          entry_type: crate::engine::entry_type::EntryType::DirectoryIndex.to_u8(),
+          hash: content_key,
+          total_size: dir_size,
+          content_type: None,
+          created_at: now_ms,
+          updated_at: now_ms,
+          virtual_time: now_ms as u64,
+          node_id: 0,
+        };
+        children_by_dir.entry(parent).or_default().insert(child.name.clone(), child);
+      }
+    }
 
     tracing::debug!(
       file_records_found,
-      paths_propagated,
+      path_records_found,
       skipped_system,
+      skipped_non_path_key,
+      skipped_dangling,
       skipped_error,
-      dirs_propagated,
+      dirs_written,
       "rebuild_directory_tree complete"
     );
 
-    Ok(paths_propagated + dirs_propagated)
+    Ok(dirs_written)
+  }
+
+  fn file_record_chunks_live(&self, record: &FileRecord) -> EngineResult<bool> {
+    for chunk_hash in &record.chunk_hashes {
+      if !self.engine.has_entry(chunk_hash)? {
+        return Ok(false);
+      }
+    }
+    Ok(true)
+  }
+
+  fn collect_directory_ancestors(path: &str, dirs: &mut std::collections::BTreeSet<String>) {
+    let mut current = normalize_path(path);
+    loop {
+      dirs.insert(current.clone());
+      match parent_path(&current) {
+        Some(parent) => current = parent,
+        None => break,
+      }
+    }
+  }
+
+  fn directory_depth(path: &str) -> usize {
+    if path == "/" {
+      0
+    } else {
+      path.split('/').filter(|segment| !segment.is_empty()).count()
+    }
+  }
+
+  fn sort_rebuilt_children(children: &mut [ChildEntry]) {
+    children.sort_by(|a, b| {
+      let a_is_dir = a.entry_type == EntryType::DirectoryIndex.to_u8();
+      let b_is_dir = b.entry_type == EntryType::DirectoryIndex.to_u8();
+      match (a_is_dir, b_is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+      }
+    });
+  }
+
+  fn store_rebuilt_directory(
+    &self,
+    dir_path: &str,
+    children: Vec<ChildEntry>,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+  ) -> EngineResult<(Vec<u8>, u64)> {
+    let dir_key = directory_path_hash(dir_path, algo)?;
+    let mut batch = WriteBatch::new();
+
+    let (dir_value, content_key) = if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+      let root_hash = crate::engine::btree::btree_from_entries(self.engine, children, hash_length, algo)?;
+      let root_entry = self
+        .engine
+        .get_entry(&root_hash)?
+        .ok_or_else(|| EngineError::NotFound("B-tree root not found after directory rebuild".to_string()))?;
+      self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone());
+      (root_entry.2, root_hash)
+    } else {
+      let dir_value = serialize_child_entries(&children, hash_length)?;
+      let content_key = directory_content_hash(&dir_value, algo)?;
+      batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
+      self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+      (dir_value, content_key)
+    };
+
+    batch.add(EntryType::DirectoryIndex, dir_key, content_key.clone());
+    if dir_path == "/" {
+      self.engine.flush_batch_and_update_head(batch, &content_key)?;
+    } else {
+      self.engine.flush_batch(batch)?;
+    }
+
+    Ok((content_key, dir_value.len() as u64))
   }
 
   /// Discover directories by scanning all directory entries in the KV,
   /// reading their children, and building a path map by brute-force
   /// trying candidate paths. Then propagate each to its parent.
+  #[allow(dead_code)]
   fn rebuild_dirs_from_kv(&self, count: &mut usize) {
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -1687,27 +1904,7 @@ impl<'a> DirectoryOps<'a> {
   /// Reads `.aeordb-config/indexes.json` under the parent path; returns Zstd if
   /// configured and the content type/size pass the `should_compress` heuristic, else None.
   fn detect_compression(&self, path: &str, content_type: Option<&str>, data_length: usize) -> CompressionAlgorithm {
-    let normalized = normalize_path(path);
-    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-    let config_path = if parent.ends_with('/') {
-      format!("{}.aeordb-config/indexes.json", parent)
-    } else {
-      format!("{}/.aeordb-config/indexes.json", parent)
-    };
-
-    match self.read_file_buffered(&config_path) {
-      Ok(config_data) => match PathIndexConfig::deserialize_with_compression(&config_data) {
-        Ok(Some(algo_str)) if algo_str == "zstd" => {
-          if should_compress(content_type, data_length) {
-            CompressionAlgorithm::Zstd
-          } else {
-            CompressionAlgorithm::None
-          }
-        }
-        _ => CompressionAlgorithm::None,
-      },
-      Err(_) => CompressionAlgorithm::None,
-    }
+    IndexConfigResolver::new(self.engine).compression_for_path(path, content_type, data_length)
   }
 
   /// Store a file with automatic index updates and optional compression.
@@ -1772,35 +1969,9 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
-    let algo = self.engine.hash_algo();
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-
-    // Remove from indexes before deleting the file
-    let index_manager = IndexManager::new(self.engine);
-    let index_names = index_manager.list_indexes(&parent)?;
-
-    for field_name in &index_names {
-      if let Some(mut index) = index_manager.load_index(&parent, field_name)? {
-        index.remove(&file_key);
-        index_manager.save_index(&parent, &index)?;
-      }
-    }
-
-    // Also check ancestor directories for glob-based configs
-    let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
-    if let Ok(Some((_config, config_dir))) = pipeline.find_config_for_path(&normalized) {
-      if config_dir != parent {
-        let ancestor_index_names = index_manager.list_indexes(&config_dir)?;
-        for field_name in &ancestor_index_names {
-          if let Some(mut index) = index_manager.load_index(&config_dir, field_name)? {
-            index.remove(&file_key);
-            index_manager.save_index(&config_dir, &index)?;
-          }
-        }
-      }
-    }
+    crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
 
     // Now delete the file itself
     self.delete_file(ctx, path)
@@ -1872,6 +2043,7 @@ impl<'a> DirectoryOps<'a> {
   /// Best-effort: walking errors stop the heal without propagating, so
   /// a caller in the read path is never blocked.
   pub(crate) fn heal_stale_dir_keys_along_path(&self, path: &str) -> EngineResult<usize> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let normalized = normalize_path(path);
@@ -1938,6 +2110,7 @@ impl<'a> DirectoryOps<'a> {
   /// (post-GC) and diverged-target (alive but != HEAD) scenarios.
   /// Returns Ok(true) if a write happened, Ok(false) otherwise.
   pub fn repair_stale_dir_key(&self, path: &str) -> EngineResult<bool> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash(path, &algo)?;
     // Skip if dir_key isn't a hard-link entry at all.
@@ -2343,6 +2516,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let normalized = normalize_path(path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let normalized_target = normalize_path(target);
 
@@ -2451,6 +2625,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let normalized = normalize_path(path);
@@ -2504,6 +2679,7 @@ impl<'a> DirectoryOps<'a> {
   /// The file's content (chunk_hashes), content_type, total_size, and
   /// created_at are preserved. Only the path and updated_at change.
   pub fn rename_file(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<FileRecord> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let old_normalized = normalize_path(old_path);
@@ -2550,44 +2726,20 @@ impl<'a> DirectoryOps<'a> {
     // Create a new FileRecord at the new path, preserving content fields
     let mut new_record =
       FileRecord::new(new_normalized.clone(), old_record.content_type.clone(), old_record.total_size, old_record.chunk_hashes.clone());
+    new_record.content_hash = old_record.content_hash.clone();
+    ensure_file_record_content_hash(self.engine, &mut new_record)?;
     new_record.created_at = old_record.created_at;
 
-    let new_value = new_record.serialize(hash_length)?;
-
-    // Store at content-addressed key
-    let content_key = file_content_hash(&new_value, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &content_key, &new_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &content_key, &new_value)?;
-    }
-
-    // Store at identity hash
-    let identity_key = file_identity_hash(&new_normalized, new_record.content_type.as_deref(), &new_record.chunk_hashes, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &identity_key, &new_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &identity_key, &new_value)?;
-    }
-
-    // Store at path-based key
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::FileRecord, &new_file_key, &new_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::FileRecord, &new_file_key, &new_value)?;
-    }
-
-    // Build child entry and update parent directories for the new path
-    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
+    let keys = materialize_file_record_entries(self.engine, &new_normalized, &mut new_record, sys_flags)?;
     let child = ChildEntry {
       entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
+      hash: keys.identity_key,
       total_size: new_record.total_size,
       created_at: new_record.created_at,
       updated_at: new_record.updated_at,
       name: file_name(&new_normalized).unwrap_or("").to_string(),
       content_type: new_record.content_type.clone(),
-      virtual_time: now_vt,
+      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
       node_id: 0,
     };
     self.update_parent_directories(&new_normalized, child)?;
@@ -2611,9 +2763,9 @@ impl<'a> DirectoryOps<'a> {
     let deleted_event = EntryEventData {
       path: old_normalized,
       entry_type: "file".to_string(),
-      content_type: old_record.content_type,
+      content_type: old_record.content_type.clone(),
       size: old_record.total_size,
-      hash: hex::encode(old_record.chunk_hashes.first().unwrap_or(&vec![])),
+      hash: old_record.content_hash_hex(),
       created_at: old_record.created_at,
       updated_at: old_record.updated_at,
       previous_hash: None,
@@ -2625,7 +2777,7 @@ impl<'a> DirectoryOps<'a> {
       entry_type: "file".to_string(),
       content_type: new_record.content_type.clone(),
       size: new_record.total_size,
-      hash: hex::encode(new_record.chunk_hashes.first().unwrap_or(&vec![])),
+      hash: new_record.content_hash_hex(),
       created_at: new_record.created_at,
       updated_at: new_record.updated_at,
       previous_hash: None,
@@ -2637,6 +2789,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
   pub fn copy_file(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<FileRecord> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
@@ -2675,6 +2828,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Recursively copy a path (file or directory) to a new location.
   pub fn copy_path(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<Vec<String>> {
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
@@ -2709,6 +2863,7 @@ impl<'a> DirectoryOps<'a> {
   /// only its path. created_at is preserved.
   pub fn rename_symlink(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
+    let _namespace = self.engine.namespace_write_guard()?;
     let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let new_normalized = normalize_path(new_path);
 

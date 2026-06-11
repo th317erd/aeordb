@@ -121,15 +121,10 @@ pub fn resolve_conflict(engine: &StorageEngine, ctx: &RequestContext, path: &str
   if let Some((header, _key, value)) = engine.get_entry(&chosen_hash)? {
     let file_record = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version)?;
 
-    // Read chunks and reconstruct file data
+    // Read chunks and reconstruct file data.
     let mut data = Vec::new();
     for chunk_hash in &file_record.chunk_hashes {
-      if let Some((chunk_header, _key, chunk_value)) = engine.get_entry(chunk_hash)? {
-        let chunk_data = if chunk_header.compression_algo != crate::engine::CompressionAlgorithm::None {
-          crate::engine::decompress(&chunk_value, chunk_header.compression_algo)?
-        } else {
-          chunk_value
-        };
+      if let Some(chunk_data) = engine.read_chunk(chunk_hash)? {
         data.extend_from_slice(&chunk_data);
       }
     }

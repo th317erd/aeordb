@@ -4,7 +4,6 @@
 //! `sync_routes.rs`, but as direct library calls with typed structs instead of JSON.
 //! This allows embedded clients to replicate without HTTP overhead.
 
-use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::conflict_store;
 use crate::engine::directory_ops;
 use crate::engine::entry_type::EntryType;
@@ -169,8 +168,7 @@ pub fn get_needed_chunks(engine: &StorageEngine, chunk_hashes: &[Vec<u8>]) -> En
   let mut result = Vec::new();
 
   for hash in chunk_hashes {
-    if let Some((header, _key, value)) = engine.get_entry(hash)? {
-      let data = if header.compression_algo != CompressionAlgorithm::None { decompress(&value, header.compression_algo)? } else { value };
+    if let Some(data) = engine.read_chunk(hash)? {
       engine.counters().record_read(data.len() as u64);
       result.push(ChunkData { hash: hash.clone(), data });
     }

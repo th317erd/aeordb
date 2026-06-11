@@ -4,7 +4,6 @@ use std::sync::Arc;
 use base64::Engine as _;
 use tokio::sync::Mutex;
 
-use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::conflict_store::store_conflict;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{EngineEvent, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED};
@@ -486,13 +485,8 @@ impl SyncEngine {
           let mut file_data = Vec::new();
           let mut all_chunks_available = true;
           for ch in &entry_chunk_hashes {
-            match self.engine.get_entry(ch) {
-              Ok(Some((header, _key, value))) => {
-                let data = if header.compression_algo != CompressionAlgorithm::None {
-                  decompress(&value, header.compression_algo).unwrap_or(value)
-                } else {
-                  value
-                };
+            match self.engine.read_chunk(ch) {
+              Ok(Some(data)) => {
                 file_data.extend_from_slice(&data);
               }
               _ => {

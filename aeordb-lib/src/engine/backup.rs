@@ -1,6 +1,6 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::file_record::FileRecord;
-use crate::engine::directory_ops::{file_path_hash, directory_path_hash, is_system_path};
+use crate::engine::directory_ops::{file_path_hash, directory_path_hash, file_content_hash, is_system_path};
 
 /// Credential paths are always excluded from backups. Importing credentials
 /// would tie the target's auth state to the source's identity — confusing
@@ -19,6 +19,21 @@ use crate::engine::symlink_record::symlink_path_hash;
 use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
 use crate::engine::entry_type::EntryType;
 use crate::engine::version_manager::VersionManager;
+
+fn store_file_record_entry_preserving_version(
+  engine: &StorageEngine,
+  key: &[u8],
+  value: &[u8],
+  flags: u8,
+  entry_version: u8,
+) -> EngineResult<()> {
+  if flags != 0 {
+    engine.store_entry_with_flags_and_version(EntryType::FileRecord, key, value, flags, entry_version)?;
+  } else {
+    engine.store_entry_with_version(EntryType::FileRecord, key, value, entry_version)?;
+  }
+  Ok(())
+}
 
 /// Export a complete version as a clean, self-contained .aeordb file.
 ///
@@ -225,22 +240,34 @@ fn write_tree_to_engine(
     if !include_system && is_system_path(path) {
       continue;
     }
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
       if !output.has_entry(&key)? {
         if is_system_path(path) {
           // System entries need the FLAG_SYSTEM bit set
-          output.store_entry_with_flags(EntryType::FileRecord, &key, &value, crate::engine::entry_header::FLAG_SYSTEM)?;
+          store_file_record_entry_preserving_version(
+            &output,
+            &key,
+            &value,
+            crate::engine::entry_header::FLAG_SYSTEM,
+            header.entry_version,
+          )?;
         } else {
-          output.store_entry(EntryType::FileRecord, &key, &value)?;
+          store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
         }
       }
       // Also write at path-hash key (for read_file lookups)
       let path_key = file_path_hash(path, &file_algo)?;
       if path_key != key && !output.has_entry(&path_key)? {
         if is_system_path(path) {
-          output.store_entry_with_flags(EntryType::FileRecord, &path_key, &value, crate::engine::entry_header::FLAG_SYSTEM)?;
+          store_file_record_entry_preserving_version(
+            &output,
+            &path_key,
+            &value,
+            crate::engine::entry_header::FLAG_SYSTEM,
+            header.entry_version,
+          )?;
         } else {
-          output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+          store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
         }
       }
       files_written += 1;
@@ -370,8 +397,7 @@ fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> Engi
     let (record, content_hash) = match source.get_entry_including_deleted(&key)? {
       Some((header, _key, raw)) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
         Ok(record) => {
-          let serialized = record.serialize(hash_length)?;
-          let h = algo.compute_hash(&serialized)?;
+          let h = file_content_hash(&raw, &algo)?;
           (record, h)
         }
         Err(e) => {
@@ -423,11 +449,11 @@ fn write_system_tree(
 
   // FileRecords (overwrite to ensure latest system state)
   for (path, (file_hash, _record)) in &tree.files {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-      output.store_entry_with_flags(EntryType::FileRecord, &key, &value, FLAG_SYSTEM)?;
+    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+      store_file_record_entry_preserving_version(&output, &key, &value, FLAG_SYSTEM, header.entry_version)?;
       let path_key = file_path_hash(path, &algo)?;
       if path_key != key {
-        output.store_entry_with_flags(EntryType::FileRecord, &path_key, &value, FLAG_SYSTEM)?;
+        store_file_record_entry_preserving_version(&output, &path_key, &value, FLAG_SYSTEM, header.entry_version)?;
       }
       files_written += 1;
     }
@@ -552,11 +578,11 @@ pub fn create_patch(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], ou
   // Write added FileRecords at both content-hash and path-hash keys
   let patch_algo = output.hash_algo();
   for (path, (file_hash, _record)) in &diff.added {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-      output.store_entry(EntryType::FileRecord, &key, &value)?;
+    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+      store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
       let path_key = file_path_hash(path, &patch_algo)?;
       if path_key != key {
-        output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+        store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
       }
       files_added += 1;
     }
@@ -564,11 +590,11 @@ pub fn create_patch(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], ou
 
   // Write modified FileRecords at both content-hash and path-hash keys
   for (path, (file_hash, _record)) in &diff.modified {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-      output.store_entry(EntryType::FileRecord, &key, &value)?;
+    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+      store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
       let path_key = file_path_hash(path, &patch_algo)?;
       if path_key != key {
-        output.store_entry(EntryType::FileRecord, &path_key, &value)?;
+        store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
       }
       files_modified += 1;
     }
@@ -821,10 +847,11 @@ pub fn import_backup_with_mode(
 
   use crate::engine::entry_header::FLAG_SYSTEM;
 
-  // Helper: read entry with header so we can inspect FLAG_SYSTEM
-  let read_entry = |hash: &[u8]| -> EngineResult<Option<(u8, Vec<u8>)>> {
+  // Helper: read entry with header so we can inspect FLAG_SYSTEM and preserve
+  // payload schema version when importing FileRecord entries.
+  let read_entry = |hash: &[u8]| -> EngineResult<Option<(u8, u8, Vec<u8>)>> {
     match backup.get_entry_including_deleted(hash)? {
-      Some((header, _key, value)) => Ok(Some((header.flags, value))),
+      Some((header, _key, value)) => Ok(Some((header.flags, header.entry_version, value))),
       None => Ok(None),
     }
   };
@@ -837,7 +864,7 @@ pub fn import_backup_with_mode(
   };
   for entry in chunk_kv_entries {
     if !target.has_entry(&entry.hash)? {
-      if let Some((_flags, value)) = read_entry(&entry.hash)? {
+      if let Some((_flags, _entry_version, value)) = read_entry(&entry.hash)? {
         target.store_entry(EntryType::Chunk, &entry.hash, &value)?;
         target.counters().record_chunk_stored(value.len() as u64);
         target.counters().record_write(value.len() as u64);
@@ -853,16 +880,12 @@ pub fn import_backup_with_mode(
     snapshot.iter_by_type(KV_TYPE_FILE_RECORD)
   };
   for entry in file_kv_entries {
-    if let Some((flags, value)) = read_entry(&entry.hash)? {
+    if let Some((flags, entry_version, value)) = read_entry(&entry.hash)? {
       let is_system = flags & FLAG_SYSTEM != 0;
       if is_system && !include_system {
         continue;
       }
-      if is_system {
-        target.store_entry_with_flags(EntryType::FileRecord, &entry.hash, &value, FLAG_SYSTEM)?;
-      } else {
-        target.store_entry(EntryType::FileRecord, &entry.hash, &value)?;
-      }
+      store_file_record_entry_preserving_version(&target, &entry.hash, &value, if is_system { FLAG_SYSTEM } else { 0 }, entry_version)?;
       target.counters().record_write(value.len() as u64);
       files_imported += 1;
       entries_imported += 1;
@@ -875,7 +898,7 @@ pub fn import_backup_with_mode(
     snapshot.iter_by_type(KV_TYPE_DIRECTORY)
   };
   for entry in dir_kv_entries {
-    if let Some((flags, value)) = read_entry(&entry.hash)? {
+    if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
       let is_system = flags & FLAG_SYSTEM != 0;
       if is_system && !include_system {
         continue;
@@ -893,7 +916,7 @@ pub fn import_backup_with_mode(
     snapshot.iter_by_type(KV_TYPE_SYMLINK)
   };
   for entry in sym_kv_entries {
-    if let Some((flags, value)) = read_entry(&entry.hash)? {
+    if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
       let is_system = flags & FLAG_SYSTEM != 0;
       if is_system && !include_system {
         continue;

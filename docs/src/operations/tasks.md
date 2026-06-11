@@ -73,8 +73,12 @@ Response:
 curl -X POST http://localhost:6830/system/tasks/reindex \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"path": "/data/"}'
+  -d '{"path": "/data/", "metadata_only": true}'
 ```
+
+Manual API reindexing defaults to `force: false`, which is index-only. Use `"force": true` to also migrate older FileRecord payloads to the current version before indexing.
+
+Use `"metadata_only": true` to rebuild only virtual `@` metadata indexes without reading file bodies or invoking parsers. Reindex tasks buffer index writes in memory and flush them after `index_flush_writes` mutations or `index_flush_ms` milliseconds. Defaults are 262,144 mutations and 30,000 ms.
 
 **Garbage Collection:**
 ```bash

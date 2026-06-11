@@ -13,6 +13,8 @@ When you change a table's index configuration (`indexes.json`), existing files n
 
 Changing `indexes.json` via the API automatically triggers a background reindex task for the affected directory. You do not need to manually trigger reindexing in most cases.
 
+If every configured field is a virtual metadata field (`@filename`, `@hash`, `@size`, and so on), the automatic task uses metadata-only reindexing. That path reads FileRecord metadata only and does not read or parse file bodies. Mixed configs that include content fields still use the full parser/content indexing path.
+
 ## Manual Reindexing
 
 ### HTTP API
@@ -21,15 +23,32 @@ Changing `indexes.json` via the API automatically triggers a background reindex 
 curl -X POST http://localhost:6830/system/tasks/reindex \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"path": "/data/"}'
+  -d '{"path": "/data/", "metadata_only": true}'
 ```
 
-The `path` argument specifies which directory to reindex. The task worker will:
+The `path` argument specifies which directory to reindex. Manual API reindexing defaults to `force: false`, which means index-only reprocessing. Pass `"force": true` only when you deliberately want to migrate older FileRecord payloads while reindexing.
+
+Set `"metadata_only": true` when you only need to rebuild virtual `@` metadata indexes. This skips full file reads, JSON parsing, and parser plugins. Content fields in the config are ignored in metadata-only mode.
+
+Optional flush controls:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `index_flush_writes` | `262144` | Flush buffered index mutations after this many field/strategy updates |
+| `index_flush_ms` | `30000` | Flush buffered index mutations after this many milliseconds |
+
+The task worker will:
 
 1. Read the `indexes.json` configuration for that path
-2. List all file entries in the directory
-3. Re-read each file and run it through the indexing pipeline
-4. Track progress and update checkpoints
+2. List all file entries in the directory, or when `force` is true, scan current live FileRecord path keys in the requested subtree
+3. If `force` is true, rewrite any older FileRecord payloads to the current version before indexing
+4. Rebuild indexes through either the metadata-only path or the full parser/content pipeline
+5. Buffer index writes in memory and flush them by write count, elapsed time, or final completion
+6. Track progress and update checkpoints
+
+Automatic reindexing triggered by `indexes.json` changes is index-only. Forced reindexing is the deliberate migration path: if a FileRecord is older than the current payload version, AeorDB rewrites the path, identity, and current content-addressed FileRecord entries using the current writer while preserving the file's timestamps, metadata, chunks, and parent directory entry. For FileRecord v0, this backfills the stored whole-file `content_hash` used by `@hash`.
+
+Forced migration includes live path-key records under internal system/config paths such as `/.aeordb-system` and `/.aeordb-config`. Those records can be migrated, but internal/system files are still skipped by the indexing pipeline.
 
 ### Glob-Aware Reindexing
 
@@ -92,7 +111,7 @@ This prevents runaway error loops when the index configuration or parser is fund
 
 ## Checkpoint and Resume
 
-Reindex tasks save a checkpoint after each batch (50 files). If the server crashes or the task is cancelled and restarted, it resumes from the last checkpoint rather than starting over.
+Reindex tasks save checkpoints as processed work becomes durable. Because index writes are buffered in memory during reindexing, AeorDB only advances the checkpoint past buffered index mutations after those mutations have been flushed to storage. If the server crashes before a buffer flush, the resumed task may repeat some already-scanned files, but it will not skip unflushed index updates.
 
 The checkpoint is the name of the last successfully processed file (files are processed in alphabetical order for deterministic ordering).
 
@@ -109,9 +128,11 @@ The task checks for cancellation after each batch, so it will stop within one ba
 
 ## Batch Processing
 
-Files are processed in batches of 50. After each batch, the task:
+Files are processed in batches of 50. Index file updates are cached in memory and flushed after 262,144 index mutations or 30 seconds by default, plus one final flush at completion. This avoids rewriting the full on-disk index file after every file/field update during large reindexes.
 
-1. Updates the checkpoint to the last file in the batch
+After each batch, the task:
+
+1. Advances the checkpoint when all prior index mutations are durable
 2. Computes progress percentage and ETA (using a rolling average of the last 10 batch times)
 3. Checks for cancellation
 

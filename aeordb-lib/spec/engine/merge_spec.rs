@@ -33,6 +33,7 @@ fn make_file_record(path: &str, updated_at: i64, chunk_hashes: Vec<Vec<u8>>) -> 
     created_at: updated_at,
     updated_at,
     metadata: Vec::new(),
+    content_hash: vec![0x42; 32],
     chunk_hashes,
   }
 }

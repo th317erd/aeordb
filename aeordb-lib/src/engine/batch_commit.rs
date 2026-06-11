@@ -3,18 +3,18 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::btree;
-use crate::engine::compression::{decompress, CompressionAlgorithm};
 use crate::engine::content_type::detect_content_type;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::directory_ops::{
-  chunk_content_hash, directory_content_hash, directory_path_hash, file_content_hash, file_identity_hash, file_path_hash, is_system_path,
-  DirectoryOps, DEFAULT_CHUNK_SIZE,
+  chunk_content_hash, directory_content_hash, directory_path_hash, is_system_path, publish_file_record_entries, whole_file_content_hash,
+  DirectoryOps, FileRecordPublishInput, DEFAULT_CHUNK_SIZE,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -73,12 +73,6 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     return Err(EngineError::InvalidInput("No files provided for commit".to_string()));
   }
 
-  // Wrap the entire commit in a transaction so the hot-tail flush is deferred
-  // to the end. Without this, a crash mid-batch can leave files visible via
-  // path-based lookup but invisible in the directory tree (the directory
-  // entries haven't propagated and HEAD hasn't been updated).
-  let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
-
   // Reject any path under /.aeordb-system/ or /.aeordb-config/. System data
   // is written exclusively through dedicated APIs (system_store, directory_ops
   // with FLAG_SYSTEM) — never through user-facing batch commit. Without this
@@ -98,16 +92,17 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   }
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
 
   // --- Phase 1: Validate all chunk hashes exist ---
   let mut missing_chunks: Vec<String> = Vec::new();
   // Decode all hex chunk hashes upfront and validate existence.
   // file_chunks[i] = Vec of (raw_hash_bytes, chunk_byte_size) for files[i].
   let mut file_chunks: Vec<Vec<(Vec<u8>, u64)>> = Vec::with_capacity(files.len());
+  let mut file_content_hashes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
 
   for file in &files {
     let mut chunks_for_file: Vec<(Vec<u8>, u64)> = Vec::with_capacity(file.chunks.len());
+    let mut content_hasher = algo.incremental_hasher()?;
     for hex_hash in &file.chunks {
       let raw_hash =
         hex::decode(hex_hash).map_err(|e| EngineError::InvalidInput(format!("Invalid hex chunk hash '{}': {}", hex_hash, e)))?;
@@ -115,6 +110,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
       // Verify chunk exists in KV store
       match read_chunk_data(engine, &raw_hash)? {
         Some(value) => {
+          content_hasher.update(&value);
           chunks_for_file.push((raw_hash, value.len() as u64));
         }
         None => {
@@ -122,12 +118,18 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
         }
       }
     }
+    file_content_hashes.push(content_hasher.finalize());
     file_chunks.push(chunks_for_file);
   }
 
   if !missing_chunks.is_empty() {
     return Err(EngineError::InvalidInput(format!("Missing {} chunk(s): {}", missing_chunks.len(), missing_chunks.join(", "))));
   }
+
+  // Serialize the publish phase so mutable path keys, directory entries, and
+  // HEAD are advanced as one namespace operation relative to other writers.
+  let _namespace = engine.namespace_write_guard()?;
+  let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
   // --- Phase 2: Create FileRecords ---
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
@@ -146,62 +148,27 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
       if let Some(first_hash) = chunk_hashes.first() { read_chunk_data(engine, first_hash)?.unwrap_or_default() } else { Vec::new() };
     let detected_content_type = detect_content_type(&first_chunk_bytes, file.content_type.as_deref());
 
-    // Check if file already exists (preserve created_at on overwrite)
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let (existing_created_at, existing_total_size) = match engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        (Some(existing.created_at), Some(existing.total_size))
-      }
-      None => (None, None),
-    };
+    let published = publish_file_record_entries(
+      engine,
+      FileRecordPublishInput {
+        normalized_path: normalized,
+        content_type: Some(detected_content_type),
+        total_size,
+        chunk_hashes,
+        content_hash: file_content_hashes[i].clone(),
+        flags: 0,
+        created_at_override: None,
+        prefer_existing_created_at: true,
+      },
+    )?;
 
-    let mut file_record = FileRecord::new(normalized.clone(), Some(detected_content_type.clone()), total_size, chunk_hashes);
-
-    if let Some(original_created_at) = existing_created_at {
-      file_record.created_at = original_created_at;
-    }
-
-    // Store the FileRecord
-    let file_value = file_record.serialize(hash_length)?;
-
-    // Content-addressed key (immutable — for versioning via ChildEntry.hash)
-    let file_content_key = file_content_hash(&file_value, &algo)?;
-    engine.store_entry(EntryType::FileRecord, &file_content_key, &file_value)?;
-
-    // Path-based key (mutable — for reads, indexing, deletion)
-    engine.store_entry(EntryType::FileRecord, &file_key, &file_value)?;
-
-    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
-    // Store at identity key so tree walker can look up entries by ChildEntry.hash
-    engine.store_entry(EntryType::FileRecord, &identity_key, &file_value)?;
-
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
-      total_size,
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: Some(detected_content_type.clone()),
-      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
-      node_id: 0,
-    };
-
-    event_entries.push(EntryEventData {
-      path: normalized.clone(),
-      entry_type: "file".to_string(),
-      content_type: Some(detected_content_type),
-      size: total_size,
-      hash: hex::encode(file_record.chunk_hashes.first().unwrap_or(&vec![])),
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      previous_hash: None,
+    event_entries.push(published.event_entry.clone());
+    engine.counters().record_file_write(published.existing_total_size, total_size, 0);
+    file_infos.push(BatchFileInfo {
+      normalized_path: published.normalized_path,
+      file_record: published.file_record,
+      child_entry: published.child_entry,
     });
-
-    engine.counters().record_file_write(existing_total_size, total_size, 0);
-
-    file_infos.push(BatchFileInfo { normalized_path: normalized, file_record, child_entry: child });
   }
 
   finish_batch_commit(engine, ctx, file_infos, event_entries)
@@ -231,10 +198,10 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     normalized_paths.push(normalized);
   }
 
+  let _namespace = engine.namespace_write_guard()?;
   let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
   let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
   let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
 
@@ -253,56 +220,27 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
       offset = end;
     }
 
-    let file_key = file_path_hash(&normalized, &algo)?;
-    let (existing_created_at, existing_total_size) = match engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => {
-        let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        (Some(existing.created_at), Some(existing.total_size))
-      }
-      None => (None, None),
-    };
+    let published = publish_file_record_entries(
+      engine,
+      FileRecordPublishInput {
+        normalized_path: normalized,
+        content_type: Some(detected_content_type),
+        total_size,
+        chunk_hashes,
+        content_hash: whole_file_content_hash(&file.data, &algo)?,
+        flags: sys_flags,
+        created_at_override: None,
+        prefer_existing_created_at: true,
+      },
+    )?;
 
-    let mut file_record = FileRecord::new(normalized.clone(), Some(detected_content_type.clone()), total_size, chunk_hashes);
-    if let Some(original_created_at) = existing_created_at {
-      file_record.created_at = original_created_at;
-    }
-
-    let file_value = file_record.serialize(hash_length)?;
-    let file_content_key = file_content_hash(&file_value, &algo)?;
-    store_file_record_entry(engine, &file_content_key, &file_value, sys_flags)?;
-
-    let file_key = file_path_hash(&normalized, &algo)?;
-    store_file_record_entry(engine, &file_key, &file_value, sys_flags)?;
-
-    let identity_key = file_identity_hash(&normalized, Some(detected_content_type.as_str()), &file_record.chunk_hashes, &algo)?;
-    store_file_record_entry(engine, &identity_key, &file_value, sys_flags)?;
-
-    let now_vt = chrono::Utc::now().timestamp_millis() as u64;
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: identity_key,
-      total_size,
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: Some(detected_content_type.clone()),
-      virtual_time: now_vt,
-      node_id: 0,
-    };
-
-    event_entries.push(EntryEventData {
-      path: normalized.clone(),
-      entry_type: "file".to_string(),
-      content_type: Some(detected_content_type),
-      size: total_size,
-      hash: file_record.chunk_hashes.first().map(hex::encode).unwrap_or_default(),
-      created_at: file_record.created_at,
-      updated_at: file_record.updated_at,
-      previous_hash: None,
+    event_entries.push(published.event_entry.clone());
+    engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
+    file_infos.push(BatchFileInfo {
+      normalized_path: published.normalized_path,
+      file_record: published.file_record,
+      child_entry: published.child_entry,
     });
-
-    engine.counters().record_file_write(existing_total_size, total_size, total_size);
-    file_infos.push(BatchFileInfo { normalized_path: normalized, file_record, child_entry: child });
   }
 
   finish_batch_commit(engine, ctx, file_infos, event_entries)
@@ -427,6 +365,15 @@ fn finish_batch_commit(
     file_infos.iter().map(|info| CommittedFile { path: info.normalized_path.clone(), size: info.file_record.total_size }).collect();
 
   ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries }));
+
+  let pipeline = IndexingPipeline::new(engine);
+  for info in &file_infos {
+    if !is_system_path(&info.normalized_path) {
+      if let Err(error) = pipeline.run_metadata_only(ctx, &info.normalized_path) {
+        tracing::warn!("Metadata indexing failed for '{}': {}", info.normalized_path, error);
+      }
+    }
+  }
 
   Ok(CommitResult { committed, files: result_files })
 }
@@ -568,15 +515,7 @@ fn should_skip_root_propagation(dir_path: &str, grandparent: &str) -> bool {
 }
 
 fn read_chunk_data(engine: &StorageEngine, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
-  let Some((header, _key, value)) = engine.get_entry(hash)? else {
-    return Ok(None);
-  };
-
-  if header.compression_algo != CompressionAlgorithm::None {
-    return decompress(&value, header.compression_algo).map(Some);
-  }
-
-  Ok(Some(value))
+  engine.read_chunk(hash)
 }
 
 fn store_buffered_chunk(engine: &StorageEngine, data: &[u8], flags: u8) -> EngineResult<Vec<u8>> {
@@ -596,13 +535,4 @@ fn store_buffered_chunk(engine: &StorageEngine, data: &[u8], flags: u8) -> Engin
   engine.counters().record_chunk_stored(data.len() as u64);
 
   Ok(chunk_key)
-}
-
-fn store_file_record_entry(engine: &StorageEngine, key: &[u8], value: &[u8], flags: u8) -> EngineResult<()> {
-  if flags != 0 {
-    engine.store_entry_with_flags(EntryType::FileRecord, key, value, flags)?;
-  } else {
-    engine.store_entry(EntryType::FileRecord, key, value)?;
-  }
-  Ok(())
 }

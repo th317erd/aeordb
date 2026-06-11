@@ -510,8 +510,7 @@ async fn test_store_empty_file_emits_event() {
   assert_eq!(event.event_type, "entries_created");
   assert_eq!(event.payload["entries"][0]["path"], "/empty.txt");
   assert_eq!(event.payload["entries"][0]["size"], 0);
-  // Empty file has no chunks, so hash should be empty
-  assert_eq!(event.payload["entries"][0]["hash"], "");
+  assert_eq!(event.payload["entries"][0]["hash"], blake3::hash(b"").to_hex().to_string());
 }
 
 // ─── Event payload structure validation ─────────────────────────────────

@@ -41,6 +41,7 @@ pub mod heartbeat;
 pub mod hot_tail;
 pub mod index_cleanup;
 pub mod index_config;
+pub mod index_config_resolver;
 pub mod index_store;
 pub mod indexing_pipeline;
 pub mod integrity_scanner;
@@ -109,7 +110,7 @@ pub use errors::{EngineError, EngineResult};
 pub use file_header::{FileHeader, FILE_HEADER_SIZE, FILE_MAGIC};
 pub use header_repair::{inspect_header, repair_header_in_place, HeaderRepairReport, HotTailMismatch};
 pub use json_store::{JsonDoc, JsonStore};
-pub use file_record::FileRecord;
+pub use file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 pub use hash_algorithm::HashAlgorithm;
 pub use disk_kv_store::DiskKVStore;
 pub use kv_pages::{
@@ -131,8 +132,12 @@ pub use scalar_converter::{
 pub use fuzzy::{extract_trigrams, extract_trigrams_no_pad, trigram_similarity, auto_fuzziness, damerau_levenshtein, jaro_winkler};
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
+pub use index_config_resolver::{glob_matches, IndexConfigResolver};
 pub use index_cleanup::{IndexCleanupSender, spawn_index_cleanup_worker};
-pub use index_store::{IndexEntry, FieldIndex, IndexManager};
+pub use index_store::{
+  IndexEntry, FieldIndex, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexWriteBufferStats,
+  DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
+};
 pub use json_parser::parse_json_fields;
 pub use search::{SearchResult, SearchResults, global_search};
 pub use source_resolver::{resolve_source, resolve_sources, walk_path, walk_paths};
@@ -144,8 +149,9 @@ pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE}
 pub use storage_engine::{StorageEngine, WriteBatch};
 pub use directory_ops::{
   DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash,
-  symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, is_system_path, DEFAULT_CHUNK_SIZE,
-  JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult, JsonMergedFile,
+  symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, whole_file_content_hash,
+  whole_file_content_hash_from_chunks, is_system_path, DEFAULT_CHUNK_SIZE, JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult,
+  JsonMergedFile,
 };
 pub use indexing_pipeline::IndexingPipeline;
 pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
@@ -153,7 +159,7 @@ pub use query_engine::{
   QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder,
   should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, QueryMeta,
   DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode,
-  ExplainResult,
+  ExplainResult, json_query_value_to_bytes, parse_single_field_query, parse_where_clause, MAX_WHERE_CLAUSE_DEPTH,
 };
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use health::{

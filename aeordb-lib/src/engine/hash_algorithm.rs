@@ -31,6 +31,13 @@ impl HashAlgorithm {
     }
   }
 
+  pub fn incremental_hasher(&self) -> EngineResult<IncrementalHasher> {
+    match self {
+      HashAlgorithm::Blake3_256 => Ok(IncrementalHasher::Blake3(blake3::Hasher::new())),
+      other => Err(EngineError::InvalidHashAlgorithm(*other as u16)),
+    }
+  }
+
   pub fn from_u16(value: u16) -> Option<Self> {
     match value {
       0x0001 => Some(HashAlgorithm::Blake3_256),
@@ -44,5 +51,25 @@ impl HashAlgorithm {
 
   pub fn to_u16(self) -> u16 {
     self as u16
+  }
+}
+
+pub enum IncrementalHasher {
+  Blake3(blake3::Hasher),
+}
+
+impl IncrementalHasher {
+  pub fn update(&mut self, data: &[u8]) {
+    match self {
+      IncrementalHasher::Blake3(hasher) => {
+        hasher.update(data);
+      }
+    }
+  }
+
+  pub fn finalize(self) -> Vec<u8> {
+    match self {
+      IncrementalHasher::Blake3(hasher) => hasher.finalize().as_bytes().to_vec(),
+    }
   }
 }

@@ -258,6 +258,35 @@ async fn test_structured_search_across_directories() {
 }
 
 #[tokio::test]
+async fn test_structured_search_accepts_nested_boolean_where() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_multi_directory(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/products",
+      "where": {
+        "and": [
+          {"field": "title", "op": "eq", "value": "Alice Widget"},
+          {"field": "price", "op": "eq", "value": 100}
+        ]
+      }
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK, "body: {:?}", json);
+
+  let results = json["results"].as_array().unwrap();
+  assert_eq!(results.len(), 1, "nested boolean where should match one product: {:?}", results);
+  assert_eq!(results[0]["path"].as_str().unwrap(), "/products/widget.json");
+}
+
+#[tokio::test]
 async fn test_structured_search_exact_punctuated_name_uses_stored_values_when_field_has_trigram_index() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   let ctx = RequestContext::system();
@@ -294,6 +323,45 @@ async fn test_structured_search_exact_punctuated_name_uses_stored_values_when_fi
   let results = json["results"].as_array().unwrap();
   assert_eq!(results.len(), 1, "exact search must recheck stored raw values instead of trigram token scalars: {}", json);
   assert_eq!(results[0]["path"].as_str().unwrap(), "/agents/mr-bennett.json");
+}
+
+#[tokio::test]
+async fn test_structured_search_uses_root_glob_index_for_scoped_virtual_field_query() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*".to_string()),
+    indexes: vec![IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/", &config);
+
+  ops.store_file_with_indexing(&ctx, "/docs/notes.txt", b"docs", Some("text/plain")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/other/notes.txt", b"other", Some("text/plain")).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/docs",
+      "where": {"field": "@file_name", "op": "eq", "value": "notes.txt"},
+      "limit": 10
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK);
+  let results = json["results"].as_array().unwrap();
+  assert_eq!(results.len(), 1, "root glob index should satisfy scoped virtual-field search: {}", json);
+  assert_eq!(results[0]["path"].as_str().unwrap(), "/docs/notes.txt");
+  assert_eq!(results[0]["source"].as_str().unwrap(), "/");
+  assert!(results[0]["matched_by"].as_array().unwrap().iter().any(|field| field.as_str() == Some("@filename")));
 }
 
 #[tokio::test]

@@ -61,8 +61,9 @@ pub struct VerifyReport {
 
   // Directory consistency
   pub directories_checked: u64,
-  pub missing_children: Vec<String>, // paths where child doesn't exist
-  pub unlisted_files: Vec<String>,   // files that exist but aren't in parent dir
+  pub missing_children: Vec<String>,      // paths where child doesn't exist
+  pub unlisted_files: Vec<String>,        // files that exist but aren't in parent dir
+  pub dangling_file_records: Vec<String>, // live path-key FileRecords with missing chunks
 
   // KV index
   pub kv_entries: u64,
@@ -116,6 +117,7 @@ impl VerifyReport {
       directories_checked: 0,
       missing_children: Vec::new(),
       unlisted_files: Vec::new(),
+      dangling_file_records: Vec::new(),
       kv_entries: 0,
       stale_kv_entries: 0,
       missing_kv_entries: 0,
@@ -135,6 +137,7 @@ impl VerifyReport {
       || self.corrupt_header > 0
       || !self.missing_children.is_empty()
       || !self.unlisted_files.is_empty()
+      || !self.dangling_file_records.is_empty()
       || self.stale_kv_entries > 0
       || self.missing_kv_entries > 0
       || !self.invalid_kv_offsets.is_empty()
@@ -168,6 +171,7 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
 
   // Phase 3: Check directory consistency
   check_directories(engine, &mut report);
+  check_path_file_records(engine, &mut report);
 
   // Phase 4: Check snapshot tree integrity (detects GC damage)
   check_snapshot_integrity(engine, &mut report);
@@ -207,12 +211,12 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
   }
 
   // Repair 3: Rebuild directory tree
-  if report.missing_kv_entries > 0 && report.file_records > 0 {
+  if (report.missing_kv_entries > 0 && report.file_records > 0) || !report.missing_children.is_empty() {
     let ops = DirectoryOps::new(engine);
     let ctx = crate::engine::request_context::RequestContext::system();
     match ops.rebuild_directory_tree(&ctx) {
       Ok(count) => {
-        report.repairs.push(format!("Directory tree rebuilt ({} paths re-propagated)", count));
+        report.repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
       }
       Err(e) => {
         report.repairs.push(format!("Directory tree rebuild failed: {}", e));
@@ -544,6 +548,54 @@ fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &
     }
     Err(_) => {
       // Directory itself doesn't exist or is corrupt
+    }
+  }
+}
+
+fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) {
+  let hash_length = engine.hash_algo().hash_length();
+  let algo = engine.hash_algo();
+  let entries = match engine.iter_kv_entries() {
+    Ok(entries) => entries,
+    Err(_) => return,
+  };
+
+  for entry in &entries {
+    if entry.entry_type() != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
+      continue;
+    }
+
+    let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) else {
+      continue;
+    };
+    let Ok(record) = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) else {
+      continue;
+    };
+    let normalized = crate::engine::path_utils::normalize_path(&record.path);
+    if normalized == "/" || normalized.starts_with("/.aeordb-") {
+      continue;
+    }
+    let Ok(path_key) = crate::engine::directory_ops::file_path_hash(&normalized, &algo) else {
+      continue;
+    };
+    if entry.hash != path_key {
+      continue;
+    }
+
+    let mut missing = Vec::new();
+    for chunk_hash in &record.chunk_hashes {
+      match engine.has_entry(chunk_hash) {
+        Ok(true) => {}
+        _ => missing.push(hex::encode(chunk_hash)),
+      }
+    }
+    if !missing.is_empty() {
+      report.dangling_file_records.push(format!(
+        "{} ({} missing chunk(s): {})",
+        normalized,
+        missing.len(),
+        missing.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+      ));
     }
   }
 }

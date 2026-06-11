@@ -370,6 +370,7 @@ impl<'a> VersionManager<'a> {
   /// Restore a named snapshot by rewinding HEAD to its root hash.
   pub fn restore_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let root_hash = self.get_snapshot_hash(name)?;
+    let _namespace = self.engine.namespace_write_guard()?;
     self.engine.update_head(&root_hash)?;
     self.engine.counters().record_write(0);
 
@@ -554,6 +555,7 @@ impl<'a> VersionManager<'a> {
   pub fn promote_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let fork_hash = self.get_fork_hash(name)?.ok_or_else(|| EngineError::NotFound(format!("Fork not found: {}", name)))?;
 
+    let _namespace = self.engine.namespace_write_guard()?;
     self.engine.update_head(&fork_hash)?;
     self.engine.counters().record_write(0);
 

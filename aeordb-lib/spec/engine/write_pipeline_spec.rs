@@ -122,6 +122,34 @@ fn test_delete_file_removes_index_entries() {
 }
 
 #[test]
+fn test_delete_file_removes_ancestor_glob_index_entries() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("*/session.json".to_string()),
+    indexes: vec![IndexFieldConfig { name: "status".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/sessions", &config);
+
+  ops.store_file_with_indexing(&ctx, "/sessions/s1/session.json", br#"{"status":"active"}"#, Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager.load_index("/sessions", "status").unwrap().unwrap();
+  assert_eq!(index.len(), 1);
+
+  ops.delete_file_with_indexing(&ctx, "/sessions/s1/session.json").unwrap();
+
+  let index = index_manager.load_index("/sessions", "status").unwrap().unwrap();
+  assert_eq!(index.len(), 0);
+}
+
+#[test]
 fn test_overwrite_file_updates_index() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();

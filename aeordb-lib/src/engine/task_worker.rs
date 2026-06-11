@@ -10,7 +10,12 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::event_bus::EventBus;
 use crate::engine::gc::run_gc;
+use crate::engine::index_store::{
+  IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
+};
+use crate::engine::index_config_resolver::{glob_matches, IndexConfigResolver};
 use crate::engine::indexing_pipeline::IndexingPipeline;
+use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{ProgressInfo, TaskQueue, TaskRecord, TaskStatus};
@@ -183,43 +188,74 @@ fn execute_reindex(
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<String, String> {
   let path = task.args.get("path").and_then(|v| v.as_str()).ok_or_else(|| "missing 'path' argument".to_string())?;
+  let force = task.args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+  let metadata_only = task.args.get("metadata_only").and_then(|v| v.as_bool()).unwrap_or(false);
+  let index_flush_options = reindex_index_buffer_options(&task.args);
 
   let ops = DirectoryOps::new(engine);
+  let resolver = IndexConfigResolver::new(engine);
+  let reindex_root = normalize_path(path);
 
-  // Verify index config exists and load it to check for glob.
-  let config_path =
-    if path.ends_with('/') { format!("{}.aeordb-config/indexes.json", path) } else { format!("{}/.aeordb-config/indexes.json", path) };
-  let config_data = ops.read_file_buffered(&config_path).map_err(|e| format!("cannot read index config at {}: {}", config_path, e))?;
-  let config = crate::engine::index_config::PathIndexConfig::deserialize(&config_data)
-    .map_err(|e| format!("cannot parse index config at {}: {}", config_path, e))?;
+  // Verify index config exists and load it to check for glob. Forced
+  // reindex doubles as the schema-migration path, so it must also be able to
+  // run without an indexes.json and simply migrate every file in the subtree.
+  let config_path = IndexConfigResolver::config_path_for_directory(&reindex_root);
+  let config = match resolver.load_config(&reindex_root) {
+    Ok(Some(config)) => Some(config),
+    Ok(None) if force => {
+      tracing::info!(
+        path = %reindex_root,
+        config_path = %config_path,
+        "forced reindex running migration-only because no index config was found"
+      );
+      None
+    }
+    Ok(None) => return Err(format!("cannot read index config at {}: not found", config_path)),
+    Err(e) if force => {
+      tracing::info!(
+        path = %reindex_root,
+        config_path = %config_path,
+        error = %e,
+        "forced reindex running migration-only because no index config was readable"
+      );
+      None
+    }
+    Err(e) => return Err(format!("cannot read index config at {}: {}", config_path, e)),
+  };
 
   // Build a sorted list of full file paths to reindex.
-  let prefix = path.trim_end_matches('/');
-  let mut file_paths: Vec<String> = if let Some(ref glob_pattern) = config.glob {
-    // Glob mode: recursive listing filtered by glob pattern.
-    let all_entries = crate::engine::directory_listing::list_directory_recursive(engine, path, -1, None, None)
-      .map_err(|e| format!("cannot list directory {}: {}", path, e))?;
+  let prefix = reindex_root.trim_end_matches('/');
+  let mut file_paths: Vec<String> = if force {
+    collect_current_file_record_paths(engine, &reindex_root)?
+  } else if let Some(ref config) = config {
+    if let Some(ref glob_pattern) = config.glob {
+      // Glob mode: recursive listing filtered by glob pattern.
+      let all_entries = crate::engine::directory_listing::list_directory_recursive(engine, &reindex_root, -1, None, None)
+        .map_err(|e| format!("cannot list directory {}: {}", reindex_root, e))?;
 
-    all_entries
-      .into_iter()
-      .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
-      .filter(|entry| !crate::engine::directory_ops::is_internal_path(&entry.path))
-      .filter(|entry| {
-        let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
-        crate::engine::indexing_pipeline::glob_matches(glob_pattern, relative)
-      })
-      .map(|entry| entry.path)
-      .collect()
+      all_entries
+        .into_iter()
+        .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
+        .filter(|entry| !crate::engine::directory_ops::is_internal_path(&entry.path))
+        .filter(|entry| {
+          let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
+          glob_matches(glob_pattern, relative)
+        })
+        .map(|entry| entry.path)
+        .collect()
+    } else {
+      // Non-glob mode: direct children only.
+      let entries = ops.list_directory(&reindex_root).map_err(|e| format!("cannot list directory {}: {}", reindex_root, e))?;
+
+      entries
+        .into_iter()
+        .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
+        .map(|entry| format!("{}/{}", prefix, entry.name))
+        .filter(|path| !crate::engine::directory_ops::is_internal_path(path))
+        .collect()
+    }
   } else {
-    // Non-glob mode: direct children only.
-    let entries = ops.list_directory(path).map_err(|e| format!("cannot list directory {}: {}", path, e))?;
-
-    entries
-      .into_iter()
-      .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
-      .map(|entry| format!("{}/{}", prefix, entry.name))
-      .filter(|path| !crate::engine::directory_ops::is_internal_path(path))
-      .collect()
+    Vec::new()
   };
   file_paths.sort();
 
@@ -235,8 +271,10 @@ fn execute_reindex(
 
   let pipeline = IndexingPipeline::with_plugin_manager(engine, plugin_manager);
   let ctx = RequestContext::system();
+  let mut index_buffer = IndexWriteBuffer::new(engine, index_flush_options);
 
   let mut indexed_count: usize = 0;
+  let mut migrated_count: usize = 0;
   let mut consecutive_failures: usize = 0;
   let mut batch_times: Vec<Duration> = Vec::new();
   let start = Instant::now();
@@ -244,26 +282,61 @@ fn execute_reindex(
   // Process in batches.
   for batch in file_paths.chunks(REINDEX_BATCH_SIZE) {
     let batch_start = Instant::now();
+    let mut last_processed_path: Option<&str> = None;
 
     for file_path in batch {
-      // Read file content.
-      let data = match ops.read_file_buffered(file_path) {
-        Ok(data) => data,
-        Err(_) => {
-          consecutive_failures += 1;
-          if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-            return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+      if force {
+        match ops.migrate_file_record_to_current_version(file_path) {
+          Ok(true) => {
+            migrated_count += 1;
           }
+          Ok(false) => {}
+          Err(error) => {
+            tracing::warn!(
+              path = %file_path,
+              error = %error,
+              "forced reindex could not migrate FileRecord"
+            );
+            consecutive_failures += 1;
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+            }
+            indexed_count += 1;
+            continue;
+          }
+        }
+
+        if config.is_none() || skip_indexing_path(file_path) {
+          consecutive_failures = 0;
           indexed_count += 1;
+          last_processed_path = Some(file_path);
           continue;
         }
+      }
+
+      let index_result = if metadata_only {
+        pipeline.run_metadata_only_buffered(&ctx, file_path, &mut index_buffer)
+      } else {
+        // Read file content only for full parser/content reindexing. Metadata-only
+        // reindexing reads the FileRecord header through the pipeline instead.
+        let data = match ops.read_file_buffered(file_path) {
+          Ok(data) => data,
+          Err(_) => {
+            consecutive_failures += 1;
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+            }
+            indexed_count += 1;
+            last_processed_path = Some(file_path);
+            continue;
+          }
+        };
+
+        let content_type = ops.get_metadata(file_path).ok().flatten().and_then(|record| record.content_type);
+        pipeline.run_buffered(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer)
       };
 
-      // Get metadata for content_type.
-      let content_type = ops.get_metadata(file_path).ok().flatten().and_then(|record| record.content_type);
-
-      // Run the indexing pipeline.
-      match pipeline.run(&ctx, file_path, &data, content_type.as_deref()) {
+      match index_result {
         Ok(()) => {
           consecutive_failures = 0;
         }
@@ -276,6 +349,15 @@ fn execute_reindex(
       }
 
       indexed_count += 1;
+      last_processed_path = Some(file_path);
+
+      match index_buffer.flush_if_due() {
+        Ok(true) => {
+          let _ = queue.update_checkpoint(&task.id, file_path);
+        }
+        Ok(false) => {}
+        Err(error) => return Err(format!("index flush failed: {}", error)),
+      }
     }
 
     let batch_duration = batch_start.elapsed();
@@ -284,15 +366,20 @@ fn execute_reindex(
       batch_times.remove(0);
     }
 
-    // Update checkpoint to the last file path in this batch.
-    if let Some(last_path) = batch.last() {
-      let _ = queue.update_checkpoint(&task.id, last_path);
+    // Only advance the checkpoint past buffered index mutations after they have
+    // been flushed. If there are no pending index mutations, all completed work
+    // is durable and the batch checkpoint is safe.
+    if index_buffer.stats().pending_mutations == 0 {
+      if let Some(last_path) = last_processed_path {
+        let _ = queue.update_checkpoint(&task.id, last_path);
+      }
     }
 
     // Compute progress and ETA.
     let progress = indexed_count as f64 / total_count as f64;
     let eta_ms = compute_eta(&batch_times, total_count, indexed_count);
 
+    let index_stats = index_buffer.stats();
     queue.set_progress(
       &task.id,
       ProgressInfo {
@@ -304,7 +391,17 @@ fn execute_reindex(
         indexed_count,
         total_count,
         stale_since: None,
-        message: Some(format!("indexed {}/{} files", indexed_count, total_count)),
+        message: Some(format!(
+          "indexed {}/{} files, migrated {}, metadata_only={}, index_mutations={}, pending_index_mutations={}, index_flushes={}, cached_indexes={}",
+          indexed_count,
+          total_count,
+          migrated_count,
+          metadata_only,
+          index_stats.mutations,
+          index_stats.pending_mutations,
+          index_stats.flushes,
+          index_stats.cached_indexes
+        )),
       },
     );
 
@@ -316,8 +413,77 @@ fn execute_reindex(
     }
   }
 
+  let flushed_indexes = index_buffer.flush_all().map_err(|error| format!("final index flush failed: {}", error))?;
+  if let Some(last_path) = file_paths.last() {
+    let _ = queue.update_checkpoint(&task.id, last_path);
+  }
+
   let elapsed_ms = start.elapsed().as_millis();
-  Ok(format!("reindexed {} files in {}ms", indexed_count, elapsed_ms))
+  let index_stats = index_buffer.stats();
+  let index_summary = format!(
+    ", metadata_only={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
+    metadata_only, index_stats.mutations, index_stats.flushes, index_stats.flushed_indexes, flushed_indexes, index_stats.cached_indexes
+  );
+  if force {
+    Ok(format!("reindexed {} files, migrated {} records in {}ms{}", indexed_count, migrated_count, elapsed_ms, index_summary))
+  } else {
+    Ok(format!("reindexed {} files in {}ms{}", indexed_count, elapsed_ms, index_summary))
+  }
+}
+
+fn reindex_index_buffer_options(args: &serde_json::Value) -> IndexWriteBufferOptions {
+  let flush_after_writes = args
+    .get("index_flush_writes")
+    .and_then(|value| value.as_u64())
+    .and_then(|value| usize::try_from(value).ok())
+    .unwrap_or(DEFAULT_INDEX_BUFFER_FLUSH_WRITES)
+    .max(1);
+
+  let flush_after =
+    args.get("index_flush_ms").and_then(|value| value.as_u64()).map(Duration::from_millis).unwrap_or(DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL);
+
+  IndexWriteBufferOptions::new(flush_after_writes, flush_after)
+}
+
+fn collect_current_file_record_paths(engine: &StorageEngine, base_path: &str) -> Result<Vec<String>, String> {
+  let normalized_base = crate::engine::path_utils::normalize_path(base_path);
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let entries = engine.entries_by_type(crate::engine::KV_TYPE_FILE_RECORD).map_err(|error| error.to_string())?;
+  let mut paths = std::collections::BTreeSet::new();
+
+  for (hash, value) in entries {
+    let Ok(Some((header, _key, _value))) = engine.get_entry_including_deleted(&hash) else {
+      continue;
+    };
+    let Ok(record) = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) else {
+      continue;
+    };
+    if !path_in_reindex_scope(&normalized_base, &record.path) {
+      continue;
+    }
+
+    let Ok(path_key) = crate::engine::directory_ops::file_path_hash(&record.path, &algo) else {
+      continue;
+    };
+    if engine.get_entry(&path_key).map_err(|error| error.to_string())?.is_some() {
+      paths.insert(record.path);
+    }
+  }
+
+  Ok(paths.into_iter().collect())
+}
+
+fn path_in_reindex_scope(base_path: &str, candidate_path: &str) -> bool {
+  if base_path == "/" {
+    return true;
+  }
+
+  candidate_path == base_path || candidate_path.strip_prefix(base_path.trim_end_matches('/')).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn skip_indexing_path(path: &str) -> bool {
+  crate::engine::directory_ops::is_internal_path(path) || crate::engine::directory_ops::is_system_path(path)
 }
 
 /// Execute a garbage collection task.

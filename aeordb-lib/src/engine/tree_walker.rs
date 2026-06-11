@@ -106,16 +106,10 @@ pub fn augment_with_system_subtrees(engine: &crate::engine::StorageEngine, tree:
     };
     let (record, content_hash) = match engine.get_entry_including_deleted(&key) {
       Ok(Some((header, _key, raw))) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
-        Ok(record) => {
-          let serialized = match record.serialize(hash_length) {
-            Ok(s) => s,
-            Err(_) => continue,
-          };
-          match algo.compute_hash(&serialized) {
-            Ok(h) => (record, h),
-            Err(_) => continue,
-          }
-        }
+        Ok(record) => match crate::engine::directory_ops::file_content_hash(&raw, &algo) {
+          Ok(h) => (record, h),
+          Err(_) => continue,
+        },
         Err(_) => continue,
       },
       _ => continue,

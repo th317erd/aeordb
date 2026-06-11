@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine, VersionManager};
+use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine, VersionManager, directory_content_hash, file_path_hash};
+use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::server::create_temp_engine_for_tests;
@@ -208,6 +209,35 @@ fn test_gc_mark_no_snapshots_or_forks() {
 
   let live = gc_mark(&engine).unwrap();
   assert!(live.len() >= 3, "should have dir + file + chunk, got {}", live.len());
+}
+
+#[test]
+fn test_gc_mark_preserves_live_path_file_record_when_head_lost_reference() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let body = b"path key still serves this file";
+
+  ops.store_file_buffered(&ctx, "/head-lost.txt", body, Some("text/plain")).unwrap();
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash("/head-lost.txt", &algo).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().expect("path FileRecord should exist");
+  let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+  let chunk_hash = record.chunk_hashes.first().expect("test file should have one chunk").clone();
+
+  let empty_root_key = directory_content_hash(&[], &algo).unwrap();
+  if !engine.has_entry(&empty_root_key).unwrap() {
+    engine.store_entry(EntryType::DirectoryIndex, &empty_root_key, &[]).unwrap();
+  }
+  engine.update_head(&empty_root_key).unwrap();
+
+  let live = gc_mark(&engine).unwrap();
+  assert!(live.contains(&path_key), "live path-key FileRecord must be marked even if HEAD is stale");
+  assert!(live.contains(&chunk_hash), "chunks referenced by a live path-key FileRecord must be marked");
+
+  run_gc(&engine, &ctx, false).unwrap();
+  assert_eq!(ops.read_file_buffered("/head-lost.txt").unwrap(), body);
 }
 
 // ─── Sweep phase ────────────────────────────────────────────────────────────

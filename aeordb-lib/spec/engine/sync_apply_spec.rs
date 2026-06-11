@@ -146,6 +146,7 @@ fn test_apply_missing_chunk_fails() {
     created_at: 1000,
     updated_at: 1000,
     metadata: Vec::new(),
+    content_hash: vec![0x42; 32],
     chunk_hashes: vec![fake_chunk_hash],
   };
 

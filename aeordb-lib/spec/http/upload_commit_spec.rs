@@ -6,7 +6,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{DirectoryOps, StorageEngine};
+use aeordb::engine::{file_path_hash, DirectoryOps, StorageEngine, DEFAULT_CHUNK_SIZE, CURRENT_FILE_RECORD_VERSION};
+use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -47,6 +48,17 @@ async fn body_json(body: Body) -> serde_json::Value {
 /// Collect response body into raw bytes.
 async fn body_bytes(body: Body) -> Vec<u8> {
   body.collect().await.unwrap().to_bytes().to_vec()
+}
+
+fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
+  let ctx = aeordb::engine::RequestContext::system();
+  let ops = DirectoryOps::new(engine);
+  let config_path = if parent_path.ends_with('/') {
+    format!("{}.aeordb-config/indexes.json", parent_path)
+  } else {
+    format!("{}/.aeordb-config/indexes.json", parent_path)
+  };
+  ops.store_file_buffered(&ctx, &config_path, &config.serialize(), Some("application/json")).unwrap();
 }
 
 fn minimal_mp4_bytes() -> Vec<u8> {
@@ -129,6 +141,80 @@ async fn test_commit_single_file() {
 
   let bytes = body_bytes(resp.into_body()).await;
   assert_eq!(bytes, data);
+}
+
+#[tokio::test]
+async fn test_commit_multichunk_file_records_whole_file_hash() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+  store_index_config(
+    &engine,
+    "/test",
+    &PathIndexConfig {
+      parser: None,
+      parser_memory_limit: None,
+      logging: false,
+      glob: None,
+      indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+    },
+  );
+
+  let mut data = vec![0u8; DEFAULT_CHUNK_SIZE + 73];
+  for (index, byte) in data.iter_mut().enumerate() {
+    *byte = (index % 251) as u8;
+  }
+
+  let h1 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data[..DEFAULT_CHUNK_SIZE]).await;
+  let h2 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data[DEFAULT_CHUNK_SIZE..]).await;
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/multichunk.bin",
+          "chunks": [h1, h2],
+          "content_type": "application/octet-stream"
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+
+  let metadata = DirectoryOps::new(&engine).get_metadata("/test/multichunk.bin").unwrap().unwrap();
+  let whole_file_hash = blake3::hash(&data).as_bytes().to_vec();
+  assert_eq!(metadata.content_hash, whole_file_hash);
+  assert_ne!(metadata.content_hash, hex::decode(compute_chunk_hash(&data[..DEFAULT_CHUNK_SIZE])).unwrap());
+  let file_key = file_path_hash("/test/multichunk.bin", &engine.hash_algo()).unwrap();
+  let (header, _key, _value) = engine.get_entry(&file_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
+
+  let search_body = serde_json::json!({
+      "path": "/test",
+      "where": {"field": "@hash", "op": "eq", "value": hex::encode(&metadata.content_hash)},
+      "limit": 100
+  });
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/files/search")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&search_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+  let json = body_json(resp.into_body()).await;
+  let results = json["results"].as_array().expect("search results should be an array");
+  let paths: Vec<&str> = results.iter().filter_map(|result| result["path"].as_str()).collect();
+  assert!(paths.contains(&"/test/multichunk.bin"), "whole-file @hash search should find blob commit path, got {paths:?}");
 }
 
 #[tokio::test]

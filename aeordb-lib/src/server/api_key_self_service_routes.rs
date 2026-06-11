@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::cache_invalidation::evict_caches_for_path;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -247,7 +248,7 @@ pub async fn revoke_own_key(
 
       match state.auth_provider.revoke_api_key(parsed_key_id) {
         Ok(true) => {
-          state.api_key_cache.evict(&parsed_key_id.to_string());
+          evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id));
           (
             StatusCode::OK,
             Json(serde_json::json!({

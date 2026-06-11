@@ -23,7 +23,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
-> **Searching by metadata:** Files can also be searched by their metadata -- filename, extension, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. Virtual field queries require no index configuration; just query with `@`-prefixed field names like `@filename`, `@extension`, or `@size`.
+> **Searching by metadata:** Files can also be searched by their metadata -- path, filename, extension, hash, size, content type, and timestamps -- using [virtual fields](./querying.md#virtual-fields) in the query API. New databases index these fields by default; legacy databases can add the default config and reindex. If a virtual-field index is absent, AeorDB falls back to a FileRecord metadata scan.
 
 ---
 
@@ -56,7 +56,7 @@ Store a file at the given path. Parent directories are created automatically. If
 
 ### Side Effects
 
-- If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), a reindex task is automatically enqueued for the parent directory. Any existing pending or running reindex for that path is cancelled first.
+- If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), a reindex task is automatically enqueued for the parent directory. Any existing pending or running reindex for that path is cancelled first. Configs containing only virtual `@` metadata fields use metadata-only reindexing automatically.
 - Triggers `entries_created` events on the event bus.
 - Runs any deployed store-phase plugins.
 
@@ -1021,7 +1021,7 @@ Search across all indexed directories in the database. Unlike `POST /files/query
 }
 ```
 
-The `query` field performs a broad fuzzy search across all default-indexed fields (@filename, @hash, @size, etc.).
+The `query` field performs a broad fuzzy search across all default-indexed text metadata fields (`@filename`, `@path`, `@hash`, `@content_type`, etc.).
 
 For more targeted searches, use a structured `where` clause:
 
@@ -1036,6 +1036,30 @@ For more targeted searches, use a structured `where` clause:
   "limit": 20
 }
 ```
+
+To find every path under a root that contains a file with a known whole-file
+content hash, query `@hash` with `eq`:
+
+```json
+{
+  "path": "/some/root/",
+  "where": {
+    "field": "@hash",
+    "op": "eq",
+    "value": "b3c1..."
+  },
+  "limit": 1000
+}
+```
+
+`@hash` is the raw whole-file hash (`blake3(file bytes)`) stored in the
+`FileRecord` at write time. It is not the first chunk hash. New databases
+bootstrap an exact `string` index plus a `trigram` index for `@hash`. Existing
+databases may need their `/.aeordb-config/indexes.json` updated and reindexed
+before `@hash eq` uses the exact index. Legacy FileRecord v0 entries written
+before this field existed must be migrated before they can participate in exact
+`@hash` lookup; trigger a forced reindex with `POST /system/tasks/reindex` and
+`"force": true` to backfill them.
 
 **Response:**
 

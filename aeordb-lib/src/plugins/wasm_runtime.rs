@@ -9,7 +9,9 @@ use crate::engine::api_key_rules::{check_operation_permitted, is_ancestor_of_any
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-use crate::engine::query_engine::{AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField};
+use crate::engine::query_engine::{
+  parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField,
+};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
@@ -1151,136 +1153,4 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
     .and_then(|v| v.as_array())
     .map(|arr| arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
     .unwrap_or_default()
-}
-
-/// Convert a JSON value to the byte representation used by converters.
-fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
-  match value {
-    serde_json::Value::Number(number) => {
-      if let Some(unsigned) = number.as_u64() {
-        Ok(unsigned.to_be_bytes().to_vec())
-      } else if let Some(signed) = number.as_i64() {
-        Ok((signed as u64).to_be_bytes().to_vec())
-      } else if let Some(float) = number.as_f64() {
-        Ok((float as u64).to_be_bytes().to_vec())
-      } else {
-        Err("Unsupported number format".to_string())
-      }
-    }
-    serde_json::Value::String(text) => Ok(text.as_bytes().to_vec()),
-    serde_json::Value::Bool(flag) => Ok(vec![if *flag { 1 } else { 0 }]),
-    other => Err(format!("Unsupported value type: {}", other)),
-  }
-}
-
-/// Parse a single field-level where clause JSON object into a QueryNode::Field.
-fn parse_single_field_query(value: &serde_json::Value) -> Result<crate::engine::query_engine::QueryNode, String> {
-  use crate::engine::query_engine::*;
-
-  let field = value.get("field").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'field' in where clause".to_string())?;
-  let op = value.get("op").and_then(|v| v.as_str()).ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
-  let raw_value = value.get("value").ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
-
-  let operation = match op {
-    "eq" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
-      QueryOp::Eq(bytes)
-    }
-    "gt" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
-      QueryOp::Gt(bytes)
-    }
-    "lt" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
-      QueryOp::Lt(bytes)
-    }
-    "between" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|msg| format!("Invalid value for field '{}': {}", field, msg))?;
-      let raw_value2 = value.get("value2").ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
-      let bytes2 = json_value_to_bytes(raw_value2).map_err(|msg| format!("Invalid value2 for field '{}': {}", field, msg))?;
-      QueryOp::Between(bytes, bytes2)
-    }
-    "in" => {
-      let array = raw_value.as_array().ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
-      let mut byte_values = Vec::with_capacity(array.len());
-      for item in array {
-        let bytes = json_value_to_bytes(item).map_err(|msg| format!("Invalid value in 'in' array for field '{}': {}", field, msg))?;
-        byte_values.push(bytes);
-      }
-      QueryOp::In(byte_values)
-    }
-    "contains" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
-      QueryOp::Contains(s.to_string())
-    }
-    "similar" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
-      let threshold = value.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
-      QueryOp::Similar(s.to_string(), threshold)
-    }
-    "phonetic" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
-      QueryOp::Phonetic(s.to_string())
-    }
-    "fuzzy" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
-
-      let fuzziness = match value.get("fuzziness") {
-        Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
-        Some(v) if v.is_u64() => Fuzziness::Fixed(v.as_u64().unwrap() as usize),
-        Some(v) if v.is_i64() => Fuzziness::Fixed(v.as_i64().unwrap().max(0) as usize),
-        _ => Fuzziness::Auto,
-      };
-
-      let algorithm = match value.get("algorithm").and_then(|v| v.as_str()) {
-        Some("jaro_winkler") => FuzzyAlgorithm::JaroWinkler,
-        _ => FuzzyAlgorithm::DamerauLevenshtein,
-      };
-
-      QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
-    }
-    "match" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
-      QueryOp::Match(s.to_string())
-    }
-    unknown => {
-      return Err(format!("Unknown operation: '{}'", unknown));
-    }
-  };
-
-  Ok(QueryNode::Field(FieldQuery { field_name: field.to_string(), operation }))
-}
-
-/// Recursively parse a where clause JSON value into a QueryNode tree.
-fn parse_where_clause(value: &serde_json::Value) -> Result<crate::engine::query_engine::QueryNode, String> {
-  use crate::engine::query_engine::QueryNode;
-
-  if value.is_array() {
-    let array = value.as_array().unwrap();
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
-    return Ok(QueryNode::And(children?));
-  }
-
-  if let Some(and_array) = value.get("and") {
-    let array = and_array.as_array().ok_or_else(|| "'and' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
-    return Ok(QueryNode::And(children?));
-  }
-
-  if let Some(or_array) = value.get("or") {
-    let array = or_array.as_array().ok_or_else(|| "'or' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(parse_where_clause).collect();
-    return Ok(QueryNode::Or(children?));
-  }
-
-  if let Some(not_value) = value.get("not") {
-    let child = parse_where_clause(not_value)?;
-    return Ok(QueryNode::Not(Box::new(child)));
-  }
-
-  if value.get("field").is_some() {
-    return parse_single_field_query(value);
-  }
-
-  Err(format!("Invalid where clause structure: {}", value))
 }

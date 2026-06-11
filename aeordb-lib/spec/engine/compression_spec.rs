@@ -1,5 +1,6 @@
 use aeordb::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::index_config_resolver::IndexConfigResolver;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -326,6 +327,22 @@ fn test_compression_with_indexing_via_config() {
   // Read back and verify
   let read_back = ops.read_file_buffered("/data/record.json").unwrap();
   assert_eq!(read_back, data.as_bytes());
+}
+
+#[test]
+fn test_index_config_resolver_detects_compression_policy() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config_json = r#"{"compression":"zstd","indexes":[]}"#;
+  ops.store_file_buffered(&ctx, "/data/.aeordb-config/indexes.json", config_json.as_bytes(), Some("application/json")).unwrap();
+
+  let resolver = IndexConfigResolver::new(&engine);
+  assert_eq!(resolver.compression_for_path("data/record.json", Some("application/json"), 2048), CompressionAlgorithm::Zstd);
+  assert_eq!(resolver.compression_for_path("/data/tiny.json", Some("application/json"), 16), CompressionAlgorithm::None);
+  assert_eq!(resolver.compression_for_path("/data/photo.jpg", Some("image/jpeg"), 2048), CompressionAlgorithm::None);
 }
 
 #[test]

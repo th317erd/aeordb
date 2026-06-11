@@ -382,7 +382,9 @@ Inspect the query execution plan without running the full query. Useful for debu
 
 ## Virtual Fields
 
-Virtual fields let you query file metadata directly -- without defining any indexes. Prefix a field name with `@` to query against built-in file attributes instead of indexed document fields.
+Virtual fields let you query file metadata directly. Prefix a field name with `@` to query against built-in file attributes instead of indexed document fields.
+
+AeorDB uses virtual-field indexes when they are configured. New databases bootstrap default virtual-field indexes at `/.aeordb-config/indexes.json`; older databases can add the same config and run a forced reindex to backfill them. If no index exists for a supported virtual field, AeorDB falls back to scanning FileRecord metadata for compatibility.
 
 ### Available Virtual Fields
 
@@ -390,15 +392,17 @@ Virtual fields let you query file metadata directly -- without defining any inde
 |-------|------|-------------|
 | `@path` | string | Full file path (e.g., `/docs/report.pdf`) |
 | `@filename` | string | Filename only -- the last segment of the path (e.g., `report.pdf`) |
+| `@file_name` | string | Alias for `@filename`; queries use the canonical `@filename` index |
 | `@extension` | string | File extension after the last `.` (e.g., `pdf`) |
 | `@content_type` | string | MIME type (e.g., `application/pdf`) |
+| `@hash` | string | Raw whole-file content hash (`blake3(file bytes)`) |
 | `@size` | u64 | File size in bytes |
 | `@created_at` | i64 | Creation timestamp in milliseconds |
 | `@updated_at` | i64 | Last update timestamp in milliseconds |
 
 ### Supported Operators
 
-**String virtual fields** (`@path`, `@filename`, `@extension`, `@content_type`) support:
+**String virtual fields** (`@path`, `@filename`, `@file_name`, `@extension`, `@content_type`, `@hash`) support:
 
 `eq`, `contains`, `in`, `gt`, `lt`, `similar` (trigram), `fuzzy` (edit distance), `phonetic` (soundex/metaphone), `match` (fused multi-strategy)
 
@@ -408,11 +412,13 @@ Virtual fields let you query file metadata directly -- without defining any inde
 
 ### How Virtual Fields Work
 
-Virtual fields scan all files under the query path and evaluate each file's metadata against the filter conditions. This means:
+Virtual fields are derived from the FileRecord header and payload. Query execution is index-first:
 
-- **No index configuration required.** Virtual field queries work immediately with zero setup.
-- **Slower than indexed queries.** Because every file is scanned, virtual field queries are O(n) where n is the number of files under the path. For small-to-medium datasets this is perfectly fine. For large datasets with millions of files, prefer indexed fields for hot query paths.
+- **Default indexes.** New databases index every built-in virtual field for exact lookup by default. `@filename` also gets trigram and phonetic indexes for `contains`, `similar`, `fuzzy`, `phonetic`, and `match`.
+- **Ancestor glob indexes.** If a query is scoped below a glob-indexed directory, AeorDB can use the ancestor index and filter candidates back down to the requested path.
+- **Scan fallback.** If a database does not have a matching virtual-field index, AeorDB scans FileRecords under the query path so legacy queries continue to work. This fallback is O(n) over files under the path.
 - **Combinable with indexed fields.** You can mix virtual fields and indexed fields in the same `where` clause using boolean combinators (`and`, `or`, `not`).
+- **Canonical aliases.** `@file_name` is accepted as an alias but is indexed and queried as `@filename`.
 
 ### Virtual Field Examples
 

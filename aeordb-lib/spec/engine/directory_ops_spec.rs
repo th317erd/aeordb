@@ -1,7 +1,13 @@
-use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash, file_path_hash};
+use aeordb::engine::compression::{CompressionAlgorithm, compress};
+use aeordb::engine::directory_ops::{DirectoryOps, chunk_content_hash, directory_path_hash, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 use aeordb::engine::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
+use std::collections::HashSet;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let path = dir.path().join("test.aeor");
@@ -48,6 +54,12 @@ fn test_store_file_from_reader_roundtrip_multichunk() {
   assert_eq!(buffered.len(), data.len());
   assert_eq!(buffered, data);
 
+  let metadata = ops.get_metadata("/streamed.bin").unwrap().unwrap();
+  assert_eq!(metadata.content_hash, blake3::hash(&data).as_bytes().to_vec());
+  let file_key = file_path_hash("/streamed.bin", &engine.hash_algo()).unwrap();
+  let (header, _key, _value) = engine.get_entry(&file_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
+
   // Streaming read back — accumulated chunks should match too
   let mut streamed = Vec::with_capacity(data.len());
   for chunk in ops.read_file_streaming("/streamed.bin").unwrap() {
@@ -86,6 +98,35 @@ fn test_store_file_creates_chunks() {
 }
 
 #[test]
+fn test_storage_engine_read_chunk_decompresses_compressed_chunks() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let data = b"compressed chunk data compressed chunk data compressed chunk data";
+  let chunk_key = chunk_content_hash(data, &engine.hash_algo()).unwrap();
+  let compressed = compress(data, CompressionAlgorithm::Zstd).unwrap();
+  engine.store_entry_compressed(EntryType::Chunk, &chunk_key, &compressed, CompressionAlgorithm::Zstd).unwrap();
+
+  let read_back = engine.read_chunk(&chunk_key).unwrap().unwrap();
+  assert_eq!(read_back, data);
+
+  let verified = engine.read_chunk_verified(&chunk_key).unwrap().unwrap();
+  assert_eq!(verified, data);
+}
+
+#[test]
+fn test_storage_engine_read_chunk_rejects_non_chunk_entries() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let key = engine.hash_algo().compute_hash(b"not-a-chunk-key").unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &key, b"directory bytes").unwrap();
+
+  let error = engine.read_chunk(&key).unwrap_err();
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("not a chunk entry")));
+}
+
+#[test]
 fn test_store_file_creates_file_record() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -115,6 +156,105 @@ fn test_store_file_updates_directory() {
   let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
   assert!(names.contains(&"file_a.txt"));
   assert!(names.contains(&"file_b.txt"));
+}
+
+fn assert_file_path_key_matches_directory_child(engine: &StorageEngine, path: &str, parent: &str, name: &str) {
+  let ops = DirectoryOps::new(engine);
+  let children = ops.list_directory(parent).unwrap();
+  let child = children
+    .iter()
+    .find(|entry| entry.name == name)
+    .unwrap_or_else(|| panic!("directory '{}' did not contain child '{}': {:?}", parent, name, children));
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let path_key = file_path_hash(path, &algo).unwrap();
+  let (path_header, _path_key, path_value) = engine.get_entry(&path_key).unwrap().unwrap();
+  let (child_header, _child_key, child_value) = engine.get_entry(&child.hash).unwrap().unwrap();
+
+  let path_record = FileRecord::deserialize(&path_value, hash_length, path_header.entry_version).unwrap();
+  let child_record = FileRecord::deserialize(&child_value, hash_length, child_header.entry_version).unwrap();
+  assert_eq!(path_record.path, child_record.path);
+  assert_eq!(path_record.content_hash, child_record.content_hash);
+  assert_eq!(path_record.chunk_hashes, child_record.chunk_hashes);
+}
+
+#[test]
+fn concurrent_same_path_writes_keep_directory_child_consistent_with_path_key() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&dir));
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine.as_ref());
+  ops.create_directory(&ctx, "/race").unwrap();
+
+  let writer_count = 12;
+  let iterations = 24;
+  let barrier = Arc::new(Barrier::new(writer_count));
+  let mut handles = Vec::new();
+
+  for writer_id in 0..writer_count {
+    let engine = Arc::clone(&engine);
+    let barrier = Arc::clone(&barrier);
+    handles.push(thread::spawn(move || {
+      let ctx = RequestContext::system();
+      let ops = DirectoryOps::new(engine.as_ref());
+      barrier.wait();
+
+      for iteration in 0..iterations {
+        let data =
+          format!("{{\"writer\":{},\"iteration\":{},\"payload\":\"{}\"}}", writer_id, iteration, "x".repeat(writer_id + iteration + 1));
+        ops.store_file_buffered(&ctx, "/race/shared.json", data.as_bytes(), Some("application/json")).unwrap();
+      }
+    }));
+  }
+
+  for handle in handles {
+    handle.join().unwrap();
+  }
+
+  assert_file_path_key_matches_directory_child(engine.as_ref(), "/race/shared.json", "/race", "shared.json");
+}
+
+#[test]
+fn concurrent_same_parent_file_creates_preserve_all_directory_children() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&dir));
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine.as_ref());
+  ops.create_directory(&ctx, "/race").unwrap();
+
+  let file_count = 48;
+  let barrier = Arc::new(Barrier::new(file_count));
+  let mut handles = Vec::new();
+
+  for file_id in 0..file_count {
+    let engine = Arc::clone(&engine);
+    let barrier = Arc::clone(&barrier);
+    handles.push(thread::spawn(move || {
+      let ctx = RequestContext::system();
+      let ops = DirectoryOps::new(engine.as_ref());
+      let name = format!("file-{file_id:03}.json");
+      let path = format!("/race/{name}");
+      let body = format!("{{\"id\":{},\"value\":\"{}\"}}", file_id, "y".repeat(file_id + 1));
+      barrier.wait();
+      ops.store_file_buffered(&ctx, &path, body.as_bytes(), Some("application/json")).unwrap();
+    }));
+  }
+
+  for handle in handles {
+    handle.join().unwrap();
+  }
+
+  let children = ops.list_directory("/race").unwrap();
+  let names: HashSet<String> = children.iter().map(|entry| entry.name.clone()).collect();
+  assert_eq!(names.len(), file_count);
+
+  for file_id in 0..file_count {
+    let name = format!("file-{file_id:03}.json");
+    assert!(names.contains(&name), "missing child {name}");
+    let path = format!("/race/{name}");
+    assert_file_path_key_matches_directory_child(engine.as_ref(), &path, "/race", &name);
+  }
 }
 
 #[test]

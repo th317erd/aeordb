@@ -8,6 +8,8 @@ use crate::engine::kv_pages::{deserialize_page, find_in_page};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 
+pub type KvTypeIndex = HashMap<u8, HashMap<Vec<u8>, KVEntry>>;
+
 /// An immutable, lock-free read view of the KV store.
 ///
 /// Holds a frozen snapshot of the write buffer, shared NVT state, and an
@@ -35,12 +37,15 @@ pub struct ReadSnapshot {
   /// Arc-wrapped for cheap sharing between snapshots (buffer-only publishes
   /// reuse existing pages via Arc::clone instead of re-reading from disk).
   pages: Arc<Vec<Vec<u8>>>,
-  /// Type index: maps entry_type (lower 4 bits of type_flags) to the set of
-  /// hash keys for that type. Built once from pages + buffer at snapshot
-  /// creation time; lookups are O(1) by type + O(k) by entries of that type.
-  /// Arc-wrapped so buffer-only publishes can share the base page index and
-  /// only apply buffer deltas.
-  type_index: Arc<HashMap<u8, HashMap<Vec<u8>, KVEntry>>>,
+  /// Type index for entries already flushed to KV pages. This is rebuilt only
+  /// when pages change. Buffer-only publishes reuse the existing page bytes
+  /// and avoid re-scanning the whole database on every write.
+  page_type_index: Arc<KvTypeIndex>,
+  /// Type index for the current write buffer. This is small by design
+  /// (normally <= the KV write-buffer threshold), so rebuilding it on
+  /// buffer-only publishes keeps new writes immediately visible without
+  /// global snapshot work.
+  buffer_type_index: KvTypeIndex,
 }
 
 impl fmt::Debug for ReadSnapshot {
@@ -57,8 +62,7 @@ impl fmt::Debug for ReadSnapshot {
 
 impl ReadSnapshot {
   /// Create a new read snapshot from a frozen buffer, shared NVT, and an
-  /// in-memory copy of all KV pages. Builds a type index from pages + buffer
-  /// so that `iter_by_type()` is O(k) instead of O(n).
+  /// in-memory copy of all KV pages.
   pub fn new(
     buffer: HashMap<Vec<u8>, KVEntry>,
     nvt: Arc<NormalizedVectorTable>,
@@ -67,49 +71,67 @@ impl ReadSnapshot {
     entry_count: usize,
     pages: Arc<Vec<Vec<u8>>>,
   ) -> Self {
-    let type_index = Arc::new(Self::build_type_index(&pages, &buffer, hash_algo));
-    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, type_index }
+    let page_type_index = Arc::new(Self::build_page_type_index(&pages, hash_algo));
+    let buffer_type_index = Self::build_buffer_type_index(&buffer);
+    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_index, buffer_type_index }
   }
 
-  /// Build the type index from pages + buffer. Entries are grouped by their
-  /// entry_type (lower 4 bits). Buffer entries override page entries for the
-  /// same hash. Deleted entries are excluded.
-  fn build_type_index(
-    pages: &[Vec<u8>],
-    buffer: &HashMap<Vec<u8>, KVEntry>,
+  /// Create a new snapshot while reusing the prebuilt flushed-page type
+  /// index. Use this when only the write buffer changed and the `pages` Arc
+  /// still points at the same flushed KV pages.
+  pub fn new_with_page_type_index(
+    buffer: HashMap<Vec<u8>, KVEntry>,
+    nvt: Arc<NormalizedVectorTable>,
+    bucket_count: usize,
     hash_algo: HashAlgorithm,
-  ) -> HashMap<u8, HashMap<Vec<u8>, KVEntry>> {
+    entry_count: usize,
+    pages: Arc<Vec<Vec<u8>>>,
+    page_type_index: Arc<KvTypeIndex>,
+  ) -> Self {
+    let buffer_type_index = Self::build_buffer_type_index(&buffer);
+    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_index, buffer_type_index }
+  }
+
+  /// Build the type index from flushed KV pages only. Entries are grouped by
+  /// their entry_type (lower 4 bits). Deleted entries are excluded.
+  fn build_page_type_index(pages: &[Vec<u8>], hash_algo: HashAlgorithm) -> KvTypeIndex {
     let hash_length = hash_algo.hash_length();
-    // Collect all entries from pages, deduplicating by hash
-    let mut by_hash: HashMap<Vec<u8>, KVEntry> = HashMap::new();
+    let mut index: KvTypeIndex = HashMap::new();
     for page_data in pages.iter() {
       if let Ok(entries) = deserialize_page(page_data, hash_length) {
         for entry in entries {
-          by_hash.insert(entry.hash.clone(), entry);
+          if (entry.type_flags & KV_FLAG_DELETED) == 0 {
+            index.entry(entry.entry_type()).or_default().insert(entry.hash.clone(), entry);
+          }
         }
       }
     }
+    index
+  }
 
-    // Buffer takes priority
+  /// Build the type index from the write buffer only. Buffer entries override
+  /// page entries during iteration; deleted buffer entries are represented by
+  /// the raw buffer map and intentionally excluded here.
+  fn build_buffer_type_index(buffer: &HashMap<Vec<u8>, KVEntry>) -> KvTypeIndex {
+    let mut index: KvTypeIndex = HashMap::new();
     for (hash, entry) in buffer {
-      by_hash.insert(hash.clone(), entry.clone());
-    }
-
-    // Group by type, excluding deleted
-    let mut index: HashMap<u8, HashMap<Vec<u8>, KVEntry>> = HashMap::new();
-    for (hash, entry) in by_hash {
       if (entry.type_flags & KV_FLAG_DELETED) != 0 {
         continue;
       }
-      index.entry(entry.entry_type()).or_default().insert(hash, entry);
+      index.entry(entry.entry_type()).or_default().insert(hash.clone(), entry.clone());
     }
-
     index
   }
 
   /// Access the shared pages Arc (for cheap cloning in buffer-only publishes).
   pub fn pages(&self) -> &Arc<Vec<Vec<u8>>> {
     &self.pages
+  }
+
+  /// Access the flushed-page type index for reuse when publishing a new
+  /// buffer-only snapshot.
+  pub fn page_type_index(&self) -> &Arc<KvTypeIndex> {
+    &self.page_type_index
   }
 
   /// Look up an entry by hash. Checks the buffer first, then reads
@@ -159,19 +181,31 @@ impl ReadSnapshot {
   }
 
   /// Iterate all entries of a specific type. O(k) where k is the number of
-  /// entries of that type, backed by the prebuilt type index.
+  /// flushed entries of that type plus the current write-buffer entries.
   pub fn iter_by_type(&self, target_type: u8) -> Vec<KVEntry> {
-    match self.type_index.get(&target_type) {
-      Some(entries) => entries.values().cloned().collect(),
-      None => Vec::new(),
+    let mut entries = Vec::new();
+    if let Some(page_entries) = self.page_type_index.get(&target_type) {
+      for (hash, entry) in page_entries {
+        if !self.buffer.contains_key(hash) {
+          entries.push(entry.clone());
+        }
+      }
     }
+    if let Some(buffer_entries) = self.buffer_type_index.get(&target_type) {
+      entries.extend(buffer_entries.values().cloned());
+    }
+    entries
   }
 
-  /// Count entries of a specific type. O(1) — reads the prebuilt type
-  /// index length without cloning. Prefer this over `iter_by_type(t).len()`,
-  /// which clones every entry just to take a length.
+  /// Count entries of a specific type without cloning entries.
   pub fn count_by_type(&self, target_type: u8) -> usize {
-    self.type_index.get(&target_type).map(|m| m.len()).unwrap_or(0)
+    let page_count = self
+      .page_type_index
+      .get(&target_type)
+      .map(|page_entries| page_entries.keys().filter(|hash| !self.buffer.contains_key(*hash)).count())
+      .unwrap_or(0);
+    let buffer_count = self.buffer_type_index.get(&target_type).map(|entries| entries.len()).unwrap_or(0);
+    page_count + buffer_count
   }
 
   /// Iterate all entries: uses the prebuilt type index to collect every
@@ -179,7 +213,14 @@ impl ReadSnapshot {
   /// pages and rebuilding the HashMap on every call.
   pub fn iter_all(&self) -> EngineResult<Vec<KVEntry>> {
     let mut all = Vec::new();
-    for entries in self.type_index.values() {
+    for entries in self.page_type_index.values() {
+      for (hash, entry) in entries {
+        if !self.buffer.contains_key(hash) {
+          all.push(entry.clone());
+        }
+      }
+    }
+    for entries in self.buffer_type_index.values() {
       all.extend(entries.values().cloned());
     }
     Ok(all)

@@ -74,6 +74,9 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // (e.g. /files/query endpoint filters results by key rules). But we skip the path-level
   // permission checks that are files-specific.
   if !is_path_route {
+    if request_path.starts_with("/blobs/chunks/") {
+      return next.run(request).await;
+    }
     // Load and insert key rules for downstream handlers if a scoped key is present.
     if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
       if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {

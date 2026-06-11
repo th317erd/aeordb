@@ -8,7 +8,7 @@ use crate::auth::TokenClaims;
 use crate::engine::batch_commit::{commit_files, CommitFile};
 use crate::engine::errors::EngineError;
 use crate::engine::RequestContext;
-use crate::engine::{EntryType, should_compress, CompressionAlgorithm, compress};
+use crate::engine::EntryType;
 use crate::server::state::AppState;
 
 /// GET /upload/config — returns hash algorithm, chunk size, and hash prefix.
@@ -138,18 +138,11 @@ pub async fn upload_chunk(
       return Ok("exists");
     }
     let chunk_size = body_vec.len() as u64;
-    if should_compress(None, body_vec.len()) {
-      match compress(&body_vec, CompressionAlgorithm::Zstd) {
-        Ok(compressed) => {
-          engine.store_entry_compressed(EntryType::Chunk, &computed_bytes, &compressed, CompressionAlgorithm::Zstd)?;
-        }
-        Err(_) => {
-          engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
-        }
-      }
-    } else {
-      engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
-    }
+    // Blob staging only knows raw chunk bytes, not the eventual file MIME
+    // type. Blind compression here burns CPU on already-compressed media and
+    // makes upload throughput unpredictable. Higher-level file writes that
+    // have content-type/config context remain free to opt into compression.
+    engine.store_entry(EntryType::Chunk, &computed_bytes, &body_vec)?;
     engine.counters().record_chunk_stored(chunk_size);
     engine.counters().record_write(chunk_size);
     Ok("created")

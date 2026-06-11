@@ -217,6 +217,10 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
   for mc in &report.missing_children {
     println!("    - {}", mc);
   }
+  println!("  Dangling records:   {:>8}", report.dangling_file_records.len());
+  for dangling in &report.dangling_file_records {
+    println!("    - {}", dangling);
+  }
   println!("  Unlisted files:     {:>8}", report.unlisted_files.len());
   for uf in &report.unlisted_files {
     println!("    - {}", uf);
@@ -301,6 +305,9 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool) {
       }
       if !report.missing_children.is_empty() {
         println!("  {} files are listed in directories but can't be read.", report.missing_children.len());
+      }
+      if !report.dangling_file_records.is_empty() {
+        println!("  {} live path-key FileRecords reference chunks that are not live.", report.dangling_file_records.len());
       }
       if !report.broken_snapshots.is_empty() {
         println!("  {} snapshots reference data that no longer exists.", report.broken_snapshots.len());

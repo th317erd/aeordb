@@ -823,17 +823,18 @@ impl DiskKVStore {
   }
 
   fn publish_buffer_only(&mut self) {
-    let current_pages = {
+    let (current_pages, current_page_type_index) = {
       let current = self.snapshot.load();
-      Arc::clone(current.pages())
+      (Arc::clone(current.pages()), Arc::clone(current.page_type_index()))
     };
-    let snapshot = ReadSnapshot::new(
+    let snapshot = ReadSnapshot::new_with_page_type_index(
       self.write_buffer.clone(),
       Arc::clone(&self.shared_nvt),
       self.bucket_count,
       self.hash_algo,
       self.entry_count,
       current_pages,
+      current_page_type_index,
     );
     self.snapshot.store(Arc::new(snapshot));
   }

@@ -7,16 +7,15 @@ use axum::{
 };
 use serde::Deserialize;
 use std::io::Write;
-use uuid::Uuid;
 
 use super::responses::ErrorResponse;
+use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::entry_type::EntryType;
 use crate::engine::path_utils::normalize_path;
-use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-use crate::engine::user::is_root;
+use crate::engine::permission_resolver::CrudlifyOp;
 
 #[derive(Deserialize)]
 pub struct DownloadRequest {
@@ -59,14 +58,12 @@ pub async fn download_zip(
   // any path in the database. 404 (not 403) so callers can't enumerate
   // existence by probing.
   if !claims.sub.starts_with("share:") {
-    if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
-      if !is_root(&user_id) {
-        let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+    if let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) {
+      let permissions = RoutePermissionChecker::for_user(&state, user_id);
+      if !permissions.is_root() {
         for raw_path in &body.paths {
           let normalized = normalize_path(raw_path);
-          let allowed = resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::Read).unwrap_or(false)
-            || resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::List).unwrap_or(false);
-          if !allowed {
+          if !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
             return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
           }
         }

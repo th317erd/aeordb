@@ -186,6 +186,12 @@ curl -X PUT http://localhost:6830/blobs/chunks/f6e5d4c3b2a1... \
 
 Atomically commit multiple files from previously uploaded chunks. Each file specifies its path, content type, and the ordered list of chunk hashes that compose it.
 
+During commit, AeorDB streams the ordered stored chunks and records the raw
+whole-file content hash (`blake3(file bytes)`) in the file metadata. That
+stored value backs `@hash` searches; it is not derived from the first chunk.
+Committed files are written as FileRecord v1 entries so the hash is stored in
+the record metadata instead of being recomputed by the indexing engine.
+
 ### Request Body
 
 ```json

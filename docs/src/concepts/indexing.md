@@ -265,31 +265,38 @@ On first server start, AeorDB bootstraps a default index configuration at `/.aeo
 
 | Field | Index Types | Description |
 |-------|------------|-------------|
-| `@filename` | string, trigram, phonetic, dmetaphone | File name (last path segment). Supports exact match, fuzzy search, and phonetic matching. |
-| `@hash` | trigram | Content hash. Supports substring and similarity search. |
+| `@path` | string, trigram | Full file path. Supports exact match plus path substring/similarity search. |
+| `@filename` | string, trigram, soundex, dmetaphone, dmetaphone_alt | File name (last path segment). Supports exact match, fuzzy search, and phonetic matching. `@file_name` is accepted as a query/config alias and resolves to this canonical field. |
+| `@extension` | string | File extension. Supports exact match. |
+| `@hash` | string, trigram | Raw whole-file content hash (`blake3(file bytes)`). Supports exact, substring, and similarity search. |
 | `@created_at` | timestamp | Creation time. Supports range queries. |
 | `@updated_at` | timestamp | Last update time. Supports range queries. |
 | `@size` | u64 | File size in bytes. Supports range queries. |
-| `@content_type` | string | MIME type. Supports exact match. |
+| `@content_type` | string, trigram | MIME type. Supports exact match, substring, and similarity search. |
 
-These indexes are stored at `/.indexes/` and cover every file in the database. Because the bootstrap config uses `glob: "**/*"`, the global search endpoint ([`POST /files/search`](../api/files.md#global-search)) works out of the box with no additional configuration.
+These indexes are stored at `/.indexes/` and cover every file in the database. Because the bootstrap config uses `glob: "**/*"`, the query and global search endpoints can use the root index for scoped virtual-field lookups and then filter candidates to the requested path. The global search endpoint ([`POST /files/search`](../api/files.md#global-search)) works out of the box with no additional configuration.
 
 ### @-Field Source Resolution
 
-When the indexing pipeline encounters a field name starting with `@`, it extracts the value from the file's metadata (FileRecord) instead of parsing the file content. This means even binary files (images, videos, PDFs) are indexed by filename, hash, timestamps, size, and content type without needing a parser.
+When the indexing pipeline encounters a field name starting with `@`, it extracts the value from the file's metadata (FileRecord) instead of parsing the file content. This means even binary files (images, videos, PDFs) are indexed by path, filename, extension, raw whole-file hash, timestamps, size, and content type without needing a parser.
+
+`@hash` is not a chunk hash and is not the content-addressed key for the serialized `FileRecord`. It is the hash of the reconstructed file bytes, computed and stored during file writes.
 
 ### Customization
 
-The default config at `/.aeordb-config/indexes.json` is only written on first boot. You can modify it to add or remove default fields. Changes trigger an automatic reindex.
+The default config at `/.aeordb-config/indexes.json` is only written on first boot. Existing databases keep their current config until you edit it. You can modify the config to add or remove default fields; changes trigger an automatic reindex, and a forced reindex can backfill FileRecord metadata migrations such as whole-file `@hash`.
 
 ## Automatic Reindexing
 
-When you store or update a `.aeordb-config/indexes.json` file, the engine automatically enqueues a background reindex task for that directory. The task:
+When you store or update a `.aeordb-config/indexes.json` file, the engine automatically enqueues a background reindex task for that directory. If the config contains only virtual `@` metadata fields, the task uses the metadata-only path and skips full file reads and parsers. Mixed configs that include content fields use the full indexing pipeline.
+
+The task:
 
 1. Reads the current index config
 2. Lists all files in the directory
-3. Re-runs the indexing pipeline for each file (in batches of 50, yielding between batches)
-4. Reports progress via `GET /system/tasks`
+3. Re-runs metadata-only or full indexing for each file
+4. Buffers index writes in memory and flushes them periodically
+5. Reports progress via `GET /system/tasks`
 
 During reindexing, queries still work but may return incomplete results. The query response includes a `meta.reindexing` field with the current progress:
 

@@ -8,10 +8,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::cache_invalidation::evict_caches_for_path;
 use super::responses::ErrorResponse;
+use super::route_permissions::{parse_user_id, reject_share_key, RoutePermissionChecker};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::permissions::{PathPermissions, PermissionLink};
 use crate::engine::path_utils::{normalize_path, parent_path, file_name};
 use crate::engine::request_context::RequestContext;
@@ -229,9 +232,7 @@ pub async fn share(
         .into_response();
     }
 
-    // Evict cache for this directory
-    state.engine.permissions_cache.evict(&perm_dir);
-    state.engine.grants_index_cache.evict_all();
+    evict_caches_for_path(&state, &perm_file_path);
 
     shared_count += 1;
     shared_paths.push(normalized);
@@ -285,8 +286,8 @@ pub async fn list_shares(
   axum::extract::Query(query): axum::extract::Query<SharesQuery>,
 ) -> Response {
   // Share tokens cannot list shares
-  if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Not available for share links").with_status(StatusCode::FORBIDDEN).into_response();
+  if let Err(response) = reject_share_key(&claims, "Not available for share links") {
+    return response;
   }
   let normalized = normalize_path(&query.path);
 
@@ -295,20 +296,12 @@ pub async fn list_shares(
   // paths to enumerate who else has been granted access — leaking
   // both path existence AND usernames of other grantees. 404 (not 403)
   // so the response shape doesn't reveal existence on its own.
-  let user_id = match Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
-    }
+  let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
+    Ok(permissions) => permissions,
+    Err(response) => return response,
   };
-  if !crate::engine::user::is_root(&user_id) {
-    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-    let allowed = resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::Read).unwrap_or(false)
-      || resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::List).unwrap_or(false);
-    if !allowed {
-      return ErrorResponse::new(format!("Not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
+  if !permissions.is_root() && !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
+    return ErrorResponse::new(format!("Not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let ops = DirectoryOps::new(&state.engine);
@@ -441,8 +434,7 @@ pub async fn unshare(
   }
 
   // Evict cache
-  state.engine.permissions_cache.evict(&perm_dir);
-  state.engine.grants_index_cache.evict_all();
+  evict_caches_for_path(&state, &perm_file_path);
 
   Json(serde_json::json!({
       "revoked": true,
@@ -460,13 +452,13 @@ pub async fn unshare(
 /// accessible entry points for non-root users.
 pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   // Share tokens don't use .permissions — they have scoped key rules
-  if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Not available for share links").with_status(StatusCode::FORBIDDEN).into_response();
+  if let Err(response) = reject_share_key(&claims, "Not available for share links") {
+    return response;
   }
 
-  let caller_id = match Uuid::parse_str(&claims.sub) {
+  let caller_id = match parse_user_id(&claims, "Invalid identity") {
     Ok(id) => id,
-    Err(_) => return ErrorResponse::new("Invalid identity").with_status(StatusCode::FORBIDDEN).into_response(),
+    Err(response) => return response,
   };
 
   // Root sees everything — no need for this endpoint

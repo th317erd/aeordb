@@ -1,6 +1,8 @@
 pub mod admin_routes;
 pub mod api_key_self_service_routes;
 pub mod backup_routes;
+pub mod blocking;
+pub mod cache_invalidation;
 pub mod cluster_routes;
 pub mod conflict_routes;
 pub mod cors;
@@ -11,6 +13,7 @@ pub mod gc_routes;
 pub mod json_merge_patch;
 pub mod portal_routes;
 pub mod responses;
+pub mod route_permissions;
 pub mod routes;
 pub mod settings_routes;
 pub mod share_link_routes;
@@ -88,6 +91,36 @@ pub fn spawn_hot_buffer_flush_timer(engine: Arc<StorageEngine>, cancel: Option<t
   });
 }
 
+/// Spawn a timer that enforces the shared index buffer's time-based flush
+/// policy even when writes stop before the next write-count threshold.
+pub fn spawn_index_buffer_flush_timer(engine: Arc<StorageEngine>, cancel: Option<tokio_util::sync::CancellationToken>) {
+  if tokio::runtime::Handle::try_current().is_err() {
+    return;
+  }
+  let weak = Arc::downgrade(&engine);
+  drop(engine);
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+      interval.tick().await;
+      if let Some(ref c) = cancel {
+        if c.is_cancelled() {
+          break;
+        }
+      }
+      match weak.upgrade() {
+        Some(engine) => {
+          if let Err(error) = engine.flush_index_buffer_if_due() {
+            tracing::warn!("Index buffer timer flush failed: {}", error);
+          }
+        }
+        None => break,
+      }
+    }
+  });
+}
+
 // NOTE: The permission_middleware only checks /files/ routes for path-level
 // CRUD permissions. The following routes are behind auth but have no path-level
 // checks: /files/query, /files/fetch, /blobs/*, /versions/*, /plugins/*, /system/events.
@@ -128,6 +161,7 @@ pub fn create_app_with_auth_mode_and_cancel(
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
   let engine = create_engine_with_hot_dir(engine_path, hot_dir);
   spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
+  spawn_index_buffer_flush_timer(engine.clone(), cancel.clone());
 
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {

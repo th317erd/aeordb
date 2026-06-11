@@ -1,4 +1,4 @@
-use aeordb::engine::file_record::FileRecord;
+use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 
 const BLAKE3_HASH_LEN: usize = 32;
 
@@ -8,7 +8,30 @@ fn make_record(path: &str, content_type: Option<&str>, total_size: u64, chunks: 
   // Pin timestamps for deterministic round-trips.
   rec.created_at = 1_700_000_000_000;
   rec.updated_at = 1_700_000_001_000;
+  rec.content_hash = vec![0x42; BLAKE3_HASH_LEN];
   rec
+}
+
+fn serialize_v0(record: &FileRecord, hash_length: usize) -> Vec<u8> {
+  let mut buffer = Vec::new();
+  let path_bytes = record.path.as_bytes();
+  let content_type_bytes = record.content_type.as_deref().unwrap_or("").as_bytes();
+
+  buffer.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+  buffer.extend_from_slice(path_bytes);
+  buffer.extend_from_slice(&(content_type_bytes.len() as u16).to_le_bytes());
+  buffer.extend_from_slice(content_type_bytes);
+  buffer.extend_from_slice(&record.total_size.to_le_bytes());
+  buffer.extend_from_slice(&record.created_at.to_le_bytes());
+  buffer.extend_from_slice(&record.updated_at.to_le_bytes());
+  buffer.extend_from_slice(&(record.metadata.len() as u32).to_le_bytes());
+  buffer.extend_from_slice(&record.metadata);
+  buffer.extend_from_slice(&(record.chunk_hashes.len() as u32).to_le_bytes());
+  for hash in &record.chunk_hashes {
+    assert_eq!(hash.len(), hash_length);
+    buffer.extend_from_slice(hash);
+  }
+  buffer
 }
 
 // ===========================================================================
@@ -20,7 +43,7 @@ fn roundtrip_basic() {
   let hash = vec![0xAA; BLAKE3_HASH_LEN];
   let record = make_record("/hello.txt", Some("text/plain"), 42, vec![hash]);
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored, record);
 }
 
@@ -29,7 +52,7 @@ fn roundtrip_no_content_type() {
   let hash = vec![0xBB; BLAKE3_HASH_LEN];
   let record = make_record("/data.bin", None, 1024, vec![hash]);
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.content_type, None);
   assert_eq!(restored, record);
 }
@@ -39,8 +62,34 @@ fn roundtrip_multiple_chunks() {
   let hashes: Vec<Vec<u8>> = (0..5).map(|i| vec![i; BLAKE3_HASH_LEN]).collect();
   let record = make_record("/multi.dat", Some("application/octet-stream"), 5000, hashes.clone());
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.chunk_hashes.len(), 5);
+  assert_eq!(restored, record);
+}
+
+#[test]
+fn roundtrip_with_persisted_content_hash() {
+  let hashes: Vec<Vec<u8>> = (0..3).map(|i| vec![i; BLAKE3_HASH_LEN]).collect();
+  let mut record = make_record("/multi.dat", Some("application/octet-stream"), 5000, hashes);
+  record.content_hash = vec![0x77; BLAKE3_HASH_LEN];
+
+  let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
+
+  assert_eq!(restored.content_hash, vec![0x77; BLAKE3_HASH_LEN]);
+  assert_eq!(restored, record);
+}
+
+#[test]
+fn deserialize_legacy_record_without_content_hash() {
+  let hashes: Vec<Vec<u8>> = (0..2).map(|i| vec![i; BLAKE3_HASH_LEN]).collect();
+  let mut record = make_record("/legacy.dat", Some("application/octet-stream"), 2048, hashes);
+  record.content_hash = Vec::new();
+
+  let data = serialize_v0(&record, BLAKE3_HASH_LEN);
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+
+  assert!(restored.content_hash.is_empty());
   assert_eq!(restored, record);
 }
 
@@ -48,7 +97,7 @@ fn roundtrip_multiple_chunks() {
 fn roundtrip_empty_chunks() {
   let record = make_record("/empty_chunks.txt", Some("text/plain"), 0, vec![]);
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert!(restored.chunk_hashes.is_empty());
   assert_eq!(restored, record);
 }
@@ -58,7 +107,7 @@ fn roundtrip_empty_metadata() {
   let record = make_record("/meta.txt", None, 10, vec![vec![0x11; BLAKE3_HASH_LEN]]);
   assert!(record.metadata.is_empty());
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert!(restored.metadata.is_empty());
 }
 
@@ -67,7 +116,7 @@ fn roundtrip_with_metadata() {
   let mut record = make_record("/meta.txt", None, 10, vec![vec![0x11; BLAKE3_HASH_LEN]]);
   record.metadata = b"some extra metadata bytes".to_vec();
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.metadata, b"some extra metadata bytes");
   assert_eq!(restored, record);
 }
@@ -81,7 +130,7 @@ fn roundtrip_unicode_path() {
     vec![vec![0xCC; BLAKE3_HASH_LEN]],
   );
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.path, record.path);
 }
 
@@ -89,7 +138,7 @@ fn roundtrip_unicode_path() {
 fn roundtrip_total_size_zero() {
   let record = make_record("/zero.txt", Some("text/plain"), 0, vec![]);
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.total_size, 0);
 }
 
@@ -97,7 +146,7 @@ fn roundtrip_total_size_zero() {
 fn roundtrip_total_size_max_u64() {
   let record = make_record("/huge.bin", None, u64::MAX, vec![vec![0xFF; BLAKE3_HASH_LEN]]);
   let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
-  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored.total_size, u64::MAX);
 }
 
@@ -127,6 +176,14 @@ fn serialize_accepts_path_at_u16_max() {
 fn serialize_rejects_content_type_exceeding_u16_max() {
   let long_ct = "x".repeat(u16::MAX as usize + 1);
   let record = make_record("/f.txt", Some(&long_ct), 0, vec![]);
+  let result = record.serialize(BLAKE3_HASH_LEN);
+  assert!(result.is_err());
+}
+
+#[test]
+fn serialize_rejects_invalid_content_hash_length() {
+  let mut record = make_record("/f.txt", None, 0, vec![]);
+  record.content_hash = vec![0xAA; BLAKE3_HASH_LEN - 1];
   let result = record.serialize(BLAKE3_HASH_LEN);
   assert!(result.is_err());
 }
@@ -187,7 +244,7 @@ fn deserialize_truncated_chunk_hashes_fails() {
   let full_data = record.serialize(BLAKE3_HASH_LEN).unwrap();
   // Remove last 10 bytes so the second hash is incomplete.
   let truncated = &full_data[..full_data.len() - 10];
-  let result = FileRecord::deserialize(truncated, BLAKE3_HASH_LEN, 0);
+  let result = FileRecord::deserialize(truncated, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION);
   assert!(result.is_err());
 }
 
@@ -218,8 +275,18 @@ fn new_metadata_is_empty() {
 #[test]
 fn deserialize_version_0_works() {
   let record = make_record("/v0.txt", Some("text/plain"), 100, vec![vec![0x12; BLAKE3_HASH_LEN]]);
-  let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
+  let data = serialize_v0(&record, BLAKE3_HASH_LEN);
   let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, 0).unwrap();
+  assert!(restored.content_hash.is_empty());
+  assert_eq!(restored.path, record.path);
+  assert_eq!(restored.chunk_hashes, record.chunk_hashes);
+}
+
+#[test]
+fn deserialize_version_1_works() {
+  let record = make_record("/v1.txt", Some("text/plain"), 100, vec![vec![0x12; BLAKE3_HASH_LEN]]);
+  let data = record.serialize(BLAKE3_HASH_LEN).unwrap();
+  let restored = FileRecord::deserialize(&data, BLAKE3_HASH_LEN, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored, record);
 }
 
@@ -245,8 +312,9 @@ fn roundtrip_with_sha512_hash_length() {
   let mut record = make_record("/sha512.txt", Some("text/plain"), 256, vec![hash]);
   // Ensure metadata is pinned too.
   record.metadata = vec![];
+  record.content_hash = vec![0xEE; sha512_len];
   let data = record.serialize(sha512_len).unwrap();
-  let restored = FileRecord::deserialize(&data, sha512_len, 0).unwrap();
+  let restored = FileRecord::deserialize(&data, sha512_len, CURRENT_FILE_RECORD_VERSION).unwrap();
   assert_eq!(restored, record);
   assert_eq!(restored.chunk_hashes[0].len(), 64);
 }

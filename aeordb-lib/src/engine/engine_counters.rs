@@ -347,8 +347,8 @@ impl EngineCounters {
           // creates a new KV entry). The `files` counter tracks LIVE
           // files — set below from the HEAD tree walker instead.
           if accumulate_sizes {
-            if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-              if let Ok(record) = FileRecord::deserialize(&value, hash_length, 0) {
+            if let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) {
+              if let Ok(record) = FileRecord::deserialize(&value, hash_length, header.entry_version) {
                 logical_size += record.total_size;
               }
             }

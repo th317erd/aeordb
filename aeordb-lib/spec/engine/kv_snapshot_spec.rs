@@ -245,6 +245,60 @@ fn test_snapshot_iter_all_excludes_deleted() {
 }
 
 #[test]
+fn test_snapshot_count_by_type_respects_buffer_overrides() {
+  let dir = tempdir().unwrap();
+
+  let disk_entries = vec![make_entry(1, 100), make_entry(2, 200), make_entry(3, 300)];
+  let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
+
+  let mut buffer = HashMap::new();
+  let updated_entry = make_entry(2, 2222);
+  let tombstone = make_deleted_entry(3, 300);
+  let new_entry = make_entry(4, 400);
+  buffer.insert(updated_entry.hash.clone(), updated_entry);
+  buffer.insert(tombstone.hash.clone(), tombstone);
+  buffer.insert(new_entry.hash.clone(), new_entry);
+
+  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+
+  assert_eq!(snap.count_by_type(KV_TYPE_CHUNK), 3);
+  let all = snap.iter_by_type(KV_TYPE_CHUNK);
+  assert_eq!(all.len(), 3);
+  assert!(all.iter().any(|entry| entry.hash == make_hash(1)));
+  assert!(all.iter().any(|entry| entry.hash == make_hash(2) && entry.offset == 2222));
+  assert!(all.iter().any(|entry| entry.hash == make_hash(4)));
+  assert!(!all.iter().any(|entry| entry.hash == make_hash(3)));
+}
+
+#[test]
+fn test_snapshot_buffer_only_publish_reuses_page_type_index() {
+  let dir = tempdir().unwrap();
+
+  let disk_entries = vec![make_entry(1, 100), make_entry(2, 200)];
+  let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
+  let first = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 2, pages);
+
+  let page_type_index = Arc::clone(first.page_type_index());
+  let mut buffer = HashMap::new();
+  let new_entry = make_entry(3, 300);
+  buffer.insert(new_entry.hash.clone(), new_entry);
+
+  let second = ReadSnapshot::new_with_page_type_index(
+    buffer,
+    make_nvt(bucket_count),
+    bucket_count,
+    HashAlgorithm::Blake3_256,
+    3,
+    Arc::clone(first.pages()),
+    Arc::clone(&page_type_index),
+  );
+
+  assert!(Arc::ptr_eq(second.page_type_index(), &page_type_index));
+  assert_eq!(second.count_by_type(KV_TYPE_CHUNK), 3);
+  assert!(second.iter_by_type(KV_TYPE_CHUNK).iter().any(|entry| entry.hash == make_hash(3)));
+}
+
+#[test]
 fn test_snapshot_get_concurrent_file_handles() {
   let dir = tempdir().unwrap();
 

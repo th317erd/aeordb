@@ -131,9 +131,21 @@ Enqueue a reindex task for a directory path. Re-scans all files and rebuilds ind
 
 ```json
 {
-  "path": "/data/"
+  "path": "/data/",
+  "force": false,
+  "metadata_only": false,
+  "index_flush_writes": 262144,
+  "index_flush_ms": 30000
 }
 ```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `path` | string | Required | Directory path to reindex |
+| `force` | boolean | `false` | When true, also migrates older live FileRecord payloads in the requested subtree to the current version before indexing eligible files. Omit or set to `false` for index-only reprocessing. Internal/system FileRecords can be migrated but are not indexed. |
+| `metadata_only` | boolean | `false` | When true, rebuild only virtual `@` metadata indexes from FileRecord metadata. This skips file body reads, JSON parsing, and parser plugins. |
+| `index_flush_writes` | integer | `262144` | Flush buffered index mutations after this many field/strategy updates. |
+| `index_flush_ms` | integer | `30000` | Flush buffered index mutations after this many milliseconds. |
 
 **Response:** `200 OK`
 
@@ -151,7 +163,7 @@ Enqueue a reindex task for a directory path. Re-scans all files and rebuilds ind
 curl -X POST http://localhost:6830/system/tasks/reindex \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"path": "/data/"}'
+  -d '{"path": "/data/", "metadata_only": true}'
 ```
 
 ---

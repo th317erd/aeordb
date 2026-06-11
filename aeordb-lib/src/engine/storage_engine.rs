@@ -1,7 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use fs2::FileExt;
 
@@ -18,6 +19,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail::VoidRecord;
+use crate::engine::index_store::{IndexManager, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
 use serde::Serialize;
 
@@ -146,6 +148,7 @@ pub struct DatabaseStats {
 /// Lock-free snapshot reads allow concurrent readers while a single writer
 /// appends new entries.
 pub struct StorageEngine {
+  namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
   pub(crate) kv_snapshot: Arc<ArcSwap<ReadSnapshot>>,
@@ -173,6 +176,9 @@ pub struct StorageEngine {
   /// is immutable, so this cache can never serve stale data for a given key.
   /// Populated by update_parent_directories, read by directory lookups.
   pub(crate) dir_content_cache: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+  /// Shared in-memory index write buffer. All index mutations pass through
+  /// this state and are flushed to disk by write-count/time policy.
+  pub(crate) index_write_buffer: Mutex<SharedIndexWriteBuffer>,
   /// GC recheck queue. While GC mark+sweep runs, every successful write hash
   /// is added here so the sweep phase can avoid clobbering entries that were
   /// written after the mark snapshot was captured. `None` means GC is not
@@ -204,6 +210,23 @@ impl StorageEngine {
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     Ok(Self::valid_reusable_range(offset, size, wal_start, wal_end))
+  }
+
+  /// Serialize namespace-level mutations that publish mutable path keys and
+  /// directory/HEAD state. The lower writer/KV locks make individual appends
+  /// safe, but they do not make a whole file/directory publish atomic against
+  /// another namespace writer.
+  pub(crate) fn namespace_write_guard(&self) -> EngineResult<NamespaceWriteGuard<'_>> {
+    let engine_id = self as *const StorageEngine as usize;
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    if already_held {
+      NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+      return Ok(NamespaceWriteGuard { engine_id, _guard: None });
+    }
+
+    let guard = self.namespace_write_lock.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+    Ok(NamespaceWriteGuard { engine_id, _guard: Some(guard) })
   }
 
   fn validate_kv_entry_offset(writer: &AppendWriter, kv_entry: &KVEntry, hash: &[u8], context: &str) -> EngineResult<()> {
@@ -372,6 +395,7 @@ impl StorageEngine {
     let void_manager = VoidManager::new(hash_algo);
 
     let engine = StorageEngine {
+      namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
@@ -385,6 +409,7 @@ impl StorageEngine {
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
@@ -583,6 +608,7 @@ impl StorageEngine {
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
     let engine = StorageEngine {
+      namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
@@ -596,6 +622,7 @@ impl StorageEngine {
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
       dir_content_cache: RwLock::new(HashMap::new()),
+      index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
@@ -723,6 +750,21 @@ impl StorageEngine {
     Ok(())
   }
 
+  /// Flush buffered index mutations if their shared write-count/time policy
+  /// says they are due.
+  pub fn flush_index_buffer_if_due(&self) -> EngineResult<bool> {
+    IndexManager::new(self).flush_buffered_indexes_if_due()
+  }
+
+  /// Force all buffered index mutations to disk.
+  pub fn flush_index_buffer(&self) -> EngineResult<usize> {
+    IndexManager::new(self).flush_buffered_indexes()
+  }
+
+  pub fn index_buffer_stats(&self) -> crate::engine::index_store::IndexWriteBufferStats {
+    IndexManager::new(self).buffered_index_stats()
+  }
+
   /// Mirror VoidManager state into the DiskKVStore's pending_voids so the
   /// next hot tail flush includes the current void snapshot. Call after any
   /// operation that changes the void set (GC sweep, void consumption,
@@ -820,11 +862,26 @@ impl StorageEngine {
   /// could leave the entry on disk but missing from the index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry(&self, entry_type: EntryType, key: &[u8], value: &[u8]) -> EngineResult<u64> {
-    self.store_entry_internal(entry_type, key, value, 0, CompressionAlgorithm::None)
+    self.store_entry_internal(entry_type, key, value, 0, CompressionAlgorithm::None, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
   }
 
   pub fn store_entry_with_flags(&self, entry_type: EntryType, key: &[u8], value: &[u8], flags: u8) -> EngineResult<u64> {
-    self.store_entry_internal(entry_type, key, value, flags, CompressionAlgorithm::None)
+    self.store_entry_internal(entry_type, key, value, flags, CompressionAlgorithm::None, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
+  }
+
+  pub fn store_entry_with_version(&self, entry_type: EntryType, key: &[u8], value: &[u8], entry_version: u8) -> EngineResult<u64> {
+    self.store_entry_internal(entry_type, key, value, 0, CompressionAlgorithm::None, entry_version)
+  }
+
+  pub fn store_entry_with_flags_and_version(
+    &self,
+    entry_type: EntryType,
+    key: &[u8],
+    value: &[u8],
+    flags: u8,
+    entry_version: u8,
+  ) -> EngineResult<u64> {
+    self.store_entry_internal(entry_type, key, value, flags, CompressionAlgorithm::None, entry_version)
   }
 
   pub fn store_entry_compressed(
@@ -834,7 +891,7 @@ impl StorageEngine {
     value: &[u8],
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u64> {
-    self.store_entry_internal(entry_type, key, value, 0, compression_algo)
+    self.store_entry_internal(entry_type, key, value, 0, compression_algo, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
   }
 
   pub fn store_entry_compressed_with_flags(
@@ -845,7 +902,7 @@ impl StorageEngine {
     flags: u8,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u64> {
-    self.store_entry_internal(entry_type, key, value, flags, compression_algo)
+    self.store_entry_internal(entry_type, key, value, flags, compression_algo, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
   }
 
   /// Core store_entry implementation. Acquires writer + KV locks, appends
@@ -858,6 +915,7 @@ impl StorageEngine {
     value: &[u8],
     flags: u8,
     compression_algo: CompressionAlgorithm,
+    entry_version: u8,
   ) -> EngineResult<u64> {
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -902,10 +960,11 @@ impl StorageEngine {
       // No explicit fsync here — void-consumption writes ride the same
       // hot-tail-flush durability path as appends. The whole point of this
       // plumbing is to AVOID per-entry random fsyncs.
-      let written = writer.write_entry_at_nosync_full(void_offset, entry_type, key, value, flags, compression_algo)?;
+      let written =
+        writer.write_entry_at_nosync_full_with_version(void_offset, entry_type, key, value, flags, compression_algo, entry_version)?;
       (void_offset, written)
     } else {
-      writer.append_entry_with_compression(entry_type, key, value, flags, compression_algo)?
+      writer.append_entry_with_compression_and_version(entry_type, key, value, flags, compression_algo, entry_version)?
     };
     kv.set_hot_tail_offset(writer.current_offset());
 
@@ -1075,6 +1134,50 @@ impl StorageEngine {
     Ok(Some((header, key, value)))
   }
 
+  fn decode_chunk_entry(&self, requested_hash: &[u8], header: EntryHeader, value: Vec<u8>) -> EngineResult<Vec<u8>> {
+    if header.entry_type != EntryType::Chunk {
+      return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(requested_hash))));
+    }
+
+    if header.compression_algo != CompressionAlgorithm::None {
+      crate::engine::compression::decompress(&value, header.compression_algo)
+    } else {
+      Ok(value)
+    }
+  }
+
+  /// Read a non-deleted chunk and return its decompressed bytes.
+  pub fn read_chunk(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    match self.get_entry(hash)? {
+      Some((header, _key, value)) => self.decode_chunk_entry(hash, header, value).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  /// Read a chunk including deleted entries and return its decompressed bytes.
+  pub fn read_chunk_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    match self.get_entry_including_deleted(hash)? {
+      Some((header, _key, value)) => self.decode_chunk_entry(hash, header, value).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  /// Read a non-deleted chunk with entry hash verification.
+  pub fn read_chunk_verified(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    match self.get_entry_verified(hash)? {
+      Some((header, _key, value)) => self.decode_chunk_entry(hash, header, value).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  /// Read a chunk including deleted entries with entry hash verification.
+  pub fn read_chunk_verified_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    match self.get_entry_verified_including_deleted(hash)? {
+      Some((header, _key, value)) => self.decode_chunk_entry(hash, header, value).map(Some),
+      None => Ok(None),
+    }
+  }
+
   /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let snapshot = self.kv_snapshot.load();
@@ -1122,6 +1225,7 @@ impl StorageEngine {
 
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
+    let _namespace = self.namespace_write_guard()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let in_transaction =
       self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
@@ -1239,6 +1343,7 @@ impl StorageEngine {
   /// Flush a write batch AND update HEAD atomically in a single lock hold.
   /// This avoids separate lock acquisitions for the batch and the head update.
   pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
+    let _namespace = self.namespace_write_guard()?;
     if batch.is_empty() {
       // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
       return self.update_head(head_hash).map(|_| Vec::new());
@@ -2130,6 +2235,10 @@ impl StorageEngine {
   pub fn shutdown(&self) -> EngineResult<()> {
     tracing::info!("Shutting down storage engine...");
 
+    if let Err(e) = self.flush_index_buffer() {
+      tracing::error!("Index buffer flush failed during shutdown: {}", e);
+    }
+
     // Step 1: Flush the KV write buffer to disk pages
     match self.kv_writer.lock() {
       Ok(mut kv) => {
@@ -2182,6 +2291,33 @@ impl StorageEngine {
 impl Drop for StorageEngine {
   fn drop(&mut self) {
     let _ = self.shutdown();
+  }
+}
+
+thread_local! {
+  static NAMESPACE_WRITE_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct NamespaceWriteGuard<'a> {
+  engine_id: usize,
+  _guard: Option<MutexGuard<'a, ()>>,
+}
+
+impl Drop for NamespaceWriteGuard<'_> {
+  fn drop(&mut self) {
+    NAMESPACE_WRITE_STACK.with(|stack| {
+      let mut stack = stack.borrow_mut();
+      let popped = stack.pop();
+      if popped != Some(self.engine_id) {
+        debug_assert_eq!(popped, Some(self.engine_id), "namespace write guard stack out of order");
+        if let Some(other_engine_id) = popped {
+          stack.push(other_engine_id);
+        }
+        if let Some(pos) = stack.iter().rposition(|held| *held == self.engine_id) {
+          stack.remove(pos);
+        }
+      }
+    });
   }
 }
 

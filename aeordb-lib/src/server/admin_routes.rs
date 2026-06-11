@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::cache_invalidation::evict_caches_for_path;
 use super::responses::{ErrorResponse, GroupResponse, UserResponse, require_root};
 use super::state::AppState;
 use crate::engine::{Group, RequestContext, User};
@@ -481,7 +482,7 @@ pub async fn update_api_key(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   match system_store::store_api_key(&state.engine, &ctx, &record) {
     Ok(()) => {
-      state.api_key_cache.evict(&key_id_string);
+      evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", key_id_string));
       (
         StatusCode::OK,
         Json(serde_json::json!({

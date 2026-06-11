@@ -9,7 +9,7 @@ Every entry on disk shares the same header format:
 ```
 [Entry Header - 31 bytes fixed + hash_length variable]
   magic:            u32    (0x0AE012DB - marks the start of a valid entry)
-  entry_version:    u8     (format version, starting at 1)
+  entry_version:    u8     (payload format version for this entry)
   entry_type:       u8     (Chunk, FileRecord, DirectoryIndex, etc.)
   flags:            u8     (operational flags)
   hash_algo:        u16    (BLAKE3_256 = 0x0001, SHA256 = 0x0002, etc.)
@@ -29,7 +29,7 @@ Key properties:
 - **`magic`** (0x0AE012DB) enables recovery scanning -- find entry boundaries even in a corrupted file by scanning for magic bytes
 - **`total_length`** enables jump-scanning -- skip to the next entry without reading the full key/value
 - **`hash`** covers `entry_type + key + value` -- re-hash and compare to detect corruption
-- **`entry_version`** enables format evolution -- the engine selects the correct parser based on this byte
+- **`entry_version`** enables payload evolution -- the engine selects the correct parser for that entry type based on this byte. The generic WAL/header format is still v0; individual payloads can advance independently.
 
 For BLAKE3-256 (the default), the hash is 32 bytes, making the full header 63 bytes.
 
@@ -59,6 +59,7 @@ Original file (700KB):
 
 FileRecord:
   path: "/docs/report.pdf"
+  content_hash: BLAKE3(file bytes)
   chunk_hashes: [hash_a, hash_b, hash_c]
   total_size: 700KB
 ```
@@ -83,7 +84,7 @@ Directories use the same pattern: `dir:/path` (mutable) and `dirc:` + data (immu
 ## FileRecord Format
 
 ```
-[FileRecord Value]
+[FileRecord Value - v1]
   path_length:      u16
   path:             [u8; path_length]     (full file path)
   content_type_len: u16
@@ -91,13 +92,16 @@ Directories use the same pattern: `dir:/path` (mutable) and `dirc:` + data (immu
   total_size:       u64                    (file size in bytes)
   created_at:       i64                    (UTC milliseconds)
   updated_at:       i64                    (UTC milliseconds)
+  content_hash:     [u8; hash_length]      (raw whole-file hash, BLAKE3(file bytes) by default)
   metadata_length:  u32
   metadata:         [u8; metadata_length]  (arbitrary JSON metadata)
   chunk_count:      u32
-  chunk_hashes:     [u8; chunk_count * 32] (ordered BLAKE3 hashes)
+  chunk_hashes:     [u8; chunk_count * hash_length] (ordered chunk hashes)
 ```
 
-Metadata fields come first so you can read file metadata without skipping past the chunk list. Chunk hashes are the tail of the record for streaming reads.
+FileRecord v0 is the same layout without `content_hash`. New writes emit FileRecord v1, and readers support both v0 and v1. Legacy v0 records expose an empty `content_hash` until they are rewritten. A forced reindex (`POST /system/tasks/reindex` with `"force": true`) rewrites older live FileRecords through the current writer and backfills this field.
+
+Metadata fields come before the chunk list so file metadata can be read without skipping past all chunk hashes. Chunk hashes are the tail of the record for streaming reads.
 
 ## Directory Propagation
 
@@ -114,6 +118,12 @@ Store /users/alice.json:
 ```
 
 Each directory gets a new content hash because one of its children changed. This chain of updates from leaf to root is what maintains the Merkle tree and makes versioning work.
+
+### Namespace Writer Serialization
+
+The visible publish step is serialized by an engine-level namespace write guard. Individual WAL appends are already protected by the writer/KV locks, but that is not enough for a file-system namespace mutation: the mutable path key, the parent directory child entry, ancestor directory hashes, and HEAD must advance as one logical operation relative to other writers.
+
+Buffered file writes may store chunks before taking this guard, because chunks are content-addressed and unreachable chunks are safe garbage if a later publish fails. Once a writer starts publishing FileRecords, symlinks, directory entries, or HEAD, it holds the namespace guard until the publish completes. The guard is reentrant for nested operations such as copy/restore and indexed delete, and it is scoped per `StorageEngine` instance.
 
 ## Void Management
 

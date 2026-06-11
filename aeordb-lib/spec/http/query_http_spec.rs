@@ -8,6 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::StorageEngine;
 use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
@@ -34,6 +35,21 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
 
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
+fn root_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: uuid::Uuid::nil().to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
     scope: None,
     permissions: None,
     key_id: None,
@@ -1461,6 +1477,202 @@ async fn test_virtual_field_filename_eq() {
   let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/docs/notes.txt");
+}
+
+#[tokio::test]
+async fn test_virtual_field_file_name_alias_eq() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_virtual_field_files(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/docs",
+    "where": [
+      { "field": "@file_name", "op": "eq", "value": "notes.txt" }
+    ]
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0]["path"], "/docs/notes.txt");
+}
+
+#[tokio::test]
+async fn test_virtual_field_file_name_alias_explain_uses_canonical_index() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/docs", &config);
+  ops.store_file_with_indexing(&ctx, "/docs/notes.txt", b"notes", Some("text/plain")).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+  let body = serde_json::json!({
+    "path": "/docs",
+    "where": { "field": "@file_name", "op": "eq", "value": "notes.txt" },
+    "explain": "plan"
+  });
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let query_tree = &json["plan"]["query_tree"];
+  assert_eq!(query_tree["field"], "@file_name");
+  assert_eq!(query_tree["index_field"], "@filename");
+  assert_eq!(query_tree["indexes"].as_array().unwrap().len(), 1, "alias explain should resolve canonical @filename index");
+  assert_eq!(query_tree["indexes"][0]["strategy"], "string");
+}
+
+#[tokio::test]
+async fn test_put_file_populates_virtual_field_indexes() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+    ],
+  };
+  store_index_config(&engine, "/stream", &config);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/stream/upload.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("streamed upload bytes"))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let index_manager = IndexManager::new(&engine);
+  let mut filename_index = index_manager.load_index("/stream", "@filename").unwrap().expect("PUT should populate @filename index");
+  assert_eq!(filename_index.lookup_exact(b"upload.txt").len(), 1);
+
+  let hash_index = index_manager.load_index("/stream", "@hash").unwrap().expect("PUT should populate @hash index");
+  assert_eq!(hash_index.values.len(), 1, "@hash index should store the whole-file hash value for streamed PUT");
+}
+
+#[tokio::test]
+async fn test_put_file_with_root_glob_virtual_index_is_visible_to_scoped_query() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*".to_string()),
+    indexes: vec![
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+    ],
+  };
+  store_index_config(&engine, "/", &config);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/docs/scoped.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth)
+    .body(Body::from("scoped root glob upload"))
+    .unwrap();
+
+  let response = app.clone().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let explain_body = serde_json::json!({
+    "path": "/docs",
+    "where": { "field": "@file_name", "op": "eq", "value": "scoped.txt" },
+    "explain": "plan"
+  });
+  let explain_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&explain_body).unwrap()))
+    .unwrap();
+  let explain_response = app.clone().oneshot(explain_request).await.unwrap();
+  assert_eq!(explain_response.status(), StatusCode::OK);
+  let explain_json = body_json(explain_response.into_body()).await;
+  let query_tree = &explain_json["plan"]["query_tree"];
+  assert_eq!(query_tree["index_field"], "@filename");
+  assert_eq!(query_tree["index_source"], "/");
+  assert_eq!(query_tree["indexes"].as_array().unwrap().len(), 2);
+
+  let query_body = serde_json::json!({
+    "path": "/docs",
+    "where": { "field": "@file_name", "op": "eq", "value": "scoped.txt" }
+  });
+  let query_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&query_body).unwrap()))
+    .unwrap();
+  let query_response = app.clone().oneshot(query_request).await.unwrap();
+  assert_eq!(query_response.status(), StatusCode::OK);
+  let query_json = body_json(query_response.into_body()).await;
+  let results = query_json["items"].as_array().unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0]["path"], "/docs/scoped.txt");
+
+  let similar_body = serde_json::json!({
+    "path": "/docs",
+    "where": { "field": "@filename", "op": "similar", "value": "scoped", "threshold": 0.2 }
+  });
+  let similar_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&similar_body).unwrap()))
+    .unwrap();
+  let similar_response = app.oneshot(similar_request).await.unwrap();
+  assert_eq!(similar_response.status(), StatusCode::OK);
+  let similar_json = body_json(similar_response.into_body()).await;
+  let similar_results = similar_json["items"].as_array().unwrap();
+  assert_eq!(similar_results.len(), 1);
+  assert_eq!(similar_results[0]["path"], "/docs/scoped.txt");
+  assert!(similar_results[0]["matched_by"].as_array().unwrap().iter().any(|field| field.as_str() == Some("trigram")));
 }
 
 #[tokio::test]

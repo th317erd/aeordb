@@ -52,7 +52,7 @@ async fn body_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_trigger_reindex_via_http() {
-  let (app, jwt_manager, _engine, _task_queue, _temp_dir) = test_app();
+  let (app, jwt_manager, _engine, task_queue, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
   let request = Request::builder()
@@ -70,6 +70,60 @@ async fn test_trigger_reindex_via_http() {
   assert!(json.get("id").is_some(), "response should contain task id");
   assert_eq!(json["task_type"], "reindex");
   assert_eq!(json["status"], "pending");
+
+  let task_id = json["id"].as_str().unwrap();
+  let task = task_queue.get_task(task_id).unwrap().unwrap();
+  assert_eq!(task.args["path"], "/data/");
+  assert_eq!(task.args["force"], false, "manual API reindex should default to index-only mode");
+  assert_eq!(task.args["metadata_only"], false, "manual API reindex should default to full indexing mode");
+}
+
+#[tokio::test]
+async fn test_trigger_reindex_can_opt_into_force_via_http() {
+  let (app, jwt_manager, _engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/system/tasks/reindex")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"path":"/data/","force":true}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let task_id = json["id"].as_str().unwrap();
+  let task = task_queue.get_task(task_id).unwrap().unwrap();
+  assert_eq!(task.args["path"], "/data/");
+  assert_eq!(task.args["force"], true);
+}
+
+#[tokio::test]
+async fn test_trigger_reindex_can_set_metadata_only_and_flush_policy_via_http() {
+  let (app, jwt_manager, _engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/system/tasks/reindex")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"path":"/data/","metadata_only":true,"index_flush_writes":262144,"index_flush_ms":30000}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let task_id = json["id"].as_str().unwrap();
+  let task = task_queue.get_task(task_id).unwrap().unwrap();
+  assert_eq!(task.args["path"], "/data/");
+  assert_eq!(task.args["metadata_only"], true);
+  assert_eq!(task.args["index_flush_writes"], 262144);
+  assert_eq!(task.args["index_flush_ms"], 30000);
 }
 
 // ===========================================================================

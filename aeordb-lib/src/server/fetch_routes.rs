@@ -6,9 +6,9 @@ use axum::{
   Json,
 };
 use serde::Deserialize;
-use uuid::Uuid;
 
 use super::responses::ErrorResponse;
+use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::auth::TokenClaims;
@@ -16,8 +16,7 @@ use crate::engine::api_key_rules::{check_operation_permitted, match_rules};
 use crate::engine::directory_ops::{is_system_path, DirectoryOps};
 use crate::engine::errors::EngineError;
 use crate::engine::path_utils::{file_name, normalize_path};
-use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-use crate::engine::user::is_root;
+use crate::engine::permission_resolver::CrudlifyOp;
 
 const MAX_BATCH_FETCH_FILES: usize = 10_000;
 const MAX_BATCH_FETCH_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
@@ -133,15 +132,15 @@ fn can_fetch_path(state: &AppState, claims: &TokenClaims, key_rules: Option<&[cr
     return true;
   }
 
-  let Ok(user_id) = Uuid::parse_str(&claims.sub) else {
+  let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) else {
     return false;
   };
-  if is_root(&user_id) {
+  let permissions = RoutePermissionChecker::for_user(state, user_id);
+  if permissions.is_root() {
     return true;
   }
 
-  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-  resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
+  permissions.has_direct_permission(path, CrudlifyOp::Read)
 }
 
 fn not_found(path: &str) -> Response {

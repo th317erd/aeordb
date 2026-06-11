@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_store::IndexManager;
+use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::query_engine::{
   FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryResult, ExplainMode, QueryStrategy, DEFAULT_QUERY_LIMIT,
 };
@@ -59,14 +60,15 @@ pub fn global_search(
   engine: &StorageEngine,
   base_path: &str,
   query: Option<&str>,
-  where_clause: Option<&FieldQuery>,
+  where_clause: Option<&QueryNode>,
   limit: Option<usize>,
   offset: Option<usize>,
 ) -> EngineResult<SearchResults> {
   let index_manager = IndexManager::new(engine);
 
-  // Discover all directories that have indexes.
-  let indexed_dirs = index_manager.discover_indexed_directories(base_path)?;
+  // Discover all directories that have indexes. Include indexed ancestors so a
+  // root glob index can satisfy a search scoped to `/some/subtree`.
+  let indexed_dirs = discover_indexed_directories_for_base(&index_manager, base_path)?;
 
   if indexed_dirs.is_empty() {
     return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
@@ -78,13 +80,16 @@ pub fn global_search(
   if let Some(query_str) = query {
     // Broad search: search fuzzy-capable indexes in every directory.
     broad_search(engine, &index_manager, &indexed_dirs, query_str, &mut all_results)?;
-  } else if let Some(field_query) = where_clause {
+  } else if let Some(query_node) = where_clause {
     // Structured search: delegate to QueryEngine per directory.
-    structured_search(engine, &index_manager, &indexed_dirs, field_query, &mut all_results)?;
+    structured_search(engine, &indexed_dirs, query_node, &mut all_results)?;
   } else {
     // Neither query nor where_clause provided -- nothing to search.
     return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
   }
+
+  let normalized_base_path = normalize_path(base_path);
+  all_results.retain(|result| path_is_under_base(&result.path, &normalized_base_path));
 
   // Deduplicate by path, keeping the highest score for each.
   deduplicate_by_path(&mut all_results);
@@ -106,6 +111,39 @@ pub fn global_search(
   let results: Vec<SearchResult> = page.into_iter().take(effective_limit).collect();
 
   Ok(SearchResults { results, has_more, total_count: Some(total_count) })
+}
+
+fn discover_indexed_directories_for_base(index_manager: &IndexManager, base_path: &str) -> EngineResult<Vec<String>> {
+  let mut dirs: BTreeSet<String> = index_manager.discover_indexed_directories(base_path)?.into_iter().collect();
+  let normalized = normalize_path(base_path);
+  let mut current = Some(normalized);
+
+  while let Some(dir) = current {
+    if !index_manager.list_indexes(&dir)?.is_empty() {
+      dirs.insert(dir.clone());
+    }
+    if dir == "/" {
+      break;
+    }
+    current = parent_path(&dir);
+  }
+
+  Ok(dirs.into_iter().collect())
+}
+
+fn path_is_under_base(path: &str, base_path: &str) -> bool {
+  if base_path == "/" {
+    return true;
+  }
+
+  let normalized_path = normalize_path(path);
+  let normalized_base = normalize_path(base_path);
+  if normalized_path == normalized_base {
+    return true;
+  }
+
+  let prefix = format!("{}/", normalized_base.trim_end_matches('/'));
+  normalized_path.starts_with(&prefix)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +206,7 @@ fn broad_search(
       match query_engine.execute(&q) {
         Ok(qr_results) => {
           for qr in qr_results {
-            out.push(query_result_to_search_result(qr, dir, field_name));
+            out.push(query_result_to_search_result(qr, dir, std::slice::from_ref(field_name)));
           }
         }
         Err(EngineError::NotFound(_)) => {
@@ -187,29 +225,21 @@ fn broad_search(
 // Structured search
 // ---------------------------------------------------------------------------
 
-/// Run a structured `FieldQuery` in every directory that has the requested
-/// field indexed.
+/// Run a structured `QueryNode` in every discovered indexed directory.
 fn structured_search(
   engine: &StorageEngine,
-  index_manager: &IndexManager,
   indexed_dirs: &[String],
-  field_query: &FieldQuery,
+  query_node: &QueryNode,
   out: &mut Vec<SearchResult>,
 ) -> EngineResult<()> {
   let query_engine = QueryEngine::new(engine);
+  let matched_fields = query_node_field_names(query_node);
 
   for dir in indexed_dirs {
-    // Only search directories that actually index the requested field.
-    let indexes = index_manager.list_indexes(dir)?;
-    let has_field = indexes.iter().any(|name| name == &field_query.field_name || name.starts_with(&format!("{}.", field_query.field_name)));
-    if !has_field {
-      continue;
-    }
-
     let q = Query {
       path: dir.clone(),
       field_queries: vec![],
-      node: Some(QueryNode::Field(field_query.clone())),
+      node: Some(query_node.clone()),
       // Same caveat as in broad_search: `None` would mean 20-result cap.
       limit: Some(usize::MAX),
       offset: None,
@@ -225,7 +255,7 @@ fn structured_search(
     match query_engine.execute(&q) {
       Ok(qr_results) => {
         for qr in qr_results {
-          out.push(query_result_to_search_result(qr, dir, &field_query.field_name));
+          out.push(query_result_to_search_result(qr, dir, &matched_fields));
         }
       }
       Err(EngineError::NotFound(_)) => continue,
@@ -234,6 +264,33 @@ fn structured_search(
   }
 
   Ok(())
+}
+
+fn query_node_field_names(node: &QueryNode) -> Vec<String> {
+  let mut fields = BTreeSet::new();
+  collect_query_node_field_names(node, &mut fields);
+  fields.into_iter().collect()
+}
+
+fn collect_query_node_field_names(node: &QueryNode, out: &mut BTreeSet<String>) {
+  match node {
+    QueryNode::Field(field_query) => {
+      out.insert(canonical_result_field_name(&field_query.field_name).to_string());
+    }
+    QueryNode::And(children) | QueryNode::Or(children) => {
+      for child in children {
+        collect_query_node_field_names(child, out);
+      }
+    }
+    QueryNode::Not(child) => collect_query_node_field_names(child, out),
+  }
+}
+
+fn canonical_result_field_name(field_name: &str) -> &str {
+  match field_name {
+    "@file_name" => "@filename",
+    other => other,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,10 +320,14 @@ fn discover_fuzzy_fields(index_names: &[String]) -> Vec<String> {
 }
 
 /// Convert a `QueryResult` from the query engine into a `SearchResult`.
-fn query_result_to_search_result(qr: QueryResult, source_dir: &str, matched_field: &str) -> SearchResult {
+fn query_result_to_search_result(qr: QueryResult, source_dir: &str, fallback_matched_by: &[String]) -> SearchResult {
   let mut matched_by = qr.matched_by;
   if matched_by.is_empty() {
-    matched_by.push(matched_field.to_string());
+    if fallback_matched_by.is_empty() {
+      matched_by.push("structured".to_string());
+    } else {
+      matched_by.extend_from_slice(fallback_matched_by);
+    }
   }
 
   SearchResult {

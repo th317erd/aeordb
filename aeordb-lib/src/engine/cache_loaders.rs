@@ -6,6 +6,7 @@ use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
 use crate::engine::index_config::PathIndexConfig;
+use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::permissions::PathPermissions;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_store;
@@ -87,8 +88,7 @@ impl CacheLoader for IndexConfigLoader {
 
   fn load(&self, path: &String, engine: &StorageEngine) -> EngineResult<Option<PathIndexConfig>> {
     let ops = DirectoryOps::new(engine);
-    let config_path =
-      if path.ends_with('/') { format!("{}.aeordb-config/indexes.json", path) } else { format!("{}/.aeordb-config/indexes.json", path) };
+    let config_path = IndexConfigResolver::config_path_for_directory(path);
 
     match ops.read_file_buffered(&config_path) {
       Ok(data) => PathIndexConfig::deserialize(&data).map(Some),

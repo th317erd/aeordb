@@ -2,6 +2,7 @@ use aeordb::engine::{
   FileRecord, DeletionRecord, ChildEntry, serialize_child_entries, deserialize_child_entries, normalize_path, parent_path, file_name,
   path_segments,
 };
+use aeordb::engine::file_record::CURRENT_FILE_RECORD_VERSION;
 
 // ─── FileRecord tests ───────────────────────────────────────────────────────
 
@@ -16,11 +17,12 @@ fn test_file_record_serialize_deserialize_roundtrip() {
     created_at: 1700000000000,
     updated_at: 1700000001000,
     metadata: Vec::new(),
+    content_hash: vec![0x11; hash_length],
     chunk_hashes: vec![chunk_hash],
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(record, deserialized);
 }
@@ -37,11 +39,12 @@ fn test_file_record_with_chunks() {
     created_at: 1700000000000,
     updated_at: 1700000000000,
     metadata: Vec::new(),
+    content_hash: vec![0x22; hash_length],
     chunk_hashes: chunks.clone(),
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 5);
   assert_eq!(deserialized.chunk_hashes, chunks);
@@ -57,11 +60,12 @@ fn test_file_record_without_content_type() {
     created_at: 1700000000000,
     updated_at: 1700000000000,
     metadata: Vec::new(),
+    content_hash: vec![0x33; hash_length],
     chunk_hashes: vec![vec![0xFF; hash_length]],
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(deserialized.content_type, None);
   assert_eq!(deserialized.path, "/data/blob");
@@ -78,11 +82,12 @@ fn test_file_record_with_metadata() {
     created_at: 1700000000000,
     updated_at: 1700000002000,
     metadata: metadata.clone(),
+    content_hash: vec![0x44; hash_length],
     chunk_hashes: vec![vec![0x01; hash_length]],
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(deserialized.metadata, metadata);
 }
@@ -97,11 +102,12 @@ fn test_file_record_empty_chunks() {
     created_at: 1700000000000,
     updated_at: 1700000000000,
     metadata: Vec::new(),
+    content_hash: vec![0x55; hash_length],
     chunk_hashes: Vec::new(),
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert!(deserialized.chunk_hashes.is_empty());
   assert_eq!(deserialized.total_size, 0);
@@ -126,11 +132,12 @@ fn test_file_record_many_chunks() {
     created_at: 1700000000000,
     updated_at: 1700000000000,
     metadata: Vec::new(),
+    content_hash: vec![0x66; hash_length],
     chunk_hashes: chunks.clone(),
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(deserialized.chunk_hashes.len(), 150);
   assert_eq!(deserialized.chunk_hashes, chunks);
@@ -156,11 +163,12 @@ fn test_file_record_with_64_byte_hash() {
     created_at: 1700000000000,
     updated_at: 1700000000000,
     metadata: Vec::new(),
+    content_hash: vec![0x77; hash_length],
     chunk_hashes: vec![chunk_hash.clone()],
   };
 
   let serialized = record.serialize(hash_length).unwrap();
-  let deserialized = FileRecord::deserialize(&serialized, hash_length, 0).unwrap();
+  let deserialized = FileRecord::deserialize(&serialized, hash_length, CURRENT_FILE_RECORD_VERSION).unwrap();
 
   assert_eq!(deserialized.chunk_hashes[0].len(), 64);
   assert_eq!(deserialized.chunk_hashes[0], chunk_hash);

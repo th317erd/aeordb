@@ -253,12 +253,14 @@ pub async fn run(config: StartConfig<'_>) {
           "glob": "**/*",
           "indexes": [
             // Virtual metadata (always present)
-            {"name": "@filename", "type": ["string", "trigram", "phonetic", "dmetaphone"]},
-            {"name": "@hash", "type": "trigram"},
+            {"name": "@path", "type": ["string", "trigram"]},
+            {"name": "@filename", "type": ["string", "trigram", "soundex", "dmetaphone", "dmetaphone_alt"]},
+            {"name": "@extension", "type": "string"},
+            {"name": "@hash", "type": ["string", "trigram"]},
             {"name": "@created_at", "type": "timestamp"},
             {"name": "@updated_at", "type": "timestamp"},
             {"name": "@size", "type": "u64"},
-            {"name": "@content_type", "type": "string"},
+            {"name": "@content_type", "type": ["string", "trigram"]},
 
             // Extracted content from native parsers (text, html, pdf, msoffice,
             // odf, image, audio, video). Parsers that have no body text emit

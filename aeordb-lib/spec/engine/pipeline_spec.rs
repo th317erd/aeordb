@@ -1,7 +1,10 @@
-use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::batch_commit::BufferedFile;
+use aeordb::engine::directory_ops::{DirectoryOps, DEFAULT_CHUNK_SIZE};
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::index_config_resolver::IndexConfigResolver;
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::{IndexingPipeline, glob_matches};
+use aeordb::engine::query_engine::QueryBuilder;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -233,6 +236,142 @@ fn test_pipeline_indexes_json_file() {
   let index = index_manager.load_index("/people", "age").unwrap();
   assert!(index.is_some(), "Expected age index to be created");
   assert_eq!(index.unwrap().len(), 1);
+}
+
+#[test]
+fn test_pipeline_shared_index_buffer_visible_before_disk_flush() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = make_simple_config("name", "string");
+  store_index_config(&engine, "/buffered-live", &config);
+
+  let data = br#"{"name":"Alice"}"#;
+  ops.store_file_buffered(&ctx, "/buffered-live/alice.json", &data[..], Some("application/json")).unwrap();
+  let pipeline = IndexingPipeline::new(&engine);
+  pipeline.run(&ctx, "/buffered-live/alice.json", &data[..], Some("application/json")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let index = index_manager
+    .load_index_by_strategy("/buffered-live", "name", "string")
+    .unwrap()
+    .expect("live pipeline index should be visible before disk flush");
+  assert_eq!(index.lookup_stored_values_exact(&[b"Alice".to_vec()]).len(), 1);
+
+  let results = QueryBuilder::new(&engine, "/buffered-live").field("name").eq_str("Alice").all().unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/buffered-live/alice.json");
+
+  assert!(
+    ops.read_file_buffered("/buffered-live/.aeordb-indexes/name.string.idx").is_err(),
+    "live pipeline index writes should remain buffered until the shared flush path runs"
+  );
+
+  assert_eq!(engine.flush_index_buffer().unwrap(), 1);
+  assert!(ops.read_file_buffered("/buffered-live/.aeordb-indexes/name.string.idx").is_ok());
+}
+
+#[test]
+fn test_streaming_metadata_indexes_remain_buffered_until_flush() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@hash".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+    ],
+  };
+  store_index_config(&engine, "/streamed", &config);
+
+  for index in 0..20 {
+    let path = format!("/streamed/file-{index:02}.json");
+    let data = format!("{{\"name\":\"file-{index:02}\"}}\n").into_bytes();
+    let chunk_hash = ops.store_chunk(&data).unwrap();
+    ops.finalize_file(&ctx, &path, vec![chunk_hash], data.len() as u64, Some("application/json"), &data).unwrap();
+  }
+
+  let stats = engine.index_buffer_stats();
+  assert_eq!(stats.flushes, 0, "streaming metadata indexing must not force flush before policy/shutdown");
+  assert_eq!(stats.pending_mutations, 40, "two metadata indexes should be pending for each streamed file");
+
+  let index_manager = IndexManager::new(&engine);
+  let filename_index = index_manager
+    .load_index_by_strategy("/streamed", "@filename", "string")
+    .unwrap()
+    .expect("@filename index should be visible from shared buffer before flush");
+  assert_eq!(filename_index.values.len(), 20);
+
+  let hash_index = index_manager
+    .load_index_by_strategy("/streamed", "@hash", "trigram")
+    .unwrap()
+    .expect("@hash index should be visible from shared buffer before flush");
+  assert_eq!(hash_index.values.len(), 20);
+
+  assert!(
+    ops.read_file_buffered("/streamed/.aeordb-indexes/@hash.trigram.idx").is_err(),
+    "streaming metadata index writes should remain buffered until the shared flush path runs"
+  );
+
+  assert_eq!(engine.flush_index_buffer().unwrap(), 2);
+  assert!(ops.read_file_buffered("/streamed/.aeordb-indexes/@hash.trigram.idx").is_ok());
+  assert!(ops.read_file_buffered("/streamed/.aeordb-indexes/@filename.string.idx").is_ok());
+}
+
+#[test]
+fn test_batch_metadata_indexes_remain_buffered_until_flush() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@hash".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+    ],
+  };
+  store_index_config(&engine, "/batch-buffered", &config);
+
+  let files = (0..20)
+    .map(|index| BufferedFile {
+      path: format!("/batch-buffered/file-{index:02}.json"),
+      data: format!("{{\"name\":\"file-{index:02}\"}}\n").into_bytes(),
+      content_type: Some("application/json".to_string()),
+    })
+    .collect();
+  ops.store_files_buffered_batch(&ctx, files).unwrap();
+
+  let stats = engine.index_buffer_stats();
+  assert_eq!(stats.flushes, 0, "batch metadata indexing must not force flush before policy/shutdown");
+  assert_eq!(stats.pending_mutations, 40, "two metadata indexes should be pending for each batch file");
+
+  let index_manager = IndexManager::new(&engine);
+  let filename_index = index_manager
+    .load_index_by_strategy("/batch-buffered", "@filename", "string")
+    .unwrap()
+    .expect("@filename index should be visible from shared buffer before flush");
+  assert_eq!(filename_index.values.len(), 20);
+
+  assert!(
+    ops.read_file_buffered("/batch-buffered/.aeordb-indexes/@hash.trigram.idx").is_err(),
+    "batch metadata index writes should remain buffered until the shared flush path runs"
+  );
+
+  assert_eq!(engine.flush_index_buffer().unwrap(), 2);
+  assert!(ops.read_file_buffered("/batch-buffered/.aeordb-indexes/@hash.trigram.idx").is_ok());
 }
 
 #[test]
@@ -586,6 +725,37 @@ fn test_glob_matches_star_within_segment() {
   assert!(!glob_matches("session-*.json", "session.json")); // `-` must be present
 }
 
+#[test]
+fn test_index_config_resolver_canonical_config_paths() {
+  assert_eq!(IndexConfigResolver::config_path_for_directory("/"), "/.aeordb-config/indexes.json");
+  assert_eq!(IndexConfigResolver::config_path_for_directory("/docs"), "/docs/.aeordb-config/indexes.json");
+  assert_eq!(IndexConfigResolver::config_path_for_directory("/docs/"), "/docs/.aeordb-config/indexes.json");
+  assert_eq!(IndexConfigResolver::config_path_for_directory("docs"), "/docs/.aeordb-config/indexes.json");
+}
+
+#[test]
+fn test_index_config_resolver_finds_ancestor_glob_owner() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*.json".to_string()),
+    indexes: vec![IndexFieldConfig { name: "kind".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/docs", &config);
+
+  let resolver = IndexConfigResolver::new(&engine);
+  let resolved = resolver.find_config_for_path("/docs/a/b/report.json").unwrap().expect("ancestor glob should match");
+  assert_eq!(resolved.1, "/docs");
+  assert_eq!(resolved.0.indexes[0].name, "kind");
+
+  let non_match = resolver.find_config_for_path("/docs/a/b/report.txt").unwrap();
+  assert!(non_match.is_none(), "ancestor glob should reject non-matching files");
+}
+
 // ============================================================
 // Ancestor config discovery tests
 // ============================================================
@@ -812,6 +982,82 @@ fn test_at_filename_field_gets_indexed() {
 }
 
 #[test]
+fn test_at_file_name_alias_indexes_canonical_filename_field() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig {
+      name: "@file_name".to_string(),
+      index_type: "string".to_string(),
+      source: None,
+      min: None,
+      max: None,
+    }],
+  };
+  store_index_config(&engine, "/files", &config);
+
+  ops.store_file_with_indexing(&ctx, "/files/notes.txt", b"notes", Some("text/plain")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  assert!(index_manager.load_index("/files", "@file_name").unwrap().is_none(), "@file_name must not create a separate alias index");
+
+  let mut index = index_manager.load_index("/files", "@filename").unwrap().expect("@file_name should index canonical @filename");
+  let matches = index.lookup_exact(b"notes.txt");
+  assert_eq!(matches.len(), 1, "canonical @filename exact index should contain the alias-configured value");
+}
+
+#[test]
+fn test_at_hash_indexes_whole_file_content_hash_not_first_chunk() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/files", &config);
+
+  let mut data = vec![0u8; DEFAULT_CHUNK_SIZE + 97];
+  for (index, byte) in data.iter_mut().enumerate() {
+    *byte = (index % 251) as u8;
+  }
+
+  let full_hash = blake3::hash(&data).to_hex().to_string();
+  let first_chunk_hash = {
+    let mut input = Vec::with_capacity(6 + DEFAULT_CHUNK_SIZE);
+    input.extend_from_slice(b"chunk:");
+    input.extend_from_slice(&data[..DEFAULT_CHUNK_SIZE]);
+    blake3::hash(&input).to_hex().to_string()
+  };
+  assert_ne!(full_hash, first_chunk_hash, "test must distinguish full-file hash from first chunk hash");
+
+  ops.store_file_with_indexing(&ctx, "/files/big.bin", &data, Some("application/octet-stream")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let hash_index = index_manager.load_index_by_strategy("/files", "@hash", "trigram").unwrap().expect("@hash index should exist");
+  assert!(hash_index.values.values().any(|value| value == full_hash.as_bytes()), "@hash index should store the whole-file hash");
+
+  let full_hash_results = QueryBuilder::new(&engine, "/files").field("@hash").eq(full_hash.as_bytes()).all().unwrap();
+  assert_eq!(full_hash_results.len(), 1);
+  assert_eq!(full_hash_results[0].file_record.path, "/files/big.bin");
+
+  let first_chunk_results = QueryBuilder::new(&engine, "/files").field("@hash").eq(first_chunk_hash.as_bytes()).all().unwrap();
+  assert!(first_chunk_results.is_empty(), "@hash must not expose the first chunk hash as the file hash");
+}
+
+#[test]
 fn test_at_size_field_gets_indexed() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();
@@ -872,6 +1118,37 @@ fn test_at_content_type_field_gets_indexed() {
   let index = index_manager.load_index("/typed", "@content_type").unwrap();
   assert!(index.is_some(), "Expected @content_type index to be created");
   assert_eq!(index.unwrap().len(), 1, "Expected one entry in @content_type index");
+}
+
+#[test]
+fn test_at_path_and_extension_fields_get_indexed() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![
+      IndexFieldConfig { name: "@path".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "@extension".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+    ],
+  };
+  store_index_config(&engine, "/docs", &config);
+
+  ops.store_file_with_indexing(&ctx, "/docs/report.final.pdf", b"pdf bytes", Some("application/pdf")).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let mut path_index = index_manager.load_index("/docs", "@path").unwrap().expect("@path index should be created");
+  let path_matches = path_index.lookup_exact(b"/docs/report.final.pdf");
+  assert_eq!(path_matches.len(), 1, "@path exact index should contain the full file path");
+
+  let mut extension_index = index_manager.load_index("/docs", "@extension").unwrap().expect("@extension index should be created");
+  let extension_matches = extension_index.lookup_exact(b"pdf");
+  assert_eq!(extension_matches.len(), 1, "@extension exact index should contain the file extension");
 }
 
 #[test]

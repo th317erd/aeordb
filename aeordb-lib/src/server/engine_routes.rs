@@ -8,8 +8,11 @@ use axum::{
 };
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
-
 use uuid::Uuid;
+
+use super::blocking::run_engine_blocking;
+use super::cache_invalidation::{evict_caches_for_path, evict_caches_for_paths};
+use super::route_permissions::{reject_share_key, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -17,21 +20,21 @@ use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
-use crate::engine::compression::{CompressionAlgorithm, decompress};
 use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::index_config::PathIndexConfig;
+use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::query_engine::{
-  QueryEngine, QueryMeta, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField,
-  SortDirection, DEFAULT_QUERY_LIMIT, AggregateQuery, ExplainMode,
+  parse_where_clause, Query, QueryEngine, QueryMeta, QueryNode, QueryStrategy, SortDirection, SortField, AggregateQuery, ExplainMode,
+  DEFAULT_QUERY_LIMIT,
 };
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
 /// Check if a file path is deleted and the user lacks delete permission.
 /// Deleted files are invisible/inaccessible to users without 'd' permission.
 fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) -> bool {
-  use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
   use crate::engine::directory_ops::file_path_hash;
 
   let user_id = match Uuid::parse_str(&claims.sub) {
@@ -58,38 +61,9 @@ fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) 
   }
 
   // File is deleted — check if user has 'd' permission
-  let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-  let has_delete = resolver.check_permission(&user_id, &normalized, CrudlifyOp::Delete).unwrap_or(false);
+  let has_delete = RoutePermissionChecker::for_user(state, user_id).has_permission(&normalized, CrudlifyOp::Delete);
 
   !has_delete
-}
-
-/// Evict cache entries when a system file is written, deleted, or renamed.
-fn evict_caches_for_path(state: &AppState, path: &str) {
-  let normalized = crate::engine::path_utils::normalize_path(path);
-
-  if normalized.ends_with("/.aeordb-permissions") || normalized == "/.aeordb-permissions" {
-    let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-    state.engine.permissions_cache.evict(&parent);
-    state.engine.grants_index_cache.evict_all();
-  }
-
-  if normalized.ends_with("/.aeordb-config/indexes.json") {
-    if let Some(dir) = normalized.strip_suffix("/.aeordb-config/indexes.json") {
-      let key = if dir.is_empty() { "/".to_string() } else { dir.to_string() };
-      state.engine.index_config_cache.evict(&key);
-    }
-  }
-
-  if normalized.starts_with("/.aeordb-system/api-keys/") {
-    if let Some(key_id) = crate::engine::path_utils::file_name(&normalized) {
-      state.api_key_cache.evict(&key_id.to_string());
-    }
-  }
-
-  if normalized.starts_with("/.aeordb-system/groups/") || normalized.starts_with("/.aeordb-system/users/") {
-    state.group_cache.evict_all();
-  }
 }
 
 /// Query parameters for GET /files/*path (version access + directory listing).
@@ -258,35 +232,32 @@ pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<T
   // Share keys (claims.sub starts with "share:") fall back to their own
   // key-rule enforcement upstream and don't carry user permissions; we
   // refuse them here.
-  if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot create directories").with_status(StatusCode::FORBIDDEN).into_response();
+  if let Err(response) = reject_share_key(&claims, "Share keys cannot create directories") {
+    return response;
   }
-  if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
-    if !is_root(&user_id) {
-      use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-      let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-      let allowed = resolver.check_path_permission(&user_id, &parent, CrudlifyOp::Create).unwrap_or(false);
-      if !allowed {
-        return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
-      }
+  let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
+    Ok(permissions) => permissions,
+    Err(response) => return response,
+  };
+  if !permissions.is_root() {
+    let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
+    if !permissions.has_path_permission(&parent, CrudlifyOp::Create) {
+      return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
     }
-  } else {
-    return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
   let engine = state.engine.clone();
   let normalized_for_blocking = normalized.clone();
-  let result = tokio::task::spawn_blocking(move || {
+  let result = run_engine_blocking("create_directory", "Failed to create directory", move || {
     let ops = DirectoryOps::new(&engine);
     ops.create_directory(&ctx, &normalized_for_blocking)
   })
   .await;
 
   match result {
-    Ok(Ok(())) => (
+    Ok(()) => (
       StatusCode::CREATED,
       Json(serde_json::json!({
         "path": normalized,
@@ -295,14 +266,7 @@ pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<T
       })),
     )
       .into_response(),
-    Ok(Err(error)) => {
-      tracing::error!("Failed to create directory '{}': {}", normalized, error);
-      engine_error_response("Failed to create directory", &error)
-    }
-    Err(join_error) => {
-      tracing::error!("create_directory task panicked: {}", join_error);
-      ErrorResponse::new("Failed to create directory: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
-    }
+    Err(response) => response,
   }
 }
 
@@ -396,23 +360,14 @@ pub async fn engine_store_file(
   let ctx_for_blocking = ctx.clone();
   let first_bytes_owned = first_bytes;
   let chunk_hashes_owned = chunk_hashes;
-  let file_record = match tokio::task::spawn_blocking(move || {
+  let file_record = match run_engine_blocking("finalize_file", "Failed to store file", move || {
     let ops = DirectoryOps::new(&engine_for_blocking);
     ops.finalize_file(&ctx_for_blocking, &path_for_blocking, chunk_hashes_owned, total_size, content_type.as_deref(), &first_bytes_owned)
   })
   .await
   {
-    Ok(Ok(record)) => record,
-    Ok(Err(error)) => {
-      tracing::error!("Engine: failed to store file at '{}': {}", path, error);
-      return engine_error_response("Failed to store file", &error);
-    }
-    Err(join_error) => {
-      tracing::error!("Engine: finalize_file task panicked: {}", join_error);
-      return ErrorResponse::new("Failed to store file: internal task error")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
+    Ok(record) => record,
+    Err(response) => return response,
   };
 
   // Auto-trigger reindex when indexes.json is stored
@@ -434,8 +389,15 @@ pub async fn engine_store_file(
         }
       }
 
+      let metadata_only = DirectoryOps::new(&state.engine)
+        .read_file_buffered(&path)
+        .ok()
+        .and_then(|data| PathIndexConfig::deserialize(&data).ok())
+        .map(|config| config.indexes.iter().all(|field| field.name.starts_with('@')))
+        .unwrap_or(false);
+
       // Enqueue new reindex
-      let _ = queue.enqueue("reindex", serde_json::json!({"path": reindex_path}));
+      let _ = queue.enqueue("reindex", serde_json::json!({"path": reindex_path, "metadata_only": metadata_only}));
     }
   }
 
@@ -1217,22 +1179,15 @@ pub async fn restore_deleted_file(
   // User/group permission check: /files/restore is exempt from path-aware
   // middleware. Restoring a file is an inverse Delete operation — require
   // the 'd' (Delete) permission on the path, matching list_deleted_files.
-  if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot restore deleted files").with_status(StatusCode::FORBIDDEN).into_response();
-  }
-  let user_id = match Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
-    }
+  if let Err(response) = reject_share_key(&claims, "Share keys cannot restore deleted files") {
+    return response;
   };
-  if !is_root(&user_id) {
-    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-    let allowed = resolver.check_path_permission(&user_id, &path, CrudlifyOp::Delete).unwrap_or(false);
-    if !allowed {
-      return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
+  let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
+    Ok(permissions) => permissions,
+    Err(response) => return response,
+  };
+  if !permissions.is_root() && !permissions.has_path_permission(&path, CrudlifyOp::Delete) {
+    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
   let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -1265,28 +1220,19 @@ pub async fn list_deleted_files(
   }
 
   // Deleted files require 'd' permission — check on the directory
-  {
-    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-    let user_id = match Uuid::parse_str(&claims.sub) {
-      Ok(id) => id,
-      Err(_) => {
-        return ErrorResponse::new("Invalid user ID").with_status(StatusCode::FORBIDDEN).into_response();
-      }
-    };
-    if !is_root(&user_id) {
-      let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-      let has_delete = resolver.check_permission(&user_id, dir_path, CrudlifyOp::Delete).unwrap_or(false);
-      if !has_delete {
-        return (
-          StatusCode::OK,
-          Json(serde_json::json!({
-            "items": [],
-            "total": 0,
-          })),
-        )
-          .into_response();
-      }
-    }
+  let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user ID") {
+    Ok(permissions) => permissions,
+    Err(response) => return response,
+  };
+  if !permissions.is_root() && !permissions.has_permission(dir_path, CrudlifyOp::Delete) {
+    return (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "items": [],
+        "total": 0,
+      })),
+    )
+      .into_response();
   }
 
   let ops = DirectoryOps::new(&state.engine);
@@ -1519,14 +1465,17 @@ pub async fn engine_get_by_hash(
     }
 
     EntryType::Chunk => {
-      // Decompress if needed and return raw chunk bytes.
-      let data = if header.compression_algo != CompressionAlgorithm::None {
-        match decompress(&value, header.compression_algo) {
-          Ok(decompressed) => decompressed,
-          Err(_) => value,
+      let data = match state.engine.read_chunk(&hash_bytes) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+          return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
         }
-      } else {
-        value
+        Err(error) => {
+          tracing::error!("Engine: failed to read chunk by hash '{}': {}", hex_hash, error);
+          return ErrorResponse::new(format!("Failed to retrieve entry: {}", error))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+        }
       };
       state.engine.counters().record_read(data.len() as u64);
 
@@ -1615,156 +1564,6 @@ pub struct WhereClause {
   pub op: String,
   pub value: serde_json::Value,
   pub value2: Option<serde_json::Value>,
-}
-
-/// Convert a JSON value to the byte representation used by converters.
-/// Numbers -> u64 big-endian bytes.
-/// Strings -> UTF-8 bytes.
-/// Booleans -> single byte 0 or 1.
-fn json_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
-  match value {
-    serde_json::Value::Number(number) => {
-      if let Some(unsigned) = number.as_u64() {
-        Ok(unsigned.to_be_bytes().to_vec())
-      } else if let Some(signed) = number.as_i64() {
-        Ok((signed as u64).to_be_bytes().to_vec())
-      } else if let Some(float) = number.as_f64() {
-        Ok((float as u64).to_be_bytes().to_vec())
-      } else {
-        Err("Unsupported number format".to_string())
-      }
-    }
-    serde_json::Value::String(text) => Ok(text.as_bytes().to_vec()),
-    serde_json::Value::Bool(flag) => Ok(vec![if *flag { 1 } else { 0 }]),
-    other => Err(format!("Unsupported value type: {}", other)),
-  }
-}
-
-/// Parse a single field-level where clause JSON object into a QueryNode::Field.
-fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, String> {
-  let field = value.get("field").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'field' in where clause".to_string())?;
-  let op = value.get("op").and_then(|v| v.as_str()).ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
-  let raw_value = value.get("value").ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
-
-  let operation = match op {
-    "eq" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
-      QueryOp::Eq(bytes)
-    }
-    "gt" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
-      QueryOp::Gt(bytes)
-    }
-    "lt" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
-      QueryOp::Lt(bytes)
-    }
-    "between" => {
-      let bytes = json_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
-      let raw_value2 = value.get("value2").ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
-      let bytes2 = json_value_to_bytes(raw_value2).map_err(|message| format!("Invalid value2 for field '{}': {}", field, message))?;
-      QueryOp::Between(bytes, bytes2)
-    }
-    "in" => {
-      let array = raw_value.as_array().ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
-      let mut byte_values = Vec::with_capacity(array.len());
-      for item in array {
-        let bytes =
-          json_value_to_bytes(item).map_err(|message| format!("Invalid value in 'in' array for field '{}': {}", field, message))?;
-        byte_values.push(bytes);
-      }
-      QueryOp::In(byte_values)
-    }
-    "contains" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
-      QueryOp::Contains(s.to_string())
-    }
-    "similar" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
-      let threshold = value.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
-      QueryOp::Similar(s.to_string(), threshold)
-    }
-    "phonetic" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
-      QueryOp::Phonetic(s.to_string())
-    }
-    "fuzzy" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
-
-      let fuzziness = match value.get("fuzziness") {
-        Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
-        Some(v) if v.is_u64() => Fuzziness::Fixed(v.as_u64().unwrap() as usize),
-        Some(v) if v.is_i64() => Fuzziness::Fixed(v.as_i64().unwrap().max(0) as usize),
-        _ => Fuzziness::Auto,
-      };
-
-      let algorithm = match value.get("algorithm").and_then(|v| v.as_str()) {
-        Some("jaro_winkler") => FuzzyAlgorithm::JaroWinkler,
-        _ => FuzzyAlgorithm::DamerauLevenshtein,
-      };
-
-      QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
-    }
-    "match" => {
-      let s = raw_value.as_str().ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
-      QueryOp::Match(s.to_string())
-    }
-    unknown => {
-      return Err(format!("Unknown operation: '{}'", unknown));
-    }
-  };
-
-  Ok(QueryNode::Field(FieldQuery { field_name: field.to_string(), operation }))
-}
-
-/// Recursively parse a where clause JSON value into a QueryNode tree.
-/// Supports:
-///   - Array: legacy format, sugar for AND of field clauses
-///   - Object with "and": AND of child clauses
-///   - Object with "or": OR of child clauses
-///   - Object with "not": NOT of a single child clause
-///   - Object with "field": leaf field query
-/// Maximum allowed nesting depth for where-clause parsing.
-/// Prevents stack overflow from adversarial deeply-nested queries.
-const MAX_WHERE_CLAUSE_DEPTH: usize = 32;
-
-fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
-  parse_where_clause_inner(value, 0)
-}
-
-fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<QueryNode, String> {
-  if depth > MAX_WHERE_CLAUSE_DEPTH {
-    return Err(format!("Query nesting too deep (max {} levels). Simplify the where clause", MAX_WHERE_CLAUSE_DEPTH,));
-  }
-
-  if value.is_array() {
-    let array = value.as_array().unwrap();
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
-    return Ok(QueryNode::And(children?));
-  }
-
-  if let Some(and_array) = value.get("and") {
-    let array = and_array.as_array().ok_or_else(|| "'and' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
-    return Ok(QueryNode::And(children?));
-  }
-
-  if let Some(or_array) = value.get("or") {
-    let array = or_array.as_array().ok_or_else(|| "'or' must be an array".to_string())?;
-    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
-    return Ok(QueryNode::Or(children?));
-  }
-
-  if let Some(not_value) = value.get("not") {
-    let child = parse_where_clause_inner(not_value, depth + 1)?;
-    return Ok(QueryNode::Not(Box::new(child)));
-  }
-
-  if value.get("field").is_some() {
-    return parse_single_field_query(value);
-  }
-
-  Err(format!("Invalid where clause structure: {}", value))
 }
 
 // ---------------------------------------------------------------------------
@@ -2299,7 +2098,7 @@ async fn do_rename(
   let path_for_blocking = path.clone();
   let destination_owned = destination.to_string();
 
-  let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
+  let result = run_engine_blocking("rename", "Rename failed", move || -> EngineResult<&'static str> {
     let ops = DirectoryOps::new(&engine);
     if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
       ops.rename_symlink(&ctx, &path_for_blocking, &destination_owned)?;
@@ -2312,9 +2111,8 @@ async fn do_rename(
   .await;
 
   match result {
-    Ok(Ok(kind)) => {
-      evict_caches_for_path(&state, &path);
-      evict_caches_for_path(&state, destination);
+    Ok(kind) => {
+      evict_caches_for_paths(&state, [path.as_str(), destination]);
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
       let to_normalized = crate::engine::path_utils::normalize_path(destination);
       (
@@ -2327,14 +2125,7 @@ async fn do_rename(
       )
         .into_response()
     }
-    Ok(Err(error)) => {
-      tracing::error!("Engine: failed to rename '{}': {}", path, error);
-      engine_error_response("Rename failed", &error)
-    }
-    Err(join_error) => {
-      tracing::error!("rename task panicked: {}", join_error);
-      ErrorResponse::new("Rename failed: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
-    }
+    Err(response) => response,
   }
 }
 
@@ -2398,30 +2189,23 @@ pub async fn copy_files(
   // middleware, so without this every authenticated user could copy any
   // file to any location. Required: Read on each source AND Create on
   // the destination directory.
-  if claims.sub.starts_with("share:") {
-    return ErrorResponse::new("Share keys cannot copy files").with_status(StatusCode::FORBIDDEN).into_response();
-  }
-  let user_id = match Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => {
-      return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
-    }
+  if let Err(response) = reject_share_key(&claims, "Share keys cannot copy files") {
+    return response;
   };
-  if !is_root(&user_id) {
-    use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-    let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
+  let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
+    Ok(permissions) => permissions,
+    Err(response) => return response,
+  };
+  if !permissions.is_root() {
     // Source check first so a 404 on an unauthorized source isn't masked
     // by a 403 on an unauthorized destination.
     for raw_path in &payload.paths {
       let normalized = crate::engine::path_utils::normalize_path(raw_path);
-      let read_allowed = resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::Read).unwrap_or(false)
-        || resolver.check_path_permission(&user_id, &normalized, CrudlifyOp::List).unwrap_or(false);
-      if !read_allowed {
+      if !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
         return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }
-    let create_allowed = resolver.check_path_permission(&user_id, &dest_normalized, CrudlifyOp::Create).unwrap_or(false);
-    if !create_allowed {
+    if !permissions.has_path_permission(&dest_normalized, CrudlifyOp::Create) {
       return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
     }
   }
@@ -2488,18 +2272,10 @@ pub async fn global_search_endpoint(
     return ErrorResponse::new("At least one of 'query' or 'where' is required").with_status(StatusCode::BAD_REQUEST).into_response();
   }
 
-  // Parse the where clause into a FieldQuery, if provided.
-  let field_query = match payload.where_clause.as_ref() {
-    Some(value) => match parse_single_field_query(value) {
-      Ok(QueryNode::Field(fq)) => Some(fq),
-      Ok(_) => {
-        return ErrorResponse::new("'where' must be a single field query (field, op, value)")
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-      Err(msg) => {
-        return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
-      }
+  let query_node = match payload.where_clause.as_ref() {
+    Some(value) => match parse_where_clause(value) {
+      Ok(node) => Some(node),
+      Err(msg) => return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response(),
     },
     None => None,
   };
@@ -2508,7 +2284,7 @@ pub async fn global_search_endpoint(
   let limit = payload.limit.map(|l| l.min(1000));
   let offset = payload.offset;
 
-  match crate::engine::search::global_search(&state.engine, base_path, payload.query.as_deref(), field_query.as_ref(), limit, offset) {
+  match crate::engine::search::global_search(&state.engine, base_path, payload.query.as_deref(), query_node.as_ref(), limit, offset) {
     Ok(results) => {
       let mut items: Vec<serde_json::Value> = results
         .results

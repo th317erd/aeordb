@@ -11,6 +11,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::index_store::{FieldIndex, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::nvt_ops::NVTMask;
+use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::scalar_converter::{
   ScalarConverter, TrigramConverter, CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64, CONVERTER_TYPE_I64,
   CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
@@ -210,6 +211,149 @@ pub enum QueryNode {
   Or(Vec<QueryNode>),
   /// Invert child (complement).
   Not(Box<QueryNode>),
+}
+
+/// Maximum allowed nesting depth for JSON where-clause parsing.
+pub const MAX_WHERE_CLAUSE_DEPTH: usize = 32;
+
+/// Convert a query JSON value to the byte representation used by converters.
+///
+/// Numbers become big-endian u64 bytes, strings become UTF-8 bytes, and
+/// booleans become a single byte. This is intentionally stricter than
+/// `json_parser::json_value_to_bytes`, because query literals should fail fast
+/// when the caller supplies unsupported types.
+pub fn json_query_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+  match value {
+    serde_json::Value::Number(number) => {
+      if let Some(unsigned) = number.as_u64() {
+        Ok(unsigned.to_be_bytes().to_vec())
+      } else if let Some(signed) = number.as_i64() {
+        Ok((signed as u64).to_be_bytes().to_vec())
+      } else if let Some(float) = number.as_f64() {
+        Ok((float as u64).to_be_bytes().to_vec())
+      } else {
+        Err("Unsupported number format".to_string())
+      }
+    }
+    serde_json::Value::String(text) => Ok(text.as_bytes().to_vec()),
+    serde_json::Value::Bool(flag) => Ok(vec![if *flag { 1 } else { 0 }]),
+    other => Err(format!("Unsupported value type: {}", other)),
+  }
+}
+
+/// Parse a single field-level where clause JSON object into a `QueryNode::Field`.
+pub fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, String> {
+  let field = value.get("field").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'field' in where clause".to_string())?;
+  let op = value.get("op").and_then(|v| v.as_str()).ok_or_else(|| format!("Missing 'op' in where clause for field '{}'", field))?;
+  let raw_value = value.get("value").ok_or_else(|| format!("Missing 'value' in where clause for field '{}'", field))?;
+
+  let operation = match op {
+    "eq" => {
+      let bytes = json_query_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Eq(bytes)
+    }
+    "gt" => {
+      let bytes = json_query_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Gt(bytes)
+    }
+    "lt" => {
+      let bytes = json_query_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      QueryOp::Lt(bytes)
+    }
+    "between" => {
+      let bytes = json_query_value_to_bytes(raw_value).map_err(|message| format!("Invalid value for field '{}': {}", field, message))?;
+      let raw_value2 = value.get("value2").ok_or_else(|| format!("Missing value2 for 'between' operation on field '{}'", field))?;
+      let bytes2 = json_query_value_to_bytes(raw_value2).map_err(|message| format!("Invalid value2 for field '{}': {}", field, message))?;
+      QueryOp::Between(bytes, bytes2)
+    }
+    "in" => {
+      let array = raw_value.as_array().ok_or_else(|| format!("'in' operation requires array value for field '{}'", field))?;
+      let mut byte_values = Vec::with_capacity(array.len());
+      for item in array {
+        let bytes =
+          json_query_value_to_bytes(item).map_err(|message| format!("Invalid value in 'in' array for field '{}': {}", field, message))?;
+        byte_values.push(bytes);
+      }
+      QueryOp::In(byte_values)
+    }
+    "contains" => {
+      let s = raw_value.as_str().ok_or_else(|| format!("'contains' requires string value for field '{}'", field))?;
+      QueryOp::Contains(s.to_string())
+    }
+    "similar" => {
+      let s = raw_value.as_str().ok_or_else(|| format!("'similar' requires string value for field '{}'", field))?;
+      let threshold = value.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
+      QueryOp::Similar(s.to_string(), threshold)
+    }
+    "phonetic" => {
+      let s = raw_value.as_str().ok_or_else(|| format!("'phonetic' requires string value for field '{}'", field))?;
+      QueryOp::Phonetic(s.to_string())
+    }
+    "fuzzy" => {
+      let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
+
+      let fuzziness = match value.get("fuzziness") {
+        Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
+        Some(v) if v.is_u64() => Fuzziness::Fixed(v.as_u64().unwrap() as usize),
+        Some(v) if v.is_i64() => Fuzziness::Fixed(v.as_i64().unwrap().max(0) as usize),
+        _ => Fuzziness::Auto,
+      };
+
+      let algorithm = match value.get("algorithm").and_then(|v| v.as_str()) {
+        Some("jaro_winkler") => FuzzyAlgorithm::JaroWinkler,
+        _ => FuzzyAlgorithm::DamerauLevenshtein,
+      };
+
+      QueryOp::Fuzzy(s.to_string(), FuzzyOptions { fuzziness, algorithm })
+    }
+    "match" => {
+      let s = raw_value.as_str().ok_or_else(|| format!("'match' requires string value for field '{}'", field))?;
+      QueryOp::Match(s.to_string())
+    }
+    unknown => return Err(format!("Unknown operation: '{}'", unknown)),
+  };
+
+  Ok(QueryNode::Field(FieldQuery { field_name: field.to_string(), operation }))
+}
+
+/// Parse a JSON where clause into a boolean query tree.
+pub fn parse_where_clause(value: &serde_json::Value) -> Result<QueryNode, String> {
+  parse_where_clause_inner(value, 0)
+}
+
+fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<QueryNode, String> {
+  if depth > MAX_WHERE_CLAUSE_DEPTH {
+    return Err(format!("Query nesting too deep (max {} levels). Simplify the where clause", MAX_WHERE_CLAUSE_DEPTH));
+  }
+
+  if value.is_array() {
+    let array = value.as_array().unwrap();
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
+    return Ok(QueryNode::And(children?));
+  }
+
+  if let Some(and_array) = value.get("and") {
+    let array = and_array.as_array().ok_or_else(|| "'and' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
+    return Ok(QueryNode::And(children?));
+  }
+
+  if let Some(or_array) = value.get("or") {
+    let array = or_array.as_array().ok_or_else(|| "'or' must be an array".to_string())?;
+    let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
+    return Ok(QueryNode::Or(children?));
+  }
+
+  if let Some(not_value) = value.get("not") {
+    let child = parse_where_clause_inner(not_value, depth + 1)?;
+    return Ok(QueryNode::Not(Box::new(child)));
+  }
+
+  if value.get("field").is_some() {
+    return parse_single_field_query(value);
+  }
+
+  Err(format!("Invalid where clause structure: {}", value))
 }
 
 /// Query execution strategy for NVTMask operations.
@@ -480,10 +624,7 @@ fn encode_cursor(result: &QueryResult, order_by: &[SortField], version_hash: &[u
         "@size" => serde_json::json!(result.file_record.total_size),
         "@created_at" => serde_json::json!(result.file_record.created_at),
         "@updated_at" => serde_json::json!(result.file_record.updated_at),
-        "@hash" => {
-          let h = if result.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&result.file_record.chunk_hashes[0]) };
-          serde_json::json!(h)
-        }
+        "@hash" => serde_json::json!(result.file_record.content_hash_hex()),
         _ => serde_json::Value::Null,
       };
       cursor.insert(sf.field.clone(), value);
@@ -726,7 +867,19 @@ impl<'a> QueryEngine<'a> {
           QueryOp::Match(_) => "match",
         };
 
-        let indexes = index_manager.load_indexes_for_field(path, &fq.field_name).unwrap_or_default();
+        let index_field_name = canonical_virtual_field_name(&fq.field_name).unwrap_or(fq.field_name.as_str());
+        let mut index_source = path.to_string();
+        let mut indexes = index_manager.load_indexes_for_field(path, index_field_name).unwrap_or_default();
+        if indexes.is_empty() && canonical_virtual_field_name(&fq.field_name).is_some() {
+          for ancestor in virtual_index_ancestor_paths(path) {
+            let ancestor_indexes = index_manager.load_indexes_for_field(&ancestor, index_field_name).unwrap_or_default();
+            if !ancestor_indexes.is_empty() {
+              index_source = ancestor;
+              indexes = ancestor_indexes;
+              break;
+            }
+          }
+        }
         let index_info: Vec<serde_json::Value> = indexes
           .iter()
           .map(|idx| {
@@ -748,6 +901,8 @@ impl<'a> QueryEngine<'a> {
         Ok(serde_json::json!({
           "type": "field",
           "field": fq.field_name,
+          "index_field": index_field_name,
+          "index_source": index_source,
           "operation": op_name,
           "indexes": index_info,
           "recheck": needs_recheck,
@@ -788,12 +943,13 @@ impl<'a> QueryEngine<'a> {
       }
     };
 
-    // Check for fuzzy operations — these need the recheck path.
-    if self.node_has_fuzzy_ops(&effective_node) {
+    let index_manager = IndexManager::new(self.engine);
+
+    // Check for fuzzy operations that can use indexed recheck. Virtual fields
+    // without an index keep their scan fallback for backwards compatibility.
+    if self.should_use_recheck_path(&effective_node, &query.path, &index_manager) {
       return self.execute_with_recheck_internal(query, &effective_node);
     }
-
-    let index_manager = IndexManager::new(self.engine);
 
     let result_hashes = if should_use_bitmap_compositing(&effective_node) {
       self.execute_tier2(&effective_node, &query.path, &index_manager)?
@@ -862,11 +1018,7 @@ impl<'a> QueryEngine<'a> {
           match sd.field.as_str() {
             "@score" => a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal),
             "@path" => a.file_record.path.cmp(&b.file_record.path),
-            "@hash" => {
-              let ha = if a.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&a.file_record.chunk_hashes[0]) };
-              let hb = if b.file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&b.file_record.chunk_hashes[0]) };
-              ha.cmp(&hb)
-            }
+            "@hash" => a.file_record.content_hash.cmp(&b.file_record.content_hash),
             "@size" => a.file_record.total_size.cmp(&b.file_record.total_size),
             "@created_at" => a.file_record.created_at.cmp(&b.file_record.created_at),
             "@updated_at" => a.file_record.updated_at.cmp(&b.file_record.updated_at),
@@ -944,12 +1096,21 @@ impl<'a> QueryEngine<'a> {
 
   /// Evaluate a single FieldQuery leaf against the index (or virtual field scan).
   fn evaluate_field_query(&self, field_query: &FieldQuery, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
-    // Virtual fields (prefixed with '@') bypass index lookup entirely.
-    // They scan all files under the path and filter by file metadata.
-    if field_query.field_name.starts_with('@') {
-      return self.evaluate_virtual_field_query(field_query, path);
+    // Virtual fields first try their configured indexes. If no matching index
+    // exists, they fall back to scanning FileRecord metadata for compatibility.
+    if canonical_virtual_field_name(&field_query.field_name).is_some() {
+      return self.evaluate_virtual_field_query(field_query, path, index_manager);
     }
 
+    self.evaluate_indexed_field_query(field_query, path, index_manager)
+  }
+
+  fn evaluate_indexed_field_query(
+    &self,
+    field_query: &FieldQuery,
+    path: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
     match &field_query.operation {
       QueryOp::Eq(value) => {
         return self.evaluate_exact_field_values(&field_query.field_name, path, std::slice::from_ref(value), index_manager)
@@ -1031,8 +1192,13 @@ impl<'a> QueryEngine<'a> {
   fn collect_all_hashes(&self, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
     let field_names = index_manager.list_indexes(path)?;
     let mut all_hashes = HashSet::new();
-    for field_name in &field_names {
-      if let Some(index) = index_manager.load_index(path, field_name)? {
+    for index_name in &field_names {
+      let loaded = if let Some((field_name, strategy)) = index_name.rsplit_once('.') {
+        index_manager.load_index_by_strategy(path, field_name, strategy)?
+      } else {
+        index_manager.load_index(path, index_name)?
+      };
+      if let Some(index) = loaded {
         for entry in &index.entries {
           all_hashes.insert(entry.file_hash.clone());
         }
@@ -1041,24 +1207,39 @@ impl<'a> QueryEngine<'a> {
     Ok(all_hashes)
   }
 
-  /// Evaluate a virtual field query by scanning all files under the path.
+  /// Evaluate a virtual field query, using an index when one is available and
+  /// falling back to scanning all files under the path otherwise.
   ///
   /// Virtual fields (`@path`, `@filename`, `@extension`, `@content_type`,
   /// `@size`, `@created_at`, `@updated_at`, `@hash`) are derived from FileRecord
-  /// metadata and do not require indexes. This is an O(n) scan over all
-  /// files in the directory tree.
-  fn evaluate_virtual_field_query(&self, field_query: &FieldQuery, path: &str) -> EngineResult<HashSet<Vec<u8>>> {
-    let field_name = field_query.field_name.as_str();
+  /// metadata. The scan fallback is O(n) over files in the directory tree.
+  fn evaluate_virtual_field_query(
+    &self,
+    field_query: &FieldQuery,
+    path: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) else {
+      return Err(EngineError::InvalidInput(format!(
+        "Unknown virtual field '{}'. Supported: @path, @filename, @file_name, @extension, \
+         @content_type, @size, @created_at, @updated_at, @hash",
+        field_query.field_name,
+      )));
+    };
 
-    // Validate the virtual field name up front.
-    match field_name {
-      "@path" | "@filename" | "@extension" | "@content_type" | "@size" | "@created_at" | "@updated_at" | "@hash" => {}
-      unknown => {
-        return Err(EngineError::InvalidInput(format!(
-          "Unknown virtual field '{}'. Supported: @path, @filename, @extension, \
-           @content_type, @size, @created_at, @updated_at, @hash",
-          unknown,
-        )));
+    if matches!(field_query.operation, QueryOp::Eq(_) | QueryOp::In(_) | QueryOp::Gt(_) | QueryOp::Lt(_) | QueryOp::Between(_, _)) {
+      match self.evaluate_indexed_virtual_field_query(field_query, field_name, path, index_manager) {
+        Ok(result) => return Ok(result),
+        Err(EngineError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+      }
+    }
+
+    if is_recheck_operation(&field_query.operation) {
+      match self.evaluate_virtual_recheck_field_query(field_query, field_name, path, index_manager) {
+        Ok(result) => return Ok(result),
+        Err(EngineError::NotFound(_)) => {}
+        Err(error) => return Err(error),
       }
     }
 
@@ -1094,6 +1275,96 @@ impl<'a> QueryEngine<'a> {
     Ok(matching_hashes)
   }
 
+  fn evaluate_virtual_recheck_field_query(
+    &self,
+    field_query: &FieldQuery,
+    field_name: &str,
+    path: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
+    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(&indexed_query, path, index_manager)?;
+    if candidates.is_empty() && candidate_values.is_empty() {
+      return Err(EngineError::NotFound(format!("No recheck index found for virtual field '{}' at '{}'", field_name, path)));
+    }
+
+    let hash_length = self.engine.hash_algo().hash_length();
+    let mut matching_hashes = HashSet::new();
+
+    for file_hash in candidates {
+      let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
+        continue;
+      };
+      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      let field_value = candidate_values
+        .get(&file_hash)
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .or_else(|| self.virtual_field_value_string(field_name, &file_record));
+
+      let Some(field_value) = field_value else {
+        continue;
+      };
+
+      let (score, _strategy) = self.compute_score(&field_query.operation, &field_value)?;
+      if score > 0.0 {
+        matching_hashes.insert(file_hash);
+      }
+    }
+
+    Ok(matching_hashes)
+  }
+
+  fn evaluate_indexed_virtual_field_query(
+    &self,
+    field_query: &FieldQuery,
+    field_name: &str,
+    path: &str,
+    index_manager: &IndexManager,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
+
+    match self.evaluate_indexed_field_query(&indexed_query, path, index_manager) {
+      Ok(result) => return Ok(result),
+      Err(EngineError::NotFound(_)) => {}
+      Err(error) => return Err(error),
+    }
+
+    for ancestor in virtual_index_ancestor_paths(path) {
+      if !self.field_has_index(&ancestor, field_name, index_manager) {
+        continue;
+      }
+
+      match self.evaluate_indexed_field_query(&indexed_query, &ancestor, index_manager) {
+        Ok(result) => return self.filter_hashes_to_query_path(result, path),
+        Err(EngineError::NotFound(_)) => continue,
+        Err(error) => return Err(error),
+      }
+    }
+
+    Err(EngineError::NotFound(format!("Index not found for virtual field '{}' at path '{}' or its ancestors", field_name, path)))
+  }
+
+  fn filter_hashes_to_query_path(&self, hashes: HashSet<Vec<u8>>, query_path: &str) -> EngineResult<HashSet<Vec<u8>>> {
+    let normalized_query_path = normalize_path(query_path);
+    if normalized_query_path == "/" {
+      return Ok(hashes);
+    }
+
+    let hash_length = self.engine.hash_algo().hash_length();
+    let mut filtered = HashSet::new();
+    for file_hash in hashes {
+      let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
+        continue;
+      };
+      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      if path_is_under_query_path(&file_record.path, &normalized_query_path) {
+        filtered.insert(file_hash);
+      }
+    }
+
+    Ok(filtered)
+  }
+
   /// Check whether a single FileRecord matches a virtual field operation.
   fn virtual_field_matches(&self, field_name: &str, file_record: &FileRecord, operation: &QueryOp) -> EngineResult<bool> {
     match field_name {
@@ -1113,14 +1384,29 @@ impl<'a> QueryEngine<'a> {
         let content_type = file_record.content_type.as_deref().unwrap_or("");
         self.virtual_string_matches(content_type, operation)
       }
-      "@hash" => {
-        let hash_hex = if file_record.chunk_hashes.is_empty() { String::new() } else { hex::encode(&file_record.chunk_hashes[0]) };
-        self.virtual_string_matches(&hash_hex, operation)
-      }
+      "@hash" => self.virtual_string_matches(&file_record.content_hash_hex(), operation),
       "@size" => self.virtual_u64_matches(file_record.total_size, operation),
       "@created_at" => self.virtual_i64_matches(file_record.created_at, operation),
       "@updated_at" => self.virtual_i64_matches(file_record.updated_at, operation),
       _ => Ok(false),
+    }
+  }
+
+  fn virtual_field_value_string(&self, field_name: &str, file_record: &FileRecord) -> Option<String> {
+    match field_name {
+      "@path" => Some(file_record.path.clone()),
+      "@filename" => Some(file_record.path.rsplit('/').next().unwrap_or("").to_string()),
+      "@extension" => {
+        let filename = file_record.path.rsplit('/').next().unwrap_or("");
+        let extension = filename.rsplit('.').next().unwrap_or("");
+        Some(if extension == filename { "" } else { extension }.to_string())
+      }
+      "@content_type" => Some(file_record.content_type.as_deref().unwrap_or("").to_string()),
+      "@hash" => Some(file_record.content_hash_hex()),
+      "@size" => Some(file_record.total_size.to_string()),
+      "@created_at" => Some(file_record.created_at.to_string()),
+      "@updated_at" => Some(file_record.updated_at.to_string()),
+      _ => None,
     }
   }
 
@@ -1273,23 +1559,71 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  /// Check if a QueryNode tree contains any fuzzy operations.
-  /// Virtual fields (prefixed with `@`) are excluded — they handle Contains
-  /// via direct substring matching, not trigram indexes.
-  fn node_has_fuzzy_ops(&self, node: &QueryNode) -> bool {
+  fn should_use_recheck_path(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> bool {
     match node {
       QueryNode::Field(fq) => {
-        if fq.field_name.starts_with('@') {
+        if !is_recheck_operation(&fq.operation) {
           return false;
         }
-        matches!(
-          fq.operation,
-          QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
-        )
+        match canonical_virtual_field_name(&fq.field_name) {
+          Some(field_name) => self.field_has_index_at_path_or_ancestors(path, field_name, index_manager),
+          None => true,
+        }
       }
-      QueryNode::And(children) | QueryNode::Or(children) => children.iter().any(|c| self.node_has_fuzzy_ops(c)),
-      QueryNode::Not(child) => self.node_has_fuzzy_ops(child),
+      // Non-virtual fuzzy queries already require the recheck path. Virtual
+      // fuzzy filters inside complex boolean nodes keep their scan fallback so
+      // existing virtual-field boolean queries do not become single-field-only.
+      QueryNode::And(children) | QueryNode::Or(children) => children.iter().any(|child| self.node_has_non_virtual_recheck_ops(child)),
+      QueryNode::Not(child) => self.node_has_non_virtual_recheck_ops(child),
     }
+  }
+
+  fn node_has_non_virtual_recheck_ops(&self, node: &QueryNode) -> bool {
+    match node {
+      QueryNode::Field(fq) => {
+        if canonical_virtual_field_name(&fq.field_name).is_some() {
+          return false;
+        }
+        is_recheck_operation(&fq.operation)
+      }
+      QueryNode::And(children) | QueryNode::Or(children) => children.iter().any(|child| self.node_has_non_virtual_recheck_ops(child)),
+      QueryNode::Not(child) => self.node_has_non_virtual_recheck_ops(child),
+    }
+  }
+
+  fn field_has_index(&self, path: &str, field_name: &str, index_manager: &IndexManager) -> bool {
+    index_manager.load_indexes_for_field(path, field_name).map(|indexes| !indexes.is_empty()).unwrap_or(false)
+  }
+
+  fn field_has_index_at_path_or_ancestors(&self, path: &str, field_name: &str, index_manager: &IndexManager) -> bool {
+    if self.field_has_index(path, field_name, index_manager) {
+      return true;
+    }
+
+    virtual_index_ancestor_paths(path).iter().any(|ancestor| self.field_has_index(ancestor, field_name, index_manager))
+  }
+
+  fn load_index_by_strategy_for_query(
+    &self,
+    path: &str,
+    field_name: &str,
+    strategy: &str,
+    index_manager: &IndexManager,
+    include_ancestors: bool,
+  ) -> EngineResult<Option<FieldIndex>> {
+    if let Some(index) = index_manager.load_index_by_strategy(path, field_name, strategy)? {
+      return Ok(Some(index));
+    }
+
+    if include_ancestors {
+      for ancestor in virtual_index_ancestor_paths(path) {
+        if let Some(index) = index_manager.load_index_by_strategy(&ancestor, field_name, strategy)? {
+          return Ok(Some(index));
+        }
+      }
+    }
+
+    Ok(None)
   }
 
   /// Execute a query containing fuzzy operations with a recheck phase.
@@ -1315,9 +1649,22 @@ impl<'a> QueryEngine<'a> {
     let mut results = Vec::new();
 
     for file_hash in candidates {
-      // Try to get value from index first (works for parser-indexed files)
+      // Load the FileRecord for the result
+      let file_record = match self.engine.get_entry(&file_hash) {
+        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
+        _ => continue,
+      };
+
+      // Try to get value from index first. Virtual fields can derive their
+      // fallback directly from FileRecord metadata; normal fields fall back to
+      // loading/parsing the file body when an old index has no values map.
       let field_value = if let Some(value_bytes) = candidate_values.get(&file_hash) {
         String::from_utf8_lossy(value_bytes).to_string()
+      } else if let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) {
+        match self.virtual_field_value_string(field_name, &file_record) {
+          Some(value) => value,
+          None => continue,
+        }
       } else {
         // Fallback: load file and parse as JSON (for native JSON files without values in index)
         let (_file_record, file_data) = match self.load_file_with_data(&file_hash, hash_length, &ops)? {
@@ -1328,12 +1675,6 @@ impl<'a> QueryEngine<'a> {
           Some(v) => v,
           None => continue,
         }
-      };
-
-      // Load the FileRecord for the result
-      let file_record = match self.engine.get_entry(&file_hash) {
-        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-        _ => continue,
       };
 
       // Compute score based on operation
@@ -1363,11 +1704,13 @@ impl<'a> QueryEngine<'a> {
     index_manager: &IndexManager,
   ) -> EngineResult<FuzzyCandidates> {
     let mut all_values: FieldValueBytes = HashMap::new();
+    let index_field_name = canonical_virtual_field_name(&field_query.field_name).unwrap_or(field_query.field_name.as_str());
+    let is_virtual_field = canonical_virtual_field_name(&field_query.field_name).is_some();
 
     match &field_query.operation {
       QueryOp::Contains(query_str) | QueryOp::Similar(query_str, _) | QueryOp::Fuzzy(query_str, _) => {
         // Use trigram index for candidates
-        let mut index = match index_manager.load_index_by_strategy(path, &field_query.field_name, "trigram")? {
+        let mut index = match self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field)? {
           Some(idx) => idx,
           None => {
             return Err(EngineError::NotFound(format!("Trigram index not found for field '{}' at '{}'", field_query.field_name, path,)));
@@ -1441,6 +1784,9 @@ impl<'a> QueryEngine<'a> {
 
         // Collect values from this index
         all_values.extend(index.values.drain());
+        if is_virtual_field {
+          candidates = self.filter_hashes_to_query_path(candidates, path)?;
+        }
 
         Ok((candidates, all_values))
       }
@@ -1454,7 +1800,9 @@ impl<'a> QueryEngine<'a> {
         let mut found_any_index = false;
 
         for strategy in &strategies {
-          if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
+          if let Some(mut index) =
+            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field)?
+          {
             found_any_index = true;
 
             for word in &query_words {
@@ -1486,6 +1834,9 @@ impl<'a> QueryEngine<'a> {
         if !found_any_index {
           return Err(EngineError::NotFound(format!("No phonetic index found for field '{}' at '{}'", field_query.field_name, path,)));
         }
+        if is_virtual_field {
+          candidates = self.filter_hashes_to_query_path(candidates, path)?;
+        }
 
         Ok((candidates, all_values))
       }
@@ -1493,7 +1844,9 @@ impl<'a> QueryEngine<'a> {
         let mut candidates = HashSet::new();
 
         // Try trigram index
-        if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, "trigram")? {
+        if let Some(mut index) =
+          self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field)?
+        {
           let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
           let converter = TrigramConverter;
           for trigram in &trigrams {
@@ -1510,7 +1863,9 @@ impl<'a> QueryEngine<'a> {
         let query_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
         let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         for strategy in &phonetic_strategies {
-          if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, strategy)? {
+          if let Some(mut index) =
+            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field)?
+          {
             for word in &query_words {
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
@@ -1534,12 +1889,15 @@ impl<'a> QueryEngine<'a> {
         }
 
         // Try exact match via string index
-        if let Some(mut index) = index_manager.load_index_by_strategy(path, &field_query.field_name, "string")? {
+        if let Some(mut index) = self.load_index_by_strategy_for_query(path, index_field_name, "string", index_manager, is_virtual_field)? {
           let entries = index.lookup_exact(query_str.as_bytes());
           for entry in entries {
             candidates.insert(entry.file_hash.clone());
           }
           all_values.extend(index.values.drain());
+        }
+        if is_virtual_field {
+          candidates = self.filter_hashes_to_query_path(candidates, path)?;
         }
 
         Ok((candidates, all_values))
@@ -2411,8 +2769,57 @@ impl<'a> FieldQueryBuilder<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Virtual field byte conversion helpers
+// Virtual field helpers
 // ---------------------------------------------------------------------------
+
+fn canonical_virtual_field_name(field_name: &str) -> Option<&'static str> {
+  match field_name {
+    "@path" => Some("@path"),
+    "@filename" | "@file_name" => Some("@filename"),
+    "@extension" => Some("@extension"),
+    "@content_type" => Some("@content_type"),
+    "@size" => Some("@size"),
+    "@created_at" => Some("@created_at"),
+    "@updated_at" => Some("@updated_at"),
+    "@hash" => Some("@hash"),
+    _ => None,
+  }
+}
+
+fn is_recheck_operation(operation: &QueryOp) -> bool {
+  matches!(operation, QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_))
+}
+
+fn virtual_index_ancestor_paths(path: &str) -> Vec<String> {
+  let normalized = normalize_path(path);
+  let mut ancestors = Vec::new();
+  let mut current = parent_path(&normalized);
+
+  while let Some(dir) = current {
+    ancestors.push(dir.clone());
+    if dir == "/" {
+      break;
+    }
+    current = parent_path(&dir);
+  }
+
+  ancestors
+}
+
+fn path_is_under_query_path(path: &str, query_path: &str) -> bool {
+  if query_path == "/" {
+    return true;
+  }
+
+  let normalized_path = normalize_path(path);
+  let normalized_query_path = normalize_path(query_path);
+  if normalized_path == normalized_query_path {
+    return true;
+  }
+
+  let prefix = format!("{}/", normalized_query_path.trim_end_matches('/'));
+  normalized_path.starts_with(&prefix)
+}
 
 /// Decode a big-endian u64 from bytes (as produced by `json_value_to_bytes`).
 /// Returns 0 if the byte slice is not exactly 8 bytes.

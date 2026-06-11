@@ -78,7 +78,7 @@ pub fn run(config: ProbeConfig<'_>) {
     let hash_length = engine.hash_algo().hash_length();
     let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
     println!("FileRecord entries: {}", entries.len());
-    let mut seen_paths = std::collections::HashSet::new();
+    let mut seen_paths = std::collections::BTreeSet::new();
     for (hash, value) in &entries {
       // Read entry header to get correct entry_version.
       let entry = match engine.get_entry_including_deleted(hash) {
@@ -88,12 +88,33 @@ pub fn run(config: ProbeConfig<'_>) {
       let version = entry.0.entry_version;
       match FileRecord::deserialize(value, hash_length, version) {
         Ok(record) => {
-          if seen_paths.insert(record.path.clone()) {
-            println!("  {} ({}B)", record.path, record.total_size);
-          }
+          seen_paths.insert(record.path);
         }
         Err(e) => {
           println!("  [deser err: {} hash={} version={}]", e, hex::encode(&hash[..8.min(hash.len())]), version);
+        }
+      }
+    }
+
+    println!("Unique FileRecord paths: {}", seen_paths.len());
+    for path in seen_paths {
+      match current_file_path_record(&engine, &path, hash_length) {
+        Ok(Some((path_version, record))) => {
+          println!(
+            "  {} ({}B, path_entry_version={}, current_file_record_version={}, content_hash_bytes={}, chunks={})",
+            record.path,
+            record.total_size,
+            path_version,
+            aeordb::engine::CURRENT_FILE_RECORD_VERSION,
+            record.content_hash.len(),
+            record.chunk_hashes.len(),
+          );
+        }
+        Ok(None) => {
+          println!("  {} (stale_non_path_record=true)", path);
+        }
+        Err(error) => {
+          println!("  {} (path_record_error={})", path, error);
         }
       }
     }
@@ -476,6 +497,19 @@ fn print_dir_entry_diagnostics(engine: &StorageEngine, dir_key: &[u8], hash_leng
 
 fn print_file_record_diagnostics(engine: &StorageEngine, ops: &DirectoryOps<'_>, normalized: &str, config: &ProbeConfig<'_>) {
   println!("--- FileRecord ---");
+  let algo = engine.hash_algo();
+  let file_key = aeordb::engine::file_path_hash(normalized, &algo).unwrap();
+  match engine.get_entry_including_deleted(&file_key) {
+    Ok(Some((header, _key, _value))) => {
+      println!("Path FileRecord header:");
+      println!("  entry_version: {}", header.entry_version);
+      println!("  current_file_record_version: {}", aeordb::engine::CURRENT_FILE_RECORD_VERSION);
+      println!("  flags: {:#x}", header.flags);
+    }
+    Ok(None) => println!("Path FileRecord header: MISSING"),
+    Err(e) => println!("Path FileRecord header: ERROR {}", e),
+  }
+
   match ops.get_metadata(normalized) {
     Ok(Some(record)) => {
       println!("FileRecord: PRESENT");
@@ -485,6 +519,8 @@ fn print_file_record_diagnostics(engine: &StorageEngine, ops: &DirectoryOps<'_>,
       println!("  created_at: {}", format_timestamp_millis(record.created_at));
       println!("  updated_at: {}", format_timestamp_millis(record.updated_at));
       println!("  metadata_bytes: {}", record.metadata.len());
+      println!("  content_hash_bytes: {}", record.content_hash.len());
+      println!("  content_hash: {}", hex::encode(&record.content_hash));
       println!("  chunk_count: {}", record.chunk_hashes.len());
 
       if config.chunks {
@@ -498,6 +534,16 @@ fn print_file_record_diagnostics(engine: &StorageEngine, ops: &DirectoryOps<'_>,
   if config.read {
     print_stream_read(ops, normalized);
   }
+}
+
+fn current_file_path_record(engine: &StorageEngine, path: &str, hash_length: usize) -> Result<Option<(u8, FileRecord)>, String> {
+  let algo = engine.hash_algo();
+  let key = aeordb::engine::file_path_hash(path, &algo).map_err(|error| error.to_string())?;
+  let Some((header, _key, value)) = engine.get_entry(&key).map_err(|error| error.to_string())? else {
+    return Ok(None);
+  };
+  let record = FileRecord::deserialize(&value, hash_length, header.entry_version).map_err(|error| error.to_string())?;
+  Ok(Some((header.entry_version, record)))
 }
 
 fn print_parent_listing(engine: &StorageEngine, ops: &DirectoryOps<'_>, normalized: &str) {

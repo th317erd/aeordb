@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
-use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::directory_ops::{DirectoryOps, file_content_hash, file_identity_hash, file_path_hash};
 use aeordb::engine::event_bus::EventBus;
+use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 use aeordb::engine::query_engine::{FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode};
 use aeordb::engine::request_context::RequestContext;
+use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
 use aeordb::engine::task_worker::process_next_task;
+use aeordb::engine::{EntryType, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexingPipeline};
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -18,6 +21,75 @@ fn store_index_config(engine: &aeordb::engine::storage_engine::StorageEngine, pa
   });
   let config_path = format!("{}/.aeordb-config/indexes.json", parent);
   ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
+}
+
+fn store_hash_index_config(engine: &StorageEngine, parent: &str) {
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine);
+  let config = serde_json::json!({
+      "indexes": [{"name": "@hash", "type": "trigram"}]
+  });
+  let config_path = format!("{}/.aeordb-config/indexes.json", parent);
+  ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
+}
+
+fn store_metadata_and_content_index_config(engine: &StorageEngine, parent: &str) {
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine);
+  let config = serde_json::json!({
+      "indexes": [
+          {"name": "@filename", "type": "string"},
+          {"name": "count", "type": "u64", "source": ["count"], "min": 0, "max": 200}
+      ]
+  });
+  let config_path = format!("{}/.aeordb-config/indexes.json", parent);
+  ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
+}
+
+fn serialize_file_record_v0(record: &FileRecord, hash_length: usize) -> Vec<u8> {
+  let mut buffer = Vec::new();
+  let path_bytes = record.path.as_bytes();
+  let content_type_bytes = record.content_type.as_deref().unwrap_or("").as_bytes();
+
+  buffer.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+  buffer.extend_from_slice(path_bytes);
+  buffer.extend_from_slice(&(content_type_bytes.len() as u16).to_le_bytes());
+  buffer.extend_from_slice(content_type_bytes);
+  buffer.extend_from_slice(&record.total_size.to_le_bytes());
+  buffer.extend_from_slice(&record.created_at.to_le_bytes());
+  buffer.extend_from_slice(&record.updated_at.to_le_bytes());
+  buffer.extend_from_slice(&(record.metadata.len() as u32).to_le_bytes());
+  buffer.extend_from_slice(&record.metadata);
+  buffer.extend_from_slice(&(record.chunk_hashes.len() as u32).to_le_bytes());
+  for hash in &record.chunk_hashes {
+    assert_eq!(hash.len(), hash_length, "test fixture chunk hash must match engine hash length");
+    buffer.extend_from_slice(hash);
+  }
+
+  buffer
+}
+
+fn rewrite_file_record_as_v0(engine: &StorageEngine, path: &str) -> Vec<u8> {
+  let ops = DirectoryOps::new(engine);
+  let record = ops.get_metadata(path).unwrap().unwrap();
+  let original_content_hash = record.content_hash.clone();
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let legacy_value = serialize_file_record_v0(&record, hash_length);
+  let path_key = file_path_hash(path, &algo).unwrap();
+  let identity_key = file_identity_hash(path, record.content_type.as_deref(), &record.chunk_hashes, &algo).unwrap();
+  let legacy_content_key = file_content_hash(&legacy_value, &algo).unwrap();
+
+  engine.store_entry(EntryType::FileRecord, &path_key, &legacy_value).unwrap();
+  engine.store_entry(EntryType::FileRecord, &identity_key, &legacy_value).unwrap();
+  engine.store_entry(EntryType::FileRecord, &legacy_content_key, &legacy_value).unwrap();
+
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, 0, "test fixture should be a legacy FileRecord v0");
+  let legacy_record = FileRecord::deserialize(&value, hash_length, header.entry_version).unwrap();
+  assert!(legacy_record.content_hash.is_empty(), "legacy v0 fixture must not store content_hash");
+
+  original_content_hash
 }
 
 /// Helper: store N JSON files at the given parent path.
@@ -72,6 +144,237 @@ fn test_reindex_indexes_all_files() {
   let results = query_engine.execute(&query).unwrap();
   assert_eq!(results.len(), 1, "should find exactly one file with count==10");
   assert!(results[0].file_record.path.contains("item-010"), "matched file should be item-010.json, got: {}", results[0].file_record.path);
+}
+
+#[test]
+fn test_forced_reindex_migrates_legacy_file_record_to_current_version_and_indexes_hash() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  store_hash_index_config(&engine, "/legacy");
+  let data = b"legacy file body that needs a stored whole-file hash";
+  ops.store_file_buffered(&ctx, "/legacy/a.txt", data, Some("text/plain")).unwrap();
+  let expected_content_hash = rewrite_file_record_as_v0(&engine, "/legacy/a.txt");
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/legacy", "force": true})).unwrap();
+  let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
+  assert!(processed);
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed);
+  assert!(completed.error.is_none(), "forced reindex should not fail: {:?}", completed.error);
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash("/legacy/a.txt", &algo).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION, "forced reindex should rewrite path FileRecord as current version");
+
+  let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+  assert_eq!(record.content_hash, expected_content_hash, "migration should backfill the raw whole-file content hash");
+
+  let results = aeordb::engine::query_engine::QueryBuilder::new(&engine, "/legacy")
+    .field("@hash")
+    .eq(hex::encode(&expected_content_hash).as_bytes())
+    .all()
+    .unwrap();
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].file_record.path, "/legacy/a.txt");
+}
+
+#[test]
+fn test_metadata_only_reindex_indexes_virtual_fields_without_reading_corrupt_bodies() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for i in 0..12 {
+    let data = serde_json::json!({"count": i});
+    ops
+      .store_file_buffered(
+        &ctx,
+        &format!("/broken-meta/item-{:03}.json", i),
+        serde_json::to_string(&data).unwrap().as_bytes(),
+        Some("application/json"),
+      )
+      .unwrap();
+  }
+
+  for i in 0..12 {
+    let path = format!("/broken-meta/item-{:03}.json", i);
+    let metadata = ops.get_metadata(&path).unwrap().unwrap();
+    let chunk_hash = metadata.chunk_hashes.first().expect("test file should have a chunk");
+    engine.mark_entry_deleted(chunk_hash).unwrap();
+  }
+
+  store_metadata_and_content_index_config(&engine, "/broken-meta");
+
+  let task = queue
+    .enqueue(
+      "reindex",
+      serde_json::json!({
+          "path": "/broken-meta",
+          "metadata_only": true,
+          "index_flush_writes": 1000000,
+          "index_flush_ms": 60000
+      }),
+    )
+    .unwrap();
+  let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
+  assert!(processed);
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed, "metadata-only reindex should not read corrupt file bodies: {:?}", completed.error);
+
+  let index_manager = IndexManager::new(&engine);
+  let filename_index = index_manager
+    .load_index_by_strategy("/broken-meta", "@filename", "string")
+    .unwrap()
+    .expect("@filename index should be flushed on completion");
+  let matches = filename_index.lookup_stored_values_exact(&[b"item-005.json".to_vec()]);
+  assert_eq!(matches.len(), 1, "metadata-only reindex should populate virtual filename indexes");
+
+  assert!(
+    index_manager.load_index_by_strategy("/broken-meta", "count", "u64").unwrap().is_none(),
+    "metadata-only reindex should not create content indexes"
+  );
+}
+
+#[test]
+fn test_shared_index_write_buffer_is_query_visible_before_disk_flush() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/buffered/a.txt", b"a", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/buffered/b.txt", b"b", Some("text/plain")).unwrap();
+
+  let config = serde_json::json!({
+      "indexes": [{"name": "@filename", "type": "string"}]
+  });
+  ops
+    .store_file_buffered(
+      &ctx,
+      "/buffered/.aeordb-config/indexes.json",
+      serde_json::to_string(&config).unwrap().as_bytes(),
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let pipeline = IndexingPipeline::new(&engine);
+  let mut buffer = IndexWriteBuffer::new(&engine, IndexWriteBufferOptions::new(usize::MAX, std::time::Duration::from_secs(3600)));
+  pipeline.run_metadata_only_buffered(&ctx, "/buffered/a.txt", &mut buffer).unwrap();
+  pipeline.run_metadata_only_buffered(&ctx, "/buffered/b.txt", &mut buffer).unwrap();
+
+  let index_manager = IndexManager::new(&engine);
+  let pending_index =
+    index_manager.load_index_by_strategy("/buffered", "@filename", "string").unwrap().expect("@filename index should be query-visible");
+  assert_eq!(pending_index.lookup_stored_values_exact(&[b"a.txt".to_vec()]).len(), 1);
+  assert_eq!(pending_index.lookup_stored_values_exact(&[b"b.txt".to_vec()]).len(), 1);
+  assert!(
+    ops.read_file_buffered("/buffered/.aeordb-indexes/@filename.string.idx").is_err(),
+    "buffered updates should not hit storage before a flush"
+  );
+
+  let stats_before_flush = buffer.stats();
+  assert_eq!(stats_before_flush.pending_mutations, 2);
+  assert_eq!(buffer.flush_all().unwrap(), 1, "one field/strategy index should be flushed");
+
+  let filename_index =
+    index_manager.load_index_by_strategy("/buffered", "@filename", "string").unwrap().expect("@filename index should exist after flush");
+  assert_eq!(filename_index.lookup_stored_values_exact(&[b"a.txt".to_vec()]).len(), 1);
+  assert_eq!(filename_index.lookup_stored_values_exact(&[b"b.txt".to_vec()]).len(), 1);
+}
+
+#[test]
+fn test_forced_reindex_migrates_recursively_without_index_config() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/no-config/nested/legacy.txt", b"legacy nested body", Some("text/plain")).unwrap();
+  let expected_content_hash = rewrite_file_record_as_v0(&engine, "/no-config/nested/legacy.txt");
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/no-config", "force": true})).unwrap();
+  let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
+  assert!(processed);
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed);
+  assert!(completed.error.is_none(), "forced migration-only reindex should not require indexes.json: {:?}", completed.error);
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash("/no-config/nested/legacy.txt", &algo).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
+
+  let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+  assert_eq!(record.content_hash, expected_content_hash);
+}
+
+#[test]
+fn test_forced_reindex_migrates_internal_file_records() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let path = "/.aeordb-system/plugins/internal-test";
+  ops.store_file_buffered(&ctx, path, b"internal plugin payload", Some("application/wasm")).unwrap();
+  let expected_content_hash = rewrite_file_record_as_v0(&engine, path);
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/", "force": true})).unwrap();
+  let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
+  assert!(processed);
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed);
+  assert!(completed.error.is_none(), "forced root reindex should migrate internal records: {:?}", completed.error);
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash(path, &algo).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
+
+  let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+  assert_eq!(record.content_hash, expected_content_hash);
+}
+
+#[test]
+fn test_plain_reindex_does_not_migrate_legacy_file_record() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  store_hash_index_config(&engine, "/legacy");
+  ops.store_file_buffered(&ctx, "/legacy/plain.txt", b"legacy file body", Some("text/plain")).unwrap();
+  rewrite_file_record_as_v0(&engine, "/legacy/plain.txt");
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/legacy"})).unwrap();
+  let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
+  assert!(processed);
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed);
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash("/legacy/plain.txt", &algo).unwrap();
+  let (header, _key, _value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, 0, "non-forced reindex should stay index-only");
 }
 
 #[test]

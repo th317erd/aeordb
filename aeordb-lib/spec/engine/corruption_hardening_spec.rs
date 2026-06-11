@@ -10,7 +10,8 @@ use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
 use aeordb::engine::lost_found;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::verify;
-use aeordb::engine::{EntryType, RequestContext, ENTRY_MAGIC};
+use aeordb::engine::{EntryType, RequestContext, ENTRY_MAGIC, file_path_hash};
+use aeordb::engine::file_record::FileRecord;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -697,6 +698,63 @@ fn clean_startup_masks_page_kv_entries_covered_by_hot_tail_voids() {
   assert_eq!(report.stale_kv_entries, 0, "voided page entries should be masked on clean startup: {:?}", report.stale_kv_details);
   let reopened_ops = DirectoryOps::new(&reopened);
   assert_eq!(reopened_ops.read_file_buffered("/gc/doc.txt").unwrap(), b"version-13");
+}
+
+#[test]
+fn rebuild_directory_tree_uses_current_path_records_once() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap();
+
+  for version in 0..30 {
+    let body = format!("version-{version:02}");
+    ops.store_file_buffered(&ctx, "/repair/doc.txt", body.as_bytes(), Some("text/plain")).unwrap();
+  }
+
+  let before = file_size(db_str);
+  let dirs_written = ops.rebuild_directory_tree(&ctx).unwrap();
+  let after = file_size(db_str);
+
+  assert_eq!(dirs_written, 2, "repair should rewrite only /repair and /, not every FileRecord copy");
+  assert!(after - before < 8192, "directory rebuild should append a small fixed amount, appended {} bytes", after - before);
+  assert_eq!(ops.read_file_buffered("/repair/doc.txt").unwrap(), b"version-29");
+}
+
+#[test]
+fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap();
+
+  ops.store_file_buffered(&ctx, "/broken/dangling.txt", b"missing chunk body", Some("text/plain")).unwrap();
+
+  let algo = engine.hash_algo();
+  let path_key = file_path_hash("/broken/dangling.txt", &algo).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().expect("path FileRecord should exist");
+  let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
+  let chunk_hash = record.chunk_hashes.first().expect("test file should have one chunk").clone();
+  let chunk_kv = engine.get_kv_entry(&chunk_hash).expect("chunk should be live before corruption");
+
+  engine.remove_kv_entry(&chunk_hash).unwrap();
+  engine.write_void_at(chunk_kv.offset, chunk_kv.total_length).unwrap();
+
+  let report = verify::verify(&engine, db_str);
+  assert!(
+    report.dangling_file_records.iter().any(|issue| issue.contains("/broken/dangling.txt")),
+    "verify should report live path FileRecords with missing chunks: {:?}",
+    report.dangling_file_records
+  );
+
+  let dirs_written = ops.rebuild_directory_tree(&ctx).unwrap();
+  assert_eq!(dirs_written, 1, "only an empty root should be rebuilt when every path record is dangling");
+
+  let root = ops.list_directory("/").unwrap();
+  assert!(!root.iter().any(|child| child.name == "broken"), "repair must not re-list a file whose chunks are missing: {:?}", root);
+  assert!(ops.read_file_buffered("/broken/dangling.txt").is_err(), "direct read should still report the underlying chunk loss");
 }
 
 #[test]

@@ -9,6 +9,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::cache_invalidation::evict_caches_for_path;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::engine::RequestContext;
@@ -21,12 +22,19 @@ use crate::auth::refresh::{RefreshTokenRecord, DEFAULT_REFRESH_EXPIRY_SECONDS};
 use crate::engine::system_store;
 
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-  let report = crate::engine::health::full_health_check(&state.engine, &state.db_path, &state.peer_manager, state.startup_time);
+  let disk = crate::engine::health::check_disk(&state.db_path);
+  let status = match disk.status {
+    crate::engine::health::HealthStatus::Unhealthy => crate::engine::health::HealthStatus::Unhealthy,
+    crate::engine::health::HealthStatus::Degraded => crate::engine::health::HealthStatus::Degraded,
+    crate::engine::health::HealthStatus::Healthy => crate::engine::health::HealthStatus::Healthy,
+  };
   // SECURITY: Only expose the top-level status publicly. Detailed checks
   // (engine stats, disk info, peer counts, auth mode) leak internal state
-  // that aids attackers. Load balancers only need the status string.
+  // that aids attackers. Load balancers only need a liveness response, so
+  // keep this route independent of storage reads that can queue behind heavy
+  // writes. Auth/peer detail remains available through internal diagnostics.
   Json(serde_json::json!({
-    "status": report.status,
+    "status": status,
     "version": env!("CARGO_PKG_VERSION"),
   }))
 }
@@ -577,7 +585,7 @@ pub async fn revoke_api_key(
 
   match state.auth_provider.revoke_api_key(parsed_key_id) {
     Ok(true) => {
-      state.api_key_cache.evict(&parsed_key_id.to_string());
+      evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id));
       (
         StatusCode::OK,
         Json(serde_json::json!({

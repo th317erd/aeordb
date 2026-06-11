@@ -20,6 +20,12 @@ use crate::server::state::AppState;
 #[derive(Deserialize)]
 pub struct ReindexRequest {
   pub path: String,
+  #[serde(default)]
+  pub force: bool,
+  #[serde(default)]
+  pub metadata_only: bool,
+  pub index_flush_writes: Option<usize>,
+  pub index_flush_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -100,7 +106,19 @@ pub async fn trigger_reindex(
     Err(resp) => return resp,
   };
 
-  match queue.enqueue("reindex", serde_json::json!({"path": body.path})) {
+  let mut args = serde_json::json!({
+      "path": body.path,
+      "force": body.force,
+      "metadata_only": body.metadata_only,
+  });
+  if let Some(index_flush_writes) = body.index_flush_writes {
+    args["index_flush_writes"] = serde_json::json!(index_flush_writes);
+  }
+  if let Some(index_flush_ms) = body.index_flush_ms {
+    args["index_flush_ms"] = serde_json::json!(index_flush_ms);
+  }
+
+  match queue.enqueue("reindex", args) {
     Ok(record) => (
       StatusCode::OK,
       Json(serde_json::json!({
