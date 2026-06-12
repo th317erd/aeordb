@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::engine::entry_header::EntryHeader;
+use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 
 #[derive(Debug)]
@@ -10,6 +11,14 @@ pub struct ScannedEntry {
   pub header: EntryHeader,
   pub key: Vec<u8>,
   pub value: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScannedRebuildEntry {
+  pub offset: u64,
+  pub header: EntryHeader,
+  pub key: Vec<u8>,
+  pub value: Option<Vec<u8>>,
 }
 
 pub struct EntryScanner {
@@ -157,6 +166,132 @@ impl EntryScanner {
   fn record_skipped_region(&mut self, offset: u64, length: usize) {
     self.last_skipped_region = Some((offset, length));
     self.skipped_regions.push((offset, length));
+  }
+
+  pub fn current_offset(&self) -> u64 {
+    self.current_offset
+  }
+
+  pub fn file_length(&self) -> u64 {
+    self.file_length
+  }
+
+  /// Scan one entry for KV rebuild. Chunk and void payloads are skipped
+  /// because rebuild only needs the key/header metadata for those large
+  /// records. Mutable metadata records are still read and hash-verified.
+  pub(crate) fn next_rebuild_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
+    loop {
+      if self.current_offset >= self.file_length {
+        return None;
+      }
+
+      let entry_offset = self.current_offset;
+      if let Err(error) = self.file.seek(SeekFrom::Start(entry_offset)) {
+        return Some(Err(error.into()));
+      }
+
+      let header = match EntryHeader::deserialize(&mut self.file) {
+        Ok(header) => header,
+        Err(EngineError::UnexpectedEof) => return None,
+        Err(error) => {
+          tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
+          match self.scan_for_next_magic(entry_offset + 1) {
+            Some((next_offset, skipped_bytes)) => {
+              tracing::warn!("Found next valid entry at offset {} (skipped {} bytes from {})", next_offset, skipped_bytes, entry_offset);
+              self.record_skipped_region(entry_offset, skipped_bytes as usize);
+              self.current_offset = next_offset;
+              if self.report_errors {
+                return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
+              }
+              continue;
+            }
+            None => {
+              tracing::warn!("No valid entry found after offset {}. Stopping scan.", entry_offset);
+              self.record_skipped_region(entry_offset, (self.file_length - entry_offset) as usize);
+              return None;
+            }
+          }
+        }
+      };
+
+      let header_size = header.header_size() as u64;
+      let payload_size = header.key_length as u64 + header.value_length as u64;
+      if header.total_length as u64 != header_size + payload_size {
+        tracing::warn!(
+          "Corrupt entry at offset {}: key_length ({}) + value_length ({}) + header ({}) does not equal total_length ({}). Skipping.",
+          entry_offset,
+          header.key_length,
+          header.value_length,
+          header_size,
+          header.total_length,
+        );
+        self.current_offset = entry_offset + header.total_length.max(1) as u64;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry {
+            offset: entry_offset,
+            reason: format!(
+              "Corrupt header: key_length ({}) + value_length ({}) + header ({}) does not equal total_length ({})",
+              header.key_length, header.value_length, header_size, header.total_length,
+            ),
+          }));
+        }
+        continue;
+      }
+
+      let entry_end = entry_offset + header.total_length as u64;
+      if entry_end > self.file_length {
+        self.current_offset = self.file_length;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry {
+            offset: entry_offset,
+            reason: format!("entry extends past scan end: {} > {}", entry_end, self.file_length),
+          }));
+        }
+        return None;
+      }
+
+      let mut key = vec![0u8; header.key_length as usize];
+      if let Err(error) = self.file.read_exact(&mut key) {
+        tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
+        self.record_skipped_region(entry_offset, header.total_length as usize);
+        self.current_offset = entry_end;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading key: {}", error) }));
+        }
+        continue;
+      }
+
+      let read_value = !matches!(header.entry_type, EntryType::Chunk | EntryType::Void);
+      let value = if read_value {
+        let mut value = vec![0u8; header.value_length as usize];
+        if let Err(error) = self.file.read_exact(&mut value) {
+          tracing::warn!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
+          self.record_skipped_region(entry_offset, header.total_length as usize);
+          self.current_offset = entry_end;
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {}", error) }));
+          }
+          continue;
+        }
+        if !header.verify(&key, &value) {
+          tracing::warn!("Hash verification failed for metadata entry at offset {}. Skipping.", entry_offset);
+          self.current_offset = entry_end;
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
+          }
+          continue;
+        }
+        Some(value)
+      } else {
+        if let Err(error) = self.file.seek(SeekFrom::Start(entry_end)) {
+          return Some(Err(error.into()));
+        }
+        None
+      };
+
+      self.current_offset = entry_end;
+      return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value }));
+    }
   }
 }
 

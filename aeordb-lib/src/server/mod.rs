@@ -38,7 +38,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::{DirectoryOps, EngineStartupProgressCallback, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue};
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
 use crate::logging::request_id_middleware;
@@ -159,7 +159,18 @@ pub fn create_app_with_auth_mode_and_cancel(
   cors_flag: Option<&str>,
   cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
-  let engine = create_engine_with_hot_dir(engine_path, hot_dir);
+  create_app_with_auth_mode_cancel_progress(engine_path, auth_mode, hot_dir, cors_flag, cancel, None)
+}
+
+pub fn create_app_with_auth_mode_cancel_progress(
+  engine_path: &str,
+  auth_mode: &AuthMode,
+  hot_dir: Option<&std::path::Path>,
+  cors_flag: Option<&str>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+  progress_callback: Option<EngineStartupProgressCallback>,
+) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
+  let engine = create_engine_with_hot_dir_and_progress(engine_path, hot_dir, progress_callback);
   spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
   spawn_index_buffer_flush_timer(engine.clone(), cancel.clone());
 
@@ -680,9 +691,17 @@ pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
 
 /// Create or open a StorageEngine with an optional hot directory for crash recovery.
 pub fn create_engine_with_hot_dir(engine_path: &str, hot_dir: Option<&std::path::Path>) -> Arc<StorageEngine> {
+  create_engine_with_hot_dir_and_progress(engine_path, hot_dir, None)
+}
+
+pub fn create_engine_with_hot_dir_and_progress(
+  engine_path: &str,
+  hot_dir: Option<&std::path::Path>,
+  progress_callback: Option<EngineStartupProgressCallback>,
+) -> Arc<StorageEngine> {
   let path = std::path::Path::new(engine_path);
   let engine = if path.exists() {
-    StorageEngine::open_with_hot_dir(engine_path, hot_dir).expect("failed to open storage engine")
+    StorageEngine::open_with_hot_dir_and_progress(engine_path, hot_dir, progress_callback).expect("failed to open storage engine")
   } else {
     StorageEngine::create_with_hot_dir(engine_path, hot_dir).expect("failed to create storage engine")
   };

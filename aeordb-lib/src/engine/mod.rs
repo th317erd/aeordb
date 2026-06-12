@@ -146,7 +146,7 @@ pub use symlink_resolver::{resolve_symlink, ResolvedTarget, MAX_SYMLINK_DEPTH};
 pub use kv_resize::KVResizeManager;
 pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE};
-pub use storage_engine::{StorageEngine, WriteBatch};
+pub use storage_engine::{ChunkEntryMetadata, EngineStartupProgress, EngineStartupProgressCallback, StorageEngine, WriteBatch};
 pub use directory_ops::{
   DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash,
   symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, whole_file_content_hash,
@@ -195,7 +195,7 @@ pub use engine_event::{
   EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED, EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
   EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED, EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
   EVENT_FILES_SHARED, EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_METRICS, GcEventData, EVENT_TASKS_CREATED, EVENT_TASKS_STARTED,
-  EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED,
+  EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED, EVENT_SERVER_READY,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

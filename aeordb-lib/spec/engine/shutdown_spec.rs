@@ -309,9 +309,10 @@ fn test_engine_shutdown_with_hot_dir() {
 // =============================================================================
 
 #[test]
-fn test_engine_usable_after_shutdown() {
-  // The engine should still be functional after shutdown (shutdown just
-  // flushes buffers, it does not invalidate the engine).
+fn test_engine_rejects_new_writes_after_shutdown() {
+  // Shutdown closes the engine to new top-level operations. This prevents
+  // service stop from racing with new request work after the shutdown gate
+  // has started.
   let temp_dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&temp_dir);
   let ctx = RequestContext::system();
@@ -320,10 +321,8 @@ fn test_engine_usable_after_shutdown() {
   ops.store_file_buffered(&ctx, "/before.txt", b"before shutdown", Some("text/plain")).unwrap();
   engine.shutdown().unwrap();
 
-  // Write after shutdown should still work
-  ops.store_file_buffered(&ctx, "/after.txt", b"after shutdown", Some("text/plain")).unwrap();
-  let data = ops.read_file_buffered("/after.txt").unwrap();
-  assert_eq!(data, b"after shutdown");
+  let result = ops.store_file_buffered(&ctx, "/after.txt", b"after shutdown", Some("text/plain"));
+  assert!(matches!(result, Err(aeordb::engine::errors::EngineError::ShuttingDown)));
 }
 
 #[test]

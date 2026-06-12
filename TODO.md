@@ -1,0 +1,103 @@
+# AeorDB Active TODO
+
+- [x] Add reserved-region validation for reusable void ranges.
+- [x] Guard void loading, registration, consumption, and KV expansion paths.
+- [x] Extend verify diagnostics for invalid hot-tail voids and KV entry offsets.
+- [x] Add focused tests for stale/invalid voids and KV expansion adjustment.
+- [x] Validate KV-expansion fixes with focused cargo tests and copied corruption evidence.
+- [x] Review current level 2/3 crash soak behavior.
+- [x] Add heavier small-file/merge stress workload with restart pressure.
+- [x] Make S3 soak preserve separate verify/probe diagnostic copies so investigation never mutates the evidence being inspected.
+- [x] Fix stale directory path-key recovery so later writes merge against canonical HEAD data instead of resurrecting old directory snapshots.
+- [x] Fix transaction commit publishing when the hot buffer was flushed mid-transaction.
+- [x] Fix transaction-local HEAD publication so durable headers are only advanced after WAL sync + hot-tail flush.
+- [x] Mask clean-startup KV page entries covered by durable hot-tail void records.
+- [x] Isolate the S3 checkpoint/visibility failure for `/stress/batch-merge/doc-035.json`: copied evidence has checkpoint state for the file, but the final path-key WAL entry is not recoverable from the DB image.
+- [x] Add focused regression coverage for dirty rebuild chronology when newer entries are written into reused lower offsets.
+- [x] Restrict reusable void consumption to chunk payload entries so mutable path/index records append instead of landing in reclaimed low offsets.
+- [x] Add focused regression coverage that mutable/index entries do not consume reusable voids while chunks still can.
+- [x] Add S2 second-level kill windows and optional scratch DB/directory arguments to `scripts/soak.sh`.
+- [x] Run focused crash/stress soak validation on throwaway `/tmp/codex` databases.
+- [x] Run final focused cargo checks with timeouts after the crash-atomicity/visibility fixes.
+- [x] Close the metrics schema gap by emitting documented `kv_file` and `kv_fill_ratio` metrics from SSE metrics pulses and `/system/stats`.
+- [x] Update stale auth/refresh specs for the opt-in `include_refresh` contract.
+- [x] Bound `test_stress_query_many_results` so default cargo stress tests stay runnable while S3 soak carries the heavier crash/write stress.
+- [x] Build a Linux x86_64 release binary from the current working tree.
+- [x] Build a macOS arm64 release binary from the same source snapshot.
+- [x] Build a Windows x86_64 release binary from the same source snapshot.
+- [x] Copy each platform release binary into `../aeordb-www/downloads/`.
+- [x] Install the new Linux release with `scripts/install-local.sh` into `~/.local/bin/aeordb`.
+- [x] Verify staged release binaries and record checksums.
+- [x] Copy the Kikx customer DB evidence before inspecting the indexed lookup failure.
+- [x] Reproduce the punctuated display-name `eq` query miss against the copied evidence or a focused fixture.
+- [x] Trace AeorDB indexed `eq` query planning/execution for string and trigram indexes.
+- [x] Fix exact equality so it cannot depend on fuzzy/tokenized index semantics.
+- [x] Add regression coverage for exact indexed lookup of punctuated names.
+- [x] Run focused tests and a live AeorDB query check.
+- [x] Keep exact lookups fast by preferring exact-capable scalar indexes before raw-value scans.
+- [x] Persist whole-file content hashes in FileRecord on write and make `@hash` use that value instead of the first chunk hash.
+- [x] Move FileRecord content_hash into a proper v1 layout and make real file writes emit v1 while v0 remains readable.
+- [ ] Consider a longer overnight S3 soak on external storage after this patch set is committed and deployed.
+- [x] Add forced-reindex FileRecord version migration/backfill so legacy v0 records are rewritten as current v1 before indexing.
+- [x] Swap `/system/tasks/reindex` default so `force` is false unless explicitly requested.
+- [x] Build release, back up FS-Server1 DB, deploy, force reindex, and verify FileRecord entry versions.
+- [x] Make indexed virtual-field queries use indexes instead of unconditional FileRecord scans.
+- [x] Build release binary for virtual-field indexing fix.
+- [x] Deploy virtual-field indexing release binary to FS-Server1.
+- [x] Update FS-Server1 default virtual index config if needed.
+- [x] Reindex FS-Server1 after deploy and verify virtual-field index usage. Old full root task `28434204-f64a-40d9-93cc-29b4dbbeccd8` was cancelled; replacement metadata-only root reindex task `e7f6f411-f1a9-470e-b773-9093e02e411a` completed on the new buffered-index binary.
+- [x] Improve reindex performance for metadata-only virtual-field changes: add a metadata-only task/mode that calls `IndexingPipeline::run_metadata_only` and avoids full file reads/parsers.
+- [x] Reduce index-write amplification during reindex by batching index updates per field/strategy instead of load/modify/save of the entire index file for every file.
+- [x] Add aggressive in-memory index-write buffering for reindex with configurable write-count/time flush thresholds and checkpoint advancement tied to durable flushes.
+- [x] Investigate Kikx session manifest fetch corruption evidence at `/tmp/codex/kikx/aeordb-session-manifest-fetch-failure-20260610T044420Z` without mutating the original.
+- [x] Let the active repair-copy run continue while collecting growth/CPU evidence.
+- [x] Confirm whether the missing `session.json` chunk is physically present but hidden by KV/void state.
+- [x] Snapshot and inspect the overgrown `.repaired` output for repeated directory/FileRecord writes.
+- [x] Audit GC, KV rebuild, directory rebuild, and repair paths for dangling FileRecord-to-chunk references.
+- [x] Fix confirmed repair write-amplification and/or unsafe retention behavior with focused regression tests.
+- [x] Add regression coverage for concurrent namespace writes preserving path-key, directory child, and HEAD consistency.
+- [x] Add writer-side namespace serialization around mutable path-key plus directory/HEAD publish operations.
+- [x] Validate namespace serialization with focused cargo tests and a live `/tmp/codex` AeorDB stress check.
+- [x] Replace per-call index load/modify/save with a shared buffered index-write path for all index mutations.
+- [x] Make query/index readers consult the shared in-memory index state so buffered writes are visible before disk flush.
+- [x] Flush buffered indexes by write-count/time and on shutdown, reusing the same path for live writes, reindex, deletes, and cleanup.
+- [x] Reproduce and fix live streaming uploads still rewriting index files per file instead of staying buffered until policy flush/shutdown.
+- [x] Validate shared index buffering with focused tests and a live `/tmp/codex` high-concurrency HTTP write stress.
+
+- [x] Run a full DRY/pathway smell audit after the shared index-buffering fix, focused on minimizing duplicate operation paths.
+  - [x] Map duplicate write, read, index, query, task, and maintenance pathways with file/line references.
+  - [x] Identify high-risk consolidation targets and separate them from cosmetic duplication.
+
+- [ ] Reduce duplicate operation pathways found by the DRY/pathway smell audit.
+  - [x] Make plain root `cargo build` build the expected AeorDB CLI binary, not just surprise-package artifacts.
+  - [x] Centralize chunk read/decompression behavior so sync, batch commit, conflict, hash, and streaming paths use one storage-level primitive.
+  - [x] Consolidate FileRecord publication into one helper used by buffered writes, streaming finalize, batch commit, restore, migrate, copy, and rename.
+  - [x] Collapse duplicated normal/buffered `IndexingPipeline` execution and field-indexing code now that all index mutations share the same buffer.
+  - [x] Introduce an `IndexConfigResolver` for config ownership, glob matching, reindex scope, and compression policy.
+  - [x] Move query JSON parsing into a non-server query module and make `/files/query` and `/files/search` use the same parser/planner surface.
+  - [x] Consolidate index cleanup/delete removal discovery so delete, cleanup, and reindex invalidation use one applicable-index resolver.
+  - [x] Add a server route command wrapper for repeated blocking execution, permission checks, cache eviction, and error mapping.
+    - [x] Add a shared blocking execution + `EngineError`/join-error mapper and use it on mkdir, streaming file finalize, and rename routes.
+    - [x] Add route-family helpers for permission checks and path-based cache eviction while preserving endpoint-specific denial semantics.
+
+- [x] Investigate upload throughput and `/system/health` starvation under active blob uploads.
+  - [x] Profile FS-Server1 under load and identify KV snapshot/type-index rebuilding on chunk writes as the main CPU hot path.
+  - [x] Stop blindly zstd-compressing staged blob chunks without MIME context.
+  - [x] Keep public `/system/health` independent of storage-backed auth/peer reads.
+  - [x] Skip scoped-key rule loading on raw `/blobs/chunks/` staging while preserving path-scoped checks at `/blobs/commit`.
+  - [x] Reuse flushed-page type indexes for buffer-only KV snapshot publishes.
+  - [x] Validate with focused cargo suites, broader query/reindex suites, release-mode live upload/commit/fetch, and `verify`.
+
+- [ ] Fix shutdown linger with active DB readers/writers.
+  - [ ] Reproduce a stop while AeorDB is serving sync/client file reads.
+  - [x] Ensure HTTP shutdown stops accepting new work by dropping the server accept loop on cancellation and closing the storage gate to new top-level operations.
+  - [x] Make storage shutdown wait for or explicitly report surviving DB readers/writers before logging shutdown complete.
+  - [x] Add diagnostics for active engine operations and long-running shutdown blockers.
+  - [x] Make successful shutdown idempotent so `Drop` does not emit duplicate completion logs after an explicit shutdown.
+
+- [ ] Investigate dirty-startup recovery performance.
+  - [ ] Profile WAL/KV scan cost on large production-sized databases.
+  - [x] Identify and remove the avoidable chunk/void payload reads from dirty WAL/KV rebuild scans.
+  - [x] Add dirty-startup scan diagnostics for skipped payload bytes.
+  - [x] Validate dirty recovery on a forced-dirty `/tmp/codex` database with byte-for-byte file recovery.
+  - [ ] Consider checkpointing or incremental recovery metadata so dirty startup does not require multi-hundred-GB scans.

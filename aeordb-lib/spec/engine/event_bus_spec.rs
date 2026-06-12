@@ -4,7 +4,7 @@ use aeordb::engine::{
   EVENT_ENTRIES_DELETED, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED,
   EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED, EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED,
   EVENT_INDEXES_UPDATED, EVENT_ERRORS, EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED, EVENT_PLUGINS_DEPLOYED,
-  EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS,
+  EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS, EVENT_SERVER_READY,
 };
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -264,7 +264,7 @@ async fn test_heartbeat_data_serialize() {
 
 #[test]
 fn test_event_type_constants() {
-  // Verify all 21 event type constants are distinct non-empty strings
+  // Verify all event type constants are distinct non-empty strings
   let all_types: Vec<&str> = vec![
     EVENT_ENTRIES_CREATED,
     EVENT_ENTRIES_UPDATED,
@@ -287,8 +287,9 @@ fn test_event_type_constants() {
     EVENT_PLUGINS_REMOVED,
     EVENT_HEARTBEAT,
     EVENT_METRICS,
+    EVENT_SERVER_READY,
   ];
-  assert_eq!(all_types.len(), 21);
+  assert_eq!(all_types.len(), 22);
   for t in &all_types {
     assert!(!t.is_empty());
   }

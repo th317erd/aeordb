@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 
 use fs2::FileExt;
 
@@ -34,6 +35,26 @@ use crate::engine::void_manager::VoidManager;
 pub struct WriteBatch {
   entries: Vec<BatchEntry>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkEntryMetadata {
+  pub stored_value_length: u64,
+  pub raw_value_length: Option<u64>,
+  pub compression_algo: CompressionAlgorithm,
+}
+
+#[derive(Debug, Clone)]
+pub struct EngineStartupProgress {
+  pub phase: String,
+  pub message: String,
+  pub current: u64,
+  pub total: Option<u64>,
+  /// Phase-local progress, where 0.0 is just started and 1.0 is complete.
+  pub progress: Option<f64>,
+  pub eta_seconds: Option<u64>,
+}
+
+pub type EngineStartupProgressCallback = Arc<dyn Fn(EngineStartupProgress) + Send + Sync + 'static>;
 
 struct BatchEntry {
   entry_type: EntryType,
@@ -71,6 +92,28 @@ impl WriteBatch {
 /// Result type for entry retrieval: (header, key, value).
 pub type EntryData = (EntryHeader, Vec<u8>, Vec<u8>);
 
+fn estimate_remaining_seconds(elapsed: std::time::Duration, current: u64, total: u64) -> Option<u64> {
+  if total == 0 {
+    return None;
+  }
+  if current >= total {
+    return Some(0);
+  }
+  if current == 0 {
+    return None;
+  }
+  let elapsed_secs = elapsed.as_secs_f64();
+  if elapsed_secs <= 0.0 {
+    return None;
+  }
+  let bytes_per_second = current as f64 / elapsed_secs;
+  if bytes_per_second <= 0.0 {
+    return None;
+  }
+  let remaining = total.saturating_sub(current) as f64;
+  Some((remaining / bytes_per_second).ceil() as u64)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RebuildOrder {
   timestamp: i64,
@@ -91,6 +134,139 @@ struct RebuildKvRecord {
   value_length: u32,
   total_length: u32,
   order: RebuildOrder,
+}
+
+#[derive(Debug, Clone)]
+pub struct EngineOperationSnapshot {
+  pub shutting_down: bool,
+  pub active_operations: usize,
+  pub operations: Vec<(String, usize)>,
+}
+
+#[derive(Default)]
+struct EngineOperationTracker {
+  state: Mutex<EngineOperationState>,
+  idle: Condvar,
+}
+
+#[derive(Default)]
+struct EngineOperationState {
+  shutting_down: bool,
+  active_operations: usize,
+  operations: HashMap<&'static str, usize>,
+}
+
+struct EngineOperationGuard<'a> {
+  tracker: &'a EngineOperationTracker,
+  operation: &'static str,
+  engine_id: usize,
+  counted: bool,
+}
+
+impl EngineOperationTracker {
+  fn begin(&self, engine_id: usize, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
+    let nested = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+    if nested {
+      return Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: false });
+    }
+
+    let mut state = match self.state.lock() {
+      Ok(state) => state,
+      Err(error) => {
+        ENGINE_OPERATION_STACK.with(|stack| {
+          let mut stack = stack.borrow_mut();
+          let popped = stack.pop();
+          debug_assert_eq!(popped, Some(engine_id));
+        });
+        return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
+      }
+    };
+    if state.shutting_down {
+      ENGINE_OPERATION_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let popped = stack.pop();
+        debug_assert_eq!(popped, Some(engine_id));
+      });
+      return Err(EngineError::ShuttingDown);
+    }
+    state.active_operations += 1;
+    *state.operations.entry(operation).or_insert(0) += 1;
+    Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: true })
+  }
+
+  fn begin_shutdown(&self) {
+    if let Ok(mut state) = self.state.lock() {
+      state.shutting_down = true;
+      if state.active_operations == 0 {
+        self.idle.notify_all();
+      }
+    }
+  }
+
+  fn snapshot(&self) -> EngineOperationSnapshot {
+    let Ok(state) = self.state.lock() else {
+      return EngineOperationSnapshot { shutting_down: true, active_operations: 0, operations: Vec::new() };
+    };
+    let mut operations: Vec<(String, usize)> = state.operations.iter().map(|(name, count)| ((*name).to_string(), *count)).collect();
+    operations.sort_by(|a, b| a.0.cmp(&b.0));
+    EngineOperationSnapshot { shutting_down: state.shutting_down, active_operations: state.active_operations, operations }
+  }
+
+  fn wait_until_idle(&self, timeout: std::time::Duration) -> EngineOperationSnapshot {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut state = match self.state.lock() {
+      Ok(state) => state,
+      Err(_) => return self.snapshot(),
+    };
+    while state.active_operations > 0 {
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        break;
+      }
+      let remaining = deadline.saturating_duration_since(now);
+      match self.idle.wait_timeout(state, remaining) {
+        Ok((next_state, result)) => {
+          state = next_state;
+          if result.timed_out() {
+            break;
+          }
+        }
+        Err(_) => return self.snapshot(),
+      }
+    }
+    let mut operations: Vec<(String, usize)> = state.operations.iter().map(|(name, count)| ((*name).to_string(), *count)).collect();
+    operations.sort_by(|a, b| a.0.cmp(&b.0));
+    EngineOperationSnapshot { shutting_down: state.shutting_down, active_operations: state.active_operations, operations }
+  }
+}
+
+impl Drop for EngineOperationGuard<'_> {
+  fn drop(&mut self) {
+    ENGINE_OPERATION_STACK.with(|stack| {
+      let mut stack = stack.borrow_mut();
+      let popped = stack.pop();
+      debug_assert_eq!(popped, Some(self.engine_id));
+    });
+
+    if !self.counted {
+      return;
+    }
+
+    let Ok(mut state) = self.tracker.state.lock() else {
+      return;
+    };
+    state.active_operations = state.active_operations.saturating_sub(1);
+    if let Some(count) = state.operations.get_mut(self.operation) {
+      *count = count.saturating_sub(1);
+      if *count == 0 {
+        state.operations.remove(self.operation);
+      }
+    }
+    if state.active_operations == 0 {
+      self.tracker.idle.notify_all();
+    }
+  }
 }
 
 impl RebuildKvRecord {
@@ -148,6 +324,8 @@ pub struct DatabaseStats {
 /// Lock-free snapshot reads allow concurrent readers while a single writer
 /// appends new entries.
 pub struct StorageEngine {
+  operation_tracker: EngineOperationTracker,
+  shutdown_complete: AtomicBool,
   namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
@@ -189,6 +367,38 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+  fn operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
+    let engine_id = self as *const StorageEngine as usize;
+    self.operation_tracker.begin(engine_id, operation)
+  }
+
+  fn internal_operation_scope(&self, operation: &'static str) -> EngineOperationGuard<'_> {
+    let engine_id = self as *const StorageEngine as usize;
+    ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+    EngineOperationGuard { tracker: &self.operation_tracker, operation, engine_id, counted: false }
+  }
+
+  /// Stop accepting new top-level engine operations. Existing operations are
+  /// allowed to finish so shutdown can avoid closing under an active DB read
+  /// or write.
+  pub fn begin_shutdown(&self) {
+    self.operation_tracker.begin_shutdown();
+  }
+
+  /// Wait for currently active top-level engine operations to drain.
+  pub fn wait_for_active_operations(&self, timeout: std::time::Duration) -> EngineOperationSnapshot {
+    self.operation_tracker.wait_until_idle(timeout)
+  }
+
+  pub fn active_operations_snapshot(&self) -> EngineOperationSnapshot {
+    self.operation_tracker.snapshot()
+  }
+
+  fn shutdown_operation_wait_timeout() -> std::time::Duration {
+    let seconds = std::env::var("AEORDB_SHUTDOWN_OPERATION_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(600);
+    std::time::Duration::from_secs(seconds)
+  }
+
   pub(crate) fn valid_reusable_range(offset: u64, size: u32, wal_start: u64, wal_end: u64) -> bool {
     if size == 0 || wal_end < wal_start || offset < wal_start {
       return false;
@@ -395,6 +605,8 @@ impl StorageEngine {
     let void_manager = VoidManager::new(hash_algo);
 
     let engine = StorageEngine {
+      operation_tracker: EngineOperationTracker::default(),
+      shutdown_complete: AtomicBool::new(false),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -427,7 +639,18 @@ impl StorageEngine {
   /// 4. Scan WAL for void entries (in-memory optimization)
   ///
   /// If the hot tail is corrupt, falls back to a full WAL scan rebuild.
-  fn open_internal(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
+  fn open_internal(path: &str, _hot_dir: Option<&Path>, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<Self> {
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "opening_file".to_string(),
+        message: "Opening database file".to_string(),
+        current: 0,
+        total: None,
+        progress: Some(0.0),
+        eta_seconds: None,
+      },
+    );
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
@@ -608,6 +831,8 @@ impl StorageEngine {
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
     let engine = StorageEngine {
+      operation_tracker: EngineOperationTracker::default(),
+      shutdown_complete: AtomicBool::new(false),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -640,7 +865,7 @@ impl StorageEngine {
       if needs_dirty_startup {
         tracing::warn!("Dirty startup: rebuilding KV index from full WAL scan...");
       }
-      engine.rebuild_kv()?;
+      engine.rebuild_kv_with_progress(progress_callback.clone())?;
       // Re-initialize counters from the freshly rebuilt KV
       let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine));
       engine.counters.store(refreshed);
@@ -648,14 +873,42 @@ impl StorageEngine {
       // Dirty rebuild lost the hot tail's void state. Re-derive voids by
       // gap-scanning the rebuilt KV (sorted by offset, ignoring deleted
       // entries) — any byte range not covered by a live KV entry is a void.
+      Self::report_startup_progress(
+        &progress_callback,
+        EngineStartupProgress {
+          phase: "recovering_voids".to_string(),
+          message: "Recovering reusable WAL gaps after dirty startup".to_string(),
+          current: 0,
+          total: None,
+          progress: Some(0.96),
+          eta_seconds: None,
+        },
+      );
       engine.recover_voids_via_gap_scan()?;
     }
 
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer();
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "engine_ready".to_string(),
+        message: "Storage engine is open".to_string(),
+        current: 1,
+        total: Some(1),
+        progress: Some(1.0),
+        eta_seconds: Some(0),
+      },
+    );
 
     Ok(engine)
+  }
+
+  fn report_startup_progress(callback: &Option<EngineStartupProgressCallback>, progress: EngineStartupProgress) {
+    if let Some(callback) = callback {
+      callback(progress);
+    }
   }
 
   /// Gap-scan the live KV index and register each gap (between consecutive
@@ -793,7 +1046,7 @@ impl StorageEngine {
   /// missing or stale. Does not use a hot directory. Refuses to open patch
   /// databases (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, None)?;
+    let engine = Self::open_internal(path, None, None)?;
 
     // Guard: refuse to open patch databases as normal databases
     let header = engine
@@ -824,7 +1077,15 @@ impl StorageEngine {
   /// file for ongoing writes. This is the recommended open path for production
   /// servers.
   pub fn open_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, hot_dir)?;
+    Self::open_with_hot_dir_and_progress(path, hot_dir, None)
+  }
+
+  pub fn open_with_hot_dir_and_progress(
+    path: &str,
+    hot_dir: Option<&Path>,
+    progress_callback: Option<EngineStartupProgressCallback>,
+  ) -> EngineResult<Self> {
+    let engine = Self::open_internal(path, hot_dir, progress_callback)?;
 
     // Guard: refuse to open patch databases as normal databases
     let header = engine
@@ -851,7 +1112,7 @@ impl StorageEngine {
 
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path, None)
+    Self::open_internal(path, None, None)
   }
 
   /// Store an entry: append to file, register in KV store.
@@ -917,6 +1178,7 @@ impl StorageEngine {
     compression_algo: CompressionAlgorithm,
     entry_version: u8,
   ) -> EngineResult<u64> {
+    let _operation = self.operation_guard("store_entry")?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
 
@@ -1058,6 +1320,7 @@ impl StorageEngine {
   ///
   /// Returns `(header, key, value)` if a non-deleted entry exists.
   pub fn get_entry(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash) {
       Some(entry) if !entry.is_deleted() => entry,
@@ -1085,10 +1348,25 @@ impl StorageEngine {
     result.map(Some)
   }
 
+  /// Retrieve only an entry header by key without reading the entry value.
+  pub fn get_entry_header(&self, hash: &[u8]) -> EngineResult<Option<EntryHeader>> {
+    let _operation = self.operation_guard("get_entry_header")?;
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get(hash) {
+      Some(entry) if !entry.is_deleted() => entry,
+      _ => return Ok(None),
+    };
+
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_header")?;
+    writer.read_entry_header_at_shared(kv_entry.offset).map(Some)
+  }
+
   /// Retrieve an entry by hash, including deleted entries.
   /// Used for version history where we need to read files that were
   /// deleted after a snapshot was taken.
   pub fn get_entry_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash) {
       Some(entry) => entry,
@@ -1105,6 +1383,7 @@ impl StorageEngine {
   /// Use this for user-facing reads (GET /files/) where integrity matters.
   /// Internal engine reads use `get_entry()` without verification for performance.
   pub fn get_entry_verified(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry_verified")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash) {
       Some(entry) if !entry.is_deleted() => entry,
@@ -1121,6 +1400,7 @@ impl StorageEngine {
   /// Like `get_entry_verified` but includes entries marked as deleted.
   /// Needed for reading historical chunk data when streaming files from snapshots.
   pub fn get_entry_verified_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry_verified_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash) {
       Some(entry) => entry,
@@ -1154,6 +1434,24 @@ impl StorageEngine {
     }
   }
 
+  /// Return metadata for a live chunk without loading its value.
+  pub fn get_chunk_metadata(&self, hash: &[u8]) -> EngineResult<Option<ChunkEntryMetadata>> {
+    let Some(header) = self.get_entry_header(hash)? else {
+      return Ok(None);
+    };
+
+    if header.entry_type != EntryType::Chunk {
+      return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(hash))));
+    }
+
+    let raw_value_length = if header.compression_algo == CompressionAlgorithm::None { Some(header.value_length as u64) } else { None };
+    Ok(Some(ChunkEntryMetadata {
+      stored_value_length: header.value_length as u64,
+      raw_value_length,
+      compression_algo: header.compression_algo,
+    }))
+  }
+
   /// Read a chunk including deleted entries and return its decompressed bytes.
   pub fn read_chunk_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
     match self.get_entry_including_deleted(hash)? {
@@ -1180,6 +1478,7 @@ impl StorageEngine {
 
   /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
+    let _operation = self.operation_guard("has_entry")?;
     let snapshot = self.kv_snapshot.load();
     match snapshot.get(hash) {
       Some(entry) => Ok(!entry.is_deleted()),
@@ -1225,6 +1524,7 @@ impl StorageEngine {
 
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
+    let _operation = self.operation_guard("update_head")?;
     let _namespace = self.namespace_write_guard()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let in_transaction =
@@ -1244,12 +1544,14 @@ impl StorageEngine {
   /// Read the current HEAD hash from the file header. HEAD points to the
   /// content-addressed root directory and represents the latest version.
   pub fn head_hash(&self) -> EngineResult<Vec<u8>> {
+    let _operation = self.operation_guard("head_hash")?;
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     Ok(writer.file_header().head_hash.clone())
   }
 
   /// Get the backup metadata from the file header.
   pub fn backup_info(&self) -> EngineResult<(u8, Vec<u8>, Vec<u8>)> {
+    let _operation = self.operation_guard("backup_info")?;
     let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?;
     let fh = writer.file_header();
     Ok((fh.backup_type, fh.base_hash.clone(), fh.target_hash.clone()))
@@ -1257,6 +1559,7 @@ impl StorageEngine {
 
   /// Update the backup metadata in the file header.
   pub fn set_backup_info(&self, backup_type: u8, base_hash: &[u8], target_hash: &[u8]) -> EngineResult<()> {
+    let _operation = self.operation_guard("set_backup_info")?;
     let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
     let mut header = writer.file_header().clone();
     header.backup_type = backup_type;
@@ -1274,6 +1577,7 @@ impl StorageEngine {
   /// could leave the entry on disk but missing from the index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_typed(&self, entry_type: EntryType, key: &[u8], value: &[u8], kv_type: u8) -> EngineResult<u64> {
+    let _operation = self.operation_guard("store_entry_typed")?;
     // Acquire BOTH locks before any work to close the TOCTOU gap.
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -1297,6 +1601,7 @@ impl StorageEngine {
   /// KV inserts could leave entries on disk but missing from the index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn flush_batch(&self, batch: WriteBatch) -> EngineResult<Vec<u64>> {
+    let _operation = self.operation_guard("flush_batch")?;
     if batch.is_empty() {
       return Ok(Vec::new());
     }
@@ -1343,6 +1648,7 @@ impl StorageEngine {
   /// Flush a write batch AND update HEAD atomically in a single lock hold.
   /// This avoids separate lock acquisitions for the batch and the head update.
   pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
+    let _operation = self.operation_guard("flush_batch_and_update_head")?;
     let _namespace = self.namespace_write_guard()?;
     if batch.is_empty() {
       // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
@@ -1586,6 +1892,7 @@ impl StorageEngine {
 
   /// Check if a KV entry is marked as deleted.
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
+    let _operation = self.operation_guard("is_entry_deleted")?;
     let snapshot = self.kv_snapshot.load();
     match snapshot.get_raw(hash) {
       Some(entry) => Ok(entry.is_deleted()),
@@ -1595,6 +1902,7 @@ impl StorageEngine {
 
   /// Mark a KV entry as deleted by setting the deleted flag.
   pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
+    let _operation = self.operation_guard("mark_entry_deleted")?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let updated = kv.update_flags(hash, KV_FLAG_DELETED);
     if !updated {
@@ -1680,6 +1988,7 @@ impl StorageEngine {
   /// Read only the entry header at a given file offset.
   /// Used by GC to determine entry size without reading the full payload.
   pub fn read_entry_header_at(&self, offset: u64) -> EngineResult<EntryHeader> {
+    let _operation = self.operation_guard("read_entry_header_at")?;
     // Use a READ lock — read_entry_at_shared uses a cloned file handle.
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
@@ -1689,7 +1998,7 @@ impl StorageEngine {
         reason: format!("entry header offset is outside current WAL region {}..{}", wal_start, wal_end),
       });
     }
-    let (header, _key, _value) = writer.read_entry_at_shared(offset)?;
+    let header = writer.read_entry_header_at_shared(offset)?;
     if !Self::valid_reusable_range(offset, header.total_length, wal_start, wal_end) {
       return Err(EngineError::CorruptEntry {
         offset,
@@ -1702,6 +2011,7 @@ impl StorageEngine {
   /// Write a DeletionRecord entry at a specific file offset (in-place).
   /// Returns the total bytes written.
   pub fn write_deletion_at(&self, offset: u64, path: &str) -> EngineResult<u32> {
+    let _operation = self.operation_guard("write_deletion_at")?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
@@ -1723,6 +2033,7 @@ impl StorageEngine {
 
   /// Write a void entry at a specific file offset (in-place).
   pub fn write_void_at(&self, offset: u64, size: u32) -> EngineResult<()> {
+    let _operation = self.operation_guard("write_void_at")?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
@@ -1744,6 +2055,7 @@ impl StorageEngine {
 
   /// Write a DeletionRecord in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_deletion_at_nosync(&self, offset: u64, path: &str) -> EngineResult<u32> {
+    let _operation = self.operation_guard("write_deletion_at_nosync")?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
@@ -1765,6 +2077,7 @@ impl StorageEngine {
 
   /// Write a void in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_void_at_nosync(&self, offset: u64, size: u32) -> EngineResult<()> {
+    let _operation = self.operation_guard("write_void_at_nosync")?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
@@ -1786,12 +2099,14 @@ impl StorageEngine {
 
   /// Sync the append writer to disk. Call after batch nosync operations.
   pub fn sync_writer(&self) -> EngineResult<()> {
+    let _operation = self.operation_guard("sync_writer")?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     writer.sync()
   }
 
   /// Batch remove multiple entries from the KV store. Publishes snapshot once at the end.
   pub fn remove_kv_entries_batch(&self, hashes: &[Vec<u8>]) -> EngineResult<()> {
+    let _operation = self.operation_guard("remove_kv_entries_batch")?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted_batch(hashes);
     Ok(())
@@ -1799,6 +2114,7 @@ impl StorageEngine {
 
   /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
   pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
+    let _operation = self.operation_guard("remove_kv_entry")?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted(hash);
     Ok(())
@@ -1806,6 +2122,7 @@ impl StorageEngine {
 
   /// Iterate all live KV entries. Used by GC sweep.
   pub fn iter_kv_entries(&self) -> EngineResult<Vec<KVEntry>> {
+    let _operation = self.operation_guard("iter_kv_entries")?;
     let snapshot = self.kv_snapshot.load();
     snapshot.iter_all()
   }
@@ -1821,6 +2138,7 @@ impl StorageEngine {
   /// Uses the prebuilt type index for O(k) lookup where k is the number of
   /// entries of the target type. Reads each entry's value from disk.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let _operation = self.operation_guard("entries_by_type")?;
     let entries: Vec<KVEntry> = {
       let snapshot = self.kv_snapshot.load();
       snapshot.iter_by_type(target_type)
@@ -1909,6 +2227,10 @@ impl StorageEngine {
   /// every entry in the `.aeordb` file. Corrupt entries are skipped with a
   /// warning. The rebuilt KV store is swapped in atomically.
   pub fn rebuild_kv(&self) -> EngineResult<()> {
+    self.rebuild_kv_with_progress(None)
+  }
+
+  pub fn rebuild_kv_with_progress(&self, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<()> {
     let _mem = crate::engine::rss_sampler::PhaseSampler::start("rebuild_kv", std::time::Duration::from_millis(50));
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
@@ -1928,18 +2250,38 @@ impl StorageEngine {
         file_path = %writer.file_path().display(),
         "rebuild_kv: scanning WAL to EOF (dirty recovery)"
       );
-      let scanner = writer.scan_entries_dirty_recovery()?;
+      let mut scanner = writer.scan_entries_dirty_recovery()?;
+      let scan_start_offset = scanner.current_offset();
+      let scan_total_bytes = scanner.file_length().saturating_sub(scan_start_offset);
+      let mut last_progress_log = std::time::Instant::now();
+      let scan_timer = std::time::Instant::now();
       let mut collected = Vec::new();
       let mut deletions = Vec::new();
-      for result in scanner {
+      Self::report_startup_progress(
+        &progress_callback,
+        EngineStartupProgress {
+          phase: "rebuild_kv_scan".to_string(),
+          message: "Scanning WAL entries for dirty startup recovery".to_string(),
+          current: 0,
+          total: Some(scan_total_bytes),
+          progress: Some(0.0),
+          eta_seconds: None,
+        },
+      );
+      let mut skipped_payload_bytes = 0u64;
+      while let Some(result) = scanner.next_rebuild_entry() {
         match result {
           Ok(scanned) => {
             let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
             if scanned.header.entry_type == EntryType::DeletionRecord {
-              if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version)
-              {
-                deletions.push((record.path, order));
+              if let Some(value) = scanned.value.as_ref() {
+                if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value, scanned.header.entry_version) {
+                  deletions.push((record.path, order));
+                }
               }
+            }
+            if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
+              skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
             }
             collected.push(RebuildKvRecord {
               type_flags: scanned.header.entry_type.to_kv_type(),
@@ -1954,12 +2296,61 @@ impl StorageEngine {
             tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
           }
         }
+        if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
+          let current = scanner.current_offset();
+          let scanned_bytes = current.saturating_sub(scan_start_offset);
+          let progress_pct = if scan_total_bytes > 0 { (scanned_bytes as f64 / scan_total_bytes as f64) * 100.0 } else { 100.0 };
+          let phase_progress =
+            if scan_total_bytes > 0 { ((scanned_bytes as f64 / scan_total_bytes as f64) * 0.80).clamp(0.0, 0.80) } else { 0.80 };
+          let eta_seconds = estimate_remaining_seconds(scan_timer.elapsed(), scanned_bytes, scan_total_bytes);
+          tracing::info!(
+            current_offset = current,
+            scanned_bytes,
+            total_scan_bytes = scan_total_bytes,
+            progress_pct,
+            entries_collected = collected.len(),
+            deletion_records = deletions.len(),
+            skipped_payload_bytes,
+            "rebuild_kv: WAL scan progress"
+          );
+          Self::report_startup_progress(
+            &progress_callback,
+            EngineStartupProgress {
+              phase: "rebuild_kv_scan".to_string(),
+              message: "Scanning WAL entries for dirty startup recovery".to_string(),
+              current: scanned_bytes,
+              total: Some(scan_total_bytes),
+              progress: Some(phase_progress),
+              eta_seconds,
+            },
+          );
+          last_progress_log = std::time::Instant::now();
+        }
       }
+      tracing::info!(
+        scanned_bytes = scanner.current_offset().saturating_sub(scan_start_offset),
+        total_scan_bytes = scan_total_bytes,
+        entries_collected = collected.len(),
+        deletion_records = deletions.len(),
+        skipped_payload_bytes,
+        duration_ms = scan_timer.elapsed().as_millis() as u64,
+        "rebuild_kv: WAL scan complete"
+      );
       (collected, deletions)
     };
     // Writer lock released here
-    tracing::debug!(scanned_entries = scanned_records.len(), "rebuild_kv: WAL scan complete");
     let scanned_count = scanned_records.len() as u64;
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "rebuild_kv_resolve".to_string(),
+        message: "Resolving latest WAL records for the rebuilt KV index".to_string(),
+        current: scanned_count,
+        total: Some(scanned_count),
+        progress: Some(0.82),
+        eta_seconds: None,
+      },
+    );
 
     // Read layout info from the file header
     let (kv_block_offset, file_path, existing_stage) = {
@@ -2024,6 +2415,17 @@ impl StorageEngine {
     // bucket pages, potentially evicting entries from earlier flushes).
     let resolved_entries = Self::resolve_rebuild_records(scanned_records, hash_algo, &deletion_records)?;
     let inserted_count = resolved_entries.len();
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "rebuild_kv_insert".to_string(),
+        message: "Buffering resolved KV records".to_string(),
+        current: 0,
+        total: Some(inserted_count as u64),
+        progress: Some(0.86),
+        eta_seconds: None,
+      },
+    );
     for kv_entry in &resolved_entries {
       new_kv.buffer_only(kv_entry.clone());
     }
@@ -2035,6 +2437,17 @@ impl StorageEngine {
       "rebuild_kv: all entries inserted, replaying deletions and flushing"
     );
 
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "rebuild_kv_flush".to_string(),
+        message: "Flushing rebuilt KV pages to disk".to_string(),
+        current: inserted_count as u64,
+        total: Some(inserted_count as u64),
+        progress: Some(0.92),
+        eta_seconds: None,
+      },
+    );
     new_kv.flush()?;
     new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot));
 
@@ -2077,6 +2490,17 @@ impl StorageEngine {
 
     let elapsed = timer.elapsed();
     tracing::info!("KV rebuild complete: {} entries indexed in {:.2}s", inserted_count, elapsed.as_secs_f64());
+    Self::report_startup_progress(
+      &progress_callback,
+      EngineStartupProgress {
+        phase: "rebuild_kv_complete".to_string(),
+        message: "KV rebuild complete".to_string(),
+        current: inserted_count as u64,
+        total: Some(inserted_count as u64),
+        progress: Some(0.95),
+        eta_seconds: Some(0),
+      },
+    );
 
     Ok(())
   }
@@ -2233,7 +2657,26 @@ impl StorageEngine {
   /// 2. Flush the hot file buffer (crash-recovery journal)
   /// 3. Sync the WAL file to ensure all OS-buffered writes are durable
   pub fn shutdown(&self) -> EngineResult<()> {
+    if self.shutdown_complete.load(Ordering::Acquire) {
+      tracing::debug!("Storage engine shutdown already complete");
+      return Ok(());
+    }
+
     tracing::info!("Shutting down storage engine...");
+    self.begin_shutdown();
+    let _shutdown_operation = self.internal_operation_scope("shutdown");
+
+    let drain_timeout = Self::shutdown_operation_wait_timeout();
+    let snapshot = self.wait_for_active_operations(drain_timeout);
+    if snapshot.active_operations > 0 {
+      tracing::error!(
+        active_operations = snapshot.active_operations,
+        operations = ?snapshot.operations,
+        wait_seconds = drain_timeout.as_secs(),
+        "Storage engine shutdown blocked by active operations"
+      );
+      return Err(EngineError::ShuttingDown);
+    }
 
     if let Err(e) = self.flush_index_buffer() {
       tracing::error!("Index buffer flush failed during shutdown: {}", e);
@@ -2284,6 +2727,7 @@ impl StorageEngine {
     }
 
     tracing::info!("Storage engine shutdown complete");
+    self.shutdown_complete.store(true, Ordering::Release);
     Ok(())
   }
 }
@@ -2296,6 +2740,7 @@ impl Drop for StorageEngine {
 
 thread_local! {
   static NAMESPACE_WRITE_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+  static ENGINE_OPERATION_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) struct NamespaceWriteGuard<'a> {

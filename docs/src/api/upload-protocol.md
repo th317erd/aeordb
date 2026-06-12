@@ -161,7 +161,9 @@ If the computed hash does not match the URL parameter, the upload is rejected.
 
 ### Compression
 
-The server automatically applies Zstd compression to chunks when beneficial (based on size heuristics). This is transparent to the client.
+Blob staging stores chunk bytes exactly as uploaded. AeorDB does not blindly
+compress `/blobs/chunks/` payloads because large media files are often already
+compressed, and commit can use raw chunk headers for fast metadata validation.
 
 ### Example
 
@@ -186,11 +188,17 @@ curl -X PUT http://localhost:6830/blobs/chunks/f6e5d4c3b2a1... \
 
 Atomically commit multiple files from previously uploaded chunks. Each file specifies its path, content type, and the ordered list of chunk hashes that compose it.
 
-During commit, AeorDB streams the ordered stored chunks and records the raw
-whole-file content hash (`blake3(file bytes)`) in the file metadata. That
-stored value backs `@hash` searches; it is not derived from the first chunk.
-Committed files are written as FileRecord v1 entries so the hash is stored in
-the record metadata instead of being recomputed by the indexing engine.
+During commit, AeorDB records the raw whole-file content hash
+(`blake3(file bytes)`) in the file metadata. That stored value backs `@hash`
+searches; it is not derived from the first chunk.
+
+By default, AeorDB streams the ordered stored chunks and computes that hash on
+the server. Trusted sync clients that already computed the raw file hash can
+send `content_hash` and `size` with each file. For raw stored chunks, AeorDB
+then validates chunk existence and byte length from entry headers and can
+publish the FileRecord without rereading every chunk body. If the chunk entries
+require decompression, AeorDB falls back to streaming the chunks and verifies
+the supplied `content_hash` against the computed value.
 
 ### Request Body
 
@@ -200,6 +208,8 @@ the record metadata instead of being recomputed by the indexing engine.
     {
       "path": "/data/report.pdf",
       "content_type": "application/pdf",
+      "content_hash": "9b01f3e3d06f...",
+      "size": 15234212,
       "chunk_hashes": [
         "a1b2c3d4e5f6...",
         "f6e5d4c3b2a1..."
@@ -221,7 +231,9 @@ the record metadata instead of being recomputed by the indexing engine.
 | `files` | array | Yes | List of files to commit |
 | `files[].path` | string | Yes | Destination path for the file |
 | `files[].content_type` | string | No | MIME type |
-| `files[].chunk_hashes` | array | Yes | Ordered list of hex-encoded chunk hashes |
+| `files[].chunk_hashes` | array | Yes | Ordered list of hex-encoded chunk hashes. `chunks` is also accepted for compatibility. |
+| `files[].content_hash` | string | No | Raw whole-file hash (`blake3(file bytes)`) as hex. When paired with `size`, this enables the raw-chunk metadata fast path for trusted callers. |
+| `files[].size` | integer | No | Total raw file byte length. If supplied, AeorDB validates it against stored chunk metadata or the streamed byte count. |
 
 ### Response
 
@@ -240,6 +252,8 @@ curl -X POST http://localhost:6830/blobs/commit \
       {
         "path": "/data/report.pdf",
         "content_type": "application/pdf",
+        "content_hash": "9b01f3e3d06f...",
+        "size": 15234212,
         "chunk_hashes": ["a1b2c3d4...", "f6e5d4c3..."]
       }
     ]
@@ -250,7 +264,7 @@ curl -X POST http://localhost:6830/blobs/commit \
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Invalid input (missing path, bad hash, etc.) |
+| 400 | Invalid input (missing path, bad hash, size mismatch, etc.) |
 | 500 | Commit task failure or panic |
 
 ---
@@ -267,6 +281,8 @@ CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 # 2. Split file into chunks and hash them
 # (pseudo-code: split report.pdf into 256KB chunks, hash each with blake3)
 # chunk_hashes=["hash1", "hash2", ...]
+# content_hash=blake3(report.pdf raw bytes)
+# size=report.pdf raw byte length
 
 # 3. Check which chunks are needed
 DEDUP=$(curl -s -X POST http://localhost:6830/blobs/check \
@@ -289,6 +305,8 @@ curl -X POST http://localhost:6830/blobs/commit \
     "files": [{
       "path": "/data/report.pdf",
       "content_type": "application/pdf",
+      "content_hash": "whole-file-hash",
+      "size": 15234212,
       "chunk_hashes": ["hash1", "hash2"]
     }]
   }'

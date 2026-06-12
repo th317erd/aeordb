@@ -24,9 +24,20 @@ use crate::engine::storage_engine::StorageEngine;
 pub struct CommitFile {
   pub path: String,
   /// Hex-encoded chunk hashes (matching hashes already in the KV store).
+  #[serde(alias = "chunk_hashes")]
   pub chunks: Vec<String>,
   #[serde(default)]
   pub content_type: Option<String>,
+  /// Optional caller-asserted raw whole-file hash (`BLAKE3(file bytes)`).
+  ///
+  /// When present with `size` and all referenced chunks are stored raw, commit
+  /// can avoid a full chunk body read pass. If it must read chunk bodies
+  /// anyway, the supplied hash is verified against the computed value.
+  #[serde(default)]
+  pub content_hash: Option<String>,
+  /// Optional caller-asserted total file size in bytes.
+  #[serde(default)]
+  pub size: Option<u64>,
 }
 
 /// A small, fully-buffered file to commit through the embedded SDK batch path.
@@ -61,6 +72,25 @@ struct BatchFileInfo {
   child_entry: ChildEntry,
 }
 
+struct PreparedCommitFile {
+  chunks: Vec<(Vec<u8>, u64)>,
+  content_hash: Vec<u8>,
+  fast_path_status: &'static str,
+  chunk_metadata_lookup_us: u128,
+  chunk_body_read_us: u128,
+  chunk_body_read_bytes: u64,
+}
+
+#[derive(Default)]
+struct FinishBatchCommitTimings {
+  directories_updated: usize,
+  directory_update_ms: u128,
+  head_update_ms: u128,
+  event_emit_ms: u128,
+  metadata_index_ms: u128,
+  metadata_indexed_files: usize,
+}
+
 /// Atomically commit multiple files from pre-uploaded chunks.
 ///
 /// 1. Validates all chunk hashes exist in the KV store
@@ -69,9 +99,15 @@ struct BatchFileInfo {
 /// 4. Updates HEAD once
 /// 5. Emits a single `entries_created` event
 pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<CommitFile>) -> EngineResult<CommitResult> {
+  let total_start = std::time::Instant::now();
   if files.is_empty() {
     return Err(EngineError::InvalidInput("No files provided for commit".to_string()));
   }
+
+  let file_count = files.len();
+  let total_logical_file_bytes: u64 = files.iter().filter_map(|file| file.size).sum();
+  let supplied_content_hash_files = files.iter().filter(|file| file.content_hash.is_some()).count();
+  let supplied_size_files = files.iter().filter(|file| file.size.is_some()).count();
 
   // Reject any path under /.aeordb-system/ or /.aeordb-config/. System data
   // is written exclusively through dedicated APIs (system_store, directory_ops
@@ -94,46 +130,64 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   let algo = engine.hash_algo();
 
   // --- Phase 1: Validate all chunk hashes exist ---
+  let validation_start = std::time::Instant::now();
   let mut missing_chunks: Vec<String> = Vec::new();
   // Decode all hex chunk hashes upfront and validate existence.
   // file_chunks[i] = Vec of (raw_hash_bytes, chunk_byte_size) for files[i].
   let mut file_chunks: Vec<Vec<(Vec<u8>, u64)>> = Vec::with_capacity(files.len());
   let mut file_content_hashes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
+  let mut asserted_hash_fast_path_files = 0usize;
+  let mut fast_path_missing_content_hash_files = 0usize;
+  let mut fast_path_missing_size_files = 0usize;
+  let mut fast_path_metadata_incomplete_files = 0usize;
+  let mut chunk_metadata_lookup_us = 0u128;
+  let mut chunk_body_read_us = 0u128;
+  let mut chunk_body_read_bytes = 0u64;
+  let mut total_chunk_refs = 0usize;
 
   for file in &files {
-    let mut chunks_for_file: Vec<(Vec<u8>, u64)> = Vec::with_capacity(file.chunks.len());
-    let mut content_hasher = algo.incremental_hasher()?;
-    for hex_hash in &file.chunks {
-      let raw_hash =
-        hex::decode(hex_hash).map_err(|e| EngineError::InvalidInput(format!("Invalid hex chunk hash '{}': {}", hex_hash, e)))?;
-
-      // Verify chunk exists in KV store
-      match read_chunk_data(engine, &raw_hash)? {
-        Some(value) => {
-          content_hasher.update(&value);
-          chunks_for_file.push((raw_hash, value.len() as u64));
+    total_chunk_refs += file.chunks.len();
+    match prepare_commit_file(engine, file, algo.hash_length())? {
+      Ok(prepared) => {
+        match prepared.fast_path_status {
+          "used" => asserted_hash_fast_path_files += 1,
+          "missing_content_hash" => fast_path_missing_content_hash_files += 1,
+          "missing_size" => fast_path_missing_size_files += 1,
+          "chunk_metadata_incomplete" => fast_path_metadata_incomplete_files += 1,
+          _ => {}
         }
-        None => {
-          missing_chunks.push(hex_hash.clone());
-        }
+        chunk_metadata_lookup_us += prepared.chunk_metadata_lookup_us;
+        chunk_body_read_us += prepared.chunk_body_read_us;
+        chunk_body_read_bytes = chunk_body_read_bytes.saturating_add(prepared.chunk_body_read_bytes);
+        file_content_hashes.push(prepared.content_hash);
+        file_chunks.push(prepared.chunks);
+      }
+      Err(missing) => {
+        missing_chunks.extend(missing);
       }
     }
-    file_content_hashes.push(content_hasher.finalize());
-    file_chunks.push(chunks_for_file);
   }
 
   if !missing_chunks.is_empty() {
     return Err(EngineError::InvalidInput(format!("Missing {} chunk(s): {}", missing_chunks.len(), missing_chunks.join(", "))));
   }
 
+  let validation_elapsed = validation_start.elapsed();
+
   // Serialize the publish phase so mutable path keys, directory entries, and
   // HEAD are advanced as one namespace operation relative to other writers.
+  let namespace_wait_start = std::time::Instant::now();
   let _namespace = engine.namespace_write_guard()?;
-  let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
+  let namespace_wait_ms = namespace_wait_start.elapsed().as_millis();
+  let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
   // --- Phase 2: Create FileRecords ---
+  let publish_start = std::time::Instant::now();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
   let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
+  let mut first_chunk_sniff_reads = 0usize;
+  let mut first_chunk_sniff_bytes = 0u64;
+  let mut first_chunk_sniff_us = 0u128;
 
   for (i, file) in files.iter().enumerate() {
     let normalized = normalize_path(&file.path);
@@ -144,8 +198,20 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
 
     // Match DirectoryOps' MIME contract: trust specific caller-provided
     // types, but treat empty/octet-stream as unknown and sniff bytes.
-    let first_chunk_bytes =
-      if let Some(first_hash) = chunk_hashes.first() { read_chunk_data(engine, first_hash)?.unwrap_or_default() } else { Vec::new() };
+    let first_chunk_bytes = if content_type_needs_sniffing(file.content_type.as_deref()) {
+      if let Some(first_hash) = chunk_hashes.first() {
+        let sniff_start = std::time::Instant::now();
+        let bytes = read_chunk_data(engine, first_hash)?.unwrap_or_default();
+        first_chunk_sniff_us += sniff_start.elapsed().as_micros();
+        first_chunk_sniff_reads += 1;
+        first_chunk_sniff_bytes = first_chunk_sniff_bytes.saturating_add(bytes.len() as u64);
+        bytes
+      } else {
+        Vec::new()
+      }
+    } else {
+      Vec::new()
+    };
     let detected_content_type = detect_content_type(&first_chunk_bytes, file.content_type.as_deref());
 
     let published = publish_file_record_entries(
@@ -170,8 +236,44 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
       child_entry: published.child_entry,
     });
   }
+  let publish_file_records_ms = publish_start.elapsed().as_millis();
 
-  finish_batch_commit(engine, ctx, file_infos, event_entries)
+  let (result, finish_timings) = finish_batch_commit(engine, ctx, file_infos, event_entries)?;
+  let transaction_commit_start = std::time::Instant::now();
+  drop(txn);
+  let transaction_commit_ms = transaction_commit_start.elapsed().as_millis();
+
+  tracing::info!(
+    files = file_count,
+    total_chunk_refs,
+    total_logical_file_bytes,
+    supplied_content_hash_files,
+    supplied_size_files,
+    asserted_hash_fast_path_files,
+    fast_path_missing_content_hash_files,
+    fast_path_missing_size_files,
+    fast_path_metadata_incomplete_files,
+    chunk_metadata_lookup_us,
+    chunk_body_read_us,
+    chunk_body_read_bytes,
+    chunk_validation_ms = validation_elapsed.as_millis(),
+    namespace_wait_ms,
+    publish_file_records_ms,
+    first_chunk_sniff_reads,
+    first_chunk_sniff_bytes,
+    first_chunk_sniff_us,
+    directories_updated = finish_timings.directories_updated,
+    directory_update_ms = finish_timings.directory_update_ms,
+    head_update_ms = finish_timings.head_update_ms,
+    metadata_indexed_files = finish_timings.metadata_indexed_files,
+    metadata_index_ms = finish_timings.metadata_index_ms,
+    event_emit_ms = finish_timings.event_emit_ms,
+    transaction_commit_ms,
+    total_ms = total_start.elapsed().as_millis(),
+    "blob commit completed"
+  );
+
+  Ok(result)
 }
 
 /// Atomically commit multiple small files from raw in-memory buffers.
@@ -243,7 +345,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     });
   }
 
-  finish_batch_commit(engine, ctx, file_infos, event_entries)
+  finish_batch_commit(engine, ctx, file_infos, event_entries).map(|(result, _timings)| result)
 }
 
 fn finish_batch_commit(
@@ -251,7 +353,8 @@ fn finish_batch_commit(
   ctx: &RequestContext,
   file_infos: Vec<BatchFileInfo>,
   event_entries: Vec<EntryEventData>,
-) -> EngineResult<CommitResult> {
+) -> EngineResult<(CommitResult, FinishBatchCommitTimings)> {
+  let mut timings = FinishBatchCommitTimings::default();
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
 
@@ -294,7 +397,10 @@ fn finish_batch_commit(
       all_new_children.extend(extra);
     }
 
+    let directory_update_start = std::time::Instant::now();
     let (content_key, dir_data_len) = update_directory(engine, dir_path, all_new_children, hash_length, &algo)?;
+    timings.directory_update_ms += directory_update_start.elapsed().as_millis();
+    timings.directories_updated += 1;
 
     updated_dirs.insert(dir_path.clone(), (content_key.clone(), dir_data_len));
 
@@ -321,11 +427,14 @@ fn finish_batch_commit(
       // Check if grandparent is already in our pending list
       if updated_dirs.contains_key(&grandparent) {
         // Already processed — re-update it
+        let directory_update_start = std::time::Instant::now();
         let (new_content_key, new_len) = update_directory(engine, &grandparent, vec![dir_child], hash_length, &algo)?;
+        timings.directory_update_ms += directory_update_start.elapsed().as_millis();
+        timings.directories_updated += 1;
         updated_dirs.insert(grandparent.clone(), (new_content_key.clone(), new_len));
 
         // Continue propagating up from grandparent
-        propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, &algo, &mut updated_dirs)?;
+        propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, &algo, &mut updated_dirs, &mut timings)?;
       } else {
         // Grandparent not yet processed — queue it
         propagated.entry(grandparent).or_default().push(dir_child);
@@ -344,19 +453,24 @@ fn finish_batch_commit(
   });
 
   for (dir_path, children) in remaining {
+    let directory_update_start = std::time::Instant::now();
     let (content_key, dir_data_len) = update_directory(engine, &dir_path, children, hash_length, &algo)?;
+    timings.directory_update_ms += directory_update_start.elapsed().as_millis();
+    timings.directories_updated += 1;
     updated_dirs.insert(dir_path.clone(), (content_key.clone(), dir_data_len));
 
     // Propagate up
     if dir_path != "/" {
-      propagate_up(engine, &dir_path, &content_key, dir_data_len, hash_length, &algo, &mut updated_dirs)?;
+      propagate_up(engine, &dir_path, &content_key, dir_data_len, hash_length, &algo, &mut updated_dirs, &mut timings)?;
     }
   }
 
   // --- Phase 4: Update HEAD ---
   // The root "/" should have been updated. Use its content hash.
   if let Some((root_content_key, _)) = updated_dirs.get("/") {
+    let head_update_start = std::time::Instant::now();
     engine.update_head(root_content_key)?;
+    timings.head_update_ms += head_update_start.elapsed().as_millis();
   }
 
   // --- Phase 5: Emit event ---
@@ -364,18 +478,23 @@ fn finish_batch_commit(
   let result_files: Vec<CommittedFile> =
     file_infos.iter().map(|info| CommittedFile { path: info.normalized_path.clone(), size: info.file_record.total_size }).collect();
 
+  let event_emit_start = std::time::Instant::now();
   ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries }));
+  timings.event_emit_ms = event_emit_start.elapsed().as_millis();
 
+  let metadata_index_start = std::time::Instant::now();
   let pipeline = IndexingPipeline::new(engine);
   for info in &file_infos {
     if !is_system_path(&info.normalized_path) {
+      timings.metadata_indexed_files += 1;
       if let Err(error) = pipeline.run_metadata_only(ctx, &info.normalized_path) {
         tracing::warn!("Metadata indexing failed for '{}': {}", info.normalized_path, error);
       }
     }
   }
+  timings.metadata_index_ms = metadata_index_start.elapsed().as_millis();
 
-  Ok(CommitResult { committed, files: result_files })
+  Ok((CommitResult { committed, files: result_files }, timings))
 }
 
 /// Update a single directory by merging new children into its existing entries.
@@ -475,6 +594,7 @@ fn propagate_up(
   hash_length: usize,
   algo: &crate::engine::hash_algorithm::HashAlgorithm,
   updated_dirs: &mut HashMap<String, (Vec<u8>, u64)>,
+  timings: &mut FinishBatchCommitTimings,
 ) -> EngineResult<()> {
   if dir_path == "/" {
     // Already at root, nothing to propagate
@@ -499,12 +619,15 @@ fn propagate_up(
     node_id: 0,
   };
 
+  let directory_update_start = std::time::Instant::now();
   let (new_content_key, new_len) = update_directory(engine, &grandparent, vec![dir_child], hash_length, algo)?;
+  timings.directory_update_ms += directory_update_start.elapsed().as_millis();
+  timings.directories_updated += 1;
 
   updated_dirs.insert(grandparent.clone(), (new_content_key.clone(), new_len));
 
   if grandparent != "/" {
-    propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, algo, updated_dirs)?;
+    propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, algo, updated_dirs, timings)?;
   }
 
   Ok(())
@@ -512,6 +635,167 @@ fn propagate_up(
 
 fn should_skip_root_propagation(dir_path: &str, grandparent: &str) -> bool {
   grandparent == "/" && is_system_path(dir_path)
+}
+
+fn content_type_needs_sniffing(content_type: Option<&str>) -> bool {
+  match content_type {
+    Some(content_type) => content_type.is_empty() || content_type == "application/octet-stream",
+    None => true,
+  }
+}
+
+fn prepare_commit_file(
+  engine: &StorageEngine,
+  file: &CommitFile,
+  hash_length: usize,
+) -> EngineResult<Result<PreparedCommitFile, Vec<String>>> {
+  let decoded_hashes = decode_commit_chunk_hashes(file)?;
+  let supplied_content_hash = decode_commit_content_hash(file.content_hash.as_deref(), hash_length)?;
+  let mut chunk_metadata_lookup_us = 0u128;
+  let mut chunk_body_read_us = 0u128;
+  let mut chunk_body_read_bytes = 0u64;
+
+  if let Some(asserted_hash) = supplied_content_hash.as_ref().filter(|_| file.size.is_some()) {
+    let mut chunks_for_file: Vec<(Vec<u8>, u64)> = Vec::with_capacity(decoded_hashes.len());
+    let mut missing_chunks = Vec::new();
+    let mut total_size = 0u64;
+    let mut metadata_complete = true;
+
+    for (hex_hash, raw_hash) in &decoded_hashes {
+      let metadata_start = std::time::Instant::now();
+      match engine.get_chunk_metadata(raw_hash)? {
+        Some(metadata) => match metadata.raw_value_length {
+          Some(raw_len) => {
+            chunk_metadata_lookup_us += metadata_start.elapsed().as_micros();
+            total_size = total_size
+              .checked_add(raw_len)
+              .ok_or_else(|| EngineError::InvalidInput(format!("Commit size overflow while preparing '{}'", file.path)))?;
+            chunks_for_file.push((raw_hash.clone(), raw_len));
+          }
+          None => {
+            chunk_metadata_lookup_us += metadata_start.elapsed().as_micros();
+            metadata_complete = false;
+            break;
+          }
+        },
+        None => {
+          chunk_metadata_lookup_us += metadata_start.elapsed().as_micros();
+          missing_chunks.push(hex_hash.clone());
+        }
+      }
+    }
+
+    if !missing_chunks.is_empty() {
+      return Ok(Err(missing_chunks));
+    }
+
+    if metadata_complete {
+      validate_commit_size(file, total_size)?;
+      return Ok(Ok(PreparedCommitFile {
+        chunks: chunks_for_file,
+        content_hash: asserted_hash.clone(),
+        fast_path_status: "used",
+        chunk_metadata_lookup_us,
+        chunk_body_read_us,
+        chunk_body_read_bytes,
+      }));
+    }
+  }
+
+  let fast_path_status = if supplied_content_hash.is_none() {
+    "missing_content_hash"
+  } else if file.size.is_none() {
+    "missing_size"
+  } else {
+    "chunk_metadata_incomplete"
+  };
+
+  let algo = engine.hash_algo();
+  let mut chunks_for_file: Vec<(Vec<u8>, u64)> = Vec::with_capacity(decoded_hashes.len());
+  let mut missing_chunks = Vec::new();
+  let mut content_hasher = algo.incremental_hasher()?;
+  let mut total_size = 0u64;
+
+  for (hex_hash, raw_hash) in decoded_hashes {
+    let read_start = std::time::Instant::now();
+    match read_chunk_data(engine, &raw_hash)? {
+      Some(value) => {
+        chunk_body_read_us += read_start.elapsed().as_micros();
+        chunk_body_read_bytes = chunk_body_read_bytes.saturating_add(value.len() as u64);
+        content_hasher.update(&value);
+        let chunk_len = value.len() as u64;
+        total_size = total_size
+          .checked_add(chunk_len)
+          .ok_or_else(|| EngineError::InvalidInput(format!("Commit size overflow while preparing '{}'", file.path)))?;
+        chunks_for_file.push((raw_hash, chunk_len));
+      }
+      None => {
+        chunk_body_read_us += read_start.elapsed().as_micros();
+        missing_chunks.push(hex_hash);
+      }
+    }
+  }
+
+  if !missing_chunks.is_empty() {
+    return Ok(Err(missing_chunks));
+  }
+
+  validate_commit_size(file, total_size)?;
+  let computed_hash = content_hasher.finalize();
+  if let Some(asserted_hash) = supplied_content_hash {
+    if asserted_hash != computed_hash {
+      return Err(EngineError::InvalidInput(format!(
+        "Content hash mismatch for '{}': expected {}, computed {}",
+        file.path,
+        hex::encode(asserted_hash),
+        hex::encode(&computed_hash),
+      )));
+    }
+  }
+
+  Ok(Ok(PreparedCommitFile {
+    chunks: chunks_for_file,
+    content_hash: computed_hash,
+    fast_path_status,
+    chunk_metadata_lookup_us,
+    chunk_body_read_us,
+    chunk_body_read_bytes,
+  }))
+}
+
+fn decode_commit_chunk_hashes(file: &CommitFile) -> EngineResult<Vec<(String, Vec<u8>)>> {
+  let mut decoded = Vec::with_capacity(file.chunks.len());
+  for hex_hash in &file.chunks {
+    let raw_hash = hex::decode(hex_hash)
+      .map_err(|error| EngineError::InvalidInput(format!("Invalid hex chunk hash '{}' for '{}': {}", hex_hash, file.path, error)))?;
+    decoded.push((hex_hash.clone(), raw_hash));
+  }
+  Ok(decoded)
+}
+
+fn decode_commit_content_hash(content_hash: Option<&str>, hash_length: usize) -> EngineResult<Option<Vec<u8>>> {
+  let Some(content_hash) = content_hash else {
+    return Ok(None);
+  };
+
+  let decoded =
+    hex::decode(content_hash).map_err(|error| EngineError::InvalidInput(format!("Invalid content_hash '{}': {}", content_hash, error)))?;
+  if decoded.len() != hash_length {
+    return Err(EngineError::InvalidInput(format!("Invalid content_hash length {} bytes; expected {} bytes", decoded.len(), hash_length,)));
+  }
+  Ok(Some(decoded))
+}
+
+fn validate_commit_size(file: &CommitFile, actual_size: u64) -> EngineResult<()> {
+  if let Some(expected_size) = file.size {
+    if expected_size != actual_size {
+      return Err(EngineError::InvalidInput(format!(
+        "Size mismatch for '{}': expected {}, computed {}",
+        file.path, expected_size, actual_size,
+      )));
+    }
+  }
+  Ok(())
 }
 
 fn read_chunk_data(engine: &StorageEngine, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {

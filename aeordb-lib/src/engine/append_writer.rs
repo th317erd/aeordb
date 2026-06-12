@@ -448,6 +448,41 @@ impl AppendWriter {
     self.read_entry_at_shared_opt(offset, true)
   }
 
+  pub fn read_entry_header_at_shared(&self, offset: u64) -> EngineResult<EntryHeader> {
+    // First read the fixed header to learn the hash algorithm and therefore
+    // the variable hash length embedded in the full header.
+    let mut fixed_buf = [0u8; EntryHeader::FIXED_HEADER_SIZE];
+    read_exact_at(&self.reader, &mut fixed_buf, offset)?;
+
+    let hash_algo_raw = u16::from_le_bytes([fixed_buf[7], fixed_buf[8]]);
+    let hash_algo =
+      crate::engine::hash_algorithm::HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let hash_length = hash_algo.hash_length();
+    let full_header_size = EntryHeader::FIXED_HEADER_SIZE + hash_length;
+
+    let mut header_buf = vec![0u8; full_header_size];
+    header_buf[..EntryHeader::FIXED_HEADER_SIZE].copy_from_slice(&fixed_buf);
+    read_exact_at(&self.reader, &mut header_buf[EntryHeader::FIXED_HEADER_SIZE..], offset + EntryHeader::FIXED_HEADER_SIZE as u64)?;
+
+    let mut cursor = Cursor::new(&header_buf);
+    let header = EntryHeader::deserialize(&mut cursor)?;
+
+    let header_size = header.header_size() as u64;
+    let payload_size = header.key_length as u64 + header.value_length as u64;
+    let max_payload = (header.total_length as u64).saturating_sub(header_size);
+    if payload_size > max_payload {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!(
+          "key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({})",
+          header.key_length, header.value_length, header.total_length, header_size,
+        ),
+      });
+    }
+
+    Ok(header)
+  }
+
   fn read_entry_at_shared_opt(&self, offset: u64, verify: bool) -> EngineResult<(EntryHeader, Vec<u8>, Vec<u8>)> {
     // Use pread (read_at) on a shared reader handle. read_at does not use or
     // modify the file's seek position, so multiple concurrent readers on the

@@ -649,18 +649,36 @@ curl http://localhost:6830/system/stats \
 
 ### GET /system/health
 
-Public health check endpoint. No authentication required. Returns only a minimal status object -- no detailed internal checks are exposed.
+Public health check endpoint. No authentication required. Once the database is ready, this returns only a minimal status object -- no detailed internal checks are exposed.
 
 **Response:** `200 OK`
 
 ```json
 {
-  "status": "ok",
-  "version": "0.9.0"
+  "status": "healthy",
+  "version": "0.9.5"
 }
 ```
 
-The response contains only `status` (either `"ok"` or `"degraded"`) and `version` (the server version string). For detailed system diagnostics, use `GET /system/stats` instead (requires authentication).
+During startup, clean opens, dirty startup, or WAL/KV recovery, AeorDB binds HTTP before the storage engine is ready. In that state, `/system/health` still returns `200 OK` with startup progress:
+
+```json
+{
+  "status": "starting",
+  "phase": "rebuild_kv_scan",
+  "message": "Scanning WAL entries for dirty startup recovery",
+  "version": "0.9.5",
+  "progress": 0.42,
+  "eta": {
+    "seconds": 480,
+    "at": "2026-06-12T03:05:00Z"
+  }
+}
+```
+
+`progress` is an overall startup fraction from `0.0` to `1.0`. `eta` is `null` when unknown, or an object with estimated seconds remaining and an RFC 3339 timestamp. Non-health routes return `503 Service Unavailable` until the full application router is ready.
+
+For detailed system diagnostics after startup, use `GET /system/stats` instead (requires authentication).
 
 **Example:**
 

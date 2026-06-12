@@ -14,7 +14,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
-use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine};
+use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine, EVENT_SERVER_READY};
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
@@ -212,6 +212,73 @@ async fn collect_sse_with_events(
       String::new()
     }
   }
+}
+
+async fn read_first_sse_frame(mut body: Body) -> String {
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("timed out waiting for first SSE frame")
+    .expect("SSE stream ended before first frame")
+    .expect("failed to read first SSE frame");
+  let bytes = frame.into_data().expect("first SSE frame should contain data");
+  String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[tokio::test]
+async fn test_sse_sends_server_ready_as_initial_event() {
+  let (app, jwt_manager, _engine, _event_bus, _temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder().method("GET").uri("/system/events").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let frame = read_first_sse_frame(response.into_body()).await;
+  assert!(frame.contains("event: server_ready"), "expected initial server_ready event, got: {}", frame);
+  assert!(frame.contains("\"event_type\":\"server_ready\""), "expected server_ready envelope, got: {}", frame);
+  assert!(frame.contains("\"status\":\"ready\""), "expected ready payload, got: {}", frame);
+}
+
+#[tokio::test]
+async fn test_sse_server_ready_respects_event_filter_when_included() {
+  let (app, jwt_manager, _engine, _event_bus, _temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=server_ready,entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let frame = read_first_sse_frame(response.into_body()).await;
+  assert!(frame.contains("event: server_ready"), "expected filtered server_ready event, got: {}", frame);
+}
+
+#[tokio::test]
+async fn test_sse_server_ready_respects_event_filter_when_excluded() {
+  let (app, jwt_manager, _engine, event_bus, _temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  event_bus.emit(EngineEvent::new("entries_created", "alice", serde_json::json!({"entries": [{"path": "/ready-filter.txt"}]})));
+
+  let frame = read_first_sse_frame(response.into_body()).await;
+  assert!(!frame.contains(EVENT_SERVER_READY), "server_ready should be filtered out: {}", frame);
+  assert!(frame.contains("event: entries_created"), "expected entries_created after filtering, got: {}", frame);
 }
 
 #[tokio::test]

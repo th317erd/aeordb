@@ -17,7 +17,10 @@ ExecStart=/opt/aeordb/bin/aeordb start \
 
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=60s
+# Large sync/upload jobs can keep the engine busy while SIGTERM is being
+# handled. A short stop timeout makes systemd escalate to SIGKILL, which
+# forces dirty startup and a full WAL recovery on large databases.
+TimeoutStopSec=30min
 KillSignal=SIGTERM
 
 # Hardening

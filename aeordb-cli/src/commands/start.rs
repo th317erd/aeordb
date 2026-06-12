@@ -1,8 +1,14 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::response::Response;
+use axum::Router;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
@@ -12,7 +18,7 @@ use aeordb::engine::{
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::create_app_with_auth_mode_and_cancel;
+use aeordb::server::create_app_with_auth_mode_cancel_progress;
 
 /// All settings the `start` command needs. Built in `main.rs` by merging the
 /// clap-parsed CLI flags with the optional config file, then passed to
@@ -33,6 +39,194 @@ pub struct StartConfig<'a> {
   pub join_url: Option<&'a str>,
   pub join_token: Option<&'a str>,
   pub advertise_url: Option<&'a str>,
+}
+
+#[derive(Clone)]
+struct StartupGateState {
+  inner: Arc<std::sync::RwLock<StartupGateInner>>,
+  started_at: String,
+  started_at_instant: std::time::Instant,
+}
+
+#[derive(Clone)]
+enum StartupGateInner {
+  Starting { phase: String, message: String, updated_at: String, progress: f64, eta_seconds: Option<u64> },
+  Ready { application: Router },
+  Failed { error: String, updated_at: String },
+}
+
+struct ServerRuntime {
+  engine: Arc<aeordb::engine::StorageEngine>,
+  startup_instant: std::time::Instant,
+  handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct InitConfig {
+  database: String,
+  auth_mode: AuthMode,
+  hot_dir: PathBuf,
+  cors_flag: Option<String>,
+  peers: Vec<String>,
+  join_url: Option<String>,
+  join_token: Option<String>,
+  advertise_url: Option<String>,
+}
+
+impl StartupGateState {
+  fn new() -> Self {
+    let now = chrono::Utc::now().to_rfc3339();
+    Self {
+      inner: Arc::new(std::sync::RwLock::new(StartupGateInner::Starting {
+        phase: "binding_http".to_string(),
+        message: "AeorDB is binding the HTTP listener".to_string(),
+        updated_at: now.clone(),
+        progress: 0.0,
+        eta_seconds: None,
+      })),
+      started_at: now,
+      started_at_instant: std::time::Instant::now(),
+    }
+  }
+
+  fn set_phase(&self, phase: impl Into<String>, message: impl Into<String>, progress: f64, eta_seconds: Option<u64>) {
+    if let Ok(mut inner) = self.inner.write() {
+      *inner = StartupGateInner::Starting {
+        phase: phase.into(),
+        message: message.into(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        progress: progress.clamp(0.0, 1.0),
+        eta_seconds,
+      };
+    }
+  }
+
+  fn set_ready(&self, application: Router) {
+    if let Ok(mut inner) = self.inner.write() {
+      *inner = StartupGateInner::Ready { application };
+    }
+  }
+
+  fn set_failed(&self, error: impl Into<String>) {
+    if let Ok(mut inner) = self.inner.write() {
+      *inner = StartupGateInner::Failed { error: error.into(), updated_at: chrono::Utc::now().to_rfc3339() };
+    }
+  }
+
+  fn ready_application(&self) -> Option<Router> {
+    match &*self.inner.read().ok()? {
+      StartupGateInner::Ready { application } => Some(application.clone()),
+      _ => None,
+    }
+  }
+
+  fn status_payload(&self) -> serde_json::Value {
+    let elapsed_ms = self.started_at_instant.elapsed().as_millis() as u64;
+    let Ok(inner) = self.inner.read() else {
+      return serde_json::json!({
+        "status": "failed",
+        "phase": "startup_lock_poisoned",
+        "message": "startup status lock is unavailable",
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": self.started_at,
+        "progress": null,
+        "eta": null,
+        "elapsed_ms": elapsed_ms,
+      });
+    };
+    match &*inner {
+      StartupGateInner::Starting { phase, message, updated_at, progress, eta_seconds } => serde_json::json!({
+        "status": "starting",
+        "phase": phase,
+        "message": message,
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": self.started_at,
+        "updated_at": updated_at,
+        "progress": progress,
+        "eta": eta_payload(*eta_seconds),
+        "elapsed_ms": elapsed_ms,
+      }),
+      StartupGateInner::Ready { .. } => serde_json::json!({
+        "status": "healthy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": self.started_at,
+        "progress": 1.0,
+        "eta": null,
+        "elapsed_ms": elapsed_ms,
+      }),
+      StartupGateInner::Failed { error, updated_at } => serde_json::json!({
+        "status": "failed",
+        "phase": "startup_failed",
+        "message": error,
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": self.started_at,
+        "updated_at": updated_at,
+        "progress": null,
+        "eta": null,
+        "elapsed_ms": elapsed_ms,
+      }),
+    }
+  }
+}
+
+fn eta_payload(eta_seconds: Option<u64>) -> serde_json::Value {
+  match eta_seconds {
+    Some(seconds) => {
+      let at =
+        chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(seconds.min(i64::MAX as u64) as i64)).map(|time| time.to_rfc3339());
+      serde_json::json!({
+        "seconds": seconds,
+        "at": at,
+      })
+    }
+    None => serde_json::Value::Null,
+  }
+}
+
+fn apply_engine_startup_progress(gate: &StartupGateState, progress: aeordb::engine::EngineStartupProgress) {
+  let phase_progress = progress.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+  // Storage open/recovery is the only startup phase that can take a long time.
+  // Reserve 15%-90% of the overall bar for it, with worker startup finishing
+  // the remaining tail.
+  let overall_progress = 0.15 + (phase_progress * 0.75);
+  gate.set_phase(progress.phase, progress.message, overall_progress, progress.eta_seconds);
+}
+
+async fn startup_gate_handler(State(gate): State<StartupGateState>, request: Request<Body>) -> Response {
+  if let Some(application) = gate.ready_application() {
+    return application.oneshot(request).await.unwrap_or_else(|error| {
+      json_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({
+          "status": "error",
+          "message": format!("request dispatch failed: {}", error),
+        }),
+      )
+    });
+  }
+
+  let path = request.uri().path().to_string();
+  let payload = gate.status_payload();
+  if path == "/system/health" {
+    let code =
+      if payload.get("status").and_then(|v| v.as_str()) == Some("failed") { StatusCode::INTERNAL_SERVER_ERROR } else { StatusCode::OK };
+    return json_response(code, payload);
+  }
+
+  let code = if payload.get("status").and_then(|v| v.as_str()) == Some("failed") {
+    StatusCode::INTERNAL_SERVER_ERROR
+  } else {
+    StatusCode::SERVICE_UNAVAILABLE
+  };
+  json_response(code, payload)
+}
+
+fn json_response(status: StatusCode, payload: serde_json::Value) -> Response {
+  let body = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"status\":\"error\"}".to_vec());
+  Response::builder()
+    .status(status)
+    .header("content-type", "application/json")
+    .body(Body::from(body))
+    .unwrap_or_else(|_| Response::new(Body::from("{\"status\":\"error\"}")))
 }
 
 pub async fn run(config: StartConfig<'_>) {
@@ -153,42 +347,197 @@ pub async fn run(config: StartConfig<'_>) {
   }
   println!();
 
+  // Parse the host address into an IP.
+  let bind_address: std::net::IpAddr = host.parse().unwrap_or_else(|_| {
+    eprintln!("Error: invalid host address '{host}'");
+    std::process::exit(1);
+  });
+  let address = SocketAddr::from((bind_address, port));
+
+  // Create a CancellationToken shared by all background tasks (including
+  // the sync loop spawned inside create_app_with_auth_mode_and_cancel) and
+  // the HTTP server below.
+  let cancel = CancellationToken::new();
+  let startup_gate = StartupGateState::new();
+  let startup_application = Router::new().fallback(startup_gate_handler).with_state(startup_gate.clone());
+
+  let init_config = InitConfig {
+    database: database.to_string(),
+    auth_mode,
+    hot_dir,
+    cors_flag: cors_flag.map(str::to_string),
+    peers,
+    join_url: join_url.map(str::to_string),
+    join_token: join_token.map(str::to_string),
+    advertise_url: advertise_url.map(str::to_string),
+  };
+
+  let init_gate = startup_gate.clone();
+  let init_cancel = cancel.clone();
+  let init_task = tokio::spawn(async move {
+    match initialize_server_runtime(init_config, init_cancel, init_gate.clone(), port).await {
+      Ok(runtime) => Ok(runtime),
+      Err(error) => {
+        init_gate.set_failed(error.clone());
+        Err(error)
+      }
+    }
+  });
+
+  let server_result = if let Some((cert_path, key_path)) = tls_config {
+    // TLS path: use axum_server with rustls + Handle for graceful shutdown
+    println!("Listening on https://{address}");
+
+    let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await {
+      Ok(config) => config,
+      Err(error) => {
+        eprintln!("Failed to load TLS certificate/key: {error}");
+        eprintln!("  cert: {cert_path}");
+        eprintln!("  key:  {key_path}");
+        std::process::exit(1);
+      }
+    };
+
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    let server_cancel = cancel.clone();
+    tokio::spawn(async move {
+      shutdown_signal().await;
+      server_cancel.cancel();
+      shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+    });
+
+    axum_server::bind_rustls(address, rustls_config)
+      .handle(handle)
+      .serve(startup_application.into_make_service())
+      .await
+      .map_err(|error| format!("{}", error))
+  } else {
+    // Non-TLS path: standard axum::serve
+    println!("Listening on http://{address}");
+
+    let listener = match tokio::net::TcpListener::bind(address).await {
+      Ok(listener) => listener,
+      Err(error) => {
+        eprintln!("Failed to bind to {address}: {error}");
+        std::process::exit(1);
+      }
+    };
+
+    let server_cancel = cancel.clone();
+    let shutdown_fut = async move {
+      shutdown_signal().await;
+      server_cancel.cancel();
+    };
+
+    let serve_fut = axum::serve(listener, startup_application).with_graceful_shutdown(shutdown_fut);
+
+    // axum's graceful shutdown waits for ALL active connections to close,
+    // but long-lived connections (SSE) never close. Once the shutdown
+    // signal fires and the cancellation token is set, drop the serve
+    // future immediately and proceed to cleanup (background tasks +
+    // engine flush). Connections are dropped when the process exits.
+    tokio::select! {
+      result = serve_fut => result.map_err(|error| format!("{}", error)),
+      _ = cancel.cancelled() => Ok(()),
+    }
+  };
+
+  cancel.cancel();
+
+  let runtime = match init_task.await {
+    Ok(Ok(runtime)) => Some(runtime),
+    Ok(Err(error)) => {
+      eprintln!("Startup error: {error}");
+      None
+    }
+    Err(error) => {
+      eprintln!("Startup task failed: {error}");
+      None
+    }
+  };
+
+  let mut clean_shutdown = true;
+  if let Some(runtime) = runtime {
+    runtime.engine.begin_shutdown();
+
+    // Wait for background tasks to finish (with a timeout).
+    tracing::info!("Waiting for background tasks to finish...");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), futures_join_all(runtime.handles)).await;
+
+    // Flush engine buffers and sync to disk.
+    if let Err(error) = runtime.engine.shutdown() {
+      clean_shutdown = false;
+      tracing::error!("Storage engine shutdown did not complete cleanly: {}", error);
+      eprintln!("Storage engine shutdown did not complete cleanly: {error}");
+    }
+    let uptime = runtime.startup_instant.elapsed().as_secs();
+    tracing::info!(uptime_seconds = uptime, "AeorDB shutting down");
+  }
+
+  if let Err(error) = server_result {
+    eprintln!("Server error: {error}");
+    std::process::exit(1);
+  }
+
+  if clean_shutdown {
+    println!("Server shut down gracefully.");
+  } else {
+    eprintln!("Server stopped, but storage shutdown did not complete cleanly.");
+  }
+}
+
+async fn initialize_server_runtime(
+  config: InitConfig,
+  cancel: CancellationToken,
+  startup_gate: StartupGateState,
+  port: u16,
+) -> Result<ServerRuntime, String> {
+  let InitConfig { database, auth_mode, hot_dir, cors_flag, peers, join_url, join_token, advertise_url } = config;
+  let hot_dir_ref = hot_dir.as_path();
+
   // If --join was supplied, perform the cluster join BEFORE the app opens
   // the engine for serving. The join writes the cluster's JWT signing key
   // into the local system_store; the JwtManager then loads it during
   // create_app_with_auth_mode and JWTs validate cluster-wide.
-  if let Some(join_url) = join_url {
-    let token = join_token.expect("--join requires --join-token");
-    if let Err(e) = perform_cluster_join(database, hot_dir_ref, join_url, token, port, advertise_url).await {
-      eprintln!("Error: --join failed: {}", e);
-      std::process::exit(1);
-    }
+  if let Some(join_url) = join_url.as_deref() {
+    startup_gate.set_phase("cluster_join", "Joining cluster before opening the serving engine", 0.05, None);
+    let token = join_token.as_deref().ok_or_else(|| "--join requires --join-token".to_string())?;
+    perform_cluster_join(&database, hot_dir_ref, join_url, token, port, advertise_url.as_deref()).await?;
     println!("Cluster join complete. Adopting shared signing key.");
   }
 
   // Register any --peers URLs into the system store before serving.
   if !peers.is_empty() {
-    if let Err(e) = register_initial_peers(database, hot_dir_ref, &peers) {
+    startup_gate.set_phase("registering_peers", "Registering configured peers before opening the serving engine", 0.10, None);
+    if let Err(e) = register_initial_peers(&database, hot_dir_ref, &peers) {
+      tracing::warn!("Failed to register some --peers: {}", e);
       eprintln!("Warning: failed to register some --peers: {}", e);
     } else {
       println!("Registered {} peer(s) from --peers", peers.len());
     }
   }
 
-  // Create a CancellationToken shared by all background tasks (including
-  // the sync loop spawned inside create_app_with_auth_mode_and_cancel) and
-  // the HTTP server below.
-  let cancel = CancellationToken::new();
-
   // Build the app (single engine open — no separate bootstrap engine).
   // We use the *_and_cancel variant so the sync loop's shutdown is wired
   // to this token; without it, the loop runs until the process is killed.
-  let (application, file_bootstrap_key, engine, event_bus, task_queue) =
-    create_app_with_auth_mode_and_cancel(database, &auth_mode, Some(hot_dir_ref), cors_flag, Some(cancel.clone()));
+  startup_gate.set_phase("opening_engine", "Opening storage engine; dirty startups may rebuild the KV index from WAL", 0.15, None);
+  let engine_progress_gate = startup_gate.clone();
+  let engine_progress: aeordb::engine::EngineStartupProgressCallback = Arc::new(move |progress| {
+    apply_engine_startup_progress(&engine_progress_gate, progress);
+  });
+  let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode_cancel_progress(
+    &database,
+    &auth_mode,
+    Some(hot_dir_ref),
+    cors_flag.as_deref(),
+    Some(cancel.clone()),
+    Some(engine_progress),
+  );
 
   // For SelfContained mode, bootstrap the root key using the already-open engine.
   if auth_mode == AuthMode::SelfContained {
-    if let Some(root_key) = bootstrap_root_key(&engine).unwrap_or(None) {
+    if let Some(root_key) = bootstrap_root_key(&engine).map_err(|error| format!("failed to bootstrap root key: {}", error))? {
       println!("==========================================================");
       println!("  ROOT API KEY (shown once, save it now!):");
       println!("  {root_key}");
@@ -208,6 +557,7 @@ pub async fn run(config: StartConfig<'_>) {
   // Start the heartbeat task (clock-sync only, every 15 seconds).
   // TODO: replace hard-coded node_id=1 with a configured value once
   // multi-node support is wired up.
+  startup_gate.set_phase("starting_workers", "Starting background workers", 0.90, None);
   let heartbeat_handle = spawn_heartbeat(event_bus.clone(), 1, cancel.clone());
 
   // Start the rate sampler (1 Hz) and metrics pulse (15s) for detailed stats.
@@ -215,10 +565,10 @@ pub async fn run(config: StartConfig<'_>) {
   let rate_trackers = Arc::new(RateTrackerSet::new());
   let sampler_handle = spawn_rate_sampler(counters.clone(), rate_trackers.clone(), cancel.clone());
   let metrics_handle =
-    spawn_metrics_pulse(event_bus.clone(), engine.clone(), counters, rate_trackers.clone(), database.to_string(), cancel.clone());
+    spawn_metrics_pulse(event_bus.clone(), engine.clone(), counters, rate_trackers.clone(), database.clone(), cancel.clone());
 
   // Make rate_trackers and db_path available to the stats endpoint via Extension.
-  let application = application.layer(axum::Extension(rate_trackers)).layer(axum::Extension(database.to_string()));
+  let application = application.layer(axum::Extension(rate_trackers)).layer(axum::Extension(database.clone()));
 
   // Reset any tasks left in Running state from a previous crash.
   if let Ok(tasks) = task_queue.list_tasks() {
@@ -298,102 +648,17 @@ pub async fn run(config: StartConfig<'_>) {
   let worker_handle = spawn_task_worker(task_queue, engine.clone(), plugin_manager, event_bus.clone(), cancel.clone());
 
   // Start the webhook dispatcher (delivers matching events to registered URLs).
-  let webhook_handle = spawn_webhook_dispatcher(event_bus, engine.clone(), cancel.clone());
+  let webhook_handle = spawn_webhook_dispatcher(event_bus, engine.clone(), cancel);
 
   let startup_instant = std::time::Instant::now();
+  startup_gate.set_ready(application);
+  tracing::info!("AeorDB HTTP application is ready");
 
-  // Parse the host address into an IP.
-  let bind_address: std::net::IpAddr = host.parse().unwrap_or_else(|_| {
-    eprintln!("Error: invalid host address '{host}'");
-    std::process::exit(1);
-  });
-  let address = SocketAddr::from((bind_address, port));
-
-  let server_result = if let Some((cert_path, key_path)) = tls_config {
-    // TLS path: use axum_server with rustls + Handle for graceful shutdown
-    println!("Listening on https://{address}");
-
-    let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await {
-      Ok(config) => config,
-      Err(error) => {
-        eprintln!("Failed to load TLS certificate/key: {error}");
-        eprintln!("  cert: {cert_path}");
-        eprintln!("  key:  {key_path}");
-        std::process::exit(1);
-      }
-    };
-
-    let handle = axum_server::Handle::new();
-    let shutdown_handle = handle.clone();
-    let server_cancel = cancel.clone();
-    tokio::spawn(async move {
-      shutdown_signal().await;
-      server_cancel.cancel();
-      shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-    });
-
-    axum_server::bind_rustls(address, rustls_config)
-      .handle(handle)
-      .serve(application.into_make_service())
-      .await
-      .map_err(|error| format!("{}", error))
-  } else {
-    // Non-TLS path: standard axum::serve
-    println!("Listening on http://{address}");
-
-    let listener = match tokio::net::TcpListener::bind(address).await {
-      Ok(listener) => listener,
-      Err(error) => {
-        eprintln!("Failed to bind to {address}: {error}");
-        std::process::exit(1);
-      }
-    };
-
-    let server_cancel = cancel.clone();
-    let shutdown_fut = async move {
-      shutdown_signal().await;
-      server_cancel.cancel();
-    };
-
-    let serve_fut = axum::serve(listener, application).with_graceful_shutdown(shutdown_fut);
-
-    // axum's graceful shutdown waits for ALL active connections to close,
-    // but long-lived connections (SSE) never close. Once the shutdown
-    // signal fires and the cancellation token is set, drop the serve
-    // future immediately and proceed to cleanup (background tasks +
-    // engine flush). Connections are dropped when the process exits.
-    tokio::select! {
-      result = serve_fut => result.map_err(|error| format!("{}", error)),
-      _ = cancel.cancelled() => Ok(()),
-    }
-  };
-
-  if let Err(error) = server_result {
-    eprintln!("Server error: {error}");
-    cancel.cancel();
-    // Give background tasks a moment to notice cancellation
-    let _ = tokio::time::timeout(
-      std::time::Duration::from_secs(5),
-      futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
-    )
-    .await;
-    engine.shutdown().ok();
-    std::process::exit(1);
-  }
-
-  // Wait for background tasks to finish (with a timeout).
-  tracing::info!("Waiting for background tasks to finish...");
-  let _ = tokio::time::timeout(
-    std::time::Duration::from_secs(10),
-    futures_join_all(vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle]),
-  )
-  .await;
-
-  // Flush engine buffers and sync to disk.
-  engine.shutdown().ok();
-  let uptime = startup_instant.elapsed().as_secs();
-  tracing::info!(uptime_seconds = uptime, "AeorDB shutting down");
-  println!("Server shut down gracefully.");
+  Ok(ServerRuntime {
+    engine,
+    startup_instant,
+    handles: vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle],
+  })
 }
 
 /// Wait for all join handles to complete.

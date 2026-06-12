@@ -178,3 +178,4 @@ pub const EVENT_TASKS_FAILED: &str = "tasks_failed";
 pub const EVENT_TASKS_CANCELLED: &str = "tasks_cancelled";
 pub const EVENT_SYNCS_COMPLETED: &str = "syncs_completed";
 pub const EVENT_SYNCS_FAILED: &str = "syncs_failed";
+pub const EVENT_SERVER_READY: &str = "server_ready";

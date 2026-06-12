@@ -83,6 +83,7 @@ pub fn engine_error_status(error: &EngineError) -> StatusCode {
   match error {
     EngineError::NotFound(_) => StatusCode::NOT_FOUND,
     EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
+    EngineError::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
     EngineError::InvalidInput(_)
     | EngineError::ReservedUserId
     | EngineError::UnsafeQueryField(_)
@@ -99,6 +100,7 @@ pub fn engine_error_code(error: &EngineError) -> &'static str {
   match error {
     EngineError::NotFound(_) => error_codes::NOT_FOUND,
     EngineError::AlreadyExists(_) => error_codes::ALREADY_EXISTS,
+    EngineError::ShuttingDown => error_codes::SERVICE_UNAVAILABLE,
     EngineError::InvalidInput(_)
     | EngineError::ReservedUserId
     | EngineError::UnsafeQueryField(_)
@@ -124,6 +126,7 @@ pub fn sanitize_engine_error(prefix: &str, error: &EngineError) -> String {
     | EngineError::RangeQueryNotSupported(message)
     | EngineError::JsonParseError(message) => format!("{}: {}", prefix, message),
     EngineError::ReservedUserId => format!("{}: cannot use the root user ID", prefix),
+    EngineError::ShuttingDown => format!("{}: storage engine is shutting down", prefix),
     _ => prefix.to_string(),
   }
 }

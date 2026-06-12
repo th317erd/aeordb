@@ -85,17 +85,21 @@ aeordb --version
 
 ### What Happens on Start
 
-1. Opens (or creates) the database file
-2. Bootstraps root API key (if `--auth self` and no key exists yet)
-3. Resets any tasks left in `Running` state from a previous crash to `Pending`
-4. Starts background workers:
+1. Binds HTTP and serves `/system/health` with `status: "starting"`
+2. Opens (or creates) the database file
+3. Rebuilds startup state from the WAL if the previous shutdown was dirty
+4. Bootstraps root API key (if `--auth self` and no key exists yet)
+5. Resets any tasks left in `Running` state from a previous crash to `Pending`
+6. Starts background workers:
    - **Heartbeat**: emits clock-sync pulses every 15 seconds
    - **Metrics**: emits system metrics snapshots every 15 seconds
    - **Cron scheduler**: checks `/.config/cron.json` every 60 seconds
    - **Task worker**: dequeues and executes background tasks
    - **Webhook dispatcher**: delivers events to registered webhook URLs
-5. Binds to the TCP port and begins serving requests
-6. Shuts down gracefully on CTRL+C
+7. Switches the full API router to ready and emits `server_ready` on eligible SSE streams
+8. On CTRL+C or SIGTERM, stops accepting new storage work, waits for active work to drain, then flushes buffers
+
+The shutdown drain window defaults to 600 seconds. Set `AEORDB_SHUTDOWN_OPERATION_WAIT_SECS` to override it.
 
 ---
 

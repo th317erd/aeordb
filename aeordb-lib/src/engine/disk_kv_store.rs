@@ -270,6 +270,7 @@ impl DiskKVStore {
     // the process crashed after the hot tail was flushed but before the KV
     // write buffer was flushed to pages. Mask those page entries with deleted
     // buffer entries so clean startup never serves data from reusable space.
+    let merged_hot_void_ranges = build_merged_void_ranges(&hot_voids);
     let mut voided_page_entries = 0usize;
     if !hot_voids.is_empty() {
       for page_data in pages.iter() {
@@ -279,11 +280,7 @@ impl DiskKVStore {
               continue;
             }
             let entry_end = entry.offset.saturating_add(entry.total_length as u64);
-            let overlaps_void = hot_voids.iter().any(|void| {
-              let void_end = void.offset.saturating_add(void.size as u64);
-              entry.offset < void_end && void.offset < entry_end
-            });
-            if overlaps_void {
+            if entry_overlaps_void_ranges(entry.offset, entry_end, &merged_hot_void_ranges) {
               let mut deleted = entry.clone();
               deleted.type_flags |= KV_FLAG_DELETED;
               write_buffer.insert(deleted.hash.clone(), deleted);
@@ -1076,5 +1073,77 @@ impl Drop for DiskKVStore {
         tracing::error!("DiskKVStore: failed to flush on drop: {}", e);
       }
     }
+  }
+}
+
+fn build_merged_void_ranges(voids: &[crate::engine::hot_tail::VoidRecord]) -> Vec<(u64, u64)> {
+  let mut ranges: Vec<(u64, u64)> = voids
+    .iter()
+    .filter_map(|void| {
+      if void.size == 0 {
+        return None;
+      }
+      let end = void.offset.checked_add(void.size as u64)?;
+      if end <= void.offset {
+        return None;
+      }
+      Some((void.offset, end))
+    })
+    .collect();
+
+  ranges.sort_unstable_by_key(|(start, end)| (*start, *end));
+
+  let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+  for (start, end) in ranges {
+    if let Some(last) = merged.last_mut() {
+      if start <= last.1 {
+        last.1 = last.1.max(end);
+        continue;
+      }
+    }
+    merged.push((start, end));
+  }
+  merged
+}
+
+fn entry_overlaps_void_ranges(entry_start: u64, entry_end: u64, void_ranges: &[(u64, u64)]) -> bool {
+  if entry_start >= entry_end || void_ranges.is_empty() {
+    return false;
+  }
+
+  let idx = void_ranges.partition_point(|(_, void_end)| *void_end <= entry_start);
+  idx < void_ranges.len() && void_ranges[idx].0 < entry_end
+}
+
+#[cfg(test)]
+mod hot_void_range_tests {
+  use super::*;
+  use crate::engine::hot_tail::VoidRecord;
+
+  #[test]
+  fn merged_void_ranges_drop_invalid_and_merge_overlaps() {
+    let merged = build_merged_void_ranges(&[
+      VoidRecord { offset: 100, size: 10 },
+      VoidRecord { offset: 105, size: 10 },
+      VoidRecord { offset: 200, size: 0 },
+      VoidRecord { offset: u64::MAX - 1, size: 4 },
+      VoidRecord { offset: 115, size: 5 },
+      VoidRecord { offset: 300, size: 1 },
+    ]);
+
+    assert_eq!(merged, vec![(100, 120), (300, 301)]);
+  }
+
+  #[test]
+  fn entry_overlap_uses_half_open_ranges() {
+    let ranges = build_merged_void_ranges(&[VoidRecord { offset: 100, size: 20 }, VoidRecord { offset: 200, size: 20 }]);
+
+    assert!(!entry_overlaps_void_ranges(80, 100, &ranges));
+    assert!(entry_overlaps_void_ranges(80, 101, &ranges));
+    assert!(entry_overlaps_void_ranges(100, 101, &ranges));
+    assert!(entry_overlaps_void_ranges(119, 121, &ranges));
+    assert!(!entry_overlaps_void_ranges(120, 199, &ranges));
+    assert!(entry_overlaps_void_ranges(199, 201, &ranges));
+    assert!(!entry_overlaps_void_ranges(220, 230, &ranges));
   }
 }

@@ -6,7 +6,10 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{file_path_hash, DirectoryOps, StorageEngine, DEFAULT_CHUNK_SIZE, CURRENT_FILE_RECORD_VERSION};
+use aeordb::engine::{
+  chunk_content_hash, compress, file_path_hash, CompressionAlgorithm, DirectoryOps, EntryType, StorageEngine, DEFAULT_CHUNK_SIZE,
+  CURRENT_FILE_RECORD_VERSION,
+};
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
@@ -215,6 +218,161 @@ async fn test_commit_multichunk_file_records_whole_file_hash() {
   let results = json["results"].as_array().expect("search results should be an array");
   let paths: Vec<&str> = results.iter().filter_map(|result| result["path"].as_str()).collect();
   assert!(paths.contains(&"/test/multichunk.bin"), "whole-file @hash search should find blob commit path, got {paths:?}");
+}
+
+#[tokio::test]
+async fn test_commit_accepts_asserted_content_hash_size_and_chunk_hashes_alias() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+
+  let mut data = vec![0u8; DEFAULT_CHUNK_SIZE + 91];
+  for (index, byte) in data.iter_mut().enumerate() {
+    *byte = ((index * 31) % 251) as u8;
+  }
+
+  let h1 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data[..DEFAULT_CHUNK_SIZE]).await;
+  let h2 = upload_chunk(rebuild_app(&jwt, &engine), &token, &data[DEFAULT_CHUNK_SIZE..]).await;
+  let whole_file_hash = blake3::hash(&data);
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/asserted-fast-path.bin",
+          "chunk_hashes": [h1, h2],
+          "content_type": "application/octet-stream",
+          "content_hash": hex::encode(whole_file_hash.as_bytes()),
+          "size": data.len()
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+
+  let json = body_json(resp.into_body()).await;
+  assert_eq!(json["files"][0]["size"].as_u64().unwrap(), data.len() as u64);
+
+  let metadata = DirectoryOps::new(&engine).get_metadata("/test/asserted-fast-path.bin").unwrap().unwrap();
+  assert_eq!(metadata.total_size, data.len() as u64);
+  assert_eq!(metadata.content_hash, whole_file_hash.as_bytes().to_vec());
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(Request::get("/files/test/asserted-fast-path.bin").header("Authorization", &token).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+  assert_eq!(body_bytes(resp.into_body()).await, data);
+}
+
+#[tokio::test]
+async fn test_commit_rejects_asserted_size_mismatch() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+
+  let data = b"size mismatch payload";
+  let hash = upload_chunk(rebuild_app(&jwt, &engine), &token, data).await;
+  let content_hash = blake3::hash(data);
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/size-mismatch.txt",
+          "chunks": [hash],
+          "content_type": "text/plain",
+          "content_hash": hex::encode(content_hash.as_bytes()),
+          "size": data.len() + 1
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(resp.into_body()).await;
+  assert!(json["error"].as_str().unwrap().contains("Size mismatch"), "unexpected error: {}", json["error"]);
+}
+
+#[tokio::test]
+async fn test_commit_without_size_verifies_supplied_content_hash() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+
+  let data = b"content hash must be verified without size";
+  let hash = upload_chunk(rebuild_app(&jwt, &engine), &token, data).await;
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/hash-without-size.txt",
+          "chunks": [hash],
+          "content_type": "text/plain",
+          "content_hash": hex::encode([0xCDu8; 32])
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(resp.into_body()).await;
+  assert!(json["error"].as_str().unwrap().contains("Content hash mismatch"), "unexpected error: {}", json["error"]);
+}
+
+#[tokio::test]
+async fn test_commit_compressed_chunk_verifies_asserted_content_hash() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+
+  let data = "legacy compressed chunk payload\n".repeat(200).into_bytes();
+  let raw_chunk_hash = chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  let compressed = compress(&data, CompressionAlgorithm::Zstd).unwrap();
+  engine.store_entry_compressed(EntryType::Chunk, &raw_chunk_hash, &compressed, CompressionAlgorithm::Zstd).unwrap();
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/test/compressed-hash-check.txt",
+          "chunks": [hex::encode(&raw_chunk_hash)],
+          "content_type": "text/plain",
+          "content_hash": hex::encode([0xABu8; 32]),
+          "size": data.len()
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+  let json = body_json(resp.into_body()).await;
+  assert!(json["error"].as_str().unwrap().contains("Content hash mismatch"), "unexpected error: {}", json["error"]);
 }
 
 #[tokio::test]

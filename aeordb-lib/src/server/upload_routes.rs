@@ -9,6 +9,7 @@ use crate::engine::batch_commit::{commit_files, CommitFile};
 use crate::engine::errors::EngineError;
 use crate::engine::RequestContext;
 use crate::engine::EntryType;
+use crate::server::blocking::run_engine_blocking;
 use crate::server::state::AppState;
 
 /// GET /upload/config — returns hash algorithm, chunk size, and hash prefix.
@@ -36,31 +37,45 @@ pub async fn upload_check(
   Extension(_claims): Extension<TokenClaims>,
   Json(body): Json<CheckRequest>,
 ) -> Response {
-  let mut have = Vec::new();
-  let mut needed = Vec::new();
+  let handler_start = std::time::Instant::now();
+  let hash_count = body.hashes.len();
+  let engine = state.engine.clone();
+  let result = run_engine_blocking("blob_check", "Blob check failed", move || -> crate::engine::EngineResult<CheckResponse> {
+    let mut have = Vec::new();
+    let mut needed = Vec::new();
 
-  for hash_hex in &body.hashes {
-    let hash_bytes = match hex::decode(hash_hex) {
-      Ok(bytes) => bytes,
-      Err(_) => {
-        return (
-          StatusCode::BAD_REQUEST,
-          Json(serde_json::json!({
-            "error": format!("Invalid hex hash: {}", hash_hex)
-          })),
-        )
-          .into_response();
+    for hash_hex in &body.hashes {
+      let hash_bytes = hex::decode(hash_hex).map_err(|_| EngineError::InvalidInput(format!("Invalid hex hash: {}", hash_hex)))?;
+
+      match engine.has_entry(&hash_bytes) {
+        Ok(true) => have.push(hash_hex.clone()),
+        Ok(false) => needed.push(hash_hex.clone()),
+        Err(_) => needed.push(hash_hex.clone()),
       }
-    };
-
-    match state.engine.has_entry(&hash_bytes) {
-      Ok(true) => have.push(hash_hex.clone()),
-      Ok(false) => needed.push(hash_hex.clone()),
-      Err(_) => needed.push(hash_hex.clone()),
     }
-  }
 
-  (StatusCode::OK, Json(CheckResponse { have, needed })).into_response()
+    Ok(CheckResponse { have, needed })
+  })
+  .await;
+
+  match result {
+    Ok(response) => {
+      let elapsed_ms = handler_start.elapsed().as_millis();
+      if hash_count >= 1000 || elapsed_ms >= 500 {
+        tracing::info!(hashes = hash_count, have = response.have.len(), needed = response.needed.len(), elapsed_ms, "blob check completed");
+      } else {
+        tracing::debug!(
+          hashes = hash_count,
+          have = response.have.len(),
+          needed = response.needed.len(),
+          elapsed_ms,
+          "blob check completed"
+        );
+      }
+      (StatusCode::OK, Json(response)).into_response()
+    }
+    Err(response) => response,
+  }
 }
 
 #[derive(Deserialize)]
@@ -81,15 +96,17 @@ pub async fn upload_chunk(
   AxumPath(hash_hex): AxumPath<String>,
   body: axum::body::Bytes,
 ) -> Response {
+  let handler_start = std::time::Instant::now();
   let chunk_size: usize = 262_144;
+  let body_bytes = body.len();
 
-  if body.len() > chunk_size {
+  if body_bytes > chunk_size {
     return (
       StatusCode::BAD_REQUEST,
       Json(serde_json::json!({
         "error": "Chunk exceeds maximum size",
         "max": chunk_size,
-        "got": body.len()
+        "got": body_bytes
       })),
     )
       .into_response();
@@ -109,11 +126,13 @@ pub async fn upload_chunk(
   };
 
   // Compute: blake3("chunk:" + data)
+  let hash_verify_start = std::time::Instant::now();
   let mut hash_input = Vec::with_capacity(6 + body.len());
   hash_input.extend_from_slice(b"chunk:");
   hash_input.extend_from_slice(&body);
   let computed = blake3::hash(&hash_input);
   let computed_bytes = computed.as_bytes().to_vec();
+  let hash_verify_ms = hash_verify_start.elapsed().as_millis();
 
   if computed_bytes != expected_bytes {
     return (
@@ -132,7 +151,8 @@ pub async fn upload_chunk(
   // async handler, multiple concurrent uploads can starve the runtime.
   let engine = state.engine.clone();
   let body_vec = body.to_vec();
-  let store_result = tokio::task::spawn_blocking(move || -> Result<&'static str, crate::engine::errors::EngineError> {
+  let engine_store_start = std::time::Instant::now();
+  let store_result = run_engine_blocking("upload_chunk", "Failed to store chunk", move || {
     if engine.has_entry(&computed_bytes)? {
       engine.counters().record_chunk_deduped();
       return Ok("exists");
@@ -148,36 +168,26 @@ pub async fn upload_chunk(
     Ok("created")
   })
   .await;
+  let engine_store_ms = engine_store_start.elapsed().as_millis();
 
   match store_result {
-    Ok(Ok("exists")) => (
-      StatusCode::OK,
-      Json(serde_json::json!({
-        "status": "exists", "hash": hash_hex
-      })),
-    )
-      .into_response(),
-    Ok(Ok(_)) => (
-      StatusCode::CREATED,
-      Json(serde_json::json!({
-        "status": "created", "hash": hash_hex
-      })),
-    )
-      .into_response(),
-    Ok(Err(e)) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      Json(serde_json::json!({
-        "error": format!("Failed to store chunk: {}", e)
-      })),
-    )
-      .into_response(),
-    Err(join_err) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      Json(serde_json::json!({
-        "error": format!("Chunk upload task panicked: {}", join_err)
-      })),
-    )
-      .into_response(),
+    Ok(status) => {
+      let elapsed_ms = handler_start.elapsed().as_millis();
+      if elapsed_ms >= 500 {
+        tracing::info!(bytes = body_bytes, status, hash_verify_ms, engine_store_ms, elapsed_ms, "blob chunk upload completed");
+      } else {
+        tracing::debug!(bytes = body_bytes, status, hash_verify_ms, engine_store_ms, elapsed_ms, "blob chunk upload completed");
+      }
+      let http_status = if status == "exists" { StatusCode::OK } else { StatusCode::CREATED };
+      (
+        http_status,
+        Json(serde_json::json!({
+          "status": status, "hash": hash_hex
+        })),
+      )
+        .into_response()
+    }
+    Err(response) => response,
   }
 }
 
@@ -193,6 +203,12 @@ pub async fn upload_commit(
   active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   Json(body): Json<CommitRequest>,
 ) -> Response {
+  let handler_start = std::time::Instant::now();
+  let file_count = body.files.len();
+  let total_chunk_refs: usize = body.files.iter().map(|file| file.chunks.len()).sum();
+  let supplied_content_hash_files = body.files.iter().filter(|file| file.content_hash.is_some()).count();
+  let supplied_size_files = body.files.iter().filter(|file| file.size.is_some()).count();
+  let supplied_logical_file_bytes: u64 = body.files.iter().filter_map(|file| file.size).sum();
   // Beta-audit P0: a scoped key must not be able to commit files at paths
   // outside its scope, even via /blobs/commit. The path-level permission
   // middleware doesn't run for /blobs/* routes — enforce inline.
@@ -219,23 +235,33 @@ pub async fn upload_commit(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
   let engine = state.engine.clone();
-  let result = tokio::task::spawn_blocking(move || commit_files(&engine, &ctx, body.files)).await;
+  let result = run_engine_blocking("upload_commit", "Commit failed", move || commit_files(&engine, &ctx, body.files)).await;
 
   match result {
-    Ok(Ok(commit_result)) => (StatusCode::OK, Json(serde_json::json!(commit_result))).into_response(),
-    Ok(Err(e)) => {
-      let status = match &e {
-        EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-      };
-      (status, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    Ok(commit_result) => {
+      tracing::info!(
+        files = file_count,
+        total_chunk_refs,
+        supplied_content_hash_files,
+        supplied_size_files,
+        supplied_logical_file_bytes,
+        committed = commit_result.committed,
+        elapsed_ms = handler_start.elapsed().as_millis(),
+        "blob commit request completed"
+      );
+      (StatusCode::OK, Json(serde_json::json!(commit_result))).into_response()
     }
-    Err(e) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      Json(serde_json::json!({
-        "error": format!("Commit task panicked: {}", e)
-      })),
-    )
-      .into_response(),
+    Err(response) => {
+      tracing::warn!(
+        files = file_count,
+        total_chunk_refs,
+        supplied_content_hash_files,
+        supplied_size_files,
+        supplied_logical_file_bytes,
+        elapsed_ms = handler_start.elapsed().as_millis(),
+        "blob commit request failed"
+      );
+      response
+    }
   }
 }

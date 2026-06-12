@@ -122,6 +122,14 @@ fn test_display_patch_database() {
   assert_eq!(display_text, "Patch database: cannot open patch as standalone");
 }
 
+#[test]
+fn test_display_shutting_down() {
+  let engine_error = EngineError::ShuttingDown;
+  let display_text = format!("{}", engine_error);
+
+  assert_eq!(display_text, "Storage engine is shutting down");
+}
+
 // --- Additional coverage for std::error::Error impl ---
 
 #[test]
@@ -152,6 +160,7 @@ fn test_error_source_non_io_variants_return_none() {
     EngineError::ReservedUserId,
     EngineError::UnsafeQueryField("x".into()),
     EngineError::PatchDatabase("x".into()),
+    EngineError::ShuttingDown,
   ];
 
   for variant in &variants {

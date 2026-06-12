@@ -15,6 +15,8 @@ AeorDB publishes real-time events via Server-Sent Events (SSE). Clients can subs
 
 Open a persistent Server-Sent Events connection. The server pushes events as they occur and sends periodic keepalive pings.
 
+When the stream is available, the server is ready to serve the full API. For unfiltered streams, and for streams that explicitly include `server_ready`, the first event is a synthetic `server_ready` event with the current ready state. This event is generated per connection; it is not a one-time broadcast that clients can miss.
+
 ### Query Parameters
 
 | Parameter | Type | Description |
@@ -78,6 +80,7 @@ Each event is a JSON object with:
 
 | Event Type | Description | Payload |
 |------------|-------------|---------|
+| `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
 | `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}]}` |
 | `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}]}` |
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata |
@@ -85,6 +88,35 @@ Each event is a JSON object with:
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
 | `metrics` | System metrics snapshot (every 15s) | `{"counts", "sizes", "throughput", "health"}` |
+
+---
+
+### Server Ready Event
+
+The `server_ready` event is emitted as the first SSE event for each eligible `/system/events` connection. Because `/system/events` is only served by the full application router, receiving this event means the server has finished startup and is ready for normal API traffic.
+
+It is sent when:
+
+- no `events` filter is supplied
+- `server_ready` is included in the `events` filter
+
+It is not sent when an `events` filter excludes it. This preserves strict event filtering for clients that only want a specific event type.
+
+```json
+{
+  "status": "ready",
+  "version": "0.9.5",
+  "startup_time": 1781233139578,
+  "uptime_ms": 6500
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Always `"ready"` |
+| `version` | string | AeorDB server version |
+| `startup_time` | integer | Server startup timestamp in Unix milliseconds |
+| `uptime_ms` | integer | Current uptime at the moment this SSE connection was accepted |
 
 ---
 

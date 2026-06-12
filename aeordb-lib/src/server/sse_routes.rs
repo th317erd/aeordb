@@ -6,6 +6,7 @@ use axum::Extension;
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio_stream::once;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{match_rules, KeyRule};
-use crate::engine::engine_event::EngineEvent;
+use crate::engine::engine_event::{EngineEvent, EVENT_SERVER_READY};
 
 #[derive(Debug, Deserialize)]
 pub struct SseParams {
@@ -78,6 +79,60 @@ fn any_path_allowed_by_rules(paths: &[String], rules: &[KeyRule]) -> bool {
   })
 }
 
+fn parse_event_filter(events: Option<String>) -> Option<Vec<String>> {
+  events.map(|e| e.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+}
+
+fn event_passes_filters(
+  event: &EngineEvent,
+  event_filter: &Option<Vec<String>>,
+  path_prefix: &Option<String>,
+  subscriber_rules: &[KeyRule],
+) -> bool {
+  if let Some(filter) = event_filter {
+    if !filter.contains(&event.event_type) {
+      return false;
+    }
+  }
+
+  if let Some(prefix) = path_prefix {
+    if !matches_path_prefix(event, prefix) {
+      return false;
+    }
+  }
+
+  if !subscriber_rules.is_empty() {
+    let paths = extract_event_paths(event);
+    // Events with no path info (heartbeat, metrics, server_ready, etc.) pass through.
+    // Events with paths are filtered: at least one path must be readable.
+    if !paths.is_empty() && !any_path_allowed_by_rules(&paths, subscriber_rules) {
+      return false;
+    }
+  }
+
+  true
+}
+
+fn event_to_sse(event: EngineEvent) -> Option<Result<Event, Infallible>> {
+  match serde_json::to_string(&event) {
+    Ok(json) => Some(Ok(Event::default().id(event.event_id.clone()).event(event.event_type.clone()).data(json))),
+    Err(_) => None,
+  }
+}
+
+fn server_ready_event(state: &AppState) -> EngineEvent {
+  EngineEvent::new(
+    EVENT_SERVER_READY,
+    "system",
+    serde_json::json!({
+      "status": "ready",
+      "version": env!("CARGO_PKG_VERSION"),
+      "startup_time": state.startup_time,
+      "uptime_ms": state.startup_instant.elapsed().as_millis() as u64,
+    }),
+  )
+}
+
 /// GET /events/stream -- Server-Sent Events stream of engine events.
 ///
 /// Query parameters:
@@ -112,47 +167,26 @@ pub async fn event_stream(
   };
 
   // Parse the comma-separated event type filter.
-  let event_filter: Option<Vec<String>> =
-    params.events.map(|e| e.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+  let event_filter = parse_event_filter(params.events);
 
   let path_prefix = params.path_prefix;
+  let ready_event = server_ready_event(&state);
+  let initial_ready =
+    if event_passes_filters(&ready_event, &event_filter, &path_prefix, &subscriber_rules) { event_to_sse(ready_event) } else { None };
 
-  let stream = BroadcastStream::new(rx).filter_map(move |result| {
+  let live_stream = BroadcastStream::new(rx).filter_map(move |result| {
     match result {
       Ok(event) => {
-        // Apply event type filter.
-        if let Some(ref filter) = event_filter {
-          if !filter.contains(&event.event_type) {
-            return None;
-          }
-        }
-
-        // Apply path prefix filter.
-        if let Some(ref prefix) = path_prefix {
-          if !matches_path_prefix(&event, prefix) {
-            return None;
-          }
-        }
-
-        // Apply permission-based filtering for non-root users with key rules.
-        if !subscriber_rules.is_empty() {
-          let paths = extract_event_paths(&event);
-          // Events with no path info (heartbeat, metrics, etc.) pass through.
-          // Events with paths are filtered: at least one path must be readable.
-          if !paths.is_empty() && !any_path_allowed_by_rules(&paths, &subscriber_rules) {
-            return None;
-          }
-        }
-
-        // Serialize the full event envelope as JSON data.
-        match serde_json::to_string(&event) {
-          Ok(json) => Some(Ok(Event::default().id(event.event_id.clone()).event(event.event_type.clone()).data(json))),
-          Err(_) => None,
+        if event_passes_filters(&event, &event_filter, &path_prefix, &subscriber_rules) {
+          event_to_sse(event)
+        } else {
+          None
         }
       }
       Err(_) => None, // Lagged or closed -- silently skip
     }
   });
+  let stream = once(initial_ready).filter_map(|event| event).chain(live_stream);
 
   Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(30)).text("ping"))
 }
