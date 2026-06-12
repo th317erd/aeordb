@@ -424,8 +424,12 @@ fn test_initialize_from_kv_counts_files() {
 
   assert_eq!(snapshot.files, 5, "startup file counter should use live tree count");
   assert!(snapshot.chunks > 0, "files produce chunks");
-  assert_eq!(snapshot.logical_data_size, 0, "startup logical size scan is opt-in");
-  assert_eq!(snapshot.chunk_data_size, 0, "startup chunk size scan is opt-in");
+  assert_eq!(
+    snapshot.logical_data_size,
+    (b"hello alpha".len() + b"hello beta".len() + b"hello gamma".len() + b"hello delta".len() + b"hello epsilon".len()) as u64,
+    "startup logical size should come from the live tree"
+  );
+  assert_eq!(snapshot.chunk_data_size, snapshot.logical_data_size, "uncompressed unique chunks should initialize from KV entry sizes");
 }
 
 #[test]
@@ -482,7 +486,8 @@ fn test_initialize_from_kv_sums_logical_size() {
   let counters = EngineCounters::initialize_from_kv(&engine);
   let snapshot = counters.snapshot();
 
-  assert_eq!(snapshot.logical_data_size, 0, "startup logical size scan is opt-in");
+  assert_eq!(snapshot.logical_data_size, 600, "startup logical size should be measured from the live tree");
+  assert_eq!(snapshot.chunk_data_size, 600, "startup chunk size should be estimated from KV entry sizes");
 }
 
 #[test]
@@ -943,7 +948,8 @@ fn test_live_counters_initialized_on_reopen() {
   assert_eq!(snap.files, 2, "should count live files");
   assert!(snap.symlinks >= 1, "should count at least 1 symlink");
   assert_eq!(snap.directories, 0, "root directory is not counted as a user directory");
-  assert_eq!(snap.logical_data_size, 0, "startup logical size scan is opt-in");
+  assert_eq!(snap.logical_data_size, 6, "startup logical size should be measured after reopen");
+  assert_eq!(snap.chunk_data_size, 6, "startup chunk size should be estimated after reopen");
 }
 
 #[test]

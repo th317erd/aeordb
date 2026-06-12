@@ -1511,14 +1511,16 @@ impl StorageEngine {
   }
 
   /// Reconcile live count counters from the authoritative KV snapshot while
-  /// preserving runtime byte-size and monotonic throughput counters.
+  /// preserving monotonic throughput counters.
   pub fn reconcile_counters_from_kv(&self) {
     let current = self.counters.load().snapshot();
     let mut refreshed = EngineCounters::initialize_from_kv(self).snapshot();
-    refreshed.logical_data_size = current.logical_data_size;
-    refreshed.chunk_data_size = current.chunk_data_size;
-    refreshed.void_space = current.void_space;
-    refreshed.void_count = current.void_count;
+    refreshed.writes_total = current.writes_total;
+    refreshed.reads_total = current.reads_total;
+    refreshed.bytes_written_total = current.bytes_written_total;
+    refreshed.bytes_read_total = current.bytes_read_total;
+    refreshed.chunks_deduped_total = current.chunks_deduped_total;
+    refreshed.write_buffer_depth = current.write_buffer_depth;
     self.counters.load().reconcile(&refreshed);
   }
 

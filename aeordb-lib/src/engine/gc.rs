@@ -5,8 +5,8 @@ use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
 use crate::engine::engine_event::{EVENT_GC_COMPLETED, EVENT_GC_STARTED};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
+use crate::engine::engine_counters::{estimated_chunk_payload_bytes, CountersSnapshot};
 use crate::engine::file_record::FileRecord;
-use crate::engine::engine_counters::CountersSnapshot;
 use crate::engine::kv_store::{
   KVEntry, KV_TYPE_DELETION, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_CHUNK, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK,
 };
@@ -835,36 +835,22 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
   let all_entries = engine.iter_kv_entries()?;
   let hash_length = engine.hash_algo().hash_length();
 
-  let mut files: u64 = 0;
-  let mut directories: u64 = 0;
   let mut symlinks: u64 = 0;
   let mut chunks: u64 = 0;
   let mut snapshots: u64 = 0;
   let mut forks: u64 = 0;
-  let mut logical_data_size: u64 = 0;
   let mut chunk_data_size: u64 = 0;
 
   for entry in &all_entries {
     match entry.entry_type() {
-      KV_TYPE_FILE_RECORD => {
-        files += 1;
-        if let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) {
-          if let Ok(record) = FileRecord::deserialize(&value, hash_length, header.entry_version) {
-            logical_data_size += record.total_size;
-          }
-        }
-      }
-      KV_TYPE_DIRECTORY => {
-        directories += 1;
-      }
+      KV_TYPE_FILE_RECORD => {}
+      KV_TYPE_DIRECTORY => {}
       KV_TYPE_SYMLINK => {
         symlinks += 1;
       }
       KV_TYPE_CHUNK => {
         chunks += 1;
-        if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-          chunk_data_size += value.len() as u64;
-        }
+        chunk_data_size = chunk_data_size.saturating_add(estimated_chunk_payload_bytes(entry, hash_length));
       }
       KV_TYPE_SNAPSHOT => {
         snapshots += 1;
@@ -876,19 +862,20 @@ fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<Counters
     }
   }
 
+  let live_tree = crate::engine::directory_listing::measure_live_tree(engine)?;
   let void_space = if let Ok(vm) = engine.void_manager.read() { vm.total_void_space() } else { 0 };
 
   // Preserve current throughput counters (they are monotonic, not reconciled)
   let current = engine.counters().snapshot();
 
   Ok(CountersSnapshot {
-    files,
-    directories,
+    files: live_tree.files,
+    directories: live_tree.directories,
     symlinks,
     chunks,
     snapshots,
     forks,
-    logical_data_size,
+    logical_data_size: live_tree.logical_data_size,
     chunk_data_size,
     void_space,
     writes_total: current.writes_total,

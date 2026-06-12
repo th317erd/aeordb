@@ -5,6 +5,14 @@ use crate::engine::errors::EngineResult;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::storage_engine::StorageEngine;
 
+/// Live tree metrics reachable from HEAD's root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveTreeMetrics {
+  pub files: u64,
+  pub directories: u64,
+  pub logical_data_size: u64,
+}
+
 /// Count live files + directories reachable from HEAD's root.
 ///
 /// "Live" means present in the current tree — i.e., reachable by walking
@@ -18,23 +26,31 @@ use crate::engine::storage_engine::StorageEngine;
 ///
 /// Returns `(files, directories)`.
 pub fn count_live_tree(engine: &StorageEngine) -> EngineResult<(u64, u64)> {
+  let metrics = measure_live_tree(engine)?;
+  Ok((metrics.files, metrics.directories))
+}
+
+/// Measure live files, directories, and logical byte size reachable from HEAD.
+///
+/// This walks directory entries only. File sizes come from `ChildEntry::total_size`,
+/// so it does not read file payload chunks and is safe to run during startup.
+pub fn measure_live_tree(engine: &StorageEngine) -> EngineResult<LiveTreeMetrics> {
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
   let root_key = directory_path_hash("/", &algo)?;
   let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
   let root_value = match ops.read_directory_data(&root_key)? {
     Some((_header, value)) => value,
-    None => return Ok((0, 0)),
+    None => return Ok(LiveTreeMetrics::default()),
   };
-  let mut files: u64 = 0;
-  let mut dirs: u64 = 0;
+  let mut metrics = LiveTreeMetrics::default();
   if !root_value.is_empty() {
-    count_walk(engine, &root_value, hash_length, &mut files, &mut dirs)?;
+    measure_walk(engine, &root_value, hash_length, &mut metrics)?;
   }
-  Ok((files, dirs))
+  Ok(metrics)
 }
 
-fn count_walk(engine: &StorageEngine, dir_value: &[u8], hash_length: usize, files: &mut u64, dirs: &mut u64) -> EngineResult<()> {
+fn measure_walk(engine: &StorageEngine, dir_value: &[u8], hash_length: usize, metrics: &mut LiveTreeMetrics) -> EngineResult<()> {
   let children = if crate::engine::btree::is_btree_format(dir_value) {
     crate::engine::btree::btree_list_from_node(dir_value, engine, hash_length, false)?
   } else {
@@ -44,13 +60,14 @@ fn count_walk(engine: &StorageEngine, dir_value: &[u8], hash_length: usize, file
     let entry_type = EntryType::from_u8(child.entry_type)?;
     match entry_type {
       EntryType::FileRecord => {
-        *files += 1;
+        metrics.files += 1;
+        metrics.logical_data_size = metrics.logical_data_size.saturating_add(child.total_size);
       }
       EntryType::DirectoryIndex => {
-        *dirs += 1;
+        metrics.directories += 1;
         if let Some((_header, _key, sub_value)) = engine.get_entry(&child.hash)? {
           if !sub_value.is_empty() {
-            count_walk(engine, &sub_value, hash_length, files, dirs)?;
+            measure_walk(engine, &sub_value, hash_length, metrics)?;
           }
         }
       }

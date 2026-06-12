@@ -24,10 +24,11 @@ const COUNT_DEFINITIONS = [
 
 const SIZE_DEFINITIONS = [
   { key: 'disk_total',    label: 'Disk Total',    format: formatBytes },
+  { key: 'kv_file',       label: 'KV File',       format: formatBytes },
   { key: 'logical_data',  label: 'Logical Data',  format: formatBytes },
   { key: 'chunk_data',    label: 'Chunk Data',    format: formatBytes },
   { key: 'dedup_savings', label: 'Dedup Savings', format: formatBytes },
-  { key: 'void_space',    label: 'Void Space',    format: formatBytes },
+  { key: 'void_space',    label: 'Reusable Void', format: formatBytes },
 ];
 
 const DARK_THEME = {

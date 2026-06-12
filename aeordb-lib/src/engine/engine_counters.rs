@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::engine::file_record::FileRecord;
-use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK};
+use crate::engine::entry_header::EntryHeader;
+use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK};
 use crate::engine::storage_engine::StorageEngine;
 
 /// Atomic counters for O(1) database statistics.
@@ -330,13 +330,6 @@ impl EngineCounters {
     let all_entries = kv_snapshot.iter_all().unwrap_or_default();
     let hash_length = engine.hash_algo().hash_length();
 
-    // Reading every FileRecord and Chunk payload off the WAL just to sum
-    // logical_data_size and chunk_data_size is multi-GB of disk I/O for
-    // a real DB. Gate the size accumulation on AEORDB_INIT_COUNTERS_FULL
-    // for callers that need accurate sizes at startup; default skip.
-    let accumulate_sizes = std::env::var("AEORDB_INIT_COUNTERS_FULL").map(|v| !v.is_empty()).unwrap_or(false);
-
-    let mut logical_size: u64 = 0;
     let mut chunk_size: u64 = 0;
 
     for entry in &all_entries {
@@ -346,13 +339,6 @@ impl EngineCounters {
           // revision (each FileRecord write is content-addressed and
           // creates a new KV entry). The `files` counter tracks LIVE
           // files — set below from the HEAD tree walker instead.
-          if accumulate_sizes {
-            if let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) {
-              if let Ok(record) = FileRecord::deserialize(&value, hash_length, header.entry_version) {
-                logical_size += record.total_size;
-              }
-            }
-          }
         }
         KV_TYPE_DIRECTORY => {
           // Same as FileRecord: every directory mutation creates a
@@ -364,11 +350,7 @@ impl EngineCounters {
         }
         KV_TYPE_CHUNK => {
           counters.chunks.fetch_add(1, Ordering::Relaxed);
-          if accumulate_sizes {
-            if let Ok(Some((_header, _key, value))) = engine.get_entry(&entry.hash) {
-              chunk_size += value.len() as u64;
-            }
-          }
+          chunk_size = chunk_size.saturating_add(estimated_chunk_payload_bytes(entry, hash_length));
         }
         KV_TYPE_SNAPSHOT => {
           counters.snapshots.fetch_add(1, Ordering::Relaxed);
@@ -380,23 +362,22 @@ impl EngineCounters {
       }
     }
 
-    // Files + directories are LIVE counts (reachable from HEAD), not
-    // total KV-entry counts. Walks the current tree once at startup;
-    // runtime increment_files/decrement_files keep it in sync after.
-    match crate::engine::directory_listing::count_live_tree(engine) {
-      Ok((live_files, live_dirs)) => {
-        counters.files.store(live_files, Ordering::Relaxed);
-        counters.directories.store(live_dirs, Ordering::Relaxed);
+    // Files/directories/logical bytes are LIVE metrics (reachable from HEAD),
+    // not total KV-entry counts. Walk the current tree once at startup.
+    match crate::engine::directory_listing::measure_live_tree(engine) {
+      Ok(metrics) => {
+        counters.files.store(metrics.files, Ordering::Relaxed);
+        counters.directories.store(metrics.directories, Ordering::Relaxed);
+        counters.logical_data_size.store(metrics.logical_data_size, Ordering::Relaxed);
       }
       Err(err) => {
         tracing::warn!(
             error = %err,
-            "count_live_tree failed at startup; live file/dir counts default to 0"
+            "measure_live_tree failed at startup; live file/dir/logical counters default to 0"
         );
       }
     }
 
-    counters.logical_data_size.store(logical_size, Ordering::Relaxed);
     counters.chunk_data_size.store(chunk_size, Ordering::Relaxed);
 
     // Capture void space from the void manager
@@ -406,6 +387,17 @@ impl EngineCounters {
 
     counters
   }
+}
+
+/// Estimate stored chunk payload bytes from KV metadata alone.
+///
+/// Chunk entries use the chunk content hash as the entry key, so their key
+/// length equals the database hash length. `KVEntry::total_length` already
+/// includes the fixed entry header, entry hash, key, and stored value. This is
+/// intentionally the stored payload length, not a decompressed/raw length.
+pub(crate) fn estimated_chunk_payload_bytes(entry: &KVEntry, hash_length: usize) -> u64 {
+  let overhead = EntryHeader::FIXED_HEADER_SIZE as u32 + hash_length as u32 + hash_length as u32;
+  entry.total_length.saturating_sub(overhead) as u64
 }
 
 /// Saturating subtraction for AtomicU64: if `current < amount`, stores 0

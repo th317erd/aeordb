@@ -638,6 +638,8 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 
 > **Note:** The previous `GET /system/stats` returned a flat object computed via O(n) iteration. The new response is structured into nested sections and is O(1) — no performance concerns polling at high frequency.
 
+`sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
+
 **Example:**
 
 ```bash

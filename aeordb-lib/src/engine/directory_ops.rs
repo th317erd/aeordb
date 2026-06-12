@@ -801,19 +801,23 @@ impl<'a> DirectoryOps<'a> {
 
         // Dedup: only store if not already present
         if !self.engine.has_entry(&chunk_key)? {
+          let stored_chunk_bytes;
           if compression_algo != CompressionAlgorithm::None {
             let compressed_data = compress(chunk_data, compression_algo)?;
+            stored_chunk_bytes = compressed_data.len() as u64;
             if sys_flags != 0 {
               self.engine.store_entry_compressed_with_flags(EntryType::Chunk, &chunk_key, &compressed_data, sys_flags, compression_algo)?;
             } else {
               self.engine.store_entry_compressed(EntryType::Chunk, &chunk_key, &compressed_data, compression_algo)?;
             }
           } else if sys_flags != 0 {
+            stored_chunk_bytes = chunk_data.len() as u64;
             self.engine.store_entry_with_flags(EntryType::Chunk, &chunk_key, chunk_data, sys_flags)?;
           } else {
+            stored_chunk_bytes = chunk_data.len() as u64;
             self.engine.store_entry(EntryType::Chunk, &chunk_key, chunk_data)?;
           }
-          self.engine.counters().record_chunk_stored(chunk_data.len() as u64);
+          self.engine.counters().record_chunk_stored(stored_chunk_bytes);
         } else {
           self.engine.counters().record_chunk_deduped();
         }
