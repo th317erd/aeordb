@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,7 @@ use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::index_store::{IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_WRITES};
 use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
@@ -89,6 +91,13 @@ struct FinishBatchCommitTimings {
   event_emit_ms: u128,
   metadata_index_ms: u128,
   metadata_indexed_files: usize,
+  metadata_index_mutations: usize,
+  metadata_index_pending_mutations: usize,
+  metadata_index_flushes: usize,
+}
+
+fn live_commit_index_buffer_options() -> IndexWriteBufferOptions {
+  IndexWriteBufferOptions::new(DEFAULT_INDEX_BUFFER_FLUSH_WRITES, Duration::from_secs(300))
 }
 
 /// Atomically commit multiple files from pre-uploaded chunks.
@@ -267,6 +276,9 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     head_update_ms = finish_timings.head_update_ms,
     metadata_indexed_files = finish_timings.metadata_indexed_files,
     metadata_index_ms = finish_timings.metadata_index_ms,
+    metadata_index_mutations = finish_timings.metadata_index_mutations,
+    metadata_index_pending_mutations = finish_timings.metadata_index_pending_mutations,
+    metadata_index_flushes = finish_timings.metadata_index_flushes,
     event_emit_ms = finish_timings.event_emit_ms,
     transaction_commit_ms,
     total_ms = total_start.elapsed().as_millis(),
@@ -484,14 +496,22 @@ fn finish_batch_commit(
 
   let metadata_index_start = std::time::Instant::now();
   let pipeline = IndexingPipeline::new(engine);
+  let mut index_buffer = IndexWriteBuffer::new(engine, live_commit_index_buffer_options());
   for info in &file_infos {
     if !is_system_path(&info.normalized_path) {
       timings.metadata_indexed_files += 1;
-      if let Err(error) = pipeline.run_metadata_only(ctx, &info.normalized_path) {
+      if let Err(error) = pipeline.run_metadata_only_buffered(ctx, &info.normalized_path, &mut index_buffer) {
         tracing::warn!("Metadata indexing failed for '{}': {}", info.normalized_path, error);
+      }
+      if let Err(error) = index_buffer.flush_if_due() {
+        tracing::warn!("Metadata index flush failed during batch commit for '{}': {}", info.normalized_path, error);
       }
     }
   }
+  let index_stats = index_buffer.stats();
+  timings.metadata_index_mutations = index_stats.mutations;
+  timings.metadata_index_pending_mutations = index_stats.pending_mutations;
+  timings.metadata_index_flushes = index_stats.flushes;
   timings.metadata_index_ms = metadata_index_start.elapsed().as_millis();
 
   Ok((CommitResult { committed, files: result_files }, timings))

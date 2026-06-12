@@ -111,8 +111,11 @@ pub fn spawn_index_buffer_flush_timer(engine: Arc<StorageEngine>, cancel: Option
       }
       match weak.upgrade() {
         Some(engine) => {
-          if let Err(error) = engine.flush_index_buffer_if_due() {
-            tracing::warn!("Index buffer timer flush failed: {}", error);
+          let flush_result = tokio::task::spawn_blocking(move || engine.flush_index_buffer_if_due()).await;
+          match flush_result {
+            Ok(Ok(_flushed)) => {}
+            Ok(Err(error)) => tracing::warn!("Index buffer timer flush failed: {}", error),
+            Err(error) => tracing::warn!("Index buffer timer flush task failed: {}", error),
           }
         }
         None => break,
