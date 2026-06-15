@@ -13,6 +13,21 @@ CARGO_JOBS="${CARGO_JOBS:-6}"
 STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-1800}"
 INSTALL_LOCAL="${INSTALL_LOCAL:-1}"
 LOCAL_INSTALL_BIN="${LOCAL_INSTALL_BIN:-$HOME/.local/bin/aeordb}"
+DEBUGGABLE_RELEASE="${DEBUGGABLE_RELEASE:-1}"
+
+case "$DEBUGGABLE_RELEASE" in
+  1|true|yes)
+    case " ${RUSTFLAGS:-} " in
+      *" -C force-frame-pointers=yes "*) ;;
+      *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" ;;
+    esac
+    ;;
+  0|false|no) ;;
+  *)
+    echo "Invalid DEBUGGABLE_RELEASE value: $DEBUGGABLE_RELEASE"
+    exit 2
+    ;;
+esac
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_dir="deploy/logs"
@@ -27,6 +42,8 @@ echo "remote_bin=$REMOTE_BIN"
 echo "health_url=$HEALTH_URL"
 echo "install_local=$INSTALL_LOCAL"
 echo "local_install_bin=$LOCAL_INSTALL_BIN"
+echo "debuggable_release=$DEBUGGABLE_RELEASE"
+echo "rustflags=${RUSTFLAGS:-}"
 echo "log_file=$log_file"
 echo
 
@@ -34,6 +51,12 @@ echo "== Build release binary =="
 cargo build --release -p aeordb-cli --bin aeordb -j "$CARGO_JOBS"
 local_sha="$(sha256sum "$LOCAL_BIN" | awk '{print $1}')"
 echo "local_sha256=$local_sha"
+file "$LOCAL_BIN"
+if command -v readelf >/dev/null 2>&1; then
+  readelf -n "$LOCAL_BIN" | awk '/Build ID/ {print "build_id="$3; found=1; exit} END {if (!found) print "build_id="}'
+  debug_sections="$(readelf -S "$LOCAL_BIN" | awk '/\.debug_/ {count++} END {print count + 0}')"
+  echo "debug_sections=$debug_sections"
+fi
 echo
 
 case "$INSTALL_LOCAL" in

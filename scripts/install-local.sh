@@ -9,6 +9,8 @@
 #
 # Environment:
 #   AEORDB_INSTALL_BIN_DIR   install directory (default: $HOME/.local/bin)
+#   CARGO_JOBS               cargo build jobs (default: 6)
+#   DEBUGGABLE_RELEASE       preserve debuggable release build settings (default: 1)
 
 set -euo pipefail
 
@@ -29,6 +31,8 @@ EOF
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin_dir="${AEORDB_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 source_binary=""
+cargo_jobs="${CARGO_JOBS:-6}"
+debuggable_release="${DEBUGGABLE_RELEASE:-1}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -62,8 +66,21 @@ done
 
 if [ -z "$source_binary" ]; then
   cd "$repo_root"
+  case "$debuggable_release" in
+    1|true|yes)
+      case " ${RUSTFLAGS:-} " in
+        *" -C force-frame-pointers=yes "*) ;;
+        *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" ;;
+      esac
+      ;;
+    0|false|no) ;;
+    *)
+      echo "error: invalid DEBUGGABLE_RELEASE value: $debuggable_release" >&2
+      exit 2
+      ;;
+  esac
   echo "Building AeorDB release binary..."
-  cargo build --release -p aeordb-cli --bin aeordb
+  cargo build --release -p aeordb-cli --bin aeordb -j "$cargo_jobs"
   source_binary="$repo_root/target/release/aeordb"
 fi
 
