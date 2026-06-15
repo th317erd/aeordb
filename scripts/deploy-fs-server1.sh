@@ -15,6 +15,16 @@ STOP_WAIT_SECONDS="${STOP_WAIT_SECONDS:-2100}"
 INSTALL_LOCAL="${INSTALL_LOCAL:-1}"
 LOCAL_INSTALL_BIN="${LOCAL_INSTALL_BIN:-$HOME/.local/bin/aeordb}"
 DEBUGGABLE_RELEASE="${DEBUGGABLE_RELEASE:-1}"
+SSH_CONNECT_TIMEOUT="${SSH_CONNECT_TIMEOUT:-10}"
+SSH_SERVER_ALIVE_INTERVAL="${SSH_SERVER_ALIVE_INTERVAL:-15}"
+SSH_SERVER_ALIVE_COUNT_MAX="${SSH_SERVER_ALIVE_COUNT_MAX:-4}"
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout="$SSH_CONNECT_TIMEOUT"
+  -o ServerAliveInterval="$SSH_SERVER_ALIVE_INTERVAL"
+  -o ServerAliveCountMax="$SSH_SERVER_ALIVE_COUNT_MAX"
+)
+SCP_OPTS=("${SSH_OPTS[@]}")
 
 case "$DEBUGGABLE_RELEASE" in
   1|true|yes)
@@ -46,6 +56,9 @@ echo "install_local=$INSTALL_LOCAL"
 echo "local_install_bin=$LOCAL_INSTALL_BIN"
 echo "debuggable_release=$DEBUGGABLE_RELEASE"
 echo "rustflags=${RUSTFLAGS:-}"
+echo "ssh_connect_timeout=$SSH_CONNECT_TIMEOUT"
+echo "ssh_server_alive_interval=$SSH_SERVER_ALIVE_INTERVAL"
+echo "ssh_server_alive_count_max=$SSH_SERVER_ALIVE_COUNT_MAX"
 echo "log_file=$log_file"
 echo
 
@@ -87,7 +100,7 @@ case "$INSTALL_LOCAL" in
 esac
 
 echo "== Remote preflight =="
-ssh "$HOST" "set -euo pipefail
+ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   echo host=\$(hostname)
   echo time=\$(date -Is)
   systemctl is-active '$SERVICE' || true
@@ -100,14 +113,14 @@ remote_tmp_bin="$REMOTE_TMP.$timestamp"
 remote_tmp_unit="/tmp/aeordb.service.$timestamp"
 
 echo "== Copy artifacts =="
-scp -q "$LOCAL_BIN" "$HOST:$remote_tmp_bin"
-scp -q "$LOCAL_UNIT" "$HOST:$remote_tmp_unit"
+scp -q "${SCP_OPTS[@]}" "$LOCAL_BIN" "$HOST:$remote_tmp_bin"
+scp -q "${SCP_OPTS[@]}" "$LOCAL_UNIT" "$HOST:$remote_tmp_unit"
 echo "copied_binary=$remote_tmp_bin"
 echo "copied_unit=$remote_tmp_unit"
 echo
 
 echo "== Install unit before stop =="
-ssh "$HOST" "set -euo pipefail
+ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   sudo install -o root -g root -m 0644 '$remote_tmp_unit' '$REMOTE_UNIT'
   sudo rm -f '$remote_tmp_unit'
   sudo systemctl daemon-reload
@@ -117,7 +130,7 @@ echo
 
 echo "== Stop service cleanly =="
 set +e
-timeout "$STOP_WAIT_SECONDS" ssh "$HOST" "set -euo pipefail
+timeout "$STOP_WAIT_SECONDS" ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   if systemctl is-active --quiet '$SERVICE'; then
     sudo systemctl stop '$SERVICE'
   fi
@@ -139,7 +152,7 @@ fi
 echo
 
 echo "== Install binary =="
-ssh "$HOST" "set -euo pipefail
+ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   sudo install -d -o root -g root -m 0755 \"\$(dirname '$REMOTE_BIN')\"
   if [ -x '$REMOTE_BIN' ]; then
     sudo cp -a '$REMOTE_BIN' '$REMOTE_BIN.bak.$timestamp'
@@ -152,7 +165,7 @@ ssh "$HOST" "set -euo pipefail
 echo
 
 echo "== Start service =="
-ssh "$HOST" "set -euo pipefail
+ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   sudo systemctl start '$SERVICE'
   systemctl show -p MainPID -p ActiveState -p SubState '$SERVICE'
 "
@@ -162,7 +175,7 @@ echo "== Wait for health =="
 deadline=$((SECONDS + STARTUP_WAIT_SECONDS))
 ready=0
 while [ "$SECONDS" -lt "$deadline" ]; do
-  output="$(ssh "$HOST" "curl -sS -m 5 -w '\nHTTP=%{http_code}\n' '$HEALTH_URL' 2>&1" || true)"
+  output="$(ssh "${SSH_OPTS[@]}" "$HOST" "curl -sS -m 5 -w '\nHTTP=%{http_code}\n' '$HEALTH_URL' 2>&1" || true)"
   echo "$output"
   http_code="$(printf '%s\n' "$output" | awk -F= '/^HTTP=/{print $2}' | tail -1)"
   if printf '%s\n' "$output" | grep -q '"status":"healthy"'; then
@@ -178,7 +191,7 @@ done
 
 echo
 echo "== Remote status =="
-ssh "$HOST" "set -euo pipefail
+ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   systemctl status '$SERVICE' --no-pager || true
   echo
   journalctl -u '$SERVICE' --since '15 minutes ago' --no-pager | tail -n 120 || true
@@ -190,7 +203,7 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-remote_sha="$(ssh "$HOST" "sha256sum '$REMOTE_BIN' | awk '{print \$1}'")"
+remote_sha="$(ssh "${SSH_OPTS[@]}" "$HOST" "sha256sum '$REMOTE_BIN' | awk '{print \$1}'")"
 if [ "$remote_sha" != "$local_sha" ]; then
   echo "Remote SHA mismatch: local=$local_sha remote=$remote_sha"
   exit 1
