@@ -707,7 +707,7 @@ pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> En
 
   // Auto-snapshot before GC — safety net in case sweep removes something needed
   if !dry_run {
-    let snapshot_name = format!("_aeordb_pre_gc_{}", chrono::Utc::now().timestamp());
+    let snapshot_name = format!("_aeordb_pre_gc_{}_{}", chrono::Utc::now().timestamp_millis(), uuid::Uuid::new_v4().simple());
 
     match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
       Ok(_) => {

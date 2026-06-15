@@ -13,12 +13,15 @@
 - Peer sync apply now fails the sync cycle on local chunk/file/symlink write errors, conflict-store errors, and sync-state persistence errors.
 - GC now aborts when it cannot create the pre-GC safety snapshot, or when the post-sweep hot-tail flush fails.
 - `StorageEngine::drop` now logs shutdown failures instead of discarding them silently.
+- Serious durability failures now latch the engine read-only for subsequent writes while leaving reads/inspection available.
+- On first durability latch, the engine attempts a best-effort emergency spill outside the DB file: serialized hot-tail/KV volatile state, dirty buffered index state, manifest metadata, and a bounded WAL-tail copy from the last published hot-tail boundary.
+- Emergency spill location order is `AEORDB_EMERGENCY_SPILL_DIR`, OS user-data directory, then `/tmp/aeordb-emergency-spill`; `AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES=0` disables WAL-tail truncation, otherwise the default cap is 4 GiB.
 
 ## Remaining high-priority audit items
 
 - Add a real Windows implementation for parent-directory sync in `engine::durability`; the helper currently centralizes the call site but no-ops on Windows.
 - Add a test/failpoint harness for forced sync failures so shutdown, transaction, timer, GC, export, and sync-state failure behavior is directly asserted.
-- Decide whether a latched durability failure should reject all subsequent writes immediately. The health state is now visible, but write gating is still a follow-up policy decision.
+- Add first-class CLI/admin tooling to inspect and recover emergency spill artifacts. Current output is intentionally explicit, but recovery is still manual.
 - Revisit `DiskKVStore::drop`: it logs failed flushes but cannot return. This is acceptable only if every normal owner path calls `StorageEngine::shutdown()` and handles the result.
 - Revisit index flush failure policy. Indexes are rebuildable, but API responses should not imply indexing succeeded when index flush failed.
 

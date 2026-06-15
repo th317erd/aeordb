@@ -264,6 +264,25 @@ Not all entries are equally important for durability:
 
 This gives durability where it matters and performance where it doesn't.
 
+## Serious Durability Failures
+
+If a critical write, flush, or sync step fails, AeorDB latches the engine into a read-only safety mode. Reads and diagnostic operations remain available, but subsequent write/index/GC mutations return a durability failure instead of continuing on top of an uncertain persistence state.
+
+On the first latch, the engine also attempts a best-effort emergency spill outside the database file. The spill contains:
+
+- `manifest.json` with the failure context, DB path, offsets, counts, and spill errors.
+- `hot-tail.bin` with the current in-memory hot-tail payload: pending KV writes plus the void snapshot.
+- `index-buffer.json` when there are unflushed buffered index mutations.
+- `wal-tail.bin` when the engine can copy WAL bytes from the last successfully published hot-tail boundary to the current WAL offset.
+
+Spill destination order is:
+
+1. `AEORDB_EMERGENCY_SPILL_DIR`, when set.
+2. The OS user-data directory (`$XDG_DATA_HOME/aeordb/emergency-spill`, `~/.local/share/aeordb/emergency-spill`, macOS Application Support, or Windows app data).
+3. The temp fallback: `/tmp/aeordb-emergency-spill` on Unix-like systems.
+
+`AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES` caps the WAL-tail copy. The default is 4 GiB; set it to `0` to copy the full tail. This is intentionally best-effort: the copied bytes reflect what the process can still read and write through the operating system at the time of failure.
+
 ## Crash Recovery
 
 The recovery hierarchy, from least to most damage:

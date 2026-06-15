@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 
 use fs2::FileExt;
@@ -55,6 +56,31 @@ pub struct EngineStartupProgress {
 }
 
 pub type EngineStartupProgressCallback = Arc<dyn Fn(EngineStartupProgress) + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EmergencySpillReport {
+  pub attempted_at: String,
+  pub context: String,
+  pub failure: String,
+  pub succeeded: bool,
+  pub spill_directory: Option<String>,
+  pub manifest_path: Option<String>,
+  pub hot_tail_path: Option<String>,
+  pub wal_tail_path: Option<String>,
+  pub index_buffer_path: Option<String>,
+  pub db_path: Option<String>,
+  pub hot_tail_writes: usize,
+  pub hot_tail_voids: usize,
+  pub index_pending_mutations: usize,
+  pub index_dirty_saves: usize,
+  pub index_deletes: usize,
+  pub wal_tail_original_start: Option<u64>,
+  pub wal_tail_copy_start: Option<u64>,
+  pub wal_tail_end: Option<u64>,
+  pub wal_tail_bytes: u64,
+  pub wal_tail_truncated: bool,
+  pub errors: Vec<String>,
+}
 
 struct BatchEntry {
   entry_type: EntryType,
@@ -329,6 +355,8 @@ pub struct StorageEngine {
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
   durability_failure: Mutex<Option<String>>,
+  emergency_spill: Mutex<Option<EmergencySpillReport>>,
+  last_published_hot_tail_offset: AtomicU64,
   namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
@@ -392,15 +420,333 @@ impl StorageEngine {
     self.durability_failure.lock().ok().and_then(|failure| failure.clone())
   }
 
+  pub fn emergency_spill_report(&self) -> Option<EmergencySpillReport> {
+    self.emergency_spill.lock().ok().and_then(|spill| spill.clone())
+  }
+
+  pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
+    if let Some(failure) = self.durability_failure() {
+      return Err(EngineError::DurabilityFailure(format!("database is read-only after serious durability failure: {}", failure)));
+    }
+    Ok(())
+  }
+
   fn record_durability_failure(&self, context: &str, error: impl std::fmt::Display) -> EngineError {
     let message = format!("{}: {}", context, error);
+    let mut first_failure = false;
     if let Ok(mut failure) = self.durability_failure.lock() {
       if failure.is_none() {
         *failure = Some(message.clone());
+        first_failure = true;
       }
     }
-    tracing::error!(context, error = %message, "Critical durability failure");
+    if first_failure {
+      let spill = self.attempt_emergency_spill(context, &message);
+      if let Ok(mut slot) = self.emergency_spill.lock() {
+        *slot = Some(spill.clone());
+      }
+      if spill.succeeded {
+        tracing::error!(
+          context,
+          error = %message,
+          spill_directory = ?spill.spill_directory,
+          wal_tail_bytes = spill.wal_tail_bytes,
+          hot_tail_writes = spill.hot_tail_writes,
+          hot_tail_voids = spill.hot_tail_voids,
+          "Critical durability failure; database latched read-only and emergency spill created"
+        );
+      } else {
+        tracing::error!(
+          context,
+          error = %message,
+          spill_errors = ?spill.errors,
+          "Critical durability failure; database latched read-only and emergency spill failed"
+        );
+      }
+    } else {
+      tracing::error!(context, error = %message, "Critical durability failure");
+    }
     EngineError::DurabilityFailure(message)
+  }
+
+  fn attempt_emergency_spill(&self, context: &str, failure: &str) -> EmergencySpillReport {
+    let attempted_at = chrono::Utc::now().to_rfc3339();
+    let mut errors = Vec::new();
+    let mut db_path: Option<PathBuf> = None;
+    let mut wal_tail_original_start = None;
+    let mut wal_tail_end = None;
+
+    let current_offset = match self.writer.try_read() {
+      Ok(writer) => {
+        db_path = Some(writer.file_path().to_path_buf());
+        let header = writer.file_header();
+        let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
+        let current_offset = writer.current_offset();
+        let boundary = self.last_published_hot_tail_offset.load(Ordering::Acquire);
+        wal_tail_original_start = Some(boundary.max(wal_start).min(current_offset));
+        wal_tail_end = Some(current_offset);
+        current_offset
+      }
+      Err(error) => {
+        errors.push(format!("writer lock unavailable for emergency spill: {}", error));
+        0
+      }
+    };
+
+    let payload = match self.kv_writer.try_lock() {
+      Ok(mut kv) => kv.emergency_hot_tail_payload(),
+      Err(error) => {
+        errors.push(format!("KV lock unavailable for emergency spill: {}", error));
+        crate::engine::hot_tail::HotTailPayload::default()
+      }
+    };
+
+    let index_snapshot = match self.index_write_buffer.try_lock() {
+      Ok(mut buffer) => match buffer.emergency_snapshot_json(self.hash_algo.hash_length()) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+          errors.push(format!("failed to snapshot buffered indexes for emergency spill: {}", error));
+          None
+        }
+      },
+      Err(error) => {
+        errors.push(format!("index buffer lock unavailable for emergency spill: {}", error));
+        None
+      }
+    };
+    let index_pending_mutations =
+      index_snapshot.as_ref().and_then(|snapshot| snapshot.get("pending_mutations")).and_then(|value| value.as_u64()).unwrap_or(0) as usize;
+    let index_dirty_saves = index_snapshot
+      .as_ref()
+      .and_then(|snapshot| snapshot.get("dirty_saves"))
+      .and_then(|value| value.as_array())
+      .map(|values| values.len())
+      .unwrap_or(0);
+    let index_deletes = index_snapshot
+      .as_ref()
+      .and_then(|snapshot| snapshot.get("deletes"))
+      .and_then(|value| value.as_array())
+      .map(|values| values.len())
+      .unwrap_or(0);
+
+    let mut report = EmergencySpillReport {
+      attempted_at,
+      context: context.to_string(),
+      failure: failure.to_string(),
+      succeeded: false,
+      spill_directory: None,
+      manifest_path: None,
+      hot_tail_path: None,
+      wal_tail_path: None,
+      index_buffer_path: None,
+      db_path: db_path.as_ref().map(|path| path.display().to_string()),
+      hot_tail_writes: payload.writes.len(),
+      hot_tail_voids: payload.voids.len(),
+      index_pending_mutations,
+      index_dirty_saves,
+      index_deletes,
+      wal_tail_original_start,
+      wal_tail_copy_start: None,
+      wal_tail_end,
+      wal_tail_bytes: 0,
+      wal_tail_truncated: false,
+      errors,
+    };
+
+    let db_label = db_path
+      .as_ref()
+      .and_then(|path| path.file_name())
+      .map(|name| name.to_string_lossy().to_string())
+      .unwrap_or_else(|| "unknown-db".to_string());
+    let dir_name =
+      format!("{}-{}-{}", Self::sanitize_spill_component(&db_label), chrono::Utc::now().timestamp_millis(), std::process::id());
+
+    for base_dir in Self::emergency_spill_base_dirs() {
+      let spill_dir = base_dir.join(&dir_name);
+      if let Err(error) = std::fs::create_dir_all(&spill_dir) {
+        report.errors.push(format!("failed to create spill directory {}: {}", spill_dir.display(), error));
+        continue;
+      }
+      if let Err(error) = crate::engine::durability::sync_parent_dir(&spill_dir) {
+        report.errors.push(format!("failed to sync spill parent for {}: {}", spill_dir.display(), error));
+      }
+
+      match self.write_emergency_spill_files(&spill_dir, db_path.as_deref(), current_offset, &payload, index_snapshot.as_ref(), &mut report)
+      {
+        Ok(()) => {
+          report.succeeded = true;
+          return report;
+        }
+        Err(error) => {
+          report.errors.push(format!("failed to write emergency spill in {}: {}", spill_dir.display(), error));
+        }
+      }
+    }
+
+    report
+  }
+
+  fn write_emergency_spill_files(
+    &self,
+    spill_dir: &Path,
+    db_path: Option<&Path>,
+    current_offset: u64,
+    payload: &crate::engine::hot_tail::HotTailPayload,
+    index_snapshot: Option<&serde_json::Value>,
+    report: &mut EmergencySpillReport,
+  ) -> Result<(), String> {
+    let hot_tail_path = spill_dir.join("hot-tail.bin");
+    let hot_tail_bytes = crate::engine::hot_tail::serialize_hot_tail(payload, self.hash_algo.hash_length());
+    Self::write_durable_file(&hot_tail_path, &hot_tail_bytes)?;
+    report.hot_tail_path = Some(hot_tail_path.display().to_string());
+
+    if let Some(snapshot) = index_snapshot {
+      if report.index_pending_mutations > 0 || report.index_dirty_saves > 0 || report.index_deletes > 0 {
+        let index_buffer_path = spill_dir.join("index-buffer.json");
+        let index_bytes = serde_json::to_vec_pretty(snapshot).map_err(|error| error.to_string())?;
+        Self::write_durable_file(&index_buffer_path, &index_bytes)?;
+        report.index_buffer_path = Some(index_buffer_path.display().to_string());
+      }
+    }
+
+    if let (Some(source), Some(original_start), Some(end)) = (db_path, report.wal_tail_original_start, report.wal_tail_end) {
+      if end > original_start {
+        let wal_tail_path = spill_dir.join("wal-tail.bin");
+        match Self::copy_wal_tail_to_file(source, &wal_tail_path, original_start, end) {
+          Ok((copy_start, copied, truncated)) => {
+            report.wal_tail_path = Some(wal_tail_path.display().to_string());
+            report.wal_tail_copy_start = Some(copy_start);
+            report.wal_tail_bytes = copied;
+            report.wal_tail_truncated = truncated;
+          }
+          Err(error) => {
+            report.errors.push(format!("failed to copy WAL tail from {} at {}..{}: {}", source.display(), original_start, end, error));
+          }
+        }
+      } else {
+        report.wal_tail_copy_start = Some(current_offset);
+      }
+    }
+
+    report.spill_directory = Some(spill_dir.display().to_string());
+    let manifest_path = spill_dir.join("manifest.json");
+    let manifest = serde_json::json!({
+      "format": "aeordb-emergency-spill-v1",
+      "attempted_at": &report.attempted_at,
+      "pid": std::process::id(),
+      "context": &report.context,
+      "failure": &report.failure,
+      "db_path": &report.db_path,
+      "hash_algorithm": format!("{:?}", self.hash_algo),
+      "hot_tail_path": &report.hot_tail_path,
+      "hot_tail_writes": report.hot_tail_writes,
+      "hot_tail_voids": report.hot_tail_voids,
+      "index_buffer_path": &report.index_buffer_path,
+      "index_pending_mutations": report.index_pending_mutations,
+      "index_dirty_saves": report.index_dirty_saves,
+      "index_deletes": report.index_deletes,
+      "wal_tail_path": &report.wal_tail_path,
+      "wal_tail_original_start": report.wal_tail_original_start,
+      "wal_tail_copy_start": report.wal_tail_copy_start,
+      "wal_tail_end": report.wal_tail_end,
+      "wal_tail_bytes": report.wal_tail_bytes,
+      "wal_tail_truncated": report.wal_tail_truncated,
+      "wal_tail_max_bytes": Self::emergency_wal_spill_max_bytes(),
+      "notes": [
+        "Best-effort emergency preservation after a serious durability failure.",
+        "WAL bytes are copied from the filesystem view available to this process; OS/page-cache state may still determine what was recoverable."
+      ],
+      "errors": &report.errors,
+    });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    Self::write_durable_file(&manifest_path, &manifest_bytes)?;
+    report.manifest_path = Some(manifest_path.display().to_string());
+    Ok(())
+  }
+
+  fn write_durable_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    file.write_all(bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    crate::engine::durability::sync_parent_dir(path).map_err(|error| error.to_string())
+  }
+
+  fn copy_wal_tail_to_file(source: &Path, destination: &Path, start: u64, end: u64) -> Result<(u64, u64, bool), String> {
+    if end <= start {
+      Self::write_durable_file(destination, &[])?;
+      return Ok((start, 0, false));
+    }
+
+    let range = end - start;
+    let max_bytes = Self::emergency_wal_spill_max_bytes();
+    let (copy_start, truncated) = if max_bytes > 0 && range > max_bytes { (end - max_bytes, true) } else { (start, false) };
+
+    let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
+    let mut output = std::fs::File::create(destination).map_err(|error| error.to_string())?;
+    input.seek(SeekFrom::Start(copy_start)).map_err(|error| error.to_string())?;
+
+    let mut remaining = end - copy_start;
+    let mut copied = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    while remaining > 0 {
+      let read_len = remaining.min(buffer.len() as u64) as usize;
+      input.read_exact(&mut buffer[..read_len]).map_err(|error| error.to_string())?;
+      output.write_all(&buffer[..read_len]).map_err(|error| error.to_string())?;
+      copied += read_len as u64;
+      remaining -= read_len as u64;
+    }
+    output.sync_all().map_err(|error| error.to_string())?;
+    crate::engine::durability::sync_parent_dir(destination).map_err(|error| error.to_string())?;
+    Ok((copy_start, copied, truncated))
+  }
+
+  fn emergency_wal_spill_max_bytes() -> u64 {
+    std::env::var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(4 * 1024 * 1024 * 1024)
+  }
+
+  fn emergency_spill_base_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(path) = std::env::var("AEORDB_EMERGENCY_SPILL_DIR") {
+      if !path.trim().is_empty() {
+        dirs.push(PathBuf::from(path));
+      }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+      if let Ok(path) = std::env::var("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(path).join("AeorDB").join("emergency-spill"));
+      } else if let Ok(path) = std::env::var("APPDATA") {
+        dirs.push(PathBuf::from(path).join("AeorDB").join("emergency-spill"));
+      }
+    }
+    #[cfg(target_os = "macos")]
+    {
+      if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join("Library").join("Application Support").join("aeordb").join("emergency-spill"));
+      }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+      if let Ok(path) = std::env::var("XDG_DATA_HOME") {
+        dirs.push(PathBuf::from(path).join("aeordb").join("emergency-spill"));
+      } else if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".local").join("share").join("aeordb").join("emergency-spill"));
+      }
+    }
+
+    dirs.push(std::env::temp_dir().join("aeordb-emergency-spill"));
+    dirs
+  }
+
+  fn sanitize_spill_component(component: &str) -> String {
+    let sanitized: String =
+      component.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' { ch } else { '_' }).collect();
+    if sanitized.is_empty() {
+      "unknown".to_string()
+    } else {
+      sanitized
+    }
   }
 
   /// Wait for currently active top-level engine operations to drain.
@@ -630,6 +976,8 @@ impl StorageEngine {
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
+      emergency_spill: Mutex::new(None),
+      last_published_hot_tail_offset: AtomicU64::new(hot_tail_offset),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -859,6 +1207,8 @@ impl StorageEngine {
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
+      emergency_spill: Mutex::new(None),
+      last_published_hot_tail_offset: AtomicU64::new(file_header.hot_tail_offset),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -1006,37 +1356,52 @@ impl StorageEngine {
   /// new voids so the void state is durable without waiting for the normal
   /// threshold trigger.
   pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
-    {
+    self.ensure_writable()?;
+    let sync_result = {
       let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      writer.sync()?;
+      writer.sync()
+    };
+    if let Err(error) = sync_result {
+      return Err(self.record_durability_failure("Forced hot-tail WAL sync failed", error));
     }
 
-    let (hot_tail_offset, entry_count, in_transaction) = {
+    let flush_result = {
       let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      kv.force_flush_hot_buffer()?;
-      (kv.hot_tail_offset(), kv.len() as u64, kv.transaction_depth > 0)
+      kv.force_flush_hot_buffer().map(|_| (kv.hot_tail_offset(), kv.len() as u64, kv.transaction_depth > 0))
+    };
+    let (hot_tail_offset, entry_count, in_transaction) = match flush_result {
+      Ok(result) => result,
+      Err(error) => return Err(self.record_durability_failure("Forced hot-tail flush failed", error)),
     };
 
     if in_transaction {
       return Ok(());
     }
 
-    let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-    let mut header = writer.file_header().clone();
-    header.hot_tail_offset = hot_tail_offset;
-    header.entry_count = entry_count;
-    writer.update_header(&header)?;
+    let header_result = {
+      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let mut header = writer.file_header().clone();
+      header.hot_tail_offset = hot_tail_offset;
+      header.entry_count = entry_count;
+      writer.update_header(&header)
+    };
+    if let Err(error) = header_result {
+      return Err(self.record_durability_failure("Forced hot-tail header update failed", error));
+    }
+    self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
     Ok(())
   }
 
   /// Flush buffered index mutations if their shared write-count/time policy
   /// says they are due.
   pub fn flush_index_buffer_if_due(&self) -> EngineResult<bool> {
+    self.ensure_writable()?;
     IndexManager::new(self).flush_buffered_indexes_if_due()
   }
 
   /// Force all buffered index mutations to disk.
   pub fn flush_index_buffer(&self) -> EngineResult<usize> {
+    self.ensure_writable()?;
     IndexManager::new(self).flush_buffered_indexes()
   }
 
@@ -1205,6 +1570,7 @@ impl StorageEngine {
     entry_version: u8,
   ) -> EngineResult<u64> {
     let _operation = self.operation_guard("store_entry")?;
+    self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
 
@@ -1569,6 +1935,7 @@ impl StorageEngine {
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("update_head")?;
+    self.ensure_writable()?;
     let _namespace = self.namespace_write_guard()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let in_transaction =
@@ -1581,6 +1948,7 @@ impl StorageEngine {
       writer.set_header_in_memory(header);
     } else {
       writer.update_file_header(&header)?;
+      self.last_published_hot_tail_offset.store(header.hot_tail_offset, Ordering::Release);
     }
     Ok(())
   }
@@ -1604,6 +1972,7 @@ impl StorageEngine {
   /// Update the backup metadata in the file header.
   pub fn set_backup_info(&self, backup_type: u8, base_hash: &[u8], target_hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("set_backup_info")?;
+    self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
     let mut header = writer.file_header().clone();
     header.backup_type = backup_type;
@@ -1622,6 +1991,7 @@ impl StorageEngine {
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_typed(&self, entry_type: EntryType, key: &[u8], value: &[u8], kv_type: u8) -> EngineResult<u64> {
     let _operation = self.operation_guard("store_entry_typed")?;
+    self.ensure_writable()?;
     // Acquire BOTH locks before any work to close the TOCTOU gap.
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -1646,6 +2016,7 @@ impl StorageEngine {
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn flush_batch(&self, batch: WriteBatch) -> EngineResult<Vec<u64>> {
     let _operation = self.operation_guard("flush_batch")?;
+    self.ensure_writable()?;
     if batch.is_empty() {
       return Ok(Vec::new());
     }
@@ -1693,6 +2064,7 @@ impl StorageEngine {
   /// This avoids separate lock acquisitions for the batch and the head update.
   pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
     let _operation = self.operation_guard("flush_batch_and_update_head")?;
+    self.ensure_writable()?;
     let _namespace = self.namespace_write_guard()?;
     if batch.is_empty() {
       // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
@@ -1736,6 +2108,7 @@ impl StorageEngine {
       writer.set_header_in_memory(header);
     } else {
       writer.update_file_header(&header)?;
+      self.last_published_hot_tail_offset.store(header.hot_tail_offset, Ordering::Release);
     }
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
@@ -1814,6 +2187,7 @@ impl StorageEngine {
   /// 4. Tells the KV store to finalize: zero pages, rehash, update header
   /// 5. Updates the writer's offset to reflect the new file layout
   pub fn expand_kv_block_online(&self, target_stage: usize) -> EngineResult<()> {
+    self.ensure_writable()?;
     let hash_length = self.hash_algo.hash_length();
     let psize = crate::engine::kv_pages::page_size(hash_length);
     let (new_block_size, _new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
@@ -1925,6 +2299,7 @@ impl StorageEngine {
     final_header.resize_target_stage = 0;
     final_header.hot_tail_offset = new_hot_tail;
     writer.update_file_header(&final_header)?;
+    self.last_published_hot_tail_offset.store(final_header.hot_tail_offset, Ordering::Release);
 
     // Sync the writer's file handle to ensure it sees the KV's changes
     writer.sync()?;
@@ -1947,6 +2322,7 @@ impl StorageEngine {
   /// Mark a KV entry as deleted by setting the deleted flag.
   pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("mark_entry_deleted")?;
+    self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let updated = kv.update_flags(hash, KV_FLAG_DELETED);
     if !updated {
@@ -2056,6 +2432,7 @@ impl StorageEngine {
   /// Returns the total bytes written.
   pub fn write_deletion_at(&self, offset: u64, path: &str) -> EngineResult<u32> {
     let _operation = self.operation_guard("write_deletion_at")?;
+    self.ensure_writable()?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
@@ -2078,6 +2455,7 @@ impl StorageEngine {
   /// Write a void entry at a specific file offset (in-place).
   pub fn write_void_at(&self, offset: u64, size: u32) -> EngineResult<()> {
     let _operation = self.operation_guard("write_void_at")?;
+    self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
@@ -2100,6 +2478,7 @@ impl StorageEngine {
   /// Write a DeletionRecord in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_deletion_at_nosync(&self, offset: u64, path: &str) -> EngineResult<u32> {
     let _operation = self.operation_guard("write_deletion_at_nosync")?;
+    self.ensure_writable()?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
     let key = self.compute_hash(format!("del:gc:{}:{}", path, deletion.deleted_at).as_bytes())?;
@@ -2122,6 +2501,7 @@ impl StorageEngine {
   /// Write a void in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_void_at_nosync(&self, offset: u64, size: u32) -> EngineResult<()> {
     let _operation = self.operation_guard("write_void_at_nosync")?;
+    self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     if !Self::valid_reusable_range(offset, size, wal_start, wal_end) {
@@ -2144,13 +2524,21 @@ impl StorageEngine {
   /// Sync the append writer to disk. Call after batch nosync operations.
   pub fn sync_writer(&self) -> EngineResult<()> {
     let _operation = self.operation_guard("sync_writer")?;
-    let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    writer.sync()
+    self.ensure_writable()?;
+    let sync_result = {
+      let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      writer.sync()
+    };
+    if let Err(error) = sync_result {
+      return Err(self.record_durability_failure("Explicit WAL sync failed", error));
+    }
+    Ok(())
   }
 
   /// Batch remove multiple entries from the KV store. Publishes snapshot once at the end.
   pub fn remove_kv_entries_batch(&self, hashes: &[Vec<u8>]) -> EngineResult<()> {
     let _operation = self.operation_guard("remove_kv_entries_batch")?;
+    self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted_batch(hashes);
     Ok(())
@@ -2159,6 +2547,7 @@ impl StorageEngine {
   /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
   pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("remove_kv_entry")?;
+    self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted(hash);
     Ok(())
@@ -2276,6 +2665,7 @@ impl StorageEngine {
   }
 
   pub fn rebuild_kv_with_progress(&self, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<()> {
+    self.ensure_writable()?;
     let _mem = crate::engine::rss_sampler::PhaseSampler::start("rebuild_kv", std::time::Duration::from_millis(50));
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
@@ -2531,6 +2921,7 @@ impl StorageEngine {
         "rebuild_kv: updating file header"
       );
       writer.update_header(&header)?;
+      self.last_published_hot_tail_offset.store(header.hot_tail_offset, Ordering::Release);
     }
 
     let elapsed = timer.elapsed();
@@ -2586,26 +2977,32 @@ impl StorageEngine {
     let header_update = match self.kv_writer.lock() {
       Ok(mut kv) => {
         if kv.transaction_depth != 0 {
-          None
-        } else if let Err(e) = kv.force_flush_hot_buffer() {
-          return Err(self.record_durability_failure("Failed to flush hot buffer after transaction", e));
+          Ok(None)
         } else {
-          Some((kv.hot_tail_offset(), kv.len() as u64))
+          kv.force_flush_hot_buffer().map(|_| Some((kv.hot_tail_offset(), kv.len() as u64)))
         }
       }
       Err(e) => {
         return Err(EngineError::IoError(std::io::Error::other(format!("Failed to flush transaction hot tail: {}", e))));
       }
     };
+    let header_update = match header_update {
+      Ok(header_update) => header_update,
+      Err(e) => return Err(self.record_durability_failure("Failed to flush hot buffer after transaction", e)),
+    };
 
     if let Some((hot_tail_offset, entry_count)) = header_update {
-      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      let mut header = writer.file_header().clone();
-      header.hot_tail_offset = hot_tail_offset;
-      header.entry_count = entry_count;
-      if let Err(e) = writer.update_header(&header) {
+      let header_result = {
+        let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+        let mut header = writer.file_header().clone();
+        header.hot_tail_offset = hot_tail_offset;
+        header.entry_count = entry_count;
+        writer.update_header(&header)
+      };
+      if let Err(e) = header_result {
         return Err(self.record_durability_failure("Failed to update header after transaction hot-tail flush", e));
       }
+      self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
     }
 
     Ok(())
@@ -2631,6 +3028,10 @@ impl StorageEngine {
   /// had ever been written to — kept HDDs spun up forever. Gate ONLY on
   /// the hot buffer: that's what this timer is responsible for.
   pub fn try_flush_hot_buffer(&self) {
+    if self.durability_failure().is_some() {
+      return;
+    }
+
     // 1. Cheap probe: hot buffer empty? Nothing for this timer to do.
     //    The lock is released before we proceed so the writer is
     //    available for any concurrent write that arrives next.
@@ -2647,26 +3048,25 @@ impl StorageEngine {
     // 2. Sync WAL data to disk first — entries written since last sync are
     //    in the OS page cache. This must happen BEFORE writing the hot tail,
     //    so that any offsets referenced by the hot tail point to durable data.
-    match self.writer.try_write() {
-      Ok(mut writer) => {
-        if let Err(e) = writer.sync() {
-          self.record_durability_failure("Timer WAL sync failed", e);
-          return;
-        }
-      }
+    let wal_sync_error = match self.writer.try_write() {
+      Ok(mut writer) => writer.sync().err().map(|error| error.to_string()),
       Err(_) => return,
+    };
+    if let Some(error) = wal_sync_error {
+      self.record_durability_failure("Timer WAL sync failed", error);
+      return;
     }
 
     // 3. Flush the hot buffer (re-takes the kv lock; the cheap probe above
     //    has already been released by here). Re-check hot_buffer_len in case
     //    another path flushed between the probe and here.
+    let mut flush_error = None;
     let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
       if kv.hot_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
-          self.record_durability_failure("Timer hot-tail flush failed", e);
-          return;
-        }
-        if kv.transaction_depth == 0 {
+          flush_error = Some(e.to_string());
+          None
+        } else if kv.transaction_depth == 0 {
           Some((kv.hot_tail_offset(), kv.len() as u64))
         } else {
           None
@@ -2677,16 +3077,26 @@ impl StorageEngine {
     } else {
       None
     };
+    if let Some(error) = flush_error {
+      self.record_durability_failure("Timer hot-tail flush failed", error);
+      return;
+    }
 
     // Now persist the header with writer lock (kv lock already released)
     if let Some((hot_tail_offset, entry_count)) = header_update {
+      let mut header_error = None;
       if let Ok(mut writer) = self.writer.try_write() {
         let mut header = writer.file_header().clone();
         header.hot_tail_offset = hot_tail_offset;
         header.entry_count = entry_count;
         if let Err(e) = writer.update_header(&header) {
-          self.record_durability_failure("Timer header update failed", e);
+          header_error = Some(e.to_string());
+        } else {
+          self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
         }
+      }
+      if let Some(error) = header_error {
+        self.record_durability_failure("Timer header update failed", error);
       }
     }
   }
@@ -2748,20 +3158,26 @@ impl StorageEngine {
       record_failure("Index buffer flush failed during shutdown", e.to_string());
     }
 
-    // Step 1: Flush the KV write buffer to disk pages
+    // Step 1: Flush the KV write buffer to disk pages. Defer durability
+    // latching until after the KV mutex is released so emergency spill can
+    // snapshot volatile KV state.
+    let mut deferred_failures: Vec<(&'static str, String)> = Vec::new();
     match self.kv_writer.lock() {
       Ok(mut kv) => {
         if let Err(e) = kv.flush() {
-          record_failure("KV flush failed during shutdown", e.to_string());
+          deferred_failures.push(("KV flush failed during shutdown", e.to_string()));
         }
         // Step 2: Flush the hot file buffer
         if let Err(e) = kv.flush_hot_buffer() {
-          record_failure("Hot file flush failed during shutdown", e.to_string());
+          deferred_failures.push(("Hot file flush failed during shutdown", e.to_string()));
         }
       }
       Err(e) => {
-        record_failure("Could not acquire KV lock during shutdown", e.to_string());
+        deferred_failures.push(("Could not acquire KV lock during shutdown", e.to_string()));
       }
+    }
+    for (context, error) in deferred_failures {
+      record_failure(context, error);
     }
 
     // Step 3: Extract KV metadata, then persist header and sync WAL.
@@ -2775,21 +3191,27 @@ impl StorageEngine {
       }
     };
 
+    let mut writer_failures: Vec<(&'static str, String)> = Vec::new();
     match self.writer.write() {
       Ok(mut writer) => {
         let mut header = writer.file_header().clone();
         header.hot_tail_offset = hot_tail_offset;
         header.entry_count = entry_count;
         if let Err(e) = writer.update_header(&header) {
-          record_failure("Header update failed during shutdown", e.to_string());
+          writer_failures.push(("Header update failed during shutdown", e.to_string()));
+        } else {
+          self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
         }
         if let Err(e) = writer.sync_all() {
-          record_failure("WAL sync failed during shutdown", e.to_string());
+          writer_failures.push(("WAL sync failed during shutdown", e.to_string()));
         }
       }
       Err(e) => {
-        record_failure("Could not acquire writer lock during shutdown", e.to_string());
+        writer_failures.push(("Could not acquire writer lock during shutdown", e.to_string()));
       }
+    }
+    for (context, error) in writer_failures {
+      record_failure(context, error);
     }
 
     if let Some(failure) = first_failure {
@@ -2814,6 +3236,7 @@ impl Drop for StorageEngine {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use serial_test::serial;
   use std::time::{Duration, Instant};
 
   #[test]
@@ -2830,6 +3253,61 @@ mod tests {
     let second = engine.shutdown_with_drain_timeout(Duration::from_secs(60));
     assert!(matches!(second, Err(EngineError::ShuttingDown)));
     assert!(started.elapsed() < Duration::from_millis(100), "repeated blocked shutdown waited too long");
+  }
+
+  #[test]
+  #[serial]
+  fn durability_failure_latches_read_only_and_spills_volatile_state() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let spill_dir = temp_dir.path().join("spill");
+    let old_spill_dir = std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR");
+    let old_spill_max = std::env::var_os("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES");
+    unsafe {
+      std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", &spill_dir);
+      std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "1048576");
+    }
+
+    struct EnvRestore {
+      spill_dir: Option<std::ffi::OsString>,
+      spill_max: Option<std::ffi::OsString>,
+    }
+    impl Drop for EnvRestore {
+      fn drop(&mut self) {
+        unsafe {
+          match &self.spill_dir {
+            Some(value) => std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", value),
+            None => std::env::remove_var("AEORDB_EMERGENCY_SPILL_DIR"),
+          }
+          match &self.spill_max {
+            Some(value) => std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", value),
+            None => std::env::remove_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
+          }
+        }
+      }
+    }
+    let _restore = EnvRestore { spill_dir: old_spill_dir, spill_max: old_spill_max };
+
+    let engine_path = temp_dir.path().join("durability-spill.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
+
+    let error = engine.record_durability_failure("test forced durability failure", "synthetic EIO");
+    assert!(matches!(error, EngineError::DurabilityFailure(_)));
+    assert!(engine.durability_failure().is_some());
+
+    let spill = engine.emergency_spill_report().expect("spill report");
+    assert!(spill.succeeded, "spill failed: {:?}", spill.errors);
+    assert_eq!(spill.hot_tail_writes, 1);
+    assert!(spill.hot_tail_path.as_ref().is_some_and(|path| std::fs::metadata(path).is_ok()));
+    assert!(spill.manifest_path.as_ref().is_some_and(|path| std::fs::metadata(path).is_ok()));
+
+    let manifest_path = spill.manifest_path.as_ref().unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest.get("format").and_then(|value| value.as_str()), Some("aeordb-emergency-spill-v1"));
+
+    assert!(engine.get_entry(b"chunk-1").unwrap().is_some());
+    let rejected = engine.store_entry(EntryType::Chunk, b"chunk-2", b"blocked");
+    assert!(matches!(rejected, Err(EngineError::DurabilityFailure(_))));
   }
 }
 

@@ -735,6 +735,14 @@ impl DiskKVStore {
     self.write_buffer.len()
   }
 
+  /// Snapshot volatile KV state for emergency preservation after a serious
+  /// durability failure. The caller writes this outside the DB file.
+  pub fn emergency_hot_tail_payload(&mut self) -> hot_tail::HotTailPayload {
+    let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
+    self.sanitize_pending_voids("emergency hot-tail spill");
+    hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() }
+  }
+
   /// Look up an entry in the write buffer only (no disk read).
   pub fn get_buffered(&self, hash: &[u8]) -> Option<&KVEntry> {
     self.write_buffer.get(hash)

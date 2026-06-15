@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_config::{IndexFieldConfig, create_converter_from_config};
@@ -284,6 +286,47 @@ impl SharedIndexWriteBuffer {
       }
     }
     self.pending_mutations = self.pending_mutations.saturating_add(snapshot.saves.len() + snapshot.deletes.len());
+  }
+
+  pub(crate) fn emergency_snapshot_json(&mut self, hash_length: usize) -> EngineResult<serde_json::Value> {
+    let mut saves = Vec::new();
+    for key in &self.dirty_keys {
+      if self.deleted_keys.contains(key) {
+        continue;
+      }
+      if let Some(index) = self.indexes.get_mut(key) {
+        index.ensure_nvt_current();
+        let data = index.serialize(hash_length);
+        saves.push(serde_json::json!({
+          "parent": &key.parent,
+          "field_name": &key.field_name,
+          "strategy": &key.strategy,
+          "bytes_base64": {
+            "encoding": "base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+          },
+        }));
+      }
+    }
+
+    let deletes: Vec<serde_json::Value> = self
+      .deleted_keys
+      .iter()
+      .map(|key| {
+        serde_json::json!({
+          "parent": &key.parent,
+          "field_name": &key.field_name,
+          "strategy": &key.strategy,
+        })
+      })
+      .collect();
+
+    Ok(serde_json::json!({
+      "format": "aeordb-index-buffer-spill-v1",
+      "pending_mutations": self.pending_mutations,
+      "dirty_saves": saves,
+      "deletes": deletes,
+    }))
   }
 }
 
@@ -1105,6 +1148,7 @@ impl<'a> IndexManager<'a> {
 
   /// Buffer an index save to `.indexes/{field_name}.{strategy}.idx` at the given path.
   pub fn save_index(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     let strategy = index.converter.strategy();
     let key = Self::buffer_key(path, &index.field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
@@ -1140,6 +1184,7 @@ impl<'a> IndexManager<'a> {
 
   /// Delete an index for a field and strategy at the given path.
   pub fn delete_index(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     let key = Self::buffer_key(path, field_name, strategy);
     let exists_in_buffer = {
       let buffer = self.lock_buffer()?;
@@ -1157,6 +1202,7 @@ impl<'a> IndexManager<'a> {
 
   /// Delete an index using the legacy path format (no strategy).
   pub fn delete_index_legacy(&self, path: &str, field_name: &str) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     let ctx = RequestContext::system();
     let index_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
@@ -1191,6 +1237,7 @@ impl<'a> IndexManager<'a> {
     file_key: &[u8],
     options: Option<IndexWriteBufferOptions>,
   ) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     let converter = create_converter_from_config(field_config)?;
     let strategy = converter.strategy().to_string();
     let key = Self::buffer_key(parent, field_name, &strategy);
@@ -1216,6 +1263,7 @@ impl<'a> IndexManager<'a> {
   /// Remove a file hash from an index name returned by `list_indexes`, using
   /// the same buffered mutation path as inserts and saves.
   pub fn remove_file_from_index_name(&self, parent: &str, index_name: &str, file_key: &[u8]) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     if let Some((field_name, strategy)) = Self::split_index_name(index_name) {
       self.remove_file_from_index(parent, field_name, strategy, file_key)
     } else {
@@ -1233,6 +1281,7 @@ impl<'a> IndexManager<'a> {
   }
 
   pub fn remove_file_from_index(&self, parent: &str, field_name: &str, strategy: &str, file_key: &[u8]) -> EngineResult<()> {
+    self.engine.ensure_writable()?;
     let key = Self::buffer_key(parent, field_name, strategy);
     let needs_load = {
       let buffer = self.lock_buffer()?;
@@ -1258,6 +1307,7 @@ impl<'a> IndexManager<'a> {
   }
 
   pub(crate) fn flush_buffered_indexes_if_due_with_options(&self, options: Option<IndexWriteBufferOptions>) -> EngineResult<bool> {
+    self.engine.ensure_writable()?;
     match self.take_flush_snapshot(false, options)? {
       Some(snapshot) => {
         self.write_flush_snapshot(snapshot)?;
@@ -1268,6 +1318,7 @@ impl<'a> IndexManager<'a> {
   }
 
   pub fn flush_buffered_indexes(&self) -> EngineResult<usize> {
+    self.engine.ensure_writable()?;
     match self.take_flush_snapshot(true, None)? {
       Some(snapshot) => self.write_flush_snapshot(snapshot),
       None => Ok(0),
