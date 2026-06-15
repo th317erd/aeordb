@@ -651,9 +651,7 @@ pub fn gc_sweep(engine: &StorageEngine, live: &HashSet<Vec<u8>>, dry_run: bool) 
   // tail; one fsync. Fast on slow disks.
   let flush_start = std::time::Instant::now();
   engine.sync_voids_to_kv_writer();
-  if let Err(e) = engine.force_hot_tail_flush() {
-    tracing::warn!("Hot tail flush after GC sweep failed: {}", e);
-  }
+  engine.force_hot_tail_flush()?;
   let flush_elapsed = flush_start.elapsed();
 
   if timing {
@@ -716,7 +714,7 @@ pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> En
         tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
       }
       Err(e) => {
-        tracing::warn!("Failed to create pre-GC snapshot: {}. Proceeding with GC anyway.", e);
+        return Err(e);
       }
     }
 

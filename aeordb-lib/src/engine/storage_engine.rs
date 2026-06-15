@@ -328,6 +328,7 @@ pub struct StorageEngine {
   shutdown_started: AtomicBool,
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
+  durability_failure: Mutex<Option<String>>,
   namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
@@ -385,6 +386,21 @@ impl StorageEngine {
   /// or write.
   pub fn begin_shutdown(&self) {
     self.operation_tracker.begin_shutdown();
+  }
+
+  pub fn durability_failure(&self) -> Option<String> {
+    self.durability_failure.lock().ok().and_then(|failure| failure.clone())
+  }
+
+  fn record_durability_failure(&self, context: &str, error: impl std::fmt::Display) -> EngineError {
+    let message = format!("{}: {}", context, error);
+    if let Ok(mut failure) = self.durability_failure.lock() {
+      if failure.is_none() {
+        *failure = Some(message.clone());
+      }
+    }
+    tracing::error!(context, error = %message, "Critical durability failure");
+    EngineError::DurabilityFailure(message)
   }
 
   /// Wait for currently active top-level engine operations to drain.
@@ -589,7 +605,9 @@ impl StorageEngine {
     {
       let mut f = OpenOptions::new().read(true).write(true).open(path)?;
       let empty = crate::engine::hot_tail::HotTailPayload::default();
-      let _ = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &empty, hash_length);
+      let end = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &empty, hash_length)?;
+      f.set_len(end)?;
+      f.sync_data()?;
     }
 
     // Update file header with KV layout info
@@ -611,6 +629,7 @@ impl StorageEngine {
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
+      durability_failure: Mutex::new(None),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -839,6 +858,7 @@ impl StorageEngine {
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
+      durability_failure: Mutex::new(None),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -2541,25 +2561,25 @@ impl StorageEngine {
   /// End a transaction: decrement the KV store's transaction depth and, when
   /// it reaches zero, truncate the hot file (completing the deferred work
   /// that `flush()` skipped while the transaction was active).
-  pub fn end_transaction(&self) {
+  pub fn end_transaction(&self) -> EngineResult<()> {
     let should_commit = match self.kv_writer.lock() {
       Ok(mut kv) => {
         kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
         kv.transaction_depth == 0
       }
       Err(e) => {
-        tracing::warn!("Failed to end transaction: {}", e);
-        return;
+        return Err(EngineError::IoError(std::io::Error::other(format!("Failed to end transaction: {}", e))));
       }
     };
 
     if !should_commit {
-      return;
+      return Ok(());
     }
 
-    if let Ok(mut writer) = self.writer.write() {
+    {
+      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       if let Err(e) = writer.sync() {
-        tracing::warn!("Transaction WAL sync failed: {}", e);
+        return Err(self.record_durability_failure("Transaction WAL sync failed", e));
       }
     }
 
@@ -2568,33 +2588,27 @@ impl StorageEngine {
         if kv.transaction_depth != 0 {
           None
         } else if let Err(e) = kv.force_flush_hot_buffer() {
-          tracing::warn!("Failed to flush hot buffer after transaction: {}", e);
-          None
+          return Err(self.record_durability_failure("Failed to flush hot buffer after transaction", e));
         } else {
           Some((kv.hot_tail_offset(), kv.len() as u64))
         }
       }
       Err(e) => {
-        tracing::warn!("Failed to flush transaction hot tail: {}", e);
-        None
+        return Err(EngineError::IoError(std::io::Error::other(format!("Failed to flush transaction hot tail: {}", e))));
       }
     };
 
     if let Some((hot_tail_offset, entry_count)) = header_update {
-      match self.writer.write() {
-        Ok(mut writer) => {
-          let mut header = writer.file_header().clone();
-          header.hot_tail_offset = hot_tail_offset;
-          header.entry_count = entry_count;
-          if let Err(e) = writer.update_header(&header) {
-            tracing::warn!("Failed to update header after transaction hot-tail flush: {}", e);
-          }
-        }
-        Err(e) => {
-          tracing::warn!("Failed to update transaction header: {}", e);
-        }
+      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let mut header = writer.file_header().clone();
+      header.hot_tail_offset = hot_tail_offset;
+      header.entry_count = entry_count;
+      if let Err(e) = writer.update_header(&header) {
+        return Err(self.record_durability_failure("Failed to update header after transaction hot-tail flush", e));
       }
     }
+
+    Ok(())
   }
 
   /// Try to flush the hot buffer if the KV lock is available.
@@ -2633,10 +2647,14 @@ impl StorageEngine {
     // 2. Sync WAL data to disk first — entries written since last sync are
     //    in the OS page cache. This must happen BEFORE writing the hot tail,
     //    so that any offsets referenced by the hot tail point to durable data.
-    if let Ok(mut writer) = self.writer.try_write() {
-      if let Err(e) = writer.sync() {
-        tracing::warn!("Timer WAL sync failed: {}", e);
+    match self.writer.try_write() {
+      Ok(mut writer) => {
+        if let Err(e) = writer.sync() {
+          self.record_durability_failure("Timer WAL sync failed", e);
+          return;
+        }
       }
+      Err(_) => return,
     }
 
     // 3. Flush the hot buffer (re-takes the kv lock; the cheap probe above
@@ -2645,7 +2663,8 @@ impl StorageEngine {
     let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
       if kv.hot_buffer_len() > 0 {
         if let Err(e) = kv.flush_hot_buffer() {
-          tracing::warn!("Timer flush failed: {}", e);
+          self.record_durability_failure("Timer hot-tail flush failed", e);
+          return;
         }
         if kv.transaction_depth == 0 {
           Some((kv.hot_tail_offset(), kv.len() as u64))
@@ -2666,7 +2685,7 @@ impl StorageEngine {
         header.hot_tail_offset = hot_tail_offset;
         header.entry_count = entry_count;
         if let Err(e) = writer.update_header(&header) {
-          tracing::warn!("Timer header update failed: {}", e);
+          self.record_durability_failure("Timer header update failed", e);
         }
       }
     }
@@ -2717,23 +2736,31 @@ impl StorageEngine {
       return Err(EngineError::ShuttingDown);
     }
 
+    let mut first_failure: Option<String> = None;
+    let mut record_failure = |context: &str, error: String| {
+      let error = self.record_durability_failure(context, error);
+      if first_failure.is_none() {
+        first_failure = Some(error.to_string());
+      }
+    };
+
     if let Err(e) = self.flush_index_buffer() {
-      tracing::error!("Index buffer flush failed during shutdown: {}", e);
+      record_failure("Index buffer flush failed during shutdown", e.to_string());
     }
 
     // Step 1: Flush the KV write buffer to disk pages
     match self.kv_writer.lock() {
       Ok(mut kv) => {
         if let Err(e) = kv.flush() {
-          tracing::error!("KV flush failed during shutdown: {}", e);
+          record_failure("KV flush failed during shutdown", e.to_string());
         }
         // Step 2: Flush the hot file buffer
         if let Err(e) = kv.flush_hot_buffer() {
-          tracing::error!("Hot file flush failed during shutdown: {}", e);
+          record_failure("Hot file flush failed during shutdown", e.to_string());
         }
       }
       Err(e) => {
-        tracing::error!("Could not acquire KV lock during shutdown: {}", e);
+        record_failure("Could not acquire KV lock during shutdown", e.to_string());
       }
     }
 
@@ -2743,7 +2770,7 @@ impl StorageEngine {
     let (hot_tail_offset, entry_count) = match self.kv_writer.lock() {
       Ok(kv) => (kv.hot_tail_offset(), kv.len() as u64),
       Err(e) => {
-        tracing::error!("Could not acquire KV lock for header update during shutdown: {}", e);
+        record_failure("Could not acquire KV lock for header update during shutdown", e.to_string());
         (0, 0)
       }
     };
@@ -2754,15 +2781,20 @@ impl StorageEngine {
         header.hot_tail_offset = hot_tail_offset;
         header.entry_count = entry_count;
         if let Err(e) = writer.update_header(&header) {
-          tracing::error!("Header update failed during shutdown: {}", e);
+          record_failure("Header update failed during shutdown", e.to_string());
         }
         if let Err(e) = writer.sync_all() {
-          tracing::error!("WAL sync failed during shutdown: {}", e);
+          record_failure("WAL sync failed during shutdown", e.to_string());
         }
       }
       Err(e) => {
-        tracing::error!("Could not acquire writer lock during shutdown: {}", e);
+        record_failure("Could not acquire writer lock during shutdown", e.to_string());
       }
+    }
+
+    if let Some(failure) = first_failure {
+      self.shutdown_flush_started.store(false, Ordering::Release);
+      return Err(EngineError::DurabilityFailure(failure));
     }
 
     tracing::info!("Storage engine shutdown complete");
@@ -2773,7 +2805,9 @@ impl StorageEngine {
 
 impl Drop for StorageEngine {
   fn drop(&mut self) {
-    let _ = self.shutdown();
+    if let Err(error) = self.shutdown() {
+      tracing::error!("Storage engine drop shutdown failed: {}", error);
+    }
   }
 }
 
@@ -2846,6 +2880,8 @@ impl<'a> TransactionGuard<'a> {
 
 impl<'a> Drop for TransactionGuard<'a> {
   fn drop(&mut self) {
-    self.engine.end_transaction();
+    if let Err(error) = self.engine.end_transaction() {
+      tracing::error!("Transaction guard failed to complete cleanly: {}", error);
+    }
   }
 }

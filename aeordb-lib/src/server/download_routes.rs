@@ -107,19 +107,28 @@ pub async fn download_zip(
               .into_response();
           }
           let zip_entry_name = strip_prefix(&normalized, &common_prefix);
-          if zip_writer.start_file(&zip_entry_name, options).is_ok() {
-            let _ = zip_writer.write_all(&data);
+          if let Err(error) = zip_writer.start_file(&zip_entry_name, options) {
+            tracing::error!("Failed to start ZIP entry '{}': {}", zip_entry_name, error);
+            return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+          }
+          if let Err(error) = zip_writer.write_all(&data) {
+            tracing::error!("Failed to write ZIP entry '{}': {}", zip_entry_name, error);
+            return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
           }
         }
         Err(crate::engine::errors::EngineError::NotFound(_)) => {
           // Not a file — try as directory
           let walk = ZipWalk { ops: &ops, common_prefix: &common_prefix, options, max_size: MAX_ZIP_SIZE };
           let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
-          if add_directory_to_zip(&walk, &normalized, &mut state).is_err() {
-            if cumulative_size > MAX_ZIP_SIZE {
+          if let Err(error) = add_directory_to_zip(&walk, &normalized, &mut state) {
+            if matches!(&error, ZipBuildError::TooLarge) {
               return ErrorResponse::new("Download exceeds the 2 GB size limit. Select fewer files or download individually.")
                 .with_status(StatusCode::PAYLOAD_TOO_LARGE)
                 .into_response();
+            }
+            if matches!(&error, ZipBuildError::Write(_)) {
+              tracing::error!("Failed to add directory '{}' to ZIP: {}", normalized, error);
+              return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
             }
             skipped.push(raw_path.clone());
           }
@@ -166,8 +175,25 @@ struct ZipState<'a, 'b> {
   cumulative_size: &'a mut u64,
 }
 
-fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState<'_, '_>) -> Result<(), ()> {
-  let entries = walk.ops.list_directory(dir_path).map_err(|_| ())?;
+#[derive(Debug)]
+enum ZipBuildError {
+  SourceUnavailable,
+  TooLarge,
+  Write(String),
+}
+
+impl std::fmt::Display for ZipBuildError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      ZipBuildError::SourceUnavailable => write!(formatter, "source unavailable"),
+      ZipBuildError::TooLarge => write!(formatter, "download exceeds size limit"),
+      ZipBuildError::Write(error) => write!(formatter, "zip write failed: {}", error),
+    }
+  }
+}
+
+fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState<'_, '_>) -> Result<(), ZipBuildError> {
+  let entries = walk.ops.list_directory(dir_path).map_err(|_| ZipBuildError::SourceUnavailable)?;
 
   for entry in entries {
     let child_path = if dir_path == "/" { format!("/{}", entry.name) } else { format!("{}/{}", dir_path, entry.name) };
@@ -180,17 +206,16 @@ fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState
     }
 
     if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
-      let _ = add_directory_to_zip(walk, &normalized, state);
+      add_directory_to_zip(walk, &normalized, state)?;
     } else if entry.entry_type == EntryType::FileRecord.to_u8() {
       if let Ok(data) = walk.ops.read_file_buffered(&normalized) {
         *state.cumulative_size += data.len() as u64;
         if *state.cumulative_size > walk.max_size {
-          return Err(());
+          return Err(ZipBuildError::TooLarge);
         }
         let zip_entry_name = strip_prefix(&normalized, walk.common_prefix);
-        if state.writer.start_file(&zip_entry_name, walk.options).is_ok() {
-          let _ = state.writer.write_all(&data);
-        }
+        state.writer.start_file(&zip_entry_name, walk.options).map_err(|error| ZipBuildError::Write(error.to_string()))?;
+        state.writer.write_all(&data).map_err(|error| ZipBuildError::Write(error.to_string()))?;
       }
     }
   }

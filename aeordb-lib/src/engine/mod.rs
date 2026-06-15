@@ -18,6 +18,7 @@ pub mod directory_entry;
 pub mod directory_listing;
 pub mod directory_ops;
 pub mod disk_kv_store;
+pub mod durability;
 pub mod email_config;
 pub mod email_sender;
 pub mod email_template;

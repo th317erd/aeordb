@@ -577,8 +577,10 @@ impl DiskKVStore {
       // snapshot in the hot tail so void state survives.
       self.sanitize_pending_voids("kv flush page-hot-tail update");
       let payload = hot_tail::HotTailPayload { writes: Vec::new(), voids: self.pending_voids.clone() };
-      hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)
+      let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)
         .map_err(|e| EngineError::IoError(std::io::Error::other(format!("Failed to write hot tail after page flush: {}", e))))?;
+      self.db_file.set_len(end)?;
+      self.db_file.sync_data()?;
     }
 
     self.publish_snapshot_incremental(&modified_buckets);

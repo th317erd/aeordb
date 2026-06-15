@@ -34,6 +34,8 @@ pub struct EngineHealth {
   pub status: HealthStatus,
   pub entry_count: u64,
   pub db_file_size_bytes: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub durability_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,7 +69,9 @@ pub fn check_engine(engine: &StorageEngine, db_path: &str) -> EngineHealth {
   // Total entry count: files + directories + symlinks + chunks + snapshots + forks
   let entry_count = snapshot.files + snapshot.directories + snapshot.symlinks + snapshot.chunks + snapshot.snapshots + snapshot.forks;
   let db_file_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-  EngineHealth { status: HealthStatus::Healthy, entry_count, db_file_size_bytes }
+  let durability_failure = engine.durability_failure();
+  let status = if durability_failure.is_some() { HealthStatus::Unhealthy } else { HealthStatus::Healthy };
+  EngineHealth { status, entry_count, db_file_size_bytes, durability_failure }
 }
 
 /// Check disk health for the partition containing the database file.

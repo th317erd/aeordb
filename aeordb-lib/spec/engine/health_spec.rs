@@ -43,7 +43,7 @@ fn make_peer_config(node_id: u64) -> PeerConfig {
 
 fn make_health_checks(engine: HealthStatus, disk: HealthStatus, sync: HealthStatus, auth: HealthStatus) -> HealthChecks {
   HealthChecks {
-    engine: EngineHealth { status: engine, entry_count: 0, db_file_size_bytes: 0 },
+    engine: EngineHealth { status: engine, entry_count: 0, db_file_size_bytes: 0, durability_failure: None },
     disk: DiskHealth { status: disk, available_bytes: 0, total_bytes: 0, usage_percent: 0.0 },
     sync: SyncHealth { status: sync, active_peers: 0, failing_peers: 0, details: None },
     auth: AuthHealth { status: auth, mode: "standalone".to_string(), signing_key_present: true },

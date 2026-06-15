@@ -85,14 +85,7 @@ where
 
   match result {
     Ok(stats) => {
-      std::fs::rename(&part_path, output_path).map_err(EngineError::from)?;
-      // fsync the parent directory so the rename survives a crash.
-      if let Some(parent) = std::path::Path::new(output_path).parent() {
-        let parent_path = if parent.as_os_str().is_empty() { std::path::Path::new(".") } else { parent };
-        if let Ok(dir) = std::fs::File::open(parent_path) {
-          let _ = dir.sync_all();
-        }
-      }
+      crate::engine::durability::rename_durable(&part_path, output_path)?;
       Ok(stats)
     }
     Err(error) => {
@@ -544,6 +537,26 @@ impl std::fmt::Display for ExportResult {
 ///
 /// Only chunks that don't exist in the base version are included.
 pub fn create_patch(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], output_path: &str) -> EngineResult<PatchResult> {
+  if std::path::Path::new(output_path).exists() {
+    return Err(EngineError::AlreadyExists(format!("patch destination '{}' already exists", output_path)));
+  }
+
+  let part_path = format!("{}.part", output_path);
+  let _ = std::fs::remove_file(&part_path);
+
+  match create_patch_inner(source, from_hash, to_hash, &part_path) {
+    Ok(stats) => {
+      crate::engine::durability::rename_durable(&part_path, output_path)?;
+      Ok(stats)
+    }
+    Err(error) => {
+      let _ = std::fs::remove_file(&part_path);
+      Err(error)
+    }
+  }
+}
+
+fn create_patch_inner(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], output_path: &str) -> EngineResult<PatchResult> {
   // Walk both trees
   let base_tree = walk_version_tree(source, from_hash)?;
   let target_tree = walk_version_tree(source, to_hash)?;

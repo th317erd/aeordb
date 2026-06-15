@@ -90,7 +90,7 @@ pub fn run(database: &str, output: &str, snapshot: Option<&str>, hash: Option<&s
       // expose the file at its final path. A killed export leaves
       // `.part` on disk — easy for an operator to identify and clean
       // up, and `import_backup` won't accidentally read it.
-      if let Err(e) = std::fs::rename(&part_path, output) {
+      if let Err(e) = aeordb::engine::durability::rename_durable(&part_path, output) {
         eprintln!(
           "Export wrote successfully but final rename failed: {}\n\
                      Partial output is at: {}",

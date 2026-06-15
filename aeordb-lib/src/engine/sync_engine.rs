@@ -191,7 +191,7 @@ impl SyncEngine {
 
     // If heads are identical, nothing to do
     if local_head == remote_head {
-      self.save_sync_state(peer_node_id, &remote_head);
+      self.save_sync_state(peer_node_id, &remote_head)?;
       return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
     }
 
@@ -221,7 +221,7 @@ impl SyncEngine {
 
     // If neither side has changes from the base, we're in sync
     if local_diff.is_empty() && remote_diff.is_empty() {
-      self.save_sync_state(peer_node_id, &remote_head);
+      self.save_sync_state(peer_node_id, &remote_head)?;
       return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
     }
 
@@ -241,14 +241,14 @@ impl SyncEngine {
 
     // Store conflicts
     for conflict in &merge_result.conflicts {
-      let _ = store_conflict(&self.engine, &context, conflict);
+      store_conflict(&self.engine, &context, conflict).map_err(|e| format!("Failed to store sync conflict: {}", e))?;
     }
 
     // Get the new local HEAD after merge
     let new_local_head = local_vm.get_head_hash().map_err(|e| format!("Failed to get post-merge HEAD: {}", e))?;
 
     // Update sync state
-    self.save_sync_state(peer_node_id, &new_local_head);
+    self.save_sync_state(peer_node_id, &new_local_head)?;
 
     // Update peer manager
     self.peer_manager.update_sync_state(peer_node_id, new_local_head, chrono::Utc::now().timestamp_millis() as u64);
@@ -293,13 +293,14 @@ impl SyncEngine {
   }
 
   /// Save sync state for a peer, recording the root hash and current time.
-  fn save_sync_state(&self, peer_node_id: u64, root_hash: &[u8]) {
+  fn save_sync_state(&self, peer_node_id: u64, root_hash: &[u8]) -> Result<(), String> {
     let state = PeerSyncState {
       last_synced_root_hash: Some(hex::encode(root_hash)),
       last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
     };
     let ctx = RequestContext::system();
-    let _ = system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state);
+    system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state)
+      .map_err(|e| format!("Failed to store sync state for peer {}: {}", peer_node_id, e))
   }
 
   /// Load sync state for a peer from system store.
@@ -415,7 +416,7 @@ impl SyncEngine {
       // No remote changes — update sync state and return
       let peer_root_bytes = hex::decode(&peer_root_hex)
         .map_err(|e| format!("Peer {} returned unparseable root hash '{}': {}", peer.node_id, peer_root_hex, e))?;
-      self.save_sync_state_hex(peer.node_id, &peer_root_hex);
+      self.save_sync_state_hex(peer.node_id, &peer_root_hex)?;
       self.peer_manager.update_sync_state(peer.node_id, peer_root_bytes, chrono::Utc::now().timestamp_millis() as u64);
       return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
     }
@@ -452,8 +453,12 @@ impl SyncEngine {
           let hash_hex = chunk["hash"].as_str().unwrap_or("");
           let data_b64 = chunk["data"].as_str().unwrap_or("");
           if let (Ok(hash), Ok(data)) = (hex::decode(hash_hex), base64::engine::general_purpose::STANDARD.decode(data_b64)) {
-            if !self.engine.has_entry(&hash).unwrap_or(false) {
-              let _ = self.engine.store_entry(crate::engine::entry_type::EntryType::Chunk, &hash, &data);
+            let exists = self.engine.has_entry(&hash).map_err(|e| format!("Failed to check local chunk {}: {}", hash_hex, e))?;
+            if !exists {
+              self
+                .engine
+                .store_entry(crate::engine::entry_type::EntryType::Chunk, &hash, &data)
+                .map_err(|e| format!("Failed to store chunk {} from peer {}: {}", hash_hex, peer.node_id, e))?;
             }
           }
         }
@@ -499,7 +504,9 @@ impl SyncEngine {
 
           if all_chunks_available {
             let content_type = entry["content_type"].as_str();
-            let _ = ops.store_file_buffered(&ctx, path, &file_data, content_type);
+            ops
+              .store_file_buffered(&ctx, path, &file_data, content_type)
+              .map_err(|e| format!("Failed to store synced file '{}' from peer {}: {}", path, peer.node_id, e))?;
             operations_count += 1;
           }
         }
@@ -511,7 +518,11 @@ impl SyncEngine {
       for entry in deleted {
         let path = entry["path"].as_str().unwrap_or("");
         if !path.is_empty() {
-          let _ = ops.delete_file(&ctx, path);
+          if let Err(error) = ops.delete_file(&ctx, path) {
+            if !matches!(&error, crate::engine::errors::EngineError::NotFound(_)) {
+              return Err(format!("Failed to delete synced file '{}' from peer {}: {}", path, peer.node_id, error));
+            }
+          }
           operations_count += 1;
         }
       }
@@ -524,7 +535,9 @@ impl SyncEngine {
           let path = entry["path"].as_str().unwrap_or("");
           let target = entry["target"].as_str().unwrap_or("");
           if !path.is_empty() && !target.is_empty() {
-            let _ = ops.store_symlink(&ctx, path, target);
+            ops
+              .store_symlink(&ctx, path, target)
+              .map_err(|e| format!("Failed to store synced symlink '{}' from peer {}: {}", path, peer.node_id, e))?;
             operations_count += 1;
           }
         }
@@ -536,7 +549,11 @@ impl SyncEngine {
       for entry in deleted {
         let path = entry["path"].as_str().unwrap_or("");
         if !path.is_empty() {
-          let _ = ops.delete_symlink(&ctx, path);
+          if let Err(error) = ops.delete_symlink(&ctx, path) {
+            if !matches!(&error, crate::engine::errors::EngineError::NotFound(_)) {
+              return Err(format!("Failed to delete synced symlink '{}' from peer {}: {}", path, peer.node_id, error));
+            }
+          }
           operations_count += 1;
         }
       }
@@ -545,20 +562,21 @@ impl SyncEngine {
     // Update sync state
     let peer_root_bytes = hex::decode(&peer_root_hex)
       .map_err(|e| format!("Peer {} returned unparseable root hash '{}': {}", peer.node_id, peer_root_hex, e))?;
-    self.save_sync_state_hex(peer.node_id, &peer_root_hex);
+    self.save_sync_state_hex(peer.node_id, &peer_root_hex)?;
     self.peer_manager.update_sync_state(peer.node_id, peer_root_bytes, chrono::Utc::now().timestamp_millis() as u64);
 
     Ok(SyncCycleResult { changes_applied: operations_count > 0, conflicts_detected: conflicts_count, operations_applied: operations_count })
   }
 
   /// Save sync state from a hex-encoded root hash string.
-  fn save_sync_state_hex(&self, peer_node_id: u64, root_hash_hex: &str) {
+  fn save_sync_state_hex(&self, peer_node_id: u64, root_hash_hex: &str) -> Result<(), String> {
     let state = PeerSyncState {
       last_synced_root_hash: Some(root_hash_hex.to_string()),
       last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
     };
     let ctx = RequestContext::system();
-    let _ = system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state);
+    system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state)
+      .map_err(|e| format!("Failed to store sync state for peer {}: {}", peer_node_id, e))
   }
 
   /// Load sync_paths from the peer config for selective sync.
