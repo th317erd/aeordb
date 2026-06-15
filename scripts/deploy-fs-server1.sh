@@ -11,6 +11,7 @@ LOCAL_UNIT="${LOCAL_UNIT:-deploy/systemd/aeordb.service}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:6830/system/health}"
 CARGO_JOBS="${CARGO_JOBS:-6}"
 STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-1800}"
+STOP_WAIT_SECONDS="${STOP_WAIT_SECONDS:-2100}"
 INSTALL_LOCAL="${INSTALL_LOCAL:-1}"
 LOCAL_INSTALL_BIN="${LOCAL_INSTALL_BIN:-$HOME/.local/bin/aeordb}"
 DEBUGGABLE_RELEASE="${DEBUGGABLE_RELEASE:-1}"
@@ -40,6 +41,7 @@ echo "timestamp=$timestamp"
 echo "service=$SERVICE"
 echo "remote_bin=$REMOTE_BIN"
 echo "health_url=$HEALTH_URL"
+echo "stop_wait_seconds=$STOP_WAIT_SECONDS"
 echo "install_local=$INSTALL_LOCAL"
 echo "local_install_bin=$LOCAL_INSTALL_BIN"
 echo "debuggable_release=$DEBUGGABLE_RELEASE"
@@ -114,13 +116,26 @@ ssh "$HOST" "set -euo pipefail
 echo
 
 echo "== Stop service cleanly =="
-ssh "$HOST" "set -euo pipefail
+set +e
+timeout "$STOP_WAIT_SECONDS" ssh "$HOST" "set -euo pipefail
   if systemctl is-active --quiet '$SERVICE'; then
     sudo systemctl stop '$SERVICE'
   fi
   systemctl is-active '$SERVICE' || true
   systemctl show -p ActiveState -p SubState -p Result '$SERVICE' || true
 "
+stop_status=$?
+set -e
+if [ "$stop_status" -eq 124 ]; then
+  echo "Timed out waiting ${STOP_WAIT_SECONDS}s for '$SERVICE' to stop on $HOST."
+  echo "The binary was built locally and copied to $HOST:$remote_tmp_bin, but was not installed."
+  echo "Leaving deployment incomplete so an operator can inspect the stuck service."
+  exit 1
+fi
+if [ "$stop_status" -ne 0 ]; then
+  echo "Failed to stop '$SERVICE' on $HOST; ssh/systemctl exit status: $stop_status"
+  exit "$stop_status"
+fi
 echo
 
 echo "== Install binary =="
