@@ -325,6 +325,8 @@ pub struct DatabaseStats {
 /// appends new entries.
 pub struct StorageEngine {
   operation_tracker: EngineOperationTracker,
+  shutdown_started: AtomicBool,
+  shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
   namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
@@ -606,6 +608,8 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       operation_tracker: EngineOperationTracker::default(),
+      shutdown_started: AtomicBool::new(false),
+      shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
@@ -832,6 +836,8 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       operation_tracker: EngineOperationTracker::default(),
+      shutdown_started: AtomicBool::new(false),
+      shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
@@ -2676,24 +2682,38 @@ impl StorageEngine {
   /// 2. Flush the hot file buffer (crash-recovery journal)
   /// 3. Sync the WAL file to ensure all OS-buffered writes are durable
   pub fn shutdown(&self) -> EngineResult<()> {
+    self.shutdown_with_drain_timeout(Self::shutdown_operation_wait_timeout())
+  }
+
+  fn shutdown_with_drain_timeout(&self, initial_drain_timeout: std::time::Duration) -> EngineResult<()> {
     if self.shutdown_complete.load(Ordering::Acquire) {
       tracing::debug!("Storage engine shutdown already complete");
       return Ok(());
     }
 
+    let previous_attempt = self.shutdown_started.swap(true, Ordering::AcqRel);
     tracing::info!("Shutting down storage engine...");
     self.begin_shutdown();
     let _shutdown_operation = self.internal_operation_scope("shutdown");
 
-    let drain_timeout = Self::shutdown_operation_wait_timeout();
+    let drain_timeout = if previous_attempt { std::time::Duration::ZERO } else { initial_drain_timeout };
     let snapshot = self.wait_for_active_operations(drain_timeout);
     if snapshot.active_operations > 0 {
       tracing::error!(
         active_operations = snapshot.active_operations,
         operations = ?snapshot.operations,
         wait_seconds = drain_timeout.as_secs(),
+        repeated_attempt = previous_attempt,
         "Storage engine shutdown blocked by active operations"
       );
+      return Err(EngineError::ShuttingDown);
+    }
+
+    if self.shutdown_flush_started.swap(true, Ordering::AcqRel) {
+      if self.shutdown_complete.load(Ordering::Acquire) {
+        return Ok(());
+      }
+      tracing::warn!("Storage engine shutdown flush is already in progress");
       return Err(EngineError::ShuttingDown);
     }
 
@@ -2754,6 +2774,28 @@ impl StorageEngine {
 impl Drop for StorageEngine {
   fn drop(&mut self) {
     let _ = self.shutdown();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::time::{Duration, Instant};
+
+  #[test]
+  fn repeated_blocked_shutdown_attempt_does_not_wait_again() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("shutdown-repeat.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let _active_operation = engine.operation_guard("test_active_operation").unwrap();
+
+    let first = engine.shutdown_with_drain_timeout(Duration::ZERO);
+    assert!(matches!(first, Err(EngineError::ShuttingDown)));
+
+    let started = Instant::now();
+    let second = engine.shutdown_with_drain_timeout(Duration::from_secs(60));
+    assert!(matches!(second, Err(EngineError::ShuttingDown)));
+    assert!(started.elapsed() < Duration::from_millis(100), "repeated blocked shutdown waited too long");
   }
 }
 
