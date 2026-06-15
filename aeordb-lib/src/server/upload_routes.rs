@@ -1,8 +1,13 @@
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::TokenClaims;
 use crate::engine::batch_commit::{commit_files, CommitFile};
@@ -11,6 +16,59 @@ use crate::engine::RequestContext;
 use crate::engine::EntryType;
 use crate::server::blocking::run_engine_blocking;
 use crate::server::state::AppState;
+
+const MAX_CONCURRENT_BLOB_COMMITS: usize = 2;
+
+fn blob_commit_semaphore() -> &'static Arc<Semaphore> {
+  static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+  SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_COMMITS)))
+}
+
+fn in_flight_blob_commits() -> &'static Mutex<HashSet<u64>> {
+  static IN_FLIGHT: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+  IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct BlobCommitInFlightGuard {
+  signature: u64,
+}
+
+impl BlobCommitInFlightGuard {
+  fn try_acquire(signature: u64) -> bool {
+    match in_flight_blob_commits().lock() {
+      Ok(mut in_flight) => in_flight.insert(signature),
+      Err(_) => false,
+    }
+  }
+
+  fn new(signature: u64) -> Self {
+    BlobCommitInFlightGuard { signature }
+  }
+}
+
+impl Drop for BlobCommitInFlightGuard {
+  fn drop(&mut self) {
+    if let Ok(mut in_flight) = in_flight_blob_commits().lock() {
+      in_flight.remove(&self.signature);
+    }
+  }
+}
+
+fn blob_commit_signature(files: &[CommitFile]) -> u64 {
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  files.len().hash(&mut hasher);
+  for file in files {
+    file.path.hash(&mut hasher);
+    file.content_type.hash(&mut hasher);
+    file.content_hash.hash(&mut hasher);
+    file.size.hash(&mut hasher);
+    file.chunks.len().hash(&mut hasher);
+    for chunk in &file.chunks {
+      chunk.hash(&mut hasher);
+    }
+  }
+  hasher.finish()
+}
 
 /// GET /upload/config — returns hash algorithm, chunk size, and hash prefix.
 pub async fn upload_config(State(state): State<AppState>) -> Response {
@@ -234,8 +292,57 @@ pub async fn upload_commit(
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
+  let commit_permit: OwnedSemaphorePermit = match Arc::clone(blob_commit_semaphore()).try_acquire_owned() {
+    Ok(permit) => permit,
+    Err(_) => {
+      tracing::warn!(
+        files = file_count,
+        total_chunk_refs,
+        supplied_content_hash_files,
+        supplied_size_files,
+        supplied_logical_file_bytes,
+        max_concurrent_blob_commits = MAX_CONCURRENT_BLOB_COMMITS,
+        "blob commit rejected because commit workers are saturated"
+      );
+      return (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+          "error": "Too many blob commits are already in progress; retry shortly",
+          "retryable": true
+        })),
+      )
+        .into_response();
+    }
+  };
+
+  let commit_signature = blob_commit_signature(&body.files);
+  if !BlobCommitInFlightGuard::try_acquire(commit_signature) {
+    tracing::warn!(
+      files = file_count,
+      total_chunk_refs,
+      supplied_content_hash_files,
+      supplied_size_files,
+      supplied_logical_file_bytes,
+      "duplicate blob commit rejected while identical request is still in progress"
+    );
+    return (
+      StatusCode::TOO_MANY_REQUESTS,
+      Json(serde_json::json!({
+        "error": "An identical blob commit is already in progress; retry after it completes",
+        "retryable": true
+      })),
+    )
+      .into_response();
+  }
+  let commit_guard = BlobCommitInFlightGuard::new(commit_signature);
+
   let engine = state.engine.clone();
-  let result = run_engine_blocking("upload_commit", "Commit failed", move || commit_files(&engine, &ctx, body.files)).await;
+  let result = run_engine_blocking("upload_commit", "Commit failed", move || {
+    let _commit_permit = commit_permit;
+    let _commit_guard = commit_guard;
+    commit_files(&engine, &ctx, body.files)
+  })
+  .await;
 
   match result {
     Ok(commit_result) => {

@@ -674,6 +674,7 @@ fn prepare_commit_file(
   let mut chunk_metadata_lookup_us = 0u128;
   let mut chunk_body_read_us = 0u128;
   let mut chunk_body_read_bytes = 0u64;
+  let mut metadata_fallback_status = "chunk_metadata_incomplete";
 
   if let Some(asserted_hash) = supplied_content_hash.as_ref().filter(|_| file.size.is_some()) {
     let mut chunks_for_file: Vec<(Vec<u8>, u64)> = Vec::with_capacity(decoded_hashes.len());
@@ -710,15 +711,28 @@ fn prepare_commit_file(
     }
 
     if metadata_complete {
-      validate_commit_size(file, total_size)?;
-      return Ok(Ok(PreparedCommitFile {
-        chunks: chunks_for_file,
-        content_hash: asserted_hash.clone(),
-        fast_path_status: "used",
-        chunk_metadata_lookup_us,
-        chunk_body_read_us,
-        chunk_body_read_bytes,
-      }));
+      match validate_commit_size(file, total_size) {
+        Ok(()) => {
+          return Ok(Ok(PreparedCommitFile {
+            chunks: chunks_for_file,
+            content_hash: asserted_hash.clone(),
+            fast_path_status: "used",
+            chunk_metadata_lookup_us,
+            chunk_body_read_us,
+            chunk_body_read_bytes,
+          }));
+        }
+        Err(error) => {
+          metadata_fallback_status = "chunk_metadata_size_mismatch";
+          tracing::debug!(
+            path = %file.path,
+            metadata_size = total_size,
+            asserted_size = file.size,
+            %error,
+            "blob commit chunk metadata did not match asserted size; falling back to chunk body verification"
+          );
+        }
+      }
     }
   }
 
@@ -727,7 +741,7 @@ fn prepare_commit_file(
   } else if file.size.is_none() {
     "missing_size"
   } else {
-    "chunk_metadata_incomplete"
+    metadata_fallback_status
   };
 
   let algo = engine.hash_algo();

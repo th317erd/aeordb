@@ -1436,19 +1436,35 @@ impl StorageEngine {
 
   /// Return metadata for a live chunk without loading its value.
   pub fn get_chunk_metadata(&self, hash: &[u8]) -> EngineResult<Option<ChunkEntryMetadata>> {
-    let Some(header) = self.get_entry_header(hash)? else {
+    let _operation = self.operation_guard("get_chunk_metadata")?;
+    let snapshot = self.kv_snapshot.load();
+    let Some(kv_entry) = snapshot.get(hash) else {
       return Ok(None);
     };
+    if kv_entry.is_deleted() {
+      return Ok(None);
+    }
 
-    if header.entry_type != EntryType::Chunk {
+    if kv_entry.entry_type() != KV_TYPE_CHUNK {
       return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(hash))));
     }
 
-    let raw_value_length = if header.compression_algo == CompressionAlgorithm::None { Some(header.value_length as u64) } else { None };
+    // Chunks are stored with the chunk hash as the key and no compression.
+    // Derive the stored/raw value length from the KV entry's total length so
+    // blob commits do not perform one random WAL header read per chunk.
+    let hash_length = self.hash_algo.hash_length() as u64;
+    let overhead = EntryHeader::FIXED_HEADER_SIZE as u64 + hash_length + hash_length;
+    let Some(stored_value_length) = (kv_entry.total_length as u64).checked_sub(overhead) else {
+      return Err(EngineError::CorruptEntry {
+        offset: kv_entry.offset,
+        reason: format!("chunk KV entry total_length {} is smaller than header+key overhead {}", kv_entry.total_length, overhead),
+      });
+    };
+
     Ok(Some(ChunkEntryMetadata {
-      stored_value_length: header.value_length as u64,
-      raw_value_length,
-      compression_algo: header.compression_algo,
+      stored_value_length,
+      raw_value_length: Some(stored_value_length),
+      compression_algo: CompressionAlgorithm::None,
     }))
   }
 
@@ -2187,12 +2203,13 @@ impl StorageEngine {
     let kv_entries = snapshot.len();
     let nvt_buckets = snapshot.bucket_count();
 
-    // Type counts from the prebuilt type index — O(1) per type.
-    let chunk_count = snapshot.iter_by_type(KV_TYPE_CHUNK).len();
-    let file_count = snapshot.iter_by_type(KV_TYPE_FILE_RECORD).len();
-    let directory_count = snapshot.iter_by_type(KV_TYPE_DIRECTORY).len();
-    let snapshot_count = snapshot.iter_by_type(KV_TYPE_SNAPSHOT).len();
-    let fork_count = snapshot.iter_by_type(KV_TYPE_FORK).len();
+    // Type counts are backed by compact snapshot counters and adjusted for
+    // the small live write buffer without cloning every entry of that type.
+    let chunk_count = snapshot.count_by_type(KV_TYPE_CHUNK);
+    let file_count = snapshot.count_by_type(KV_TYPE_FILE_RECORD);
+    let directory_count = snapshot.count_by_type(KV_TYPE_DIRECTORY);
+    let snapshot_count = snapshot.count_by_type(KV_TYPE_SNAPSHOT);
+    let fork_count = snapshot.count_by_type(KV_TYPE_FORK);
 
     // 3. Lock void_manager for void stats
     let (void_count, void_space_bytes) = match self.void_manager.read() {

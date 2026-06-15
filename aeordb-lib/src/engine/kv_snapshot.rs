@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use crate::engine::errors::EngineResult;
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::kv_pages::{deserialize_page, find_in_page};
+use crate::engine::kv_pages::{deserialize_page, find_entry_in_page_data, live_type_counts_in_page};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 
-pub type KvTypeIndex = HashMap<u8, HashMap<Vec<u8>, KVEntry>>;
+pub type KvPageSet = Arc<Vec<Arc<[u8]>>>;
+pub type KvTypeCounts = [usize; 16];
 
 /// An immutable, lock-free read view of the KV store.
 ///
@@ -32,20 +33,15 @@ pub struct ReadSnapshot {
   hash_algo: HashAlgorithm,
   /// Total entry count at snapshot creation time.
   entry_count: usize,
-  /// In-memory copy of all KV pages at snapshot time.
-  /// Each entry is a serialized page (page_size bytes).
-  /// Arc-wrapped for cheap sharing between snapshots (buffer-only publishes
-  /// reuse existing pages via Arc::clone instead of re-reading from disk).
-  pages: Arc<Vec<Vec<u8>>>,
-  /// Type index for entries already flushed to KV pages. This is rebuilt only
-  /// when pages change. Buffer-only publishes reuse the existing page bytes
-  /// and avoid re-scanning the whole database on every write.
-  page_type_index: Arc<KvTypeIndex>,
-  /// Type index for the current write buffer. This is small by design
-  /// (normally <= the KV write-buffer threshold), so rebuilding it on
-  /// buffer-only publishes keeps new writes immediately visible without
-  /// global snapshot work.
-  buffer_type_index: KvTypeIndex,
+  /// In-memory copy of all KV pages at snapshot time. Each bucket page is
+  /// individually Arc-wrapped, so publishing a new snapshot only clones page
+  /// pointers and replaces the buckets that actually changed.
+  pages: KvPageSet,
+  /// Live entry counts for flushed KV pages only. Buffer overrides are folded
+  /// in by `count_by_type`; explicit type iteration scans pages on demand.
+  page_type_counts: KvTypeCounts,
+  /// Type counts for the current write buffer.
+  buffer_type_counts: KvTypeCounts,
 }
 
 impl fmt::Debug for ReadSnapshot {
@@ -61,77 +57,73 @@ impl fmt::Debug for ReadSnapshot {
 }
 
 impl ReadSnapshot {
-  /// Create a new read snapshot from a frozen buffer, shared NVT, and an
-  /// in-memory copy of all KV pages.
+  /// Create a new read snapshot from a frozen buffer, shared NVT, and shared
+  /// immutable KV pages.
   pub fn new(
     buffer: HashMap<Vec<u8>, KVEntry>,
     nvt: Arc<NormalizedVectorTable>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
-    pages: Arc<Vec<Vec<u8>>>,
+    pages: KvPageSet,
   ) -> Self {
-    let page_type_index = Arc::new(Self::build_page_type_index(&pages, hash_algo));
-    let buffer_type_index = Self::build_buffer_type_index(&buffer);
-    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_index, buffer_type_index }
+    let page_type_counts = Self::build_page_type_counts(&pages, hash_algo);
+    let buffer_type_counts = Self::build_buffer_type_counts(&buffer);
+    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_counts, buffer_type_counts }
   }
 
-  /// Create a new snapshot while reusing the prebuilt flushed-page type
-  /// index. Use this when only the write buffer changed and the `pages` Arc
-  /// still points at the same flushed KV pages.
-  pub fn new_with_page_type_index(
+  /// Create a new snapshot while reusing precomputed flushed-page counts.
+  /// Use this when only the write buffer changed or when the publisher has
+  /// already applied bucket-local count deltas.
+  pub fn new_with_page_type_counts(
     buffer: HashMap<Vec<u8>, KVEntry>,
     nvt: Arc<NormalizedVectorTable>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
-    pages: Arc<Vec<Vec<u8>>>,
-    page_type_index: Arc<KvTypeIndex>,
+    pages: KvPageSet,
+    page_type_counts: KvTypeCounts,
   ) -> Self {
-    let buffer_type_index = Self::build_buffer_type_index(&buffer);
-    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_index, buffer_type_index }
+    let buffer_type_counts = Self::build_buffer_type_counts(&buffer);
+    ReadSnapshot { buffer, nvt, bucket_count, hash_algo, entry_count, pages, page_type_counts, buffer_type_counts }
   }
 
-  /// Build the type index from flushed KV pages only. Entries are grouped by
-  /// their entry_type (lower 4 bits). Deleted entries are excluded.
-  fn build_page_type_index(pages: &[Vec<u8>], hash_algo: HashAlgorithm) -> KvTypeIndex {
+  /// Build compact type counts from flushed KV pages only. Deleted entries are
+  /// excluded. Corrupt pages are treated as empty here; open/flush paths are
+  /// responsible for flagging corruption and triggering rebuild.
+  fn build_page_type_counts(pages: &[Arc<[u8]>], hash_algo: HashAlgorithm) -> KvTypeCounts {
     let hash_length = hash_algo.hash_length();
-    let mut index: KvTypeIndex = HashMap::new();
+    let mut counts = [0usize; 16];
     for page_data in pages.iter() {
-      if let Ok(entries) = deserialize_page(page_data, hash_length) {
-        for entry in entries {
-          if (entry.type_flags & KV_FLAG_DELETED) == 0 {
-            index.entry(entry.entry_type()).or_default().insert(entry.hash.clone(), entry);
-          }
+      if let Ok(page_counts) = live_type_counts_in_page(page_data, hash_length) {
+        for (i, count) in page_counts.iter().enumerate() {
+          counts[i] += count;
         }
       }
     }
-    index
+    counts
   }
 
-  /// Build the type index from the write buffer only. Buffer entries override
-  /// page entries during iteration; deleted buffer entries are represented by
-  /// the raw buffer map and intentionally excluded here.
-  fn build_buffer_type_index(buffer: &HashMap<Vec<u8>, KVEntry>) -> KvTypeIndex {
-    let mut index: KvTypeIndex = HashMap::new();
-    for (hash, entry) in buffer {
+  /// Build compact type counts from the write buffer only.
+  fn build_buffer_type_counts(buffer: &HashMap<Vec<u8>, KVEntry>) -> KvTypeCounts {
+    let mut counts = [0usize; 16];
+    for entry in buffer.values() {
       if (entry.type_flags & KV_FLAG_DELETED) != 0 {
         continue;
       }
-      index.entry(entry.entry_type()).or_default().insert(hash.clone(), entry.clone());
+      counts[entry.entry_type() as usize] += 1;
     }
-    index
+    counts
   }
 
   /// Access the shared pages Arc (for cheap cloning in buffer-only publishes).
-  pub fn pages(&self) -> &Arc<Vec<Vec<u8>>> {
+  pub fn pages(&self) -> &KvPageSet {
     &self.pages
   }
 
-  /// Access the flushed-page type index for reuse when publishing a new
-  /// buffer-only snapshot.
-  pub fn page_type_index(&self) -> &Arc<KvTypeIndex> {
-    &self.page_type_index
+  /// Access flushed-page type counts for reuse when publishing a new snapshot.
+  pub fn page_type_counts(&self) -> KvTypeCounts {
+    self.page_type_counts
   }
 
   /// Look up an entry by hash. Checks the buffer first, then reads
@@ -171,57 +163,80 @@ impl ReadSnapshot {
     let hash_length = self.hash_algo.hash_length();
     let page_data = &self.pages[bucket_index];
 
-    let entries = deserialize_page(page_data, hash_length).ok()?;
-
-    if include_deleted {
-      entries.iter().find(|e| e.hash == hash).cloned()
-    } else {
-      find_in_page(&entries, hash).cloned()
-    }
+    find_entry_in_page_data(page_data, hash_length, hash, include_deleted).ok().flatten()
   }
 
-  /// Iterate all entries of a specific type. O(k) where k is the number of
-  /// flushed entries of that type plus the current write-buffer entries.
+  /// Iterate all entries of a specific type. This intentionally scans pages on
+  /// demand instead of keeping a full always-resident cloned type index.
   pub fn iter_by_type(&self, target_type: u8) -> Vec<KVEntry> {
     let mut entries = Vec::new();
-    if let Some(page_entries) = self.page_type_index.get(&target_type) {
-      for (hash, entry) in page_entries {
-        if !self.buffer.contains_key(hash) {
-          entries.push(entry.clone());
+    let hash_length = self.hash_algo.hash_length();
+
+    for page_data in self.pages.iter() {
+      if let Ok(page_entries) = deserialize_page(page_data, hash_length) {
+        for entry in page_entries {
+          if entry.entry_type() == target_type && !entry.is_deleted() && !self.buffer.contains_key(entry.hash.as_slice()) {
+            entries.push(entry);
+          }
         }
       }
     }
-    if let Some(buffer_entries) = self.buffer_type_index.get(&target_type) {
-      entries.extend(buffer_entries.values().cloned());
+
+    for entry in self.buffer.values() {
+      if entry.entry_type() == target_type && !entry.is_deleted() {
+        entries.push(entry.clone());
+      }
     }
     entries
   }
 
   /// Count entries of a specific type without cloning entries.
   pub fn count_by_type(&self, target_type: u8) -> usize {
-    let page_count = self
-      .page_type_index
-      .get(&target_type)
-      .map(|page_entries| page_entries.keys().filter(|hash| !self.buffer.contains_key(*hash)).count())
-      .unwrap_or(0);
-    let buffer_count = self.buffer_type_index.get(&target_type).map(|entries| entries.len()).unwrap_or(0);
-    page_count + buffer_count
+    let target_index = (target_type & 0x0F) as usize;
+    let mut count = self.page_type_counts[target_index];
+
+    for (hash, buffered) in &self.buffer {
+      if let Some(page_entry) = self.read_from_disk(hash, false) {
+        if page_entry.entry_type() == target_type {
+          count = count.saturating_sub(1);
+        }
+      }
+      if !buffered.is_deleted() && buffered.entry_type() == target_type {
+        count += 1;
+      }
+    }
+
+    // Fast path for empty buffers avoids the loop above; this also keeps the
+    // precomputed buffer count used so accidental divergence is visible in
+    // debug builds during tests.
+    debug_assert_eq!(
+      self.buffer.values().filter(|entry| !entry.is_deleted() && entry.entry_type() == target_type).count(),
+      self.buffer_type_counts[target_index]
+    );
+
+    count
   }
 
-  /// Iterate all entries: uses the prebuilt type index to collect every
-  /// non-deleted entry across all types. Still O(n) but avoids re-scanning
-  /// pages and rebuilding the HashMap on every call.
+  /// Iterate all entries. Explicit O(n) scan used by diagnostics, backup, and
+  /// resize paths; normal reads/counts should not call this.
   pub fn iter_all(&self) -> EngineResult<Vec<KVEntry>> {
     let mut all = Vec::new();
-    for entries in self.page_type_index.values() {
-      for (hash, entry) in entries {
-        if !self.buffer.contains_key(hash) {
-          all.push(entry.clone());
+    let hash_length = self.hash_algo.hash_length();
+
+    for page_data in self.pages.iter() {
+      if let Ok(page_entries) = deserialize_page(page_data, hash_length) {
+        for entry in page_entries {
+          if !entry.is_deleted() && !self.buffer.contains_key(entry.hash.as_slice()) {
+            all.push(entry);
+          }
         }
       }
     }
-    for entries in self.buffer_type_index.values() {
-      all.extend(entries.values().cloned());
+
+    for entry in self.buffer.values() {
+      if !entry.is_deleted() {
+        all.push(entry.clone());
+      }
     }
     Ok(all)
   }
@@ -254,5 +269,51 @@ impl ReadSnapshot {
   /// Number of entries in the frozen buffer.
   pub fn buffer_len(&self) -> usize {
     self.buffer.len()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine::hash_algorithm::HashAlgorithm;
+  use crate::engine::kv_pages::serialize_page;
+  use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
+  use crate::engine::scalar_converter::HashConverter;
+
+  fn entry(hash_byte: u8, entry_type: u8, deleted: bool) -> KVEntry {
+    KVEntry {
+      type_flags: entry_type | if deleted { KV_FLAG_DELETED } else { 0 },
+      hash: vec![hash_byte; 32],
+      offset: hash_byte as u64 * 100,
+      total_length: 128,
+    }
+  }
+
+  fn snapshot_with(buffer: HashMap<Vec<u8>, KVEntry>) -> ReadSnapshot {
+    let page = serialize_page(&[entry(1, KV_TYPE_CHUNK, false), entry(2, KV_TYPE_FILE_RECORD, false)], 32);
+    let pages = Arc::new(vec![Arc::<[u8]>::from(page.into_boxed_slice())]);
+    let nvt = Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), 1));
+    ReadSnapshot::new(buffer, nvt, 1, HashAlgorithm::Blake3_256, 2, pages)
+  }
+
+  #[test]
+  fn count_by_type_applies_buffer_overrides() {
+    let mut buffer = HashMap::new();
+    buffer.insert(vec![2u8; 32], entry(2, KV_TYPE_DIRECTORY, false));
+    let snapshot = snapshot_with(buffer);
+
+    assert_eq!(snapshot.count_by_type(KV_TYPE_CHUNK), 1);
+    assert_eq!(snapshot.count_by_type(KV_TYPE_FILE_RECORD), 0);
+    assert_eq!(snapshot.count_by_type(KV_TYPE_DIRECTORY), 1);
+  }
+
+  #[test]
+  fn count_by_type_applies_buffer_deletions() {
+    let mut buffer = HashMap::new();
+    buffer.insert(vec![1u8; 32], entry(1, KV_TYPE_CHUNK, true));
+    let snapshot = snapshot_with(buffer);
+
+    assert_eq!(snapshot.count_by_type(KV_TYPE_CHUNK), 0);
+    assert_eq!(snapshot.count_by_type(KV_TYPE_FILE_RECORD), 1);
   }
 }

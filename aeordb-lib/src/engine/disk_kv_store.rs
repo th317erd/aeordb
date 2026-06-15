@@ -9,7 +9,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
 use crate::engine::kv_pages::*;
-use crate::engine::kv_snapshot::ReadSnapshot;
+use crate::engine::kv_snapshot::{KvPageSet, ReadSnapshot};
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
@@ -75,6 +75,10 @@ pub struct DiskKVStore {
 }
 
 impl DiskKVStore {
+  fn page_arc(page_data: Vec<u8>) -> Arc<[u8]> {
+    Arc::<[u8]>::from(page_data.into_boxed_slice())
+  }
+
   fn valid_void_range_for_layout(kv_block_offset: u64, kv_block_length: u64, hot_tail_offset: u64, offset: u64, size: u32) -> bool {
     if size == 0 {
       return false;
@@ -148,7 +152,8 @@ impl DiskKVStore {
 
     let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
-    let pages = Arc::new(vec![vec![0u8; psize]; bucket_count]);
+    let empty_page = Self::page_arc(vec![0u8; psize]);
+    let pages = Arc::new(vec![empty_page; bucket_count]);
     let initial_snapshot = ReadSnapshot::new(HashMap::new(), Arc::clone(&shared_nvt), bucket_count, hash_algo, 0, pages);
     let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
 
@@ -253,7 +258,7 @@ impl DiskKVStore {
           tracing::warn!(bucket, ?error, "KV bucket page failed CRC on open — triggering dirty startup");
           detected_page_corruption = true;
         }
-        pages.push(page_data);
+        pages.push(Self::page_arc(page_data));
       }
       Arc::new(pages)
     };
@@ -803,7 +808,7 @@ impl DiskKVStore {
   // Snapshot publishing
   // ========================================================================
 
-  fn read_all_pages(&mut self) -> Arc<Vec<Vec<u8>>> {
+  fn read_all_pages(&mut self) -> KvPageSet {
     let hash_length = self.hash_algo.hash_length();
     let psize = page_size(hash_length);
     let mut pages = Vec::with_capacity(self.bucket_count);
@@ -811,27 +816,27 @@ impl DiskKVStore {
       let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
       let mut page_data = vec![0u8; psize];
       if self.db_file.seek(SeekFrom::Start(offset)).is_ok() && self.db_file.read_exact(&mut page_data).is_ok() {
-        pages.push(page_data);
+        pages.push(Self::page_arc(page_data));
         continue;
       }
-      pages.push(vec![0u8; psize]);
+      pages.push(Self::page_arc(vec![0u8; psize]));
     }
     Arc::new(pages)
   }
 
   fn publish_buffer_only(&mut self) {
-    let (current_pages, current_page_type_index) = {
+    let (current_pages, current_page_type_counts) = {
       let current = self.snapshot.load();
-      (Arc::clone(current.pages()), Arc::clone(current.page_type_index()))
+      (Arc::clone(current.pages()), current.page_type_counts())
     };
-    let snapshot = ReadSnapshot::new_with_page_type_index(
+    let snapshot = ReadSnapshot::new_with_page_type_counts(
       self.write_buffer.clone(),
       Arc::clone(&self.shared_nvt),
       self.bucket_count,
       self.hash_algo,
       self.entry_count,
       current_pages,
-      current_page_type_index,
+      current_page_type_counts,
     );
     self.snapshot.store(Arc::new(snapshot));
   }
@@ -857,27 +862,34 @@ impl DiskKVStore {
     let current = self.snapshot.load();
     let old_pages = current.pages();
     let mut new_pages = (**old_pages).clone();
+    let mut new_page_type_counts = current.page_type_counts();
 
     let hash_length = self.hash_algo.hash_length();
     let psize = page_size(hash_length);
     for &bucket in modified_buckets {
       if bucket < new_pages.len() {
+        let old_counts = live_type_counts_in_page(&new_pages[bucket], hash_length).unwrap_or([0usize; 16]);
         let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
         let mut page_data = vec![0u8; psize];
         if self.db_file.seek(SeekFrom::Start(offset)).is_ok() {
           let _ = self.db_file.read_exact(&mut page_data);
         }
-        new_pages[bucket] = page_data;
+        let new_counts = live_type_counts_in_page(&page_data, hash_length).unwrap_or([0usize; 16]);
+        for i in 0..new_page_type_counts.len() {
+          new_page_type_counts[i] = new_page_type_counts[i].saturating_sub(old_counts[i]).saturating_add(new_counts[i]);
+        }
+        new_pages[bucket] = Self::page_arc(page_data);
       }
     }
 
-    let snapshot = ReadSnapshot::new(
+    let snapshot = ReadSnapshot::new_with_page_type_counts(
       self.write_buffer.clone(),
       Arc::clone(&self.shared_nvt),
       self.bucket_count,
       self.hash_algo,
       self.entry_count,
       Arc::new(new_pages),
+      new_page_type_counts,
     );
     self.snapshot.store(Arc::new(snapshot));
   }

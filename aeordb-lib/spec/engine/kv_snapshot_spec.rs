@@ -41,7 +41,11 @@ fn create_temp_kv_store(dir: &std::path::Path) -> DiskKVStore {
 }
 
 /// Read all pages from an in-file KV at kv_block_offset.
-fn read_pages_from_file(db_path: &std::path::Path, kv_block_offset: u64, bucket_count: usize, hash_length: usize) -> Vec<Vec<u8>> {
+fn page_arc(page_data: Vec<u8>) -> Arc<[u8]> {
+  Arc::<[u8]>::from(page_data.into_boxed_slice())
+}
+
+fn read_pages_from_file(db_path: &std::path::Path, kv_block_offset: u64, bucket_count: usize, hash_length: usize) -> Vec<Arc<[u8]>> {
   let mut file = File::open(db_path).unwrap();
   let psize = page_size(hash_length);
   let mut pages = Vec::with_capacity(bucket_count);
@@ -50,14 +54,14 @@ fn read_pages_from_file(db_path: &std::path::Path, kv_block_offset: u64, bucket_
     let mut page_data = vec![0u8; psize];
     file.seek(SeekFrom::Start(offset)).unwrap();
     file.read_exact(&mut page_data).unwrap();
-    pages.push(page_data);
+    pages.push(page_arc(page_data));
   }
   pages
 }
 
 /// Create a DiskKVStore with entries flushed to disk, then return
 /// the store's bucket_count and in-memory pages.
-fn create_flushed_store(dir: &std::path::Path, entries: &[KVEntry]) -> (usize, Arc<Vec<Vec<u8>>>) {
+fn create_flushed_store(dir: &std::path::Path, entries: &[KVEntry]) -> (usize, Arc<Vec<Arc<[u8]>>>) {
   let db_path = dir.join("test.aeordb");
   let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
   let kv_block_offset = 256u64;
@@ -79,8 +83,9 @@ fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
 }
 
 /// Create empty pages for a given bucket count and hash length.
-fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Vec<u8>>> {
-  Arc::new(vec![vec![0u8; page_size(hash_length)]; bucket_count])
+fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Arc<[u8]>>> {
+  let empty = page_arc(vec![0u8; page_size(hash_length)]);
+  Arc::new(vec![empty; bucket_count])
 }
 
 // ============================================================================
@@ -271,29 +276,30 @@ fn test_snapshot_count_by_type_respects_buffer_overrides() {
 }
 
 #[test]
-fn test_snapshot_buffer_only_publish_reuses_page_type_index() {
+fn test_snapshot_buffer_only_publish_reuses_pages_and_type_counts() {
   let dir = tempdir().unwrap();
 
   let disk_entries = vec![make_entry(1, 100), make_entry(2, 200)];
   let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
   let first = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 2, pages);
 
-  let page_type_index = Arc::clone(first.page_type_index());
+  let page_type_counts = first.page_type_counts();
   let mut buffer = HashMap::new();
   let new_entry = make_entry(3, 300);
   buffer.insert(new_entry.hash.clone(), new_entry);
 
-  let second = ReadSnapshot::new_with_page_type_index(
+  let first_pages = Arc::clone(first.pages());
+  let second = ReadSnapshot::new_with_page_type_counts(
     buffer,
     make_nvt(bucket_count),
     bucket_count,
     HashAlgorithm::Blake3_256,
     3,
-    Arc::clone(first.pages()),
-    Arc::clone(&page_type_index),
+    Arc::clone(&first_pages),
+    page_type_counts,
   );
 
-  assert!(Arc::ptr_eq(second.page_type_index(), &page_type_index));
+  assert!(Arc::ptr_eq(second.pages(), &first_pages));
   assert_eq!(second.count_by_type(KV_TYPE_CHUNK), 3);
   assert!(second.iter_by_type(KV_TYPE_CHUNK).iter().any(|entry| entry.hash == make_hash(3)));
 }

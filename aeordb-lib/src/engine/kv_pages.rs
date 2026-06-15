@@ -34,6 +34,60 @@ fn is_empty_page(data: &[u8]) -> bool {
   magic == 0 && count == 0
 }
 
+fn page_crc(data: &[u8]) -> u32 {
+  let mut hasher = crc32fast::Hasher::new();
+  hasher.update(&data[..4]);
+  hasher.update(&[0u8; 4]);
+  hasher.update(&data[8..]);
+  hasher.finalize()
+}
+
+fn validated_entry_count(data: &[u8], hash_length: usize) -> EngineResult<Option<usize>> {
+  if data.len() < PAGE_HEADER_SIZE {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "Page data too short for header".to_string() });
+  }
+
+  if is_empty_page(data) {
+    return Ok(None);
+  }
+
+  let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+  if magic != PAGE_MAGIC {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("page magic mismatch (got 0x{:08x}, expected 0x{:08x})", magic, PAGE_MAGIC),
+    });
+  }
+
+  let stored_crc = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+  let computed_crc = page_crc(data);
+  if stored_crc != computed_crc {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("page CRC mismatch (stored {:08x}, computed {:08x})", stored_crc, computed_crc),
+    });
+  }
+
+  let count = u16::from_le_bytes([data[8], data[9]]) as usize;
+  if count > MAX_ENTRIES_PER_PAGE {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Page entry count {} exceeds maximum {}", count, MAX_ENTRIES_PER_PAGE),
+    });
+  }
+
+  let entry_size = hash_length + 1 + 8 + 4;
+  let required = PAGE_HEADER_SIZE + count * entry_size;
+  if data.len() < required {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Page data too short: need {} bytes for {} entries, got {}", required, count, data.len()),
+    });
+  }
+
+  Ok(Some(count))
+}
+
 /// Compute the file offset of bucket N's page within the KV file.
 pub fn bucket_page_offset(bucket_index: usize, hash_length: usize) -> u64 {
   (bucket_index * page_size(hash_length)) as u64
@@ -80,51 +134,11 @@ pub fn serialize_page(entries: &[KVEntry], hash_length: usize) -> Vec<u8> {
 /// per-bucket rebuild (see disk-resident-kvs.md §4) or escalate to dirty
 /// startup.
 pub fn deserialize_page(data: &[u8], hash_length: usize) -> EngineResult<Vec<KVEntry>> {
-  if data.len() < PAGE_HEADER_SIZE {
-    return Err(EngineError::CorruptEntry { offset: 0, reason: "Page data too short for header".to_string() });
-  }
-
-  if is_empty_page(data) {
+  let Some(count) = validated_entry_count(data, hash_length)? else {
     return Ok(Vec::new());
-  }
-
-  let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-  if magic != PAGE_MAGIC {
-    return Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("page magic mismatch (got 0x{:08x}, expected 0x{:08x})", magic, PAGE_MAGIC),
-    });
-  }
-
-  let stored_crc = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-  // Compute CRC over the page with the crc32 field zeroed.
-  let mut tmp = data.to_vec();
-  tmp[4..8].fill(0);
-  let computed_crc = crc32fast::hash(&tmp);
-  if stored_crc != computed_crc {
-    return Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("page CRC mismatch (stored {:08x}, computed {:08x})", stored_crc, computed_crc),
-    });
-  }
-
-  let count = u16::from_le_bytes([data[8], data[9]]) as usize;
-  if count > MAX_ENTRIES_PER_PAGE {
-    return Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("Page entry count {} exceeds maximum {}", count, MAX_ENTRIES_PER_PAGE),
-    });
-  }
+  };
 
   let entry_size = hash_length + 1 + 8 + 4;
-  let required = PAGE_HEADER_SIZE + count * entry_size;
-  if data.len() < required {
-    return Err(EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("Page data too short: need {} bytes for {} entries, got {}", required, count, data.len()),
-    });
-  }
-
   let mut entries = Vec::with_capacity(count);
   for i in 0..count {
     let offset = PAGE_HEADER_SIZE + i * entry_size;
@@ -136,6 +150,55 @@ pub fn deserialize_page(data: &[u8], hash_length: usize) -> EngineResult<Vec<KVE
   }
 
   Ok(entries)
+}
+
+/// Find one entry in a serialized page without allocating every entry in the
+/// bucket. This keeps hot hash lookups from churning a temporary `Vec<KVEntry>`
+/// for each read.
+pub fn find_entry_in_page_data(data: &[u8], hash_length: usize, hash: &[u8], include_deleted: bool) -> EngineResult<Option<KVEntry>> {
+  let Some(count) = validated_entry_count(data, hash_length)? else {
+    return Ok(None);
+  };
+
+  let entry_size = hash_length + 1 + 8 + 4;
+  for i in 0..count {
+    let offset = PAGE_HEADER_SIZE + i * entry_size;
+    let entry_hash = &data[offset..offset + hash_length];
+    if entry_hash != hash {
+      continue;
+    }
+
+    let type_flags = data[offset + hash_length];
+    if !include_deleted && (type_flags & KV_FLAG_DELETED) != 0 {
+      return Ok(None);
+    }
+
+    let file_offset = u64::from_le_bytes(data[offset + hash_length + 1..offset + hash_length + 9].try_into().unwrap());
+    let total_length = u32::from_le_bytes(data[offset + hash_length + 9..offset + hash_length + 13].try_into().unwrap());
+    return Ok(Some(KVEntry { type_flags, hash: entry_hash.to_vec(), offset: file_offset, total_length }));
+  }
+
+  Ok(None)
+}
+
+/// Count live entries by KV type in one serialized page without allocating
+/// entry hashes. The lower four bits of `type_flags` are the KV type.
+pub fn live_type_counts_in_page(data: &[u8], hash_length: usize) -> EngineResult<[usize; 16]> {
+  let mut counts = [0usize; 16];
+  let Some(count) = validated_entry_count(data, hash_length)? else {
+    return Ok(counts);
+  };
+
+  let entry_size = hash_length + 1 + 8 + 4;
+  for i in 0..count {
+    let offset = PAGE_HEADER_SIZE + i * entry_size;
+    let type_flags = data[offset + hash_length];
+    if (type_flags & KV_FLAG_DELETED) == 0 {
+      counts[(type_flags & 0x0F) as usize] += 1;
+    }
+  }
+
+  Ok(counts)
 }
 
 /// Find an entry by hash within a deserialized page, skipping deleted entries.
@@ -170,4 +233,50 @@ pub fn stage_for_count(entry_count: usize, hash_length: usize) -> usize {
     }
   }
   KV_STAGE_SIZES.len() - 1
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
+
+  fn entry(hash_byte: u8, entry_type: u8, deleted: bool) -> KVEntry {
+    KVEntry {
+      type_flags: entry_type | if deleted { KV_FLAG_DELETED } else { 0 },
+      hash: vec![hash_byte; 32],
+      offset: hash_byte as u64 * 100,
+      total_length: 128,
+    }
+  }
+
+  #[test]
+  fn find_entry_in_page_data_allocates_only_the_match() {
+    let entries = vec![entry(1, KV_TYPE_CHUNK, false), entry(2, KV_TYPE_FILE_RECORD, false), entry(3, KV_TYPE_DIRECTORY, true)];
+    let page = serialize_page(&entries, 32);
+
+    let found = find_entry_in_page_data(&page, 32, &[2u8; 32], false).unwrap().unwrap();
+    assert_eq!(found.hash, vec![2u8; 32]);
+    assert_eq!(found.entry_type(), KV_TYPE_FILE_RECORD);
+
+    assert!(find_entry_in_page_data(&page, 32, &[3u8; 32], false).unwrap().is_none());
+    assert!(find_entry_in_page_data(&page, 32, &[9u8; 32], true).unwrap().is_none());
+    assert!(find_entry_in_page_data(&page, 32, &[3u8; 32], true).unwrap().unwrap().is_deleted());
+  }
+
+  #[test]
+  fn live_type_counts_skip_deleted_entries() {
+    let page = serialize_page(
+      &[
+        entry(1, KV_TYPE_CHUNK, false),
+        entry(2, KV_TYPE_CHUNK, false),
+        entry(3, KV_TYPE_FILE_RECORD, false),
+        entry(4, KV_TYPE_FILE_RECORD, true),
+      ],
+      32,
+    );
+
+    let counts = live_type_counts_in_page(&page, 32).unwrap();
+    assert_eq!(counts[KV_TYPE_CHUNK as usize], 2);
+    assert_eq!(counts[KV_TYPE_FILE_RECORD as usize], 1);
+  }
 }

@@ -195,10 +195,8 @@ searches; it is not derived from the first chunk.
 By default, AeorDB streams the ordered stored chunks and computes that hash on
 the server. Trusted sync clients that already computed the raw file hash can
 send `content_hash` and `size` with each file. For raw stored chunks, AeorDB
-then validates chunk existence and byte length from entry headers and can
-publish the FileRecord without rereading every chunk body. If the chunk entries
-require decompression, AeorDB falls back to streaming the chunks and verifies
-the supplied `content_hash` against the computed value.
+then validates chunk existence and byte length from KV metadata and can publish
+the FileRecord without rereading every chunk body.
 
 ### Request Body
 
@@ -265,6 +263,7 @@ curl -X POST http://localhost:6830/blobs/commit \
 | Status | Condition |
 |--------|-----------|
 | 400 | Invalid input (missing path, bad hash, size mismatch, etc.) |
+| 429 | Blob commit workers are saturated, or an identical commit is already in progress. The response includes `"retryable": true`. |
 | 500 | Commit task failure or panic |
 
 ---

@@ -13,6 +13,19 @@ fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
   create_temp_engine_for_tests()
 }
 
+#[test]
+fn test_chunk_metadata_derives_raw_length_from_kv_entry() {
+  let (engine, _temp) = setup();
+  let ops = DirectoryOps::new(&engine);
+  let data = vec![42u8; 12_345];
+
+  let chunk_hash = ops.store_chunk(&data).unwrap();
+  let metadata = engine.get_chunk_metadata(&chunk_hash).unwrap().unwrap();
+
+  assert_eq!(metadata.stored_value_length, data.len() as u64);
+  assert_eq!(metadata.raw_value_length, Some(data.len() as u64));
+}
+
 // ─── 1. HEAD changes on file store ────────────────────────────────────────
 
 #[test]
