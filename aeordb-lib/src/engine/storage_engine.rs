@@ -561,7 +561,7 @@ impl StorageEngine {
     let dir_name =
       format!("{}-{}-{}", Self::sanitize_spill_component(&db_label), chrono::Utc::now().timestamp_millis(), std::process::id());
 
-    for base_dir in Self::emergency_spill_base_dirs() {
+    for base_dir in crate::engine::emergency_spill::emergency_spill_base_dirs() {
       let spill_dir = base_dir.join(&dir_name);
       if let Err(error) = std::fs::create_dir_all(&spill_dir) {
         report.errors.push(format!("failed to create spill directory {}: {}", spill_dir.display(), error));
@@ -702,41 +702,6 @@ impl StorageEngine {
 
   fn emergency_wal_spill_max_bytes() -> u64 {
     std::env::var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(4 * 1024 * 1024 * 1024)
-  }
-
-  fn emergency_spill_base_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(path) = std::env::var("AEORDB_EMERGENCY_SPILL_DIR") {
-      if !path.trim().is_empty() {
-        dirs.push(PathBuf::from(path));
-      }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-      if let Ok(path) = std::env::var("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(path).join("AeorDB").join("emergency-spill"));
-      } else if let Ok(path) = std::env::var("APPDATA") {
-        dirs.push(PathBuf::from(path).join("AeorDB").join("emergency-spill"));
-      }
-    }
-    #[cfg(target_os = "macos")]
-    {
-      if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join("Library").join("Application Support").join("aeordb").join("emergency-spill"));
-      }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-      if let Ok(path) = std::env::var("XDG_DATA_HOME") {
-        dirs.push(PathBuf::from(path).join("aeordb").join("emergency-spill"));
-      } else if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join(".local").join("share").join("aeordb").join("emergency-spill"));
-      }
-    }
-
-    dirs.push(std::env::temp_dir().join("aeordb-emergency-spill"));
-    dirs
   }
 
   fn sanitize_spill_component(component: &str) -> String {
@@ -1350,6 +1315,18 @@ impl StorageEngine {
     );
 
     Ok(())
+  }
+
+  /// Repair path used after external emergency spill artifacts have restored
+  /// any missing WAL-tail bytes. This deliberately uses the dirty-recovery
+  /// scanner so entries beyond a stale `hot_tail_offset` are indexed, then
+  /// reconstructs reusable void state from WAL gaps and publishes a fresh
+  /// hot-tail snapshot.
+  pub fn recover_after_emergency_spill_replay(&self) -> EngineResult<()> {
+    self.rebuild_kv()?;
+    self.recover_voids_via_gap_scan()?;
+    self.sync_voids_to_kv_writer();
+    self.force_hot_tail_flush()
   }
 
   /// Force an immediate hot tail flush. Used by GC sweep after registering

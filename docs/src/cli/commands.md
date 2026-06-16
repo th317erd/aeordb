@@ -86,20 +86,68 @@ aeordb --version
 ### What Happens on Start
 
 1. Binds HTTP and serves `/system/health` with `status: "starting"`
-2. Opens (or creates) the database file
-3. Rebuilds startup state from the WAL if the previous shutdown was dirty
-4. Bootstraps root API key (if `--auth self` and no key exists yet)
-5. Resets any tasks left in `Running` state from a previous crash to `Pending`
-6. Starts background workers:
+2. Scans the configured emergency-spill locations for unresolved artifacts tied to this database and refuses startup if any are found
+3. Opens (or creates) the database file
+4. Rebuilds startup state from the WAL if the previous shutdown was dirty
+5. Bootstraps root API key (if `--auth self` and no key exists yet)
+6. Resets any tasks left in `Running` state from a previous crash to `Pending`
+7. Starts background workers:
    - **Heartbeat**: emits clock-sync pulses every 15 seconds
    - **Metrics**: emits system metrics snapshots every 15 seconds
    - **Cron scheduler**: checks `/.config/cron.json` every 60 seconds
    - **Task worker**: dequeues and executes background tasks
    - **Webhook dispatcher**: delivers events to registered webhook URLs
-7. Switches the full API router to ready and emits `server_ready` on eligible SSE streams
-8. On CTRL+C or SIGTERM, stops accepting new storage work, waits for active work to drain, then flushes buffers
+8. Switches the full API router to ready and emits `server_ready` on eligible SSE streams
+9. On CTRL+C or SIGTERM, stops accepting new storage work, waits for active work to drain, then flushes buffers
 
 The shutdown drain window defaults to 600 seconds. Set `AEORDB_SHUTDOWN_OPERATION_WAIT_SECS` to override it.
+
+---
+
+## `aeordb verify`
+
+Verify database integrity and optionally repair recoverable issues.
+
+```bash
+aeordb verify [OPTIONS]
+```
+
+### Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--database` | `-D` | `data.aeordb` | Path to the `.aeordb` database file |
+| `--repair` | | `false` | Repair recoverable issues |
+| `--force-fix-in-place` | | `false` | Apply repairs directly to the original database instead of creating `<database>.repaired` |
+| `--yes` | | `false` | Accept emergency-spill replay prompts without interactive confirmation |
+
+### Examples
+
+```bash
+# Verify without modifying the database
+aeordb verify --database data.aeordb
+
+# Repair into a copy
+aeordb verify --repair --database data.aeordb
+
+# Repair the original database in place
+aeordb verify --repair --force-fix-in-place --database data.aeordb
+
+# Unattended emergency-spill repair after reviewing the artifacts
+aeordb verify --repair --force-fix-in-place --yes --database data.aeordb
+```
+
+### Emergency Spill Recovery
+
+If startup finds unresolved emergency-spill artifacts for the target database, it exits before serving the normal API and prints the repair command:
+
+```bash
+aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
+```
+
+Repair scans all emergency-spill locations, orders matching artifacts oldest-first, prints the hot-tail and WAL-tail files it found, and prompts before replay. `--yes` skips the prompt for automation. Spill replay must run in place because the artifact marker belongs to the original database path.
+
+WAL-tail bytes are the only spill payload replayed into the database file. `hot-tail.bin` and `index-buffer.json` are preserved and reported, but repair does not trust them as primary data: after WAL-tail replay it forces a WAL rebuild, reconstructs reusable gaps, and publishes a fresh hot tail.
 
 ---
 

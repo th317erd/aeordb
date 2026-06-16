@@ -496,6 +496,8 @@ async fn initialize_server_runtime(
   let InitConfig { database, auth_mode, hot_dir, cors_flag, peers, join_url, join_token, advertise_url } = config;
   let hot_dir_ref = hot_dir.as_path();
 
+  fail_if_unresolved_emergency_spills(&database)?;
+
   // If --join was supplied, perform the cluster join BEFORE the app opens
   // the engine for serving. The join writes the cluster's JWT signing key
   // into the local system_store; the JwtManager then loads it during
@@ -659,6 +661,40 @@ async fn initialize_server_runtime(
     startup_instant,
     handles: vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle],
   })
+}
+
+fn fail_if_unresolved_emergency_spills(database: &str) -> Result<(), String> {
+  let artifacts = aeordb::engine::emergency_spill::scan_unapplied_for_database(database)
+    .map_err(|error| format!("failed to scan emergency spill locations before startup: {}", error))?;
+  if artifacts.is_empty() {
+    return Ok(());
+  }
+
+  let mut message = String::new();
+  message.push_str("unresolved AeorDB emergency spill artifacts were found for this database; refusing to start until repair completes\n");
+  message.push_str(&format!("database: {}\n", database));
+  message.push_str(&format!("artifacts: {}\n", artifacts.len()));
+  for (index, artifact) in artifacts.iter().enumerate() {
+    message.push_str(&format!(
+      "  {}. {} ({})\n",
+      index + 1,
+      artifact.directory.display(),
+      artifact.attempted_at.as_deref().unwrap_or("unknown time")
+    ));
+    if artifact.wal_tail_bytes > 0 {
+      message.push_str(&format!(
+        "     WAL tail: {} bytes, copy_start={:?}, end={:?}, truncated={}\n",
+        artifact.wal_tail_bytes, artifact.wal_tail_copy_start, artifact.wal_tail_end, artifact.wal_tail_truncated
+      ));
+    }
+    if artifact.hot_tail_writes > 0 || artifact.hot_tail_voids > 0 {
+      message.push_str(&format!("     hot-tail snapshot: {} writes, {} voids\n", artifact.hot_tail_writes, artifact.hot_tail_voids));
+    }
+  }
+  message.push_str("\nRun repair, review the prompt, and then start again:\n");
+  message.push_str(&format!("  aeordb verify --repair --force-fix-in-place -D {}\n", database));
+  message.push_str("For unattended repair after reviewing the artifacts, add --yes.\n");
+  Err(message)
 }
 
 /// Wait for all join handles to complete.

@@ -16,12 +16,14 @@
 - Serious durability failures now latch the engine read-only for subsequent writes while leaving reads/inspection available.
 - On first durability latch, the engine attempts a best-effort emergency spill outside the DB file: serialized hot-tail/KV volatile state, dirty buffered index state, manifest metadata, and a bounded WAL-tail copy from the last published hot-tail boundary.
 - Emergency spill location order is `AEORDB_EMERGENCY_SPILL_DIR`, OS user-data directory, then `/tmp/aeordb-emergency-spill`; `AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES=0` disables WAL-tail truncation, otherwise the default cap is 4 GiB.
+- Server startup now scans emergency-spill locations and refuses to start when unresolved artifacts match the target database.
+- `aeordb verify --repair --force-fix-in-place` now orders matching emergency-spill artifacts oldest-first, prompts for confirmation unless `--yes` is passed, replays verified WAL-tail bytes, forces WAL/KV/void recovery, and marks artifacts applied after a clean repair.
 
 ## Remaining high-priority audit items
 
 - Add a real Windows implementation for parent-directory sync in `engine::durability`; the helper currently centralizes the call site but no-ops on Windows.
 - Add a test/failpoint harness for forced sync failures so shutdown, transaction, timer, GC, export, and sync-state failure behavior is directly asserted.
-- Add first-class CLI/admin tooling to inspect and recover emergency spill artifacts. Current output is intentionally explicit, but recovery is still manual.
+- Add first-class admin/API tooling to inspect emergency spill artifacts. CLI startup blocking and in-place repair replay are now implemented.
 - Revisit `DiskKVStore::drop`: it logs failed flushes but cannot return. This is acceptable only if every normal owner path calls `StorageEngine::shutdown()` and handles the result.
 - Revisit index flush failure policy. Indexes are rebuildable, but API responses should not imply indexing succeeded when index flush failed.
 

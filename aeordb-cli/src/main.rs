@@ -182,6 +182,9 @@ enum Commands {
     /// database is too large to copy.
     #[arg(long)]
     force_fix_in_place: bool,
+    /// Accept emergency spill replay prompts without interactive confirmation.
+    #[arg(long)]
+    yes: bool,
   },
   /// Run garbage collection to reclaim unreachable entries
   Gc {
@@ -347,8 +350,8 @@ async fn main() {
     Commands::Promote { database, hash } => {
       commands::promote::run(&database, &hash);
     }
-    Commands::Verify { database, repair, force_fix_in_place } => {
-      commands::verify::run(&database, repair, force_fix_in_place);
+    Commands::Verify { database, repair, force_fix_in_place, yes } => {
+      commands::verify::run(&database, repair, force_fix_in_place, yes);
     }
     Commands::Gc { database, dry_run } => {
       commands::gc::run(&database, dry_run);

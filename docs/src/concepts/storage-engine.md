@@ -283,6 +283,14 @@ Spill destination order is:
 
 `AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES` caps the WAL-tail copy. The default is 4 GiB; set it to `0` to copy the full tail. This is intentionally best-effort: the copied bytes reflect what the process can still read and write through the operating system at the time of failure.
 
+On the next server start, AeorDB scans every spill destination for unresolved artifacts whose `db_path` matches the database being opened. If any are found, startup refuses to serve the normal API and prints the in-place repair command:
+
+```bash
+aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
+```
+
+Repair orders matching artifacts by creation time, oldest first, and prompts before replay unless `--yes` is passed. Replay only copies verified WAL-tail bytes back into the database file. The external `hot-tail.bin` and `index-buffer.json` files are reported as evidence, but are not treated as primary data: after the WAL tail is restored, repair forces a WAL-to-EOF KV rebuild, re-derives reusable gaps with the void gap scanner, and publishes a new hot tail. When verify/repair finishes cleanly, each artifact directory receives an `applied.json` marker and future startups ignore it.
+
 ## Crash Recovery
 
 The recovery hierarchy, from least to most damage:

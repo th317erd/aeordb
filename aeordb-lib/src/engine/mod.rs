@@ -22,6 +22,7 @@ pub mod durability;
 pub mod email_config;
 pub mod email_sender;
 pub mod email_template;
+pub mod emergency_spill;
 pub mod engine_counters;
 pub mod engine_event;
 pub mod entry_header;
