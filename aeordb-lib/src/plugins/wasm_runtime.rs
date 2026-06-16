@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store};
 
-use crate::engine::directory_ops::{DirectoryOps, EngineFileStream};
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
 use crate::engine::api_key_rules::{check_operation_permitted, is_ancestor_of_any_rule, match_rules, operation_to_flag_char};
 use crate::engine::cache::Cache;
@@ -12,6 +12,7 @@ use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::query_engine::{
   parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField,
 };
+use crate::engine::range_extract::{extract_range_by_path, RangeExtractionRequest, RangeMode};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
@@ -829,202 +830,36 @@ fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
   uuid::Uuid::parse_str(&ctx.user_id).map(|user_id| user_id.is_nil()).unwrap_or(false)
 }
 
-const DEFAULT_EXTRACT_MAX_BYTES: usize = 4 * 1024 * 1024;
-const ABSOLUTE_EXTRACT_MAX_BYTES: usize = 16 * 1024 * 1024;
-
 fn extract_file_text(engine: &StorageEngine, path: &str, args_json: &serde_json::Value) -> Result<serde_json::Value, String> {
-  let mode = args_json.get("mode").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'mode' argument".to_string())?;
-  let max_bytes = args_json.get("max_bytes").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(DEFAULT_EXTRACT_MAX_BYTES);
-  if max_bytes == 0 || max_bytes > ABSOLUTE_EXTRACT_MAX_BYTES {
-    return Err(format!("Invalid max_bytes: must be between 1 and {}", ABSOLUTE_EXTRACT_MAX_BYTES));
-  }
-
-  let directory_ops = DirectoryOps::new(engine);
-  let file_record = directory_ops
-    .get_metadata(path)
-    .map_err(|error| format!("Metadata failed: {}", error))?
-    .ok_or_else(|| format!("File not found: {}", path))?;
-  let content_type = file_record.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string());
-  let source_size = file_record.total_size;
-  let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes, engine).map_err(|error| format!("Read failed: {}", error))?;
-
-  let extracted = match mode {
-    "lines" => {
-      let start = args_json.get("start").and_then(|v| v.as_u64()).unwrap_or(1);
-      let end = args_json.get("end").and_then(|v| v.as_u64());
-      if start == 0 {
-        return Err("Line ranges are 1-based; start must be at least 1".to_string());
-      }
-      if let Some(end) = end {
-        if end < start {
-          return Err("Range end must be greater than or equal to start".to_string());
-        }
-      }
-      extract_lines_from_stream(stream, start, end, max_bytes)?
-    }
-    "chars" => {
-      let start = args_json.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
-      let end = args_json.get("end").and_then(|v| v.as_u64());
-      if let Some(end) = end {
-        if end < start {
-          return Err("Range end must be greater than or equal to start".to_string());
-        }
-      }
-      extract_chars_from_stream(stream, start, end, max_bytes)?
-    }
-    _ => return Err("Unsupported extract mode; expected 'lines' or 'chars'".to_string()),
+  let mode = match args_json.get("mode").and_then(|v| v.as_str()) {
+    Some("lines") => RangeMode::Lines,
+    Some("chars") => RangeMode::Chars,
+    Some("bytes") => RangeMode::Bytes,
+    Some("json_pointer") => RangeMode::JsonPointer,
+    Some(_) => return Err("Unsupported extract mode; expected 'lines', 'chars', 'bytes', or 'json_pointer'".to_string()),
+    None => return Err("Missing 'mode' argument".to_string()),
   };
 
-  engine.counters().record_read(extracted.text.len() as u64);
+  let request = RangeExtractionRequest {
+    mode,
+    start: args_json.get("start").and_then(|v| v.as_u64()),
+    end: args_json.get("end").and_then(|v| v.as_u64()),
+    pointer: args_json.get("pointer").and_then(|v| v.as_str()).map(str::to_string),
+    max_bytes: args_json.get("max_bytes").and_then(|v| v.as_u64()).map(|v| v as usize),
+  };
+
+  let extracted = extract_range_by_path(engine, path, &request).map_err(|error| error.to_string())?;
 
   Ok(serde_json::json!({
-    "text": extracted.text,
-    "content_type": content_type,
-    "source_size": source_size,
-    "mode": mode,
-    "start": args_json.get("start").and_then(|v| v.as_u64()),
-    "end": args_json.get("end").and_then(|v| v.as_u64()),
+    "text": extracted.content,
+    "content_type": extracted.content_type,
+    "source_size": extracted.source_size,
+    "mode": extracted.mode.as_str(),
+    "start": extracted.start,
+    "end": extracted.end,
+    "pointer": extracted.pointer,
     "truncated": extracted.truncated,
   }))
-}
-
-struct ExtractedText {
-  text: String,
-  truncated: bool,
-}
-
-fn extract_lines_from_stream(
-  stream: EngineFileStream<'_>,
-  start: u64,
-  end: Option<u64>,
-  max_bytes: usize,
-) -> Result<ExtractedText, String> {
-  let mut text = String::new();
-  let mut truncated = false;
-  let mut current_line = 1u64;
-  let mut pending_cr = false;
-  let mut pending_cr_selected = false;
-
-  for_each_utf8_char(stream, |character| {
-    if pending_cr {
-      if character == '\n' {
-        if pending_cr_selected && !push_limited(&mut text, character, max_bytes) {
-          truncated = true;
-          return Ok(false);
-        }
-        current_line += 1;
-        pending_cr = false;
-        return Ok(!end.map(|end| current_line > end).unwrap_or(false));
-      }
-
-      current_line += 1;
-      pending_cr = false;
-      if end.map(|end| current_line > end).unwrap_or(false) {
-        return Ok(false);
-      }
-    }
-
-    let selected = current_line >= start && end.map(|end| current_line <= end).unwrap_or(true);
-    if selected && !push_limited(&mut text, character, max_bytes) {
-      truncated = true;
-      return Ok(false);
-    }
-
-    if character == '\r' {
-      pending_cr = true;
-      pending_cr_selected = selected;
-    } else if character == '\n' {
-      current_line += 1;
-      if end.map(|end| current_line > end).unwrap_or(false) {
-        return Ok(false);
-      }
-    }
-
-    Ok(true)
-  })?;
-
-  Ok(ExtractedText { text, truncated })
-}
-
-fn extract_chars_from_stream(
-  stream: EngineFileStream<'_>,
-  start: u64,
-  end: Option<u64>,
-  max_bytes: usize,
-) -> Result<ExtractedText, String> {
-  let mut text = String::new();
-  let mut truncated = false;
-  let mut current_char = 0u64;
-
-  for_each_utf8_char(stream, |character| {
-    if end.map(|end| current_char >= end).unwrap_or(false) {
-      return Ok(false);
-    }
-    if current_char >= start {
-      if !push_limited(&mut text, character, max_bytes) {
-        truncated = true;
-        return Ok(false);
-      }
-    }
-    current_char += 1;
-    Ok(true)
-  })?;
-
-  Ok(ExtractedText { text, truncated })
-}
-
-fn push_limited(text: &mut String, character: char, max_bytes: usize) -> bool {
-  if text.len() + character.len_utf8() > max_bytes {
-    return false;
-  }
-  text.push(character);
-  true
-}
-
-fn for_each_utf8_char<F>(stream: EngineFileStream<'_>, mut handle: F) -> Result<(), String>
-where
-  F: FnMut(char) -> Result<bool, String>,
-{
-  let mut pending = Vec::new();
-
-  for chunk in stream {
-    let chunk = chunk.map_err(|error| format!("Read failed: {}", error))?;
-    pending.extend_from_slice(&chunk);
-
-    loop {
-      match std::str::from_utf8(&pending) {
-        Ok(valid) => {
-          for character in valid.chars() {
-            if !handle(character)? {
-              return Ok(());
-            }
-          }
-          pending.clear();
-          break;
-        }
-        Err(error) if error.error_len().is_none() => {
-          let valid_up_to = error.valid_up_to();
-          if valid_up_to > 0 {
-            let valid = std::str::from_utf8(&pending[..valid_up_to]).map_err(|error| format!("Invalid UTF-8: {}", error))?;
-            for character in valid.chars() {
-              if !handle(character)? {
-                return Ok(());
-              }
-            }
-          }
-          pending = pending[valid_up_to..].to_vec();
-          break;
-        }
-        Err(error) => return Err(format!("Invalid UTF-8: {}", error)),
-      }
-    }
-  }
-
-  if !pending.is_empty() {
-    return Err("Invalid UTF-8: incomplete trailing character".to_string());
-  }
-
-  Ok(())
 }
 
 /// Maximum size for a single guest message read (16 MB).

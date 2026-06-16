@@ -234,6 +234,49 @@ async fn test_broad_search_response_shape() {
 }
 
 #[tokio::test]
+async fn test_broad_search_include_matches_returns_locators_and_identity() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_multi_directory(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "query": "Alice",
+      "limit": 10,
+      "include_matches": true,
+      "max_matches_per_result": 2,
+      "snippet_chars": 48
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK, "body: {:?}", json);
+  let results = json["results"].as_array().unwrap();
+  let alice_result =
+    results.iter().find(|result| result["path"].as_str() == Some("/people/alice.json")).expect("Alice result should be present");
+
+  assert!(alice_result["content_hash"].as_str().unwrap_or("").len() >= 32, "missing content_hash: {}", alice_result);
+  assert_eq!(alice_result["matches_truncated"], false);
+  assert_eq!(alice_result["locator_status"], "complete");
+
+  let matches = alice_result["matches"].as_array().expect("matches should be an array");
+  assert!(!matches.is_empty(), "expected at least one match locator: {}", alice_result);
+  let locator = &matches[0];
+  assert_eq!(locator["matched_text"], "Alice");
+  assert_eq!(locator["confidence"], "exact");
+  assert_eq!(locator["source"]["type"], "field-value");
+  assert_eq!(locator["source"]["json_pointer"], "/name");
+  assert_eq!(locator["fetch"]["preferred"], "json_pointer");
+  assert_eq!(locator["fetch"]["json_pointer"], "/name");
+  assert!(locator["range"]["char"]["start"].as_u64().is_some(), "missing char range: {}", locator);
+  assert!(locator["snippet"]["text"].as_str().unwrap_or("").contains("Alice"), "missing snippet hit: {}", locator);
+  assert!(!locator["snippet"]["highlight"].as_array().unwrap().is_empty(), "missing snippet highlight: {}", locator);
+}
+
+#[tokio::test]
 async fn test_structured_search_across_directories() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_multi_directory(&engine);
@@ -255,6 +298,47 @@ async fn test_structured_search_across_directories() {
   let results = json["results"].as_array().unwrap();
   assert_eq!(results.len(), 1, "only one person named Alice");
   assert_eq!(results[0]["path"].as_str().unwrap(), "/people/alice.json");
+}
+
+#[tokio::test]
+async fn test_structured_search_include_matches_returns_metadata_locator_for_filename() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*".to_string()),
+    indexes: vec![IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/", &config);
+
+  ops.store_file_with_indexing(&ctx, "/docs/notes.txt", b"docs", Some("text/plain")).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+  let (status, json) = search_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/docs",
+      "where": {"field": "@file_name", "op": "eq", "value": "notes.txt"},
+      "include_matches": true,
+      "limit": 10
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK, "body: {:?}", json);
+  let results = json["results"].as_array().unwrap();
+  assert_eq!(results.len(), 1);
+  let locator = &results[0]["matches"].as_array().unwrap()[0];
+  assert_eq!(locator["source"]["type"], "metadata");
+  assert_eq!(locator["source"]["field"], "@filename");
+  assert_eq!(locator["matched_text"], "notes.txt");
+  assert_eq!(locator["fetch"]["preferred"], "metadata");
 }
 
 #[tokio::test]

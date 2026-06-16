@@ -15,6 +15,7 @@ pub mod portal_routes;
 pub mod responses;
 pub mod route_permissions;
 pub mod routes;
+pub mod search_locators;
 pub mod settings_routes;
 pub mod share_link_routes;
 pub mod share_routes;

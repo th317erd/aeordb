@@ -14,11 +14,12 @@ use super::blocking::run_engine_blocking;
 use super::cache_invalidation::{evict_caches_for_path, evict_caches_for_paths};
 use super::route_permissions::{reject_share_key, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
+use super::search_locators::{broad_query_terms, generate_locators, terms_from_query_node, LocatorOptions, LocatorOptionsRequest, LocatorTerm};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
-use crate::engine::{DirectoryOps, RequestContext, TaskStatus, VersionManager, is_root};
+use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
 use crate::engine::entry_type::EntryType;
@@ -27,8 +28,8 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::query_engine::{
-  parse_where_clause, Query, QueryEngine, QueryMeta, QueryNode, QueryStrategy, SortDirection, SortField, AggregateQuery, ExplainMode,
-  DEFAULT_QUERY_LIMIT,
+  parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryMeta, QueryNode, QueryResult, QueryStrategy, SortDirection,
+  SortField, DEFAULT_QUERY_LIMIT,
 };
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 
@@ -540,6 +541,78 @@ fn filter_results_by_direct_read(
     };
     resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
   });
+}
+
+fn enrich_query_items_with_locators(
+  engine: &StorageEngine,
+  query_results: &[QueryResult],
+  items: &mut [serde_json::Value],
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+) {
+  for item in items {
+    let Some(path) = json_item_path(item).map(str::to_string) else {
+      continue;
+    };
+    let Some(result) = query_results.iter().find(|result| result.file_record.path == path) else {
+      continue;
+    };
+    add_locator_fields(engine, item, &result.file_record, terms, options);
+  }
+}
+
+fn enrich_search_items_with_locators(
+  engine: &StorageEngine,
+  search_results: &[SearchResult],
+  items: &mut [serde_json::Value],
+  query: Option<&str>,
+  query_node: Option<&QueryNode>,
+  options: &LocatorOptions,
+) {
+  let structured_terms = query_node.map(terms_from_query_node);
+  let ops = DirectoryOps::new(engine);
+
+  for item in items {
+    let Some(path) = json_item_path(item).map(str::to_string) else {
+      continue;
+    };
+    let Some(search_result) = search_results.iter().find(|result| result.path == path) else {
+      continue;
+    };
+    let terms = match query {
+      Some(query_text) => broad_query_terms(query_text, &search_result.matched_fields),
+      None => structured_terms.clone().unwrap_or_default(),
+    };
+    let Ok(Some(file_record)) = ops.get_metadata(&path) else {
+      continue;
+    };
+    add_locator_fields(engine, item, &file_record, &terms, options);
+  }
+}
+
+fn add_locator_fields(
+  engine: &StorageEngine,
+  item: &mut serde_json::Value,
+  file_record: &FileRecord,
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+) {
+  let Some(object) = item.as_object_mut() else {
+    return;
+  };
+
+  if !file_record.content_hash.is_empty() {
+    object.insert("content_hash".to_string(), serde_json::json!(file_record.content_hash_hex()));
+  }
+
+  let generation = generate_locators(engine, file_record, terms, options);
+  object.insert("matches".to_string(), serde_json::to_value(generation.matches).unwrap_or_else(|_| serde_json::Value::Array(Vec::new())));
+  object.insert("matches_truncated".to_string(), serde_json::json!(generation.matches_truncated));
+  object.insert("locator_status".to_string(), serde_json::json!(generation.locator_status));
+}
+
+fn json_item_path(item: &serde_json::Value) -> Option<&str> {
+  item.get("path").and_then(|value| value.as_str())
 }
 
 fn apply_listing_filters(
@@ -1534,6 +1607,8 @@ pub struct QueryRequest {
   pub aggregate: Option<AggregateRequestData>,
   pub select: Option<Vec<String>>,
   pub explain: Option<serde_json::Value>,
+  #[serde(flatten)]
+  pub locators: LocatorOptionsRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1581,7 +1656,9 @@ fn map_select_fields(select: &[String]) -> Vec<String> {
       "@content_type" => "content_type".to_string(),
       "@created_at" => "created_at".to_string(),
       "@updated_at" => "updated_at".to_string(),
+      "@content_hash" => "content_hash".to_string(),
       "@matched_by" => "matched_by".to_string(),
+      "@matches" => "matches".to_string(),
       other => other.to_string(),
     })
     .collect()
@@ -1822,6 +1899,12 @@ pub async fn query_endpoint(
       // above.
       if !claims.sub.starts_with("share:") {
         filter_results_by_direct_read(&mut response_items, &claims.sub, &state.engine, &state.group_cache);
+      }
+
+      let locator_options = LocatorOptions::from_request(&body.locators);
+      if locator_options.include_matches {
+        let locator_terms = if is_empty { Vec::new() } else { terms_from_query_node(&query_node) };
+        enrich_query_items_with_locators(state.engine.as_ref(), &paginated.results, &mut response_items, &locator_terms, &locator_options);
       }
 
       let mut response = serde_json::json!({
@@ -2261,6 +2344,8 @@ pub struct GlobalSearchRequest {
   pub path: Option<String>,
   pub limit: Option<usize>,
   pub offset: Option<usize>,
+  #[serde(flatten)]
+  pub locators: LocatorOptionsRequest,
 }
 
 pub async fn global_search_endpoint(
@@ -2289,6 +2374,7 @@ pub async fn global_search_endpoint(
       let mut items: Vec<serde_json::Value> = results
         .results
         .iter()
+        .filter(|r| !is_system_path(&r.path))
         .map(|r| {
           serde_json::json!({
             "path": r.path,
@@ -2308,6 +2394,18 @@ pub async fn global_search_endpoint(
       // only sees files they have direct Read on (grants + inheritance).
       if !claims.sub.starts_with("share:") {
         filter_results_by_direct_read(&mut items, &claims.sub, &state.engine, &state.group_cache);
+      }
+
+      let locator_options = LocatorOptions::from_request(&payload.locators);
+      if locator_options.include_matches {
+        enrich_search_items_with_locators(
+          state.engine.as_ref(),
+          &results.results,
+          &mut items,
+          payload.query.as_deref(),
+          query_node.as_ref(),
+          &locator_options,
+        );
       }
 
       let mut response = serde_json::json!({

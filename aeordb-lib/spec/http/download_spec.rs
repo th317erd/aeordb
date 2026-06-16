@@ -41,10 +41,20 @@ fn store_test_files(engine: &aeordb::engine::StorageEngine) {
   ops.store_file_buffered(&ctx, "/images/logo.svg", b"<svg></svg>", Some("image/svg+xml")).unwrap();
 }
 
+fn store_range_test_files(engine: &aeordb::engine::StorageEngine) {
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine);
+  ops.store_file_buffered(&ctx, "/docs/mixed.txt", b"one\r\ntwo\nthree\rfour", Some("text/plain")).unwrap();
+  ops
+    .store_file_buffered(&ctx, "/docs/session.json", br#"{"messages":[{"content":"alpha"},{"content":"beta"}]}"#, Some("application/json"))
+    .unwrap();
+}
+
 #[tokio::test]
 async fn download_zip_with_valid_paths() {
   let (app, jwt_manager, engine, _temp) = test_app();
   store_test_files(&engine);
+  store_range_test_files(&engine);
   let auth = bearer_token(&jwt_manager);
 
   let body = serde_json::json!({ "paths": ["/docs/readme.md", "/docs/notes.txt"] });
@@ -76,6 +86,7 @@ async fn download_zip_with_valid_paths() {
 async fn download_zip_skips_missing_paths() {
   let (app, jwt_manager, engine, _temp) = test_app();
   store_test_files(&engine);
+  store_range_test_files(&engine);
   let auth = bearer_token(&jwt_manager);
 
   let body = serde_json::json!({ "paths": ["/docs/readme.md", "/nonexistent.txt"] });
@@ -368,4 +379,149 @@ async fn batch_fetch_binary_content_is_encoded_as_lossy_utf8_string() {
   assert_eq!(response.status(), StatusCode::OK);
   let json = response_json(response).await;
   assert_eq!(json["/bin/data.bin"]["content"], "f\u{FFFD}g");
+}
+
+#[tokio::test]
+async fn batch_fetch_items_returns_multiple_ranges_from_same_file() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  store_test_files(&engine);
+  store_range_test_files(&engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "items": [
+      {
+        "id": "line-range",
+        "path": "/docs/mixed.txt",
+        "range": { "mode": "lines", "start": 2, "end": 3 }
+      },
+      {
+        "id": "byte-range",
+        "path": "/docs/mixed.txt",
+        "range": { "mode": "bytes", "start": 4, "end": 9 }
+      }
+    ],
+    "continue_on_error": true
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/fetch")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = response_json(response).await;
+  assert_eq!(json["has_errors"], false);
+  let items = json["items"].as_array().unwrap();
+  assert_eq!(items.len(), 2);
+  assert_eq!(items[0]["id"], "line-range");
+  assert_eq!(items[0]["status"], "ok");
+  assert_eq!(items[0]["content"], "two\nthree\r");
+  assert_eq!(items[0]["range"]["mode"], "lines");
+  assert_eq!(items[0]["content_type"], "text/plain");
+  assert!(items[0]["content_hash"].as_str().unwrap().len() > 10);
+
+  assert_eq!(items[1]["id"], "byte-range");
+  assert_eq!(items[1]["status"], "ok");
+  assert_eq!(items[1]["content"], "\ntwo\n");
+  assert_eq!(items[1]["range"]["mode"], "bytes");
+}
+
+#[tokio::test]
+async fn batch_fetch_items_supports_json_pointer() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  store_test_files(&engine);
+  store_range_test_files(&engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "items": [
+      {
+        "id": "json-pointer",
+        "path": "/docs/session.json",
+        "range": { "mode": "json_pointer", "pointer": "/messages/1/content" }
+      }
+    ]
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/fetch")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = response_json(response).await;
+  assert_eq!(json["items"][0]["status"], "ok");
+  assert_eq!(json["items"][0]["content"], "beta");
+  assert_eq!(json["items"][0]["range"]["mode"], "json_pointer");
+  assert_eq!(json["items"][0]["range"]["pointer"], "/messages/1/content");
+}
+
+#[tokio::test]
+async fn batch_fetch_items_stale_hash_returns_per_item_error_when_requested() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  store_test_files(&engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "items": [
+      {
+        "id": "stale",
+        "path": "/docs/readme.md",
+        "if_content_hash": "not-the-current-hash",
+        "range": { "mode": "chars", "start": 0, "end": 3 }
+      }
+    ],
+    "continue_on_error": true
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/fetch")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = response_json(response).await;
+  assert_eq!(json["has_errors"], true);
+  assert_eq!(json["items"][0]["id"], "stale");
+  assert_eq!(json["items"][0]["status"], "stale");
+}
+
+#[tokio::test]
+async fn batch_fetch_items_stale_hash_returns_conflict_by_default() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  store_test_files(&engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "items": [
+      {
+        "path": "/docs/readme.md",
+        "if_content_hash": "not-the-current-hash",
+        "range": { "mode": "chars", "start": 0, "end": 3 }
+      }
+    ]
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/fetch")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CONFLICT);
 }

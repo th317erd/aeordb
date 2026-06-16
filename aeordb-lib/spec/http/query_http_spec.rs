@@ -64,6 +64,21 @@ async fn body_json(body: Body) -> serde_json::Value {
   serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
+async fn query_request(app: axum::Router, auth: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  let status = response.status();
+  let json = body_json(response.into_body()).await;
+  (status, json)
+}
+
 fn make_user_json(name: &str, age: u64, email: &str) -> Vec<u8> {
   format!(r#"{{"name":"{}","age":{},"email":"{}"}}"#, name, age, email,).into_bytes()
 }
@@ -153,6 +168,49 @@ async fn test_query_exact_match() {
   let results = json["items"].as_array().unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0]["path"], "/myapp/users/alice.json");
+}
+
+#[tokio::test]
+async fn test_query_include_matches_returns_range_locators_and_identity() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let (status, json) = query_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/myapp/users",
+      "where": { "field": "name", "op": "eq", "value": "Alice" },
+      "include_matches": true,
+      "max_matches_per_result": 1,
+      "snippet_chars": 64
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::OK, "body: {:?}", json);
+  let items = json["items"].as_array().unwrap();
+  assert_eq!(items.len(), 1);
+  let item = &items[0];
+  assert_eq!(item["path"], "/myapp/users/alice.json");
+  assert!(item["content_hash"].as_str().unwrap_or("").len() >= 32, "missing content_hash: {}", item);
+  assert_eq!(item["matches_truncated"], false);
+  assert_eq!(item["locator_status"], "complete");
+
+  let matches = item["matches"].as_array().unwrap();
+  assert_eq!(matches.len(), 1);
+  let locator = &matches[0];
+  assert_eq!(locator["query"], "Alice");
+  assert_eq!(locator["matched_text"], "Alice");
+  assert_eq!(locator["field"], "name");
+  assert_eq!(locator["source"]["type"], "field-value");
+  assert_eq!(locator["source"]["json_pointer"], "/name");
+  assert!(locator["range"]["char"]["start"].as_u64().is_some(), "missing char range: {}", locator);
+  assert_eq!(locator["fetch"]["preferred"], "json_pointer");
+  assert_eq!(locator["fetch"]["json_pointer"], "/name");
+  assert!(locator["snippet"]["text"].as_str().unwrap_or("").contains("Alice"), "missing snippet: {}", locator);
 }
 
 #[tokio::test]

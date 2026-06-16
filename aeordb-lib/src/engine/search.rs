@@ -17,6 +17,8 @@ pub struct SearchResult {
   pub score: f64,
   /// Names of the indexes/strategies that produced this match.
   pub matched_by: Vec<String>,
+  /// Indexed field names that should be inspected for opt-in locator generation.
+  pub matched_fields: Vec<String>,
   /// Directory where the matching index lives.
   pub source_dir: String,
   /// File size in bytes.
@@ -334,6 +336,7 @@ fn query_result_to_search_result(qr: QueryResult, source_dir: &str, fallback_mat
     path: qr.file_record.path,
     score: qr.score,
     matched_by,
+    matched_fields: fallback_matched_by.to_vec(),
     source_dir: source_dir.to_string(),
     size: qr.file_record.total_size,
     content_type: qr.file_record.content_type,
@@ -347,18 +350,27 @@ fn deduplicate_by_path(results: &mut Vec<SearchResult>) {
   let mut best: HashMap<String, usize> = HashMap::new();
   let mut to_remove = Vec::new();
 
-  for (i, result) in results.iter().enumerate() {
-    match best.get(&result.path) {
-      Some(&existing_idx) => {
-        if result.score > results[existing_idx].score {
+  for i in 0..results.len() {
+    let path = results[i].path.clone();
+    match best.get(&path).copied() {
+      Some(existing_idx) => {
+        let incoming_matched_by = results[i].matched_by.clone();
+        let incoming_matched_fields = results[i].matched_fields.clone();
+        let existing_matched_by = results[existing_idx].matched_by.clone();
+        let existing_matched_fields = results[existing_idx].matched_fields.clone();
+        if results[i].score > results[existing_idx].score {
+          append_unique(&mut results[i].matched_by, existing_matched_by);
+          append_unique(&mut results[i].matched_fields, existing_matched_fields);
           to_remove.push(existing_idx);
-          best.insert(result.path.clone(), i);
+          best.insert(path, i);
         } else {
+          append_unique(&mut results[existing_idx].matched_by, incoming_matched_by);
+          append_unique(&mut results[existing_idx].matched_fields, incoming_matched_fields);
           to_remove.push(i);
         }
       }
       None => {
-        best.insert(result.path.clone(), i);
+        best.insert(path, i);
       }
     }
   }
@@ -368,6 +380,14 @@ fn deduplicate_by_path(results: &mut Vec<SearchResult>) {
   to_remove.dedup();
   for idx in to_remove.into_iter().rev() {
     results.swap_remove(idx);
+  }
+}
+
+fn append_unique(target: &mut Vec<String>, values: Vec<String>) {
+  for value in values {
+    if !target.contains(&value) {
+      target.push(value);
+    }
   }
 }
 
@@ -418,6 +438,7 @@ mod tests {
         path: "/a".to_string(),
         score: 0.5,
         matched_by: vec!["trigram".to_string()],
+        matched_fields: vec!["name".to_string()],
         source_dir: "/d1".to_string(),
         size: 10,
         content_type: None,
@@ -428,6 +449,7 @@ mod tests {
         path: "/a".to_string(),
         score: 0.9,
         matched_by: vec!["soundex".to_string()],
+        matched_fields: vec!["name".to_string()],
         source_dir: "/d2".to_string(),
         size: 10,
         content_type: None,
@@ -438,6 +460,7 @@ mod tests {
         path: "/b".to_string(),
         score: 0.7,
         matched_by: vec!["trigram".to_string()],
+        matched_fields: vec!["title".to_string()],
         source_dir: "/d1".to_string(),
         size: 20,
         content_type: None,
@@ -458,6 +481,7 @@ mod tests {
       path: "/x".to_string(),
       score: 1.0,
       matched_by: vec![],
+      matched_fields: vec![],
       source_dir: "/d".to_string(),
       size: 0,
       content_type: None,

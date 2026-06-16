@@ -262,9 +262,12 @@ If both `snapshot` and `version` are provided, `snapshot` takes precedence. Retu
 
 ## POST /files/fetch
 
-Fetch multiple files in one request and return a JSON object keyed by canonical file path. This endpoint is for file bodies only; directories, missing files, system paths, and unreadable paths return `404`.
+Fetch multiple files or multiple file ranges in one request. There are two request shapes:
 
-The response is all-or-nothing. If any requested path cannot be read, no partial result is returned. File bytes are encoded into JSON strings with UTF-8 lossy conversion, so binary data may contain replacement characters.
+- `paths`: whole-file batch fetch, returned as a JSON object keyed by canonical path.
+- `items`: range batch fetch, returned as an ordered `items` array.
+
+Provide either `paths` or `items`, not both. Directories, missing files, system paths, and unreadable paths return `404`. File bytes are encoded into JSON strings with UTF-8 lossy conversion, so binary data may contain replacement characters.
 
 ### Request
 
@@ -285,8 +288,10 @@ The response is all-or-nothing. If any requested path cannot be read, no partial
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `paths` | array | Yes | File paths to fetch |
+| `paths` | array | Yes for whole-file mode | File paths to fetch |
+| `items` | array | Yes for range mode | Range fetch requests; see below |
 | `max_bytes` | integer | No | Optional lower cumulative byte limit for this request. Values above the server cap are clamped to the server cap. |
+| `continue_on_error` | boolean | No | Range mode only. If true, per-item errors are returned in the `items` array instead of aborting the request. |
 
 ### Response
 
@@ -315,12 +320,78 @@ The response is all-or-nothing. If any requested path cannot be read, no partial
 }
 ```
 
+### Range Fetch Mode
+
+Use `items` to fetch line, character, byte, or JSON Pointer ranges. This is the preferred follow-up for search hit locators.
+
+```json
+{
+  "items": [
+    {
+      "id": "hit-1",
+      "path": "/data/a.txt",
+      "if_content_hash": "b3c1...",
+      "range": { "mode": "lines", "start": 10, "end": 14 }
+    },
+    {
+      "id": "hit-2",
+      "path": "/data/b.json",
+      "if_updated_at": 1775968398000,
+      "range": { "mode": "json_pointer", "pointer": "/messages/0/content" },
+      "max_bytes": 65536
+    }
+  ],
+  "continue_on_error": true
+}
+```
+
+| Item Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `id` | string | No | Caller-supplied ID echoed in the response |
+| `path` | string | Yes | File path |
+| `if_content_hash` | string | No | Reject as stale if the file content hash changed since search |
+| `if_updated_at` | integer | No | Reject as stale if the file timestamp changed since search |
+| `range.mode` | string | Yes | `lines`, `chars`, `bytes`, or `json_pointer` |
+| `range.start` | integer | No | Start offset. Lines are 1-based inclusive; chars/bytes are 0-based inclusive |
+| `range.end` | integer | No | End offset. Lines are inclusive; chars/bytes are exclusive |
+| `range.pointer` | string | Required for `json_pointer` | RFC 6901 JSON Pointer |
+| `max_bytes` | integer | No | Per-item output cap, clamped by the server |
+
+Range-mode response:
+
+```json
+{
+  "items": [
+    {
+      "id": "hit-1",
+      "status": "ok",
+      "path": "/data/a.txt",
+      "name": "a.txt",
+      "size": 324534,
+      "created_at": 1235413451345,
+      "updated_at": 134513453145,
+      "content_hash": "b3c1...",
+      "content_type": "text/plain",
+      "range": { "mode": "lines", "start": 10, "end": 14, "pointer": null },
+      "source_size": 324534,
+      "content": "...",
+      "truncated": false
+    }
+  ],
+  "has_errors": false
+}
+```
+
+If `continue_on_error` is true, per-item errors have `status` values such as `not_found`, `stale`, `invalid`, `too_large`, or `error`.
+
 ### Limits
 
 | Limit | Value |
 |-------|-------|
 | Maximum paths | 10,000 |
 | Maximum cumulative file bytes | 256 MB |
+| Default per-item range output | 4 MB |
+| Maximum per-item range output | 16 MB |
 
 ### Example
 
@@ -335,8 +406,9 @@ curl -X POST http://localhost:6830/files/fetch \
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Empty `paths` array or too many paths |
+| 400 | Empty request, invalid range, both `paths` and `items`, or too many paths/items |
 | 404 | Any requested path is missing, a directory, a system path, or not readable by the caller |
+| 409 | Range item is stale because `if_content_hash` or `if_updated_at` no longer matches |
 | 413 | Response would exceed the cumulative byte limit |
 | 500 | Internal read failure |
 
@@ -1060,6 +1132,12 @@ before `@hash eq` uses the exact index. Legacy FileRecord v0 entries written
 before this field existed must be migrated before they can participate in exact
 `@hash` lookup; trigger a forced reindex with `POST /system/tasks/reindex` and
 `"force": true` to backfill them.
+
+For agent workflows, `/files/search` and `/files/query` also support opt-in hit
+locators with `include_matches: true`. Locator responses include snippets,
+typed ranges, `content_hash` identity anchors, and fetch hints that can be used
+with `/files/fetch` range mode. See [Querying](querying.md#hit-locators) for
+the full schema.
 
 **Response:**
 

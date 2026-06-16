@@ -69,6 +69,7 @@ pub mod permission_resolver;
 pub mod permissions;
 pub mod phonetic;
 pub mod query_engine;
+pub mod range_extract;
 pub mod rate_tracker;
 pub mod request_context;
 pub mod rss_sampler;
@@ -162,6 +163,10 @@ pub use query_engine::{
   should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, QueryMeta,
   DEFAULT_QUERY_LIMIT, AggregateQuery, AggregateResult, GroupResult, bytes_to_f64, bytes_to_json_value, is_numeric_type, ExplainMode,
   ExplainResult, json_query_value_to_bytes, parse_single_field_query, parse_where_clause, MAX_WHERE_CLAUSE_DEPTH,
+};
+pub use range_extract::{
+  extract_range_by_path, extract_range_from_record, ExtractedRange, RangeExtractionRequest, RangeMode, ABSOLUTE_RANGE_MAX_BYTES,
+  DEFAULT_RANGE_MAX_BYTES,
 };
 pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
 pub use health::{

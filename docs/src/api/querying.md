@@ -32,6 +32,11 @@ Execute a query against indexed fields within a directory path.
   "before": null,
   "include_total": true,
   "select": ["@path", "@score", "name"],
+  "include_matches": false,
+  "max_matches_per_result": 5,
+  "snippet_chars": 160,
+  "match_context_lines": 2,
+  "max_locator_scan_bytes": 268435456,
   "explain": false
 }
 ```
@@ -48,7 +53,14 @@ Execute a query against indexed fields within a directory path.
 | `include_total` | boolean | No | Include `total_count` in response (default: false) |
 | `select` | array | No | Project specific fields in results |
 | `aggregate` | object | No | Run aggregations instead of returning results |
+| `include_matches` | boolean | No | Include request-time hit locators for returned results (default: false) |
+| `max_matches_per_result` | integer | No | Maximum hit locators per result (default: 5, max: 50) |
+| `snippet_chars` | integer | No | Maximum snippet characters per locator (default: 160, max: 4096) |
+| `match_context_lines` | integer | No | Context line count for stored-file line fetch hints |
+| `max_locator_scan_bytes` | integer | No | Caller cap for stored-file locator scans; server clamps to its hard cap |
 | `explain` | string/boolean | No | `"plan"`, `"analyze"`, or `true` for query plan |
+
+Hit locators are opt-in. They are generated only for the current page after authorization filtering, not during index lookup.
 
 ---
 
@@ -205,7 +217,7 @@ An array at the top level is sugar for AND:
 
 ```json
 {
-  "results": [
+  "items": [
     {
       "path": "/users/alice.json",
       "size": 256,
@@ -213,7 +225,7 @@ An array at the top level is sugar for AND:
       "created_at": 1775968398000,
       "updated_at": 1775968398000,
       "score": 1.0,
-      "matched_by": ["age"]
+      "matched_by": ["name"]
     }
   ],
   "has_more": true,
@@ -232,7 +244,7 @@ An array at the top level is sugar for AND:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `results` | array | Matching file metadata with scores |
+| `items` | array | Matching file metadata with scores |
 | `has_more` | boolean | Whether more results exist beyond the current page |
 | `total_count` | integer | Total matching results (only if `include_total: true`) |
 | `next_cursor` | string | Cursor for the next page (if `has_more` is true) |
@@ -254,6 +266,59 @@ Each result object contains:
 | `updated_at` | integer | Last update timestamp (ms) |
 | `score` | float | Relevance score (1.0 = exact match) |
 | `matched_by` | array | List of field names that matched |
+| `content_hash` | string | Whole-file content hash, present when `include_matches` is true and the record has a hash |
+| `matches` | array | Hit locators, present when `include_matches` is true |
+| `matches_truncated` | boolean | True if more locators were available than returned |
+| `locator_status` | string | `complete`, `partial`, or `unsupported` |
+
+### Hit Locators
+
+When `include_matches` is true, `/files/query` and `/files/search` add bounded hit locators to each returned result. This is designed for agents that need to search first and then fetch only relevant ranges.
+
+For JSON files, matching indexed fields are reported as `field-value` locators with JSON Pointer fetch hints:
+
+```json
+{
+  "path": "/users/alice.json",
+  "content_hash": "b3c1...",
+  "matches": [
+    {
+      "id": "m_0001",
+      "query": "Alice",
+      "matched_text": "Alice",
+      "field": "name",
+      "operator": "eq",
+      "source": {
+        "type": "field-value",
+        "field": "name",
+        "json_pointer": "/name",
+        "value_type": "string"
+      },
+      "range": {
+        "char": { "start": 0, "end": 5, "unit": "unicode-scalar", "basis": "field-value" }
+      },
+      "fetch": {
+        "json_pointer": "/name",
+        "preferred": "json_pointer"
+      },
+      "snippet": {
+        "text": "Alice",
+        "highlight": [{ "start": 0, "end": 5, "unit": "unicode-scalar" }],
+        "truncated_before": false,
+        "truncated_after": false
+      },
+      "confidence": "exact",
+      "scan_status": "complete"
+    }
+  ],
+  "matches_truncated": false,
+  "locator_status": "complete"
+}
+```
+
+Metadata matches such as `@filename` use `source.type = "metadata"`. Plain-text or unstructured UTF-8 file matches use `source.type = "stored-file"` and include byte, character, line, and column ranges plus `byte_range` and `line_range` fetch hints.
+
+Use `POST /files/fetch` range mode to fetch the returned ranges. Pass `if_content_hash` or `if_updated_at` from the search result to avoid fetching a stale range after the file changes.
 
 ---
 
@@ -320,6 +385,8 @@ Return only specific fields in each result. Use `@`-prefixed names for built-in 
 | `@created_at` | `created_at` |
 | `@updated_at` | `updated_at` |
 | `@matched_by` | `matched_by` |
+| `@content_hash` | `content_hash` |
+| `@matches` | `matches` |
 
 Envelope fields (`has_more`, `next_cursor`, `total_count`, `meta`) are never stripped by projection.
 
@@ -502,6 +569,11 @@ Search across all indexed directories in the database.
 | `path` | string | No | Scope search to a subtree (default: `/` = everything) |
 | `limit` | integer | No | Max results (default: 50, max: 1000) |
 | `offset` | integer | No | Skip results |
+| `include_matches` | boolean | No | Include request-time hit locators for returned results (default: false) |
+| `max_matches_per_result` | integer | No | Maximum hit locators per result (default: 5, max: 50) |
+| `snippet_chars` | integer | No | Maximum snippet characters per locator (default: 160, max: 4096) |
+| `match_context_lines` | integer | No | Context line count for stored-file line fetch hints |
+| `max_locator_scan_bytes` | integer | No | Caller cap for stored-file locator scans; server clamps to its hard cap |
 
 At least one of `query` or `where` is required.
 
@@ -540,7 +612,7 @@ curl -X POST http://localhost:6830/files/search \
 
 ### Response
 
-Same format as `/files/query`, plus a `source` field per result indicating which directory's index matched:
+Same format as `/files/query`, plus a `source` field per result indicating which directory's index matched. The locator fields below are present only when `include_matches` is true:
 
 ```json
 {
@@ -553,7 +625,11 @@ Same format as `/files/query`, plus a `source` field per result indicating which
       "size": 256,
       "content_type": "application/json",
       "created_at": 1775968398000,
-      "updated_at": 1775968398000
+      "updated_at": 1775968398000,
+      "content_hash": "b3c1...",
+      "matches": [],
+      "matches_truncated": false,
+      "locator_status": "complete"
     }
   ],
   "has_more": false,
