@@ -50,6 +50,8 @@ use state::AppState;
 
 pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_config, parse_cors_origins};
 
+const BLOB_MANIFEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Spawn a 100ms timer that calls `engine.try_flush_hot_buffer()` on every
 /// tick. Without this, KV writes accumulate in `write_buffer` / `hot_buffer`
 /// until a 512-entry threshold or `shutdown()`. For low-traffic workloads
@@ -562,6 +564,14 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/versions/import", post(backup_routes::import_backup))
     .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
 
+  // Routes with bounded manifest payloads. These bodies are control-plane
+  // JSON hash/path manifests, not raw file bytes, so they should be larger
+  // than the default 1 MB limit but far below the 10 GB raw upload ceiling.
+  let blob_manifest_routes = Router::new()
+    .route("/blobs/check", post(upload_routes::upload_check))
+    .route("/blobs/commit", post(upload_routes::upload_commit))
+    .layer(axum::extract::DefaultBodyLimit::max(BLOB_MANIFEST_BODY_LIMIT_BYTES));
+
   // Routes that require authentication (default 1 MB limit)
   let protected_routes = Router::new()
     // Auth: API key self-service
@@ -598,9 +608,7 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/system/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/system/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
     .route("/system/lifecycle", get(task_routes::get_lifecycle).put(task_routes::put_lifecycle))
-    // Blobs: upload check, commit, and config (small payloads)
-    .route("/blobs/check", post(upload_routes::upload_check))
-    .route("/blobs/commit", post(upload_routes::upload_commit))
+    // Blobs: config is small; check/commit are manifest routes with their own limit.
     .route("/blobs/config", get(upload_routes::upload_config))
     // System: SSE event stream
     .route("/system/events", get(sse_routes::event_stream))
@@ -642,6 +650,7 @@ fn create_app_with_all_and_task_queue_inner(
     // Merge the large-upload and medium-upload routes into the protected group
     .merge(large_upload_routes)
     .merge(medium_upload_routes)
+    .merge(blob_manifest_routes)
     .route_layer(from_fn_with_state(app_state.clone(), permission_middleware))
     .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 

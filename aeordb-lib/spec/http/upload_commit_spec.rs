@@ -147,6 +147,46 @@ async fn test_commit_single_file() {
 }
 
 #[tokio::test]
+async fn test_commit_manifest_body_over_default_limit_reaches_handler() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+  let fake_hash = "00".repeat(32);
+  let chunk_hashes = vec![fake_hash; 18_000];
+
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/",
+          "chunks": chunk_hashes,
+          "content_type": "application/octet-stream"
+      }]
+  });
+  let body = serde_json::to_vec(&commit_body).unwrap();
+  assert!(body.len() > 1024 * 1024, "test body must exceed the default 1 MiB route limit");
+
+  let response = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  let response_text = String::from_utf8_lossy(&body_bytes(response.into_body()).await).into_owned();
+  assert!(
+    response_text.contains("Cannot store at root path"),
+    "large commit manifest should reach AeorDB validation, got: {response_text}"
+  );
+  assert!(
+    !response_text.contains("length limit exceeded"),
+    "large commit manifest was rejected by the generic body limiter: {response_text}"
+  );
+}
+
+#[tokio::test]
 async fn test_commit_multichunk_file_records_whole_file_hash() {
   let (_app, jwt, engine, _tmp) = test_app();
   let token = root_bearer_token(&jwt);

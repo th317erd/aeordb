@@ -167,6 +167,33 @@ async fn test_check_identifies_missing_chunks() {
   assert_eq!(needed[0].as_str().unwrap(), fake_hash);
 }
 
+#[tokio::test]
+async fn test_check_manifest_body_over_default_limit_reaches_handler() {
+  let (app, jwt_manager, _engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let fake_hash = "00".repeat(32);
+  let hashes = vec![fake_hash.clone(); 18_000];
+  let body = serde_json::to_vec(&serde_json::json!({ "hashes": hashes })).unwrap();
+  assert!(body.len() > 1024 * 1024, "test body must exceed the default 1 MiB route limit");
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/blobs/check")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(body))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["have"].as_array().unwrap().len(), 0);
+  assert_eq!(json["needed"].as_array().unwrap().len(), 18_000);
+  assert_eq!(json["needed"][0].as_str().unwrap(), fake_hash);
+}
+
 // ===========================================================================
 // 5. POST /upload/check mixed have and needed
 // ===========================================================================

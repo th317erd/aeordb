@@ -16,9 +16,9 @@ AeorDB provides a 4-phase upload protocol for efficient, deduplicated file trans
 | Method | Path | Description | Auth | Body Limit |
 |--------|------|-------------|------|-----------|
 | GET | `/blobs/config` | Negotiate hash algorithm and chunk size | No | -- |
-| POST | `/blobs/check` | Check which chunks the server already has | Yes | 1 MB |
+| POST | `/blobs/check` | Check which chunks the server already has | Yes | 32 MiB |
 | PUT | `/blobs/chunks/{hash}` | Upload a single chunk | Yes | 10 GB |
-| POST | `/blobs/commit` | Atomic multi-file commit from chunks | Yes | 1 MB |
+| POST | `/blobs/commit` | Atomic multi-file commit from chunks | Yes | 32 MiB |
 
 ---
 
@@ -65,6 +65,10 @@ curl http://localhost:6830/blobs/config
 ## Phase 2: POST /blobs/check
 
 Send a list of chunk hashes to determine which ones the server already has (deduplication). Only upload the ones in the `needed` list.
+
+The request body is a JSON manifest and is capped at 32 MiB. Clients syncing
+very large files or large batches should split `/blobs/check` calls before that
+limit.
 
 ### Request Body
 
@@ -187,6 +191,10 @@ curl -X PUT http://localhost:6830/blobs/chunks/f6e5d4c3b2a1... \
 ## Phase 4: POST /blobs/commit
 
 Atomically commit multiple files from previously uploaded chunks. Each file specifies its path, content type, and the ordered list of chunk hashes that compose it.
+
+The request body is a JSON manifest and is capped at 32 MiB. This is separate
+from the 10 GB raw chunk upload limit because `/blobs/commit` carries paths and
+hash references, not file bytes.
 
 During commit, AeorDB records the raw whole-file content hash
 (`blake3(file bytes)`) in the file metadata. That stored value backs `@hash`
