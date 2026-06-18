@@ -11,7 +11,7 @@ use crate::engine::errors::EngineResult;
 use crate::engine::event_bus::EventBus;
 use crate::engine::gc::run_gc;
 use crate::engine::index_store::{
-  IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
+  IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
 };
 use crate::engine::index_config_resolver::{glob_matches, IndexConfigResolver};
 use crate::engine::indexing_pipeline::IndexingPipeline;
@@ -222,6 +222,17 @@ fn execute_reindex(
     }
     Err(e) => return Err(format!("cannot read index config at {}: {}", config_path, e)),
   };
+  let stale_indexes_deleted = if let Some(ref config) = config {
+    let deleted = IndexManager::new(engine)
+      .delete_indexes_not_in_config(&reindex_root, config)
+      .map_err(|error| format!("failed to retire stale indexes for {}: {}", reindex_root, error))?;
+    if deleted > 0 {
+      tracing::info!(path = %reindex_root, deleted, "retired stale indexes before reindex");
+    }
+    deleted
+  } else {
+    0
+  };
 
   // Build a sorted list of full file paths to reindex.
   let prefix = reindex_root.trim_end_matches('/');
@@ -421,8 +432,14 @@ fn execute_reindex(
   let elapsed_ms = start.elapsed().as_millis();
   let index_stats = index_buffer.stats();
   let index_summary = format!(
-    ", metadata_only={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
-    metadata_only, index_stats.mutations, index_stats.flushes, index_stats.flushed_indexes, flushed_indexes, index_stats.cached_indexes
+    ", metadata_only={}, stale_indexes_deleted={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
+    metadata_only,
+    stale_indexes_deleted,
+    index_stats.mutations,
+    index_stats.flushes,
+    index_stats.flushed_indexes,
+    flushed_indexes,
+    index_stats.cached_indexes
   );
   if force {
     Ok(format!("reindexed {} files, migrated {} records in {}ms{}", indexed_count, migrated_count, elapsed_ms, index_summary))

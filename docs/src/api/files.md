@@ -1130,10 +1130,11 @@ bootstrap an exact `string` index for `@hash`; trigram hash indexes are not
 created by default because exact hash lookup is the normal use case and trigram
 hash indexes consume substantial memory on large databases. Existing databases
 may need their `/.aeordb-config/indexes.json` updated and reindexed before
-`@hash eq` uses only the exact index. Legacy FileRecord v0 entries written before
-this field existed must be migrated before they can participate in exact `@hash`
-lookup; trigger a forced reindex with `POST /system/tasks/reindex` and
-`"force": true` to backfill them.
+`@hash eq` uses only the exact index; reindexing also retires old hash index
+strategies that are no longer present in the config. Legacy FileRecord v0
+entries written before this field existed must be migrated before they can
+participate in exact `@hash` lookup; trigger a forced reindex with
+`POST /system/tasks/reindex` and `"force": true` to backfill them.
 
 For agent workflows, `/files/search` and `/files/query` also support opt-in hit
 locators with `include_matches: true`. Locator responses include snippets,

@@ -33,6 +33,17 @@ fn store_hash_index_config(engine: &StorageEngine, parent: &str) {
   ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
 }
 
+fn store_hash_index_config_with_type(engine: &StorageEngine, parent: &str, index_type: serde_json::Value) {
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(engine);
+  let config = serde_json::json!({
+      "indexes": [{"name": "@hash", "type": index_type}]
+  });
+  let config_path = format!("{}/.aeordb-config/indexes.json", parent);
+  ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
+  engine.index_config_cache.evict(&parent.to_string());
+}
+
 fn store_metadata_and_content_index_config(engine: &StorageEngine, parent: &str) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
@@ -101,6 +112,49 @@ fn store_json_files(engine: &aeordb::engine::storage_engine::StorageEngine, pare
     let path = format!("{}/item-{:03}.json", parent, i);
     ops.store_file_buffered(&ctx, &path, serde_json::to_string(&data).unwrap().as_bytes(), Some("application/json")).unwrap();
   }
+}
+
+#[test]
+fn test_reindex_removes_stale_index_strategies_after_config_change() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  store_hash_index_config_with_type(&engine, "/stale", serde_json::json!(["string", "trigram"]));
+  ops.store_file_buffered(&ctx, "/stale/a.txt", b"stable content", Some("text/plain")).unwrap();
+
+  let initial_task = queue.enqueue("reindex", serde_json::json!({"path": "/stale", "metadata_only": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let completed = queue.get_task(&initial_task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed, "initial reindex should complete: {:?}", completed.error);
+
+  let index_manager = IndexManager::new(&engine);
+  assert!(
+    index_manager.load_index_by_strategy("/stale", "@hash", "string").unwrap().is_some(),
+    "initial config should build the exact hash index"
+  );
+  assert!(
+    index_manager.load_index_by_strategy("/stale", "@hash", "trigram").unwrap().is_some(),
+    "initial config should build the trigram hash index"
+  );
+
+  store_hash_index_config_with_type(&engine, "/stale", serde_json::json!("string"));
+
+  let cleanup_task = queue.enqueue("reindex", serde_json::json!({"path": "/stale", "metadata_only": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let completed = queue.get_task(&cleanup_task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed, "cleanup reindex should complete: {:?}", completed.error);
+
+  let index_names = index_manager.list_indexes("/stale").unwrap();
+  assert!(index_names.contains(&"@hash.string".to_string()), "exact hash index should remain: {:?}", index_names);
+  assert!(!index_names.contains(&"@hash.trigram".to_string()), "trigram hash index should be retired: {:?}", index_names);
+  assert!(
+    index_manager.load_index_by_strategy("/stale", "@hash", "trigram").unwrap().is_none(),
+    "retired trigram hash index should not load from cache or disk"
+  );
 }
 
 #[test]

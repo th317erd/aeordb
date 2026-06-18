@@ -284,7 +284,7 @@ When the indexing pipeline encounters a field name starting with `@`, it extract
 
 ### Customization
 
-The default config at `/.aeordb-config/indexes.json` is only written on first boot. Existing databases keep their current config until you edit it. You can modify the config to add or remove default fields; changes trigger an automatic reindex, and a forced reindex can backfill FileRecord metadata migrations such as whole-file `@hash`.
+The default config at `/.aeordb-config/indexes.json` is only written on first boot. Existing databases keep their current config until you edit it. You can modify the config to add or remove default fields; changes trigger an automatic reindex. During reindex, AeorDB retires index files whose field/strategy is no longer present in the config. A forced reindex can also backfill FileRecord metadata migrations such as whole-file `@hash`.
 
 ## Automatic Reindexing
 

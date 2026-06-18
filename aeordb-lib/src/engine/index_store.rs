@@ -6,7 +6,7 @@ use base64::Engine as _;
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::index_config::{IndexFieldConfig, create_converter_from_config};
+use crate::engine::index_config::{create_converter_from_config, IndexFieldConfig, PathIndexConfig};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
@@ -1271,6 +1271,46 @@ impl<'a> IndexManager<'a> {
     let index_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
     ops.delete_file(&ctx, &index_path)
+  }
+
+  /// Delete field/strategy indexes at `path` that are not present in the
+  /// current index config. This retires indexes removed by config changes so a
+  /// reindex does not keep carrying obsolete cached or on-disk index files.
+  pub fn delete_indexes_not_in_config(&self, path: &str, config: &PathIndexConfig) -> EngineResult<usize> {
+    let parent = normalize_path(path);
+    let mut desired = HashSet::new();
+
+    for field_config in &config.indexes {
+      let converter = create_converter_from_config(field_config)?;
+      desired.insert(format!("{}.{}", field_config.name, converter.strategy()));
+    }
+
+    let existing = self.list_indexes(&parent)?;
+    let mut deleted = 0usize;
+
+    for index_name in existing {
+      if desired.contains(&index_name) {
+        continue;
+      }
+
+      let delete_result = if let Some((field_name, strategy)) = Self::split_index_name(&index_name) {
+        self.delete_index(&parent, field_name, strategy)
+      } else {
+        self.delete_index_legacy(&parent, &index_name)
+      };
+
+      match delete_result {
+        Ok(()) => deleted += 1,
+        Err(EngineError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+      }
+    }
+
+    if deleted > 0 {
+      self.flush_buffered_indexes()?;
+    }
+
+    Ok(deleted)
   }
 
   /// Create an empty index for a field at the given path.
