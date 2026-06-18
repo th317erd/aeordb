@@ -473,10 +473,12 @@ pub fn file_restore_from_version(
   // Resolve the file at the version
   let (_, file_record) = crate::engine::version_access::resolve_file_at_version(engine, &root_hash, path)?;
 
-  // Create auto-snapshot
-  let now = chrono::Utc::now();
-  let base_name = now.format("pre-restore-%Y-%m-%dT%H-%M-%SZ").to_string();
-  let auto_snapshot_name = {
+  // Create auto-snapshot when snapshot writes are enabled. Preserve the
+  // existing return type by returning an empty name when lifecycle policy has
+  // disabled snapshot writes.
+  let auto_snapshot_name = if crate::engine::lifecycle_config::snapshot_writes_enabled(engine) {
+    let now = chrono::Utc::now();
+    let base_name = now.format("pre-restore-%Y-%m-%dT%H-%M-%SZ").to_string();
     let mut name = base_name.clone();
     let mut attempt = 1;
     loop {
@@ -496,6 +498,9 @@ pub fn file_restore_from_version(
         Err(error) => return Err(error),
       }
     }
+  } else {
+    tracing::info!(path, "Skipping pre-restore snapshot because snapshot writes are disabled");
+    String::new()
   };
 
   // Read historical file content

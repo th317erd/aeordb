@@ -1362,6 +1362,11 @@ impl<'a> DirectoryOps<'a> {
   /// Uses a per-lane AtomicI64 so delete/restore/manual snapshots
   /// don't block each other. Each lane throttles independently.
   fn auto_snapshot_throttled(&self, ctx: &RequestContext, lane: &std::sync::atomic::AtomicI64, throttle_ms: i64, prefix: &str) {
+    if !crate::engine::lifecycle_config::snapshot_writes_enabled(self.engine) {
+      tracing::debug!("Auto-snapshot ({}) skipped because snapshot writes are disabled", prefix);
+      return;
+    }
+
     use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp_millis();
     let last = lane.load(Ordering::Relaxed);

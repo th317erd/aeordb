@@ -29,6 +29,13 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 | PATCH | `/system/cron/{id}` | Update a cron schedule | Yes |
 | DELETE | `/system/cron/{id}` | Delete a cron schedule | Yes |
 
+### Lifecycle Configuration
+
+| Method | Path | Description | Root Required |
+|--------|------|-------------|---------------|
+| GET | `/system/lifecycle` | Read lifecycle policy | Yes |
+| PUT | `/system/lifecycle` | Replace lifecycle policy | Yes |
+
 ### Backup & Restore
 
 | Method | Path | Description | Root Required |
@@ -407,6 +414,52 @@ Delete a cron schedule.
 | Status | Condition |
 |--------|-----------|
 | 404 | Schedule not found |
+
+---
+
+## Lifecycle Configuration
+
+Lifecycle configuration is stored inside the database at `/.aeordb-config/lifecycle.json`. Missing fields use safe defaults, so older databases that only have `snapshot_retention` continue to allow snapshot writes.
+
+### GET /system/lifecycle
+
+Return the current lifecycle policy.
+
+**Response:** `200 OK`
+
+```json
+{
+  "snapshot_writes_enabled": true,
+  "snapshot_retention": {
+    "auto_months": 0,
+    "manual_months": 0
+  }
+}
+```
+
+### PUT /system/lifecycle
+
+Replace the lifecycle policy.
+
+**Request Body:**
+
+```json
+{
+  "snapshot_writes_enabled": false,
+  "snapshot_retention": {
+    "auto_months": 1,
+    "manual_months": 12
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `snapshot_writes_enabled` | boolean | `true` | Allow creation of new snapshot records. When `false`, existing snapshots can still be listed, read, restored, deleted, exported, and pruned. |
+| `snapshot_retention.auto_months` | integer | `0` | Months after which auto snapshots are eligible for pruning. `0` disables pruning. |
+| `snapshot_retention.manual_months` | integer | `0` | Months after which manual snapshots are eligible for pruning. `0` disables pruning. |
+
+When `snapshot_writes_enabled` is `false`, manual `POST /versions/snapshots` and snapshot rename requests return `403`. Automatic safety snapshots, such as file-restore and pre-GC snapshots, are skipped; the underlying operation continues when it can safely proceed without writing a new snapshot.
 
 ---
 

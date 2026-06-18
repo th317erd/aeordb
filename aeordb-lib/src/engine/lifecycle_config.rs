@@ -35,12 +35,26 @@ impl Default for SnapshotRetention {
   }
 }
 
+fn default_snapshot_writes_enabled() -> bool {
+  true
+}
+
 /// Full lifecycle config schema. Extend with adjacent settings (GC cadence,
 /// scrub schedule, auto-snapshot interval) as they're added.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LifecycleConfig {
+  /// Whether new snapshots may be written. Existing snapshots remain readable,
+  /// restorable, deletable, and eligible for retention pruning.
+  #[serde(default = "default_snapshot_writes_enabled")]
+  pub snapshot_writes_enabled: bool,
   #[serde(default)]
   pub snapshot_retention: SnapshotRetention,
+}
+
+impl Default for LifecycleConfig {
+  fn default() -> Self {
+    LifecycleConfig { snapshot_writes_enabled: true, snapshot_retention: SnapshotRetention::default() }
+  }
 }
 
 /// Load lifecycle config. Returns defaults (everything zeroed = never prune)
@@ -66,6 +80,23 @@ pub fn save_lifecycle_config(engine: &StorageEngine, config: &LifecycleConfig) -
   let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
   ops.store_file_buffered(&ctx, LIFECYCLE_CONFIG_PATH, &data, Some("application/json"))?;
   Ok(())
+}
+
+/// Whether callers are allowed to create new snapshot records.
+///
+/// This only gates snapshot writes. Existing snapshot reads, restores, deletes,
+/// exports, and retention pruning keep working when writes are disabled.
+pub fn snapshot_writes_enabled(engine: &StorageEngine) -> bool {
+  load_lifecycle_config(engine).snapshot_writes_enabled
+}
+
+/// Return an explicit engine error when snapshot writes are disabled.
+pub fn ensure_snapshot_writes_enabled(engine: &StorageEngine) -> EngineResult<()> {
+  if snapshot_writes_enabled(engine) {
+    Ok(())
+  } else {
+    Err(EngineError::SnapshotWritesDisabled)
+  }
 }
 
 /// Result of a snapshot retention pass.

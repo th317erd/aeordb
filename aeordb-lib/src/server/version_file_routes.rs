@@ -286,17 +286,17 @@ pub async fn file_restore(
     }
   };
 
-  // Create auto-snapshot BEFORE restore (mandatory safety net).
+  // Create auto-snapshot BEFORE restore when snapshot writes are enabled.
   // Uses the restore lane so it doesn't interfere with delete auto-snapshots.
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  state.engine.last_auto_snapshot_restore.store(chrono::Utc::now().timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
-  let now = chrono::Utc::now();
-  let base_name = now.format("auto-pre-restore %Y-%m-%d %H:%M:%S%.3f").to_string();
+  let auto_snapshot_name = if crate::engine::lifecycle_config::snapshot_writes_enabled(&state.engine) {
+    state.engine.last_auto_snapshot_restore.store(chrono::Utc::now().timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
+    let now = chrono::Utc::now();
+    let base_name = now.format("auto-pre-restore %Y-%m-%d %H:%M:%S%.3f").to_string();
 
-  let auto_snapshot_name = {
     let mut name = base_name.clone();
     let mut attempt = 1;
-    loop {
+    let snapshot_name = loop {
       match vm.create_snapshot(&ctx, &name, {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("reason".to_string(), "auto-snapshot before file restore".to_string());
@@ -318,7 +318,11 @@ pub async fn file_restore(
             .into_response();
         }
       }
-    }
+    };
+    Some(snapshot_name)
+  } else {
+    tracing::info!(path = %path, "Skipping pre-restore snapshot because snapshot writes are disabled");
+    None
   };
 
   // Restore the file by re-using the existing chunk hashes from the

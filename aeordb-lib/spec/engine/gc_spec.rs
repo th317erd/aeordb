@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine, VersionManager, directory_content_hash, file_path_hash};
+use aeordb::engine::{
+  directory_content_hash, file_path_hash, save_lifecycle_config, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine,
+  VersionManager,
+};
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
 use aeordb::engine::tree_walker::walk_version_tree;
@@ -304,6 +307,22 @@ fn test_run_gc_end_to_end() {
 
   let result2 = run_gc(&engine, &ctx, false).unwrap();
   assert_eq!(result2.garbage_entries, 0, "second GC should find no garbage");
+}
+
+#[test]
+fn test_run_gc_skips_pre_gc_snapshot_when_snapshot_writes_disabled() {
+  let (engine, _temp) = setup_engine_with_versions();
+  let ctx = RequestContext::system();
+
+  save_lifecycle_config(&engine, &LifecycleConfig { snapshot_writes_enabled: false, ..LifecycleConfig::default() }).unwrap();
+
+  let result = run_gc(&engine, &ctx, false).unwrap();
+  assert!(result.live_entries > 0);
+  assert!(!result.dry_run);
+
+  let vm = VersionManager::new(&engine);
+  let snapshots = vm.list_snapshots().unwrap();
+  assert!(!snapshots.iter().any(|snapshot| snapshot.name.starts_with("_aeordb_pre_gc_")));
 }
 
 #[test]

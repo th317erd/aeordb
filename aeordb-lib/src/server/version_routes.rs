@@ -48,6 +48,12 @@ pub async fn snapshot_create(
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateSnapshotRequest>,
 ) -> Response {
+  if !crate::engine::lifecycle_config::snapshot_writes_enabled(&state.engine) {
+    return ErrorResponse::new("Snapshot writes are disabled by lifecycle configuration")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response();
+  }
+
   if std::env::var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT").is_err() {
     use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp_millis();
@@ -77,6 +83,9 @@ pub async fn snapshot_create(
       (status, Json(response_body)).into_response()
     }
     Err(EngineError::AlreadyExists(message)) => ErrorResponse::new(message).with_status(StatusCode::CONFLICT).into_response(),
+    Err(EngineError::SnapshotWritesDisabled) => {
+      ErrorResponse::new("Snapshot writes are disabled by lifecycle configuration").with_status(StatusCode::FORBIDDEN).into_response()
+    }
     Err(error) => {
       tracing::error!("Engine: failed to create snapshot: {}", error);
       ErrorResponse::new(format!("Failed to create snapshot: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
@@ -271,6 +280,9 @@ pub async fn snapshot_rename(
     )
       .into_response(),
     Err(EngineError::AlreadyExists(msg)) => ErrorResponse::new(msg).with_status(StatusCode::CONFLICT).into_response(),
+    Err(EngineError::SnapshotWritesDisabled) => {
+      ErrorResponse::new("Snapshot writes are disabled by lifecycle configuration").with_status(StatusCode::FORBIDDEN).into_response()
+    }
     Err(error) => {
       tracing::error!("Failed to rename snapshot '{}': {}", snapshot.name, error);
       ErrorResponse::new(format!("Failed to rename snapshot: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()

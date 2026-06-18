@@ -214,8 +214,8 @@ pub use cron_scheduler::{
   validate_cron_expression,
 };
 pub use lifecycle_config::{
-  LifecycleConfig, SnapshotRetention, load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, PruneResult,
-  SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_MANUAL,
+  LifecycleConfig, SnapshotRetention, load_lifecycle_config, save_lifecycle_config, snapshot_writes_enabled,
+  ensure_snapshot_writes_enabled, prune_expired_snapshots, PruneResult, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_MANUAL,
 };
 pub use request_context::RequestContext;
 pub use rate_tracker::{RateTracker, RateSnapshot, RateTrackerSet, RateSetSnapshot};

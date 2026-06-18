@@ -707,15 +707,19 @@ pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> En
 
   // Auto-snapshot before GC — safety net in case sweep removes something needed
   if !dry_run {
-    let snapshot_name = format!("_aeordb_pre_gc_{}_{}", chrono::Utc::now().timestamp_millis(), uuid::Uuid::new_v4().simple());
+    if crate::engine::lifecycle_config::snapshot_writes_enabled(engine) {
+      let snapshot_name = format!("_aeordb_pre_gc_{}_{}", chrono::Utc::now().timestamp_millis(), uuid::Uuid::new_v4().simple());
 
-    match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
-      Ok(_) => {
-        tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
+      match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
+        Ok(_) => {
+          tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
+        }
+        Err(e) => {
+          return Err(e);
+        }
       }
-      Err(e) => {
-        return Err(e);
-      }
+    } else {
+      tracing::info!("Skipping pre-GC snapshot because snapshot writes are disabled");
     }
 
     // Clean up old pre-GC snapshots — keep last 3

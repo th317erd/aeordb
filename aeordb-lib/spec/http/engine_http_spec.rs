@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{save_lifecycle_config, LifecycleConfig, StorageEngine};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -719,6 +719,27 @@ async fn test_snapshot_create() {
   assert!(json["root_hash"].is_string());
   assert!(json["created_at"].is_number());
   assert_eq!(json["metadata"]["env"], "test");
+}
+
+#[tokio::test]
+async fn test_snapshot_create_returns_403_when_snapshot_writes_disabled() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  save_lifecycle_config(&engine, &LifecycleConfig { snapshot_writes_enabled: false, ..LifecycleConfig::default() }).unwrap();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/versions/snapshots")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"name":"blocked","metadata":{}}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["error"], "Snapshot writes are disabled by lifecycle configuration");
 }
 
 #[tokio::test]

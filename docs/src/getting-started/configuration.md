@@ -254,6 +254,25 @@ Supported task types: `"gc"`, `"reindex"`, and `"backup"`. The `"backup"` type a
 
 The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. Cron schedules can also be managed via the HTTP API at `/system/cron`.
 
+## Lifecycle Policy
+
+Database lifecycle policy is stored in the database at `/.aeordb-config/lifecycle.json` and can be managed through the root-only `/system/lifecycle` API.
+
+```bash
+curl -X PUT http://localhost:6830/system/lifecycle \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "snapshot_writes_enabled": false,
+    "snapshot_retention": {
+      "auto_months": 1,
+      "manual_months": 12
+    }
+  }'
+```
+
+`snapshot_writes_enabled` defaults to `true`. Set it to `false` to disallow new snapshot writes without removing or breaking existing snapshots. Existing snapshots can still be listed, read, restored, deleted, exported, and pruned. Automatic safety snapshots are skipped while this flag is disabled.
+
 ## Compression
 
 AeorDB uses zstd compression automatically when configured. To enable compression for a directory, add the `compression` field to the index config:

@@ -120,6 +120,8 @@ Example cron configuration (`/.config/cron.json`):
 
 GC should not be run concurrently with writes. The sweep phase re-verifies each candidate against the current KV state before overwriting to mitigate races, but for full safety, callers should ensure exclusive access during GC.
 
+Before a non-dry-run GC, AeorDB normally creates an engine-internal `_aeordb_pre_gc_*` snapshot as a safety net. If lifecycle configuration has `"snapshot_writes_enabled": false`, GC skips that safety snapshot and continues with the mark-and-sweep run. Existing snapshots are still honored as live roots either way.
+
 **Crash safety**: If the process crashes mid-sweep, the `.aeordb` file may contain partially overwritten entries. On restart, the `.kv` index file will be stale and must be deleted to trigger a full rebuild from the `.aeordb` file scan. The rebuild replays deletion records and reconstructs the index, so no committed data is lost. Garbage entries that were not yet swept will persist until the next GC run.
 
 ## Performance

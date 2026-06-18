@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext};
+use aeordb::engine::{save_lifecycle_config, DirectoryOps, LifecycleConfig, RequestContext, StorageEngine};
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::version_access::read_file_at_version;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
@@ -150,6 +150,38 @@ async fn test_restore_creates_auto_snapshot() {
   let snapshots = vm.list_snapshots().unwrap();
   let found = snapshots.iter().any(|s| s.name == auto_snap_name);
   assert!(found, "Auto-snapshot '{}' should exist in snapshot list", auto_snap_name);
+}
+
+#[tokio::test]
+async fn test_restore_skips_auto_snapshot_when_snapshot_writes_disabled() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  store_file(&engine, "/disabled.txt", b"original");
+  create_snapshot(&engine, "snap1");
+  store_file(&engine, "/disabled.txt", b"modified");
+  save_lifecycle_config(&engine, &LifecycleConfig { snapshot_writes_enabled: false, ..LifecycleConfig::default() }).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/versions/restore/disabled.txt")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"snapshot":"snap1"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  assert!(json["auto_snapshot"].is_null(), "auto_snapshot should be null when snapshot writes are disabled");
+  assert_eq!(read_file(&engine, "/disabled.txt"), b"original");
+
+  let vm = VersionManager::new(&engine);
+  let snapshots = vm.list_snapshots().unwrap();
+  assert_eq!(snapshots.len(), 1);
+  assert_eq!(snapshots[0].name, "snap1");
 }
 
 /// The auto-snapshot should capture the state BEFORE restore

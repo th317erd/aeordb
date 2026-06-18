@@ -27,6 +27,8 @@ AeorDB provides Git-like version control through snapshots (named points in time
 
 Create a named snapshot of the current HEAD.
 
+If lifecycle configuration has `"snapshot_writes_enabled": false`, this endpoint returns `403 Forbidden`. Existing snapshots remain available for listing, reading, restoring, deleting, exporting, and pruning.
+
 **Request Body:**
 
 ```json
@@ -71,6 +73,7 @@ curl -X POST http://localhost:6830/versions/snapshots \
 
 | Status | Condition |
 |--------|-----------|
+| 403 | Snapshot writes disabled by lifecycle configuration |
 | 409 | Snapshot with this name already exists |
 | 500 | Internal failure |
 
@@ -401,7 +404,7 @@ curl http://localhost:6830/versions/history/assets/logo.psd \
 
 Restore a single file from a historical version to the current HEAD. **Requires root.**
 
-Before restoring, an automatic safety snapshot is created (named `pre-restore-{timestamp}`) to preserve the current state. If the safety snapshot cannot be created, the restore is rejected.
+Before restoring, an automatic safety snapshot is created to preserve the current state. If lifecycle configuration has `"snapshot_writes_enabled": false`, this safety snapshot is skipped and the restore still proceeds. If snapshot writes are enabled but the safety snapshot cannot be created, the restore is rejected.
 
 **Request Body:**
 
@@ -440,6 +443,18 @@ If both are provided, `snapshot` takes precedence.
 
 The `auto_snapshot` field contains the name of the safety snapshot created before the restore. You can use this snapshot to recover the pre-restore state if needed.
 
+When snapshot writes are disabled, `auto_snapshot` is `null`:
+
+```json
+{
+  "restored": true,
+  "path": "assets/logo.psd",
+  "from_snapshot": "v1.0",
+  "auto_snapshot": null,
+  "size": 256000
+}
+```
+
 **Example:**
 
 ```bash
@@ -457,4 +472,4 @@ curl -X POST http://localhost:6830/versions/restore/assets/logo.psd \
 | 403 | Non-root user (requires both write and snapshot permissions) |
 | 404 | File not found at the specified version |
 | 404 | Snapshot or version not found |
-| 500 | Failed to create safety snapshot or write restored file |
+| 500 | Failed to create safety snapshot while snapshot writes are enabled, or failed to write restored file |

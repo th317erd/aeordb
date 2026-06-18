@@ -253,6 +253,8 @@ let (auto_snap, size) = file_restore_from_version(
 ).unwrap();
 ```
 
+If lifecycle configuration has `snapshot_writes_enabled` set to `false`, `file_restore_from_version` skips the auto-safety snapshot and returns an empty `auto_snap` string while still restoring the file.
+
 ## Sync / Replication
 
 The library exposes the same sync primitives as the HTTP endpoints, enabling embedded clients to replicate without HTTP overhead.
