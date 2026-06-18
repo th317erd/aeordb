@@ -601,28 +601,7 @@ async fn initialize_server_runtime(
         // by replacing /.aeordb-config/indexes.json before first start, or
         // overriding via per-directory `.aeordb-config/indexes.json` files
         // anywhere in the tree.
-        let default_config = serde_json::json!({
-          "glob": "**/*",
-          "indexes": [
-            // Virtual metadata (always present)
-            {"name": "@path", "type": ["string", "trigram"]},
-            {"name": "@filename", "type": ["string", "trigram", "soundex", "dmetaphone", "dmetaphone_alt"]},
-            {"name": "@extension", "type": "string"},
-            {"name": "@hash", "type": ["string", "trigram"]},
-            {"name": "@created_at", "type": "timestamp"},
-            {"name": "@updated_at", "type": "timestamp"},
-            {"name": "@size", "type": "u64"},
-            {"name": "@content_type", "type": ["string", "trigram"]},
-
-            // Extracted content from native parsers (text, html, pdf, msoffice,
-            // odf, image, audio, video). Parsers that have no body text emit
-            // an empty string for `text` and put their useful info in `metadata`.
-            {"name": "text", "type": "trigram"},
-            {"name": "title", "type": ["string", "trigram"]},
-            {"name": "metadata.format", "type": "string"},
-            {"name": "metadata.duration", "type": "f64", "min": 0, "max": 86400}
-          ]
-        });
+        let default_config = default_global_index_config();
         let config_bytes = serde_json::to_vec_pretty(&default_config).unwrap();
         if let Err(e) = ops.store_file_buffered(&ctx, config_path, &config_bytes, Some("application/json")) {
           tracing::warn!("Failed to write default index config: {}", e);
@@ -660,6 +639,31 @@ async fn initialize_server_runtime(
     engine,
     startup_instant,
     handles: vec![heartbeat_handle, sampler_handle, metrics_handle, webhook_handle, cron_handle, worker_handle],
+  })
+}
+
+fn default_global_index_config() -> serde_json::Value {
+  serde_json::json!({
+    "glob": "**/*",
+    "indexes": [
+      // Virtual metadata (always present)
+      {"name": "@path", "type": ["string", "trigram"]},
+      {"name": "@filename", "type": ["string", "trigram", "soundex", "dmetaphone", "dmetaphone_alt"]},
+      {"name": "@extension", "type": "string"},
+      {"name": "@hash", "type": "string"},
+      {"name": "@created_at", "type": "timestamp"},
+      {"name": "@updated_at", "type": "timestamp"},
+      {"name": "@size", "type": "u64"},
+      {"name": "@content_type", "type": "string"},
+
+      // Extracted content from native parsers (text, html, pdf, msoffice,
+      // odf, image, audio, video). Parsers that have no body text emit
+      // an empty string for `text` and put their useful info in `metadata`.
+      {"name": "text", "type": "trigram"},
+      {"name": "title", "type": ["string", "trigram"]},
+      {"name": "metadata.format", "type": "string"},
+      {"name": "metadata.duration", "type": "f64", "min": 0, "max": 86400}
+    ]
   })
 }
 
@@ -864,4 +868,27 @@ fn register_initial_peers(database: &str, hot_dir: &std::path::Path, peers: &[St
 
   drop(engine);
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::default_global_index_config;
+
+  #[test]
+  fn default_global_index_config_keeps_hash_and_content_type_exact_only() {
+    let config = default_global_index_config();
+    let indexes = config["indexes"].as_array().expect("indexes array");
+    let index_type = |name: &str| {
+      indexes
+        .iter()
+        .find(|index| index["name"] == name)
+        .and_then(|index| index.get("type"))
+        .cloned()
+        .unwrap_or_else(|| panic!("missing index {name}"))
+    };
+
+    assert_eq!(index_type("@path"), serde_json::json!(["string", "trigram"]));
+    assert_eq!(index_type("@hash"), serde_json::json!("string"));
+    assert_eq!(index_type("@content_type"), serde_json::json!("string"));
+  }
 }

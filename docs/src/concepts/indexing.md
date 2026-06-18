@@ -268,11 +268,11 @@ On first server start, AeorDB bootstraps a default index configuration at `/.aeo
 | `@path` | string, trigram | Full file path. Supports exact match plus path substring/similarity search. |
 | `@filename` | string, trigram, soundex, dmetaphone, dmetaphone_alt | File name (last path segment). Supports exact match, fuzzy search, and phonetic matching. `@file_name` is accepted as a query/config alias and resolves to this canonical field. |
 | `@extension` | string | File extension. Supports exact match. |
-| `@hash` | string, trigram | Raw whole-file content hash (`blake3(file bytes)`). Supports exact, substring, and similarity search. |
+| `@hash` | string | Raw whole-file content hash (`blake3(file bytes)`). Supports exact match. |
 | `@created_at` | timestamp | Creation time. Supports range queries. |
 | `@updated_at` | timestamp | Last update time. Supports range queries. |
 | `@size` | u64 | File size in bytes. Supports range queries. |
-| `@content_type` | string, trigram | MIME type. Supports exact match, substring, and similarity search. |
+| `@content_type` | string | MIME type. Supports exact match. |
 
 These indexes are stored at `/.indexes/` and cover every file in the database. Because the bootstrap config uses `glob: "**/*"`, the query and global search endpoints can use the root index for scoped virtual-field lookups and then filter candidates to the requested path. The global search endpoint ([`POST /files/search`](../api/files.md#global-search)) works out of the box with no additional configuration.
 

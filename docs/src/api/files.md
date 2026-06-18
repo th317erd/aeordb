@@ -1093,7 +1093,7 @@ Search across all indexed directories in the database. Unlike `POST /files/query
 }
 ```
 
-The `query` field performs a broad fuzzy search across all default-indexed text metadata fields (`@filename`, `@path`, `@hash`, `@content_type`, etc.).
+The `query` field performs a broad fuzzy search across default-indexed text metadata fields that have fuzzy-capable indexes, such as `@filename` and `@path`.
 
 For more targeted searches, use a structured `where` clause:
 
@@ -1126,11 +1126,13 @@ content hash, query `@hash` with `eq`:
 
 `@hash` is the raw whole-file hash (`blake3(file bytes)`) stored in the
 `FileRecord` at write time. It is not the first chunk hash. New databases
-bootstrap an exact `string` index plus a `trigram` index for `@hash`. Existing
-databases may need their `/.aeordb-config/indexes.json` updated and reindexed
-before `@hash eq` uses the exact index. Legacy FileRecord v0 entries written
-before this field existed must be migrated before they can participate in exact
-`@hash` lookup; trigger a forced reindex with `POST /system/tasks/reindex` and
+bootstrap an exact `string` index for `@hash`; trigram hash indexes are not
+created by default because exact hash lookup is the normal use case and trigram
+hash indexes consume substantial memory on large databases. Existing databases
+may need their `/.aeordb-config/indexes.json` updated and reindexed before
+`@hash eq` uses only the exact index. Legacy FileRecord v0 entries written before
+this field existed must be migrated before they can participate in exact `@hash`
+lookup; trigger a forced reindex with `POST /system/tasks/reindex` and
 `"force": true` to backfill them.
 
 For agent workflows, `/files/search` and `/files/query` also support opt-in hit
