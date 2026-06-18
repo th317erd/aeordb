@@ -615,6 +615,40 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
     "gc_last_reclaimed_bytes": 1048576,
     "write_buffer_depth": 42
   },
+  "memory": {
+    "process": {
+      "rss_bytes": 2147483648,
+      "peak_rss_bytes": 3221225472,
+      "virtual_bytes": 8589934592,
+      "data_bytes": 1610612736,
+      "swap_bytes": 0,
+      "thread_count": 32,
+      "fd_count": 128
+    },
+    "index_cache": {
+      "cached_indexes": 16,
+      "dirty_indexes": 4,
+      "deleted_indexes": 0,
+      "pending_mutations": 512,
+      "total_mutations": 102400,
+      "flushes": 7,
+      "flushed_indexes": 92,
+      "entries": 2500000,
+      "values": 350000,
+      "estimated_bytes": 734003200,
+      "top_cached_indexes": []
+    },
+    "directory_cache": {
+      "entries": 12000,
+      "estimated_bytes": 16777216
+    },
+    "caches": {
+      "permissions_entries": 128,
+      "index_config_entries": 16,
+      "grants_index_entries": 4
+    },
+    "estimated_engine_owned_bytes": 750780416
+  },
   "sync": {
     "active_peers": 2,
     "failing_peers": 0,
@@ -634,11 +668,14 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 | `throughput` | Rolling read/write rates (1m, 5m, 15m averages) and peak rates |
 | `latency` | Percentile latencies (p50, p95, p99) for write, read, query, and flush operations (in milliseconds) |
 | `health` | Operational health signals: disk usage, KV fill ratio, dedup hit rate, last GC reclamation, write buffer depth |
+| `memory` | Process memory and AeorDB-owned cache diagnostics, including RSS, swap, thread/fd counts, index cache estimates, directory cache estimates, and cache entry counts |
 | `sync` | Replication status: active/failing peers, last sync timestamp, per-peer sync lag (only present when replication is active) |
 
 > **Note:** The previous `GET /system/stats` returned a flat object computed via O(n) iteration. The new response is structured into nested sections and is O(1) — no performance concerns polling at high frequency.
 
 `sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
+
+`memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort estimates intended for diagnosis and trend monitoring; they are not allocator-exact byte accounting.
 
 **Example:**
 
@@ -698,6 +735,27 @@ Prometheus-format metrics endpoint. Requires authentication.
 
 - **Content-Type:** `text/plain; version=0.0.4; charset=utf-8`
 - **Body:** Prometheus text exposition format
+
+Memory gauges are updated when `/system/metrics` is rendered and by the periodic metrics pulse:
+
+| Metric | Description |
+|--------|-------------|
+| `aeordb_process_rss_bytes` | Current process resident set size |
+| `aeordb_process_peak_rss_bytes` | Peak process resident set size observed by the OS |
+| `aeordb_process_virtual_bytes` | Process virtual address size |
+| `aeordb_process_data_bytes` | Process data/heap segment size where available |
+| `aeordb_process_swap_bytes` | Process swap usage where available |
+| `aeordb_process_thread_count` | Process thread count where available |
+| `aeordb_process_fd_count` | Open file descriptor count where available |
+| `aeordb_engine_memory_estimated_bytes` | Estimated AeorDB-owned cache memory tracked by diagnostics |
+| `aeordb_index_cache_estimated_bytes` | Estimated shared index cache memory |
+| `aeordb_index_cache_cached_indexes` | Cached field/strategy index count |
+| `aeordb_index_cache_dirty_indexes` | Cached indexes with unflushed mutations |
+| `aeordb_index_cache_pending_mutations` | Pending index mutations in the shared buffer |
+| `aeordb_index_cache_entries` | Indexed scalar entry count currently cached |
+| `aeordb_index_cache_values` | Raw indexed value count currently cached |
+| `aeordb_directory_cache_estimated_bytes` | Estimated directory content cache memory |
+| `aeordb_directory_cache_entries` | Directory content cache entry count |
 
 **Example:**
 

@@ -45,6 +45,8 @@ pub fn spawn_metrics_pulse(
       let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
       let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
       let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
+      let memory = engine.memory_stats();
+      crate::metrics::record_memory_metrics(&memory);
 
       // Get the db file size from disk metadata.
       let disk_total = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -108,6 +110,7 @@ pub fn spawn_metrics_pulse(
               "kv_fill_ratio": kv_fill_ratio,
               "disk_usage_percent": disk_health.usage_percent,
           },
+          "memory": memory,
       });
 
       let event = EngineEvent::new(EVENT_METRICS, "system", payload);

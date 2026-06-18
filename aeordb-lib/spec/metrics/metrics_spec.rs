@@ -135,6 +135,22 @@ async fn test_metrics_endpoint_returns_empty_when_no_activity() {
 
 #[tokio::test]
 #[serial]
+async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
+  let (app, jwt_manager, _, _, _temp_dir) = test_app_global();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder().uri("/system/metrics").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let output = body_string(response.into_body()).await;
+  assert!(output.contains("aeordb_process_rss_bytes"), "metrics should contain process RSS gauge, got:\n{}", output);
+  assert!(output.contains("aeordb_index_cache_estimated_bytes"), "metrics should contain index cache memory gauge, got:\n{}", output);
+}
+
+#[tokio::test]
+#[serial]
 async fn test_http_request_duration_recorded() {
   let (app, _, prometheus_handle, engine, _temp_dir) = test_app_global();
 

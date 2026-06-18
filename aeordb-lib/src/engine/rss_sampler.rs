@@ -35,6 +35,9 @@ pub struct ProcessMemory {
   pub peak_resident_kb: u64, // peak  RSS  (Linux VmHWM / macOS resident_size_max)
   pub virtual_kb: u64,       // virtual size (Linux VmSize / macOS virtual_size)
   pub data_kb: u64,          // heap+data segment (Linux VmData; 0 on macOS)
+  pub swap_kb: u64,          // Linux VmSwap; 0 when unavailable
+  pub thread_count: u64,     // Linux Threads; 0 when unavailable
+  pub fd_count: u64,         // open file descriptors; 0 when unavailable
 }
 
 pub fn read_process_memory() -> ProcessMemory {
@@ -74,7 +77,14 @@ fn read_linux_proc_status() -> ProcessMemory {
     if let Some(v) = parse(line, "VmData:") {
       out.data_kb = v;
     }
+    if let Some(v) = parse(line, "VmSwap:") {
+      out.swap_kb = v;
+    }
+    if let Some(v) = parse(line, "Threads:") {
+      out.thread_count = v;
+    }
   }
+  out.fd_count = read_fd_count();
   out
 }
 
@@ -123,7 +133,15 @@ fn read_macos_task_info() -> Option<ProcessMemory> {
     // macOS doesn't expose heap-vs-data the way Linux does via VmData.
     // Leave 0 here; the wide_rss.tsv consumer treats it as "unavailable".
     data_kb: 0,
+    swap_kb: 0,
+    thread_count: 0,
+    fd_count: read_fd_count(),
   })
+}
+
+fn read_fd_count() -> u64 {
+  let path = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+  std::fs::read_dir(path).map(|entries| entries.count() as u64).unwrap_or(0)
 }
 
 /// Returns true when `AEORDB_GC_MEM_PROFILE` is set (any non-empty value).

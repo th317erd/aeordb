@@ -186,9 +186,45 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
     "kv_fill_ratio": 0.72,
     "dedup_hit_rate": 0.33,
     "write_buffer_depth": 42
+  },
+  "memory": {
+    "process": {
+      "rss_bytes": 2147483648,
+      "peak_rss_bytes": 3221225472,
+      "virtual_bytes": 8589934592,
+      "data_bytes": 1610612736,
+      "swap_bytes": 0,
+      "thread_count": 32,
+      "fd_count": 128
+    },
+    "index_cache": {
+      "cached_indexes": 16,
+      "dirty_indexes": 4,
+      "deleted_indexes": 0,
+      "pending_mutations": 512,
+      "total_mutations": 102400,
+      "flushes": 7,
+      "flushed_indexes": 92,
+      "entries": 2500000,
+      "values": 350000,
+      "estimated_bytes": 734003200,
+      "top_cached_indexes": []
+    },
+    "directory_cache": {
+      "entries": 12000,
+      "estimated_bytes": 16777216
+    },
+    "caches": {
+      "permissions_entries": 128,
+      "index_config_entries": 16,
+      "grants_index_entries": 4
+    },
+    "estimated_engine_owned_bytes": 750780416
   }
 }
 ```
+
+`memory.process` is sampled from the operating system. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort diagnostic estimates, not allocator-exact accounting.
 
 **Payload sections:**
 

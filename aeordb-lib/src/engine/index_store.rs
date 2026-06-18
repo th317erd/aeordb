@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -66,13 +67,30 @@ impl IndexWriteBufferOptions {
   }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct IndexWriteBufferStats {
   pub mutations: usize,
   pub flushes: usize,
   pub flushed_indexes: usize,
   pub cached_indexes: usize,
+  pub dirty_indexes: usize,
+  pub deleted_indexes: usize,
   pub pending_mutations: usize,
+  pub entries: usize,
+  pub values: usize,
+  pub estimated_bytes: u64,
+  pub top_cached_indexes: Vec<CachedIndexMemoryStats>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CachedIndexMemoryStats {
+  pub parent: String,
+  pub field_name: String,
+  pub strategy: String,
+  pub entries: usize,
+  pub values: usize,
+  pub estimated_bytes: u64,
+  pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,12 +157,38 @@ impl SharedIndexWriteBuffer {
   }
 
   fn stats(&self) -> IndexWriteBufferStats {
+    let mut top_cached_indexes: Vec<CachedIndexMemoryStats> = self
+      .indexes
+      .iter()
+      .map(|(key, index)| CachedIndexMemoryStats {
+        parent: key.parent.clone(),
+        field_name: key.field_name.clone(),
+        strategy: key.strategy.clone(),
+        entries: index.entries.len(),
+        values: index.values.len(),
+        estimated_bytes: index.estimated_memory_bytes(),
+        dirty: self.dirty_keys.contains(key),
+      })
+      .collect();
+    top_cached_indexes.sort_by(|left, right| right.estimated_bytes.cmp(&left.estimated_bytes));
+    top_cached_indexes.truncate(8);
+
+    let entries = self.indexes.values().map(|index| index.entries.len()).sum();
+    let values = self.indexes.values().map(|index| index.values.len()).sum();
+    let estimated_bytes = self.indexes.values().map(|index| index.estimated_memory_bytes()).sum();
+
     IndexWriteBufferStats {
       mutations: self.total_mutations,
       flushes: self.flush_count,
       flushed_indexes: self.flushed_indexes,
       cached_indexes: self.indexes.len(),
+      dirty_indexes: self.dirty_keys.len(),
+      deleted_indexes: self.deleted_keys.len(),
       pending_mutations: self.pending_mutations,
+      entries,
+      values,
+      estimated_bytes,
+      top_cached_indexes,
     }
   }
 
@@ -400,12 +444,19 @@ impl<'a> IndexWriteBuffer<'a> {
   }
 
   pub fn stats(&self) -> IndexWriteBufferStats {
+    let manager_stats = self.manager.buffered_index_stats();
     IndexWriteBufferStats {
       mutations: self.total_mutations,
       flushes: self.flush_count,
       flushed_indexes: self.flushed_indexes,
-      cached_indexes: self.manager.buffered_index_stats().cached_indexes,
+      cached_indexes: manager_stats.cached_indexes,
+      dirty_indexes: manager_stats.dirty_indexes,
+      deleted_indexes: manager_stats.deleted_indexes,
       pending_mutations: self.pending_mutations,
+      entries: manager_stats.entries,
+      values: manager_stats.values,
+      estimated_bytes: manager_stats.estimated_bytes,
+      top_cached_indexes: manager_stats.top_cached_indexes,
     }
   }
 }
@@ -463,6 +514,19 @@ impl FieldIndex {
   /// Get the raw field value for a file hash (for fuzzy query recheck).
   pub fn get_value(&self, file_hash: &[u8]) -> Option<&[u8]> {
     self.values.get(file_hash).map(|v| v.as_slice())
+  }
+
+  pub fn estimated_memory_bytes(&self) -> u64 {
+    let entry_hash_len = self.entries.first().map(|entry| entry.file_hash.len()).unwrap_or(32);
+    let value_sample_bytes = self.values.iter().next().map(|(key, value)| key.len().saturating_add(value.len())).unwrap_or(64);
+    let entries_bytes = self.entries.capacity().saturating_mul(size_of::<IndexEntry>().saturating_add(entry_hash_len));
+    let values_bytes = self.values.len().saturating_mul(size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(value_sample_bytes));
+    let nvt_bytes = self.nvt.bucket_count().saturating_mul(size_of::<crate::engine::nvt::NVTBucket>());
+    size_of::<FieldIndex>()
+      .saturating_add(self.field_name.capacity())
+      .saturating_add(entries_bytes)
+      .saturating_add(values_bytes)
+      .saturating_add(nvt_bytes) as u64
   }
 
   /// Return true when this index stores one scalar for the complete raw field

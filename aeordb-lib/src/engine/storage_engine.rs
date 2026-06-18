@@ -338,6 +338,54 @@ pub struct DatabaseStats {
   pub hash_algorithm: String,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EngineMemoryStats {
+  pub process: ProcessMemoryStats,
+  pub index_cache: IndexCacheMemoryStats,
+  pub directory_cache: DirectoryCacheMemoryStats,
+  pub caches: EngineCacheMemoryStats,
+  pub estimated_engine_owned_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ProcessMemoryStats {
+  pub rss_bytes: u64,
+  pub peak_rss_bytes: u64,
+  pub virtual_bytes: u64,
+  pub data_bytes: u64,
+  pub swap_bytes: u64,
+  pub thread_count: u64,
+  pub fd_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct IndexCacheMemoryStats {
+  pub cached_indexes: usize,
+  pub dirty_indexes: usize,
+  pub deleted_indexes: usize,
+  pub pending_mutations: usize,
+  pub total_mutations: usize,
+  pub flushes: usize,
+  pub flushed_indexes: usize,
+  pub entries: usize,
+  pub values: usize,
+  pub estimated_bytes: u64,
+  pub top_cached_indexes: Vec<crate::engine::index_store::CachedIndexMemoryStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DirectoryCacheMemoryStats {
+  pub entries: usize,
+  pub estimated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EngineCacheMemoryStats {
+  pub permissions_entries: usize,
+  pub index_config_entries: usize,
+  pub grants_index_entries: usize,
+}
+
 /// Top-level storage engine combining an append-only WAL, a disk-backed KV index,
 /// and a void manager for reclaimable space tracking.
 ///
@@ -2130,6 +2178,60 @@ impl StorageEngine {
     let idx = self.index_config_cache.len();
     let dirc = self.dir_content_cache.read().map(|m| m.len()).unwrap_or(0);
     (perms, idx, dirc)
+  }
+
+  pub fn memory_stats(&self) -> EngineMemoryStats {
+    let process = crate::engine::rss_sampler::read_process_memory();
+    let index_stats = self.index_buffer_stats();
+    let directory_cache = self.directory_cache_memory_stats();
+    let caches = EngineCacheMemoryStats {
+      permissions_entries: self.permissions_cache.len(),
+      index_config_entries: self.index_config_cache.len(),
+      grants_index_entries: self.grants_index_cache.len(),
+    };
+    let index_cache = IndexCacheMemoryStats {
+      cached_indexes: index_stats.cached_indexes,
+      dirty_indexes: index_stats.dirty_indexes,
+      deleted_indexes: index_stats.deleted_indexes,
+      pending_mutations: index_stats.pending_mutations,
+      total_mutations: index_stats.mutations,
+      flushes: index_stats.flushes,
+      flushed_indexes: index_stats.flushed_indexes,
+      entries: index_stats.entries,
+      values: index_stats.values,
+      estimated_bytes: index_stats.estimated_bytes,
+      top_cached_indexes: index_stats.top_cached_indexes,
+    };
+    let estimated_engine_owned_bytes = index_cache.estimated_bytes.saturating_add(directory_cache.estimated_bytes);
+
+    EngineMemoryStats {
+      process: ProcessMemoryStats {
+        rss_bytes: process.resident_kb.saturating_mul(1024),
+        peak_rss_bytes: process.peak_resident_kb.saturating_mul(1024),
+        virtual_bytes: process.virtual_kb.saturating_mul(1024),
+        data_bytes: process.data_kb.saturating_mul(1024),
+        swap_bytes: process.swap_kb.saturating_mul(1024),
+        thread_count: process.thread_count,
+        fd_count: process.fd_count,
+      },
+      index_cache,
+      directory_cache,
+      caches,
+      estimated_engine_owned_bytes,
+    }
+  }
+
+  fn directory_cache_memory_stats(&self) -> DirectoryCacheMemoryStats {
+    let Ok(cache) = self.dir_content_cache.read() else {
+      return DirectoryCacheMemoryStats::default();
+    };
+    let entries = cache.len();
+    let sample_bytes = cache.iter().next().map(|(key, value)| key.len().saturating_add(value.len())).unwrap_or(64);
+    let per_entry = std::mem::size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(sample_bytes);
+    DirectoryCacheMemoryStats {
+      entries,
+      estimated_bytes: std::mem::size_of::<HashMap<Vec<u8>, Vec<u8>>>().saturating_add(entries.saturating_mul(per_entry)) as u64,
+    }
   }
 
   /// Best-effort O(1) metrics for the in-file KV block.

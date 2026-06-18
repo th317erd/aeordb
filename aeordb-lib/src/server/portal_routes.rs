@@ -294,6 +294,7 @@ pub struct EnhancedStats {
   pub sizes: StatsSizes,
   pub throughput: StatsThroughput,
   pub health: StatsHealth,
+  pub memory: crate::engine::storage_engine::EngineMemoryStats,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -428,6 +429,7 @@ fn get_stats_inner(
 
   // Disk health: single statvfs call
   let disk_health = check_disk(db_path);
+  let memory = state.engine.memory_stats();
 
   // Dedup hit rate: chunks_deduped / (chunks + chunks_deduped)
   let total_chunk_operations = counters.chunks + counters.chunks_deduped_total;
@@ -476,6 +478,7 @@ fn get_stats_inner(
       dedup_hit_rate,
       write_buffer_depth: counters.write_buffer_depth,
     },
+    memory,
   };
 
   Json(stats)

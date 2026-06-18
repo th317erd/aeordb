@@ -50,6 +50,24 @@ pub const QUERY_DURATION: &str = "aeordb_query_duration_seconds";
 // KV Store
 pub const KV_FLUSH_DURATION: &str = "aeordb_kv_flush_duration_seconds";
 
+// Memory
+pub const PROCESS_RSS_BYTES: &str = "aeordb_process_rss_bytes";
+pub const PROCESS_PEAK_RSS_BYTES: &str = "aeordb_process_peak_rss_bytes";
+pub const PROCESS_VIRTUAL_BYTES: &str = "aeordb_process_virtual_bytes";
+pub const PROCESS_DATA_BYTES: &str = "aeordb_process_data_bytes";
+pub const PROCESS_SWAP_BYTES: &str = "aeordb_process_swap_bytes";
+pub const PROCESS_THREAD_COUNT: &str = "aeordb_process_thread_count";
+pub const PROCESS_FD_COUNT: &str = "aeordb_process_fd_count";
+pub const ENGINE_MEMORY_ESTIMATED_BYTES: &str = "aeordb_engine_memory_estimated_bytes";
+pub const INDEX_CACHE_ESTIMATED_BYTES: &str = "aeordb_index_cache_estimated_bytes";
+pub const INDEX_CACHE_CACHED_INDEXES: &str = "aeordb_index_cache_cached_indexes";
+pub const INDEX_CACHE_DIRTY_INDEXES: &str = "aeordb_index_cache_dirty_indexes";
+pub const INDEX_CACHE_PENDING_MUTATIONS: &str = "aeordb_index_cache_pending_mutations";
+pub const INDEX_CACHE_ENTRIES: &str = "aeordb_index_cache_entries";
+pub const INDEX_CACHE_VALUES: &str = "aeordb_index_cache_values";
+pub const DIRECTORY_CACHE_ESTIMATED_BYTES: &str = "aeordb_directory_cache_estimated_bytes";
+pub const DIRECTORY_CACHE_ENTRIES: &str = "aeordb_directory_cache_entries";
+
 // Versions
 pub const VERSION_SNAPSHOTS_TOTAL: &str = "aeordb_version_snapshots_total";
 pub const VERSION_RESTORES_TOTAL: &str = "aeordb_version_restores_total";

@@ -31,6 +31,17 @@ const SIZE_DEFINITIONS = [
   { key: 'void_space',    label: 'Reusable Void', format: formatBytes },
 ];
 
+const MEMORY_DEFINITIONS = [
+  { path: ['process', 'rss_bytes'],               label: 'RSS',                  format: formatBytes },
+  { path: ['process', 'peak_rss_bytes'],          label: 'Peak RSS',             format: formatBytes },
+  { path: ['process', 'data_bytes'],              label: 'Data / Heap',          format: formatBytes },
+  { path: ['process', 'swap_bytes'],              label: 'Swap',                 format: formatBytes },
+  { path: ['index_cache', 'estimated_bytes'],     label: 'Index Cache',          format: formatBytes },
+  { path: ['directory_cache', 'estimated_bytes'], label: 'Directory Cache',      format: formatBytes },
+  { path: ['index_cache', 'cached_indexes'],      label: 'Cached Indexes',       format: formatNumber },
+  { path: ['index_cache', 'pending_mutations'],   label: 'Pending Index Writes', format: formatNumber },
+];
+
 const DARK_THEME = {
   title:   { color: '#e6edf3' },
   grid:    { color: '#30363d' },
@@ -97,6 +108,7 @@ class AeorDashboard extends HTMLElement {
           this.updateStatCards(data);
           this.updateThroughput(data.throughput);
           this.updateHealthIndicators(data.health);
+          this.updateMemory(data.memory);
           this.updateStorageChart(data);
           this.recordActivityPoint(data);
           this.updateActivityChart();
@@ -210,6 +222,32 @@ class AeorDashboard extends HTMLElement {
           <div class="stat-value" id="health-write-buffer-depth">&mdash;</div>
         </div>
       </div>
+      <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Memory</div>
+      <div class="stats-grid" id="stats-memory">
+        ${MEMORY_DEFINITIONS.map((definition, index) => `
+          <div class="stat-card">
+            <div class="stat-label">${definition.label}</div>
+            <div class="stat-value" id="stat-memory-${index}">&mdash;</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="chart-card" id="memory-index-card" style="margin-bottom:1.75rem;display:none;">
+        <div class="chart-title">Largest Cached Indexes</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Index</th>
+                <th>Entries</th>
+                <th>Values</th>
+                <th>Memory</th>
+                <th>Dirty</th>
+              </tr>
+            </thead>
+            <tbody id="memory-index-rows"></tbody>
+          </table>
+        </div>
+      </div>
       <div class="charts-row">
         <div class="chart-card">
           <div class="chart-title">Activity (ops/sec)</div>
@@ -246,6 +284,7 @@ class AeorDashboard extends HTMLElement {
       this.updateStatCards(data);
       this.updateThroughput(data.throughput);
       this.updateHealthIndicators(data.health);
+      this.updateMemory(data.memory);
       this.updateStorageChart(data);
       this.recordActivityPoint(data);
       this.updateActivityChart();
@@ -386,6 +425,50 @@ class AeorDashboard extends HTMLElement {
     const bufferElement = this.querySelector('#health-write-buffer-depth');
     if (bufferElement)
       bufferElement.textContent = (health.write_buffer_depth != null) ? formatNumber(health.write_buffer_depth) : '\u2014';
+  }
+
+  updateMemory(memory) {
+    if (!memory)
+      return;
+
+    for (let index = 0; index < MEMORY_DEFINITIONS.length; index++) {
+      const definition = MEMORY_DEFINITIONS[index];
+      const element = this.querySelector(`#stat-memory-${index}`);
+      if (!element)
+        continue;
+
+      let value = memory;
+      for (const part of definition.path)
+        value = value ? value[part] : null;
+
+      element.textContent = (value != null) ? definition.format(value) : '\u2014';
+    }
+
+    const rows = this.querySelector('#memory-index-rows');
+    const card = this.querySelector('#memory-index-card');
+    if (!rows || !card)
+      return;
+
+    const indexes = memory.index_cache?.top_cached_indexes || [];
+    if (!indexes.length) {
+      rows.innerHTML = '';
+      card.style.display = 'none';
+      return;
+    }
+
+    rows.innerHTML = indexes.map((index) => {
+      const name = `${index.parent || '/'} / ${index.field_name || '?'} / ${index.strategy || '?'}`;
+      return `
+        <tr>
+          <td style="font-family:var(--font-mono);font-size:0.78rem;">${escapeHtml(name)}</td>
+          <td>${formatNumber(index.entries || 0)}</td>
+          <td>${formatNumber(index.values || 0)}</td>
+          <td>${formatBytes(index.estimated_bytes || 0)}</td>
+          <td>${index.dirty ? 'yes' : 'no'}</td>
+        </tr>
+      `;
+    }).join('');
+    card.style.display = '';
   }
 
   updateStorageChart(data) {

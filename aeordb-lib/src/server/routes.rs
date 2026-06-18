@@ -944,6 +944,8 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
 
 /// GET /admin/metrics -- render Prometheus metrics.
 pub async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+  let memory = state.engine.memory_stats();
+  crate::metrics::record_memory_metrics(&memory);
   let output = state.prometheus_handle.render();
   Response::builder()
     .status(StatusCode::OK)

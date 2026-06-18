@@ -203,7 +203,7 @@ async fn test_stats_has_enhanced_structure() {
   let json = body_json(response.into_body()).await;
 
   // Top-level sections must be present
-  for section in &["identity", "counts", "sizes", "throughput", "health"] {
+  for section in &["identity", "counts", "sizes", "throughput", "health", "memory"] {
     assert!(json.get(section).is_some(), "Expected top-level section '{}' to be present in stats response", section,);
   }
 
@@ -246,6 +246,36 @@ async fn test_stats_has_enhanced_structure() {
   assert!(health.get("kv_fill_ratio").is_some(), "health.kv_fill_ratio missing");
   assert!(health.get("dedup_hit_rate").is_some(), "health.dedup_hit_rate missing");
   assert!(health.get("write_buffer_depth").is_some(), "health.write_buffer_depth missing");
+
+  let memory = &json["memory"];
+  for section in &["process", "index_cache", "directory_cache", "caches"] {
+    assert!(memory.get(section).is_some(), "memory.{} missing", section);
+  }
+
+  let process = &memory["process"];
+  for field in &["rss_bytes", "peak_rss_bytes", "virtual_bytes", "data_bytes", "swap_bytes", "thread_count", "fd_count"] {
+    assert!(process.get(field).is_some(), "memory.process.{} missing", field);
+  }
+
+  let index_cache = &memory["index_cache"];
+  for field in &[
+    "cached_indexes",
+    "dirty_indexes",
+    "deleted_indexes",
+    "pending_mutations",
+    "total_mutations",
+    "flushes",
+    "flushed_indexes",
+    "entries",
+    "values",
+    "estimated_bytes",
+    "top_cached_indexes",
+  ] {
+    assert!(index_cache.get(field).is_some(), "memory.index_cache.{} missing", field);
+  }
+
+  assert!(memory["directory_cache"].get("entries").is_some(), "memory.directory_cache.entries missing");
+  assert!(memory["directory_cache"].get("estimated_bytes").is_some(), "memory.directory_cache.estimated_bytes missing");
 }
 
 #[tokio::test]
