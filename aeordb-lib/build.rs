@@ -58,9 +58,12 @@ fn main() {
     ensure_link(&manifest_dir, &portal_dir, spec);
   }
 
+  generate_docs_asset_table(&manifest_dir);
+
   // build.rs is idempotent and cheap; don't ask cargo to rerun it on
   // every source change. It'll rerun on cargo clean / fresh checkout
-  // anyway, and that's when it actually has work to do.
+  // anyway, and that's when it actually has work to do. The docs asset
+  // generator below registers the docs source paths separately.
   println!("cargo:rerun-if-changed=build.rs");
 }
 
@@ -180,4 +183,148 @@ fn create_directory_link(link_path: &Path, target: &Path, name: &str) {
   if !status.success() {
     panic!("mklink /J failed for `{}` (target: {})", name, target.display(),);
   }
+}
+
+fn generate_docs_asset_table(manifest_dir: &Path) {
+  let workspace_root = manifest_dir.parent().expect("aeordb-lib has a workspace parent");
+  let docs_dir = workspace_root.join("docs");
+  let docs_src_dir = docs_dir.join("src");
+  let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+  let docs_book_dir = out_dir.join("docs-book");
+  let generated = out_dir.join("docs_assets.rs");
+
+  println!("cargo:rerun-if-changed={}", docs_dir.join("book.toml").display());
+  register_rerun_if_changed_recursive(&docs_src_dir);
+
+  if docs_dir.join("book.toml").is_file() {
+    let _ = std::fs::remove_dir_all(&docs_book_dir);
+    match std::process::Command::new("mdbook").arg("build").arg(&docs_dir).arg("--dest-dir").arg(&docs_book_dir).status() {
+      Ok(status) if status.success() => {}
+      Ok(status) => {
+        println!("cargo:warning=mdbook build failed with status {status}; embedded /docs/ will use the fallback page");
+      }
+      Err(error) => {
+        println!("cargo:warning=mdbook not available ({error}); embedded /docs/ will use the fallback page");
+      }
+    }
+  }
+
+  let mut assets = Vec::new();
+  if docs_book_dir.is_dir() {
+    collect_docs_book_assets(&docs_book_dir, &docs_book_dir, &mut assets);
+  }
+  let docs_built_with_mdbook = assets.iter().any(|(path, _, _)| path == "index.html");
+
+  let skill_src = docs_src_dir.join("SKILL.md");
+  if skill_src.is_file() {
+    assets.push(("SKILL.md".to_string(), skill_src, "text/markdown; charset=utf-8"));
+  }
+
+  if !docs_built_with_mdbook {
+    let fallback_dir = out_dir.join("docs-fallback");
+    std::fs::create_dir_all(&fallback_dir).expect("create docs fallback output directory");
+    let fallback_index = fallback_dir.join("index.html");
+    std::fs::write(
+      &fallback_index,
+      "<!doctype html><meta charset=\"utf-8\"><title>AeorDB Documentation</title><h1>AeorDB Documentation</h1><p>The mdBook documentation was not available when this binary was built.</p>",
+    )
+    .expect("write docs fallback index");
+    assets.push(("index.html".to_string(), fallback_index, "text/html; charset=utf-8"));
+  }
+
+  assets.sort_by(|a, b| a.0.cmp(&b.0));
+
+  let mut output = String::new();
+  output.push_str("#[derive(Debug, Clone, Copy)]\n");
+  output.push_str("pub struct EmbeddedDocAsset {\n");
+  output.push_str("  pub path: &'static str,\n");
+  output.push_str("  pub bytes: &'static [u8],\n");
+  output.push_str("  pub content_type: &'static str,\n");
+  output.push_str("}\n\n");
+  output.push_str("pub static DOC_ASSETS: &[EmbeddedDocAsset] = &[\n");
+
+  for (url_path, file_path, content_type) in assets {
+    let file_path_literal = rust_string_literal(&file_path.to_string_lossy());
+    output.push_str("  EmbeddedDocAsset { path: ");
+    output.push_str(&rust_string_literal(&url_path));
+    output.push_str(", bytes: include_bytes!(");
+    output.push_str(&file_path_literal);
+    output.push_str("), content_type: ");
+    output.push_str(&rust_string_literal(content_type));
+    output.push_str(" },\n");
+  }
+
+  output.push_str("];\n\n");
+  output.push_str("pub const DOCS_BUILT_WITH_MDBOOK: bool = ");
+  output.push_str(if docs_built_with_mdbook { "true" } else { "false" });
+  output.push_str(";\n");
+  std::fs::write(generated, output).expect("write generated docs asset table");
+}
+
+fn register_rerun_if_changed_recursive(path: &Path) {
+  if !path.exists() {
+    return;
+  }
+  println!("cargo:rerun-if-changed={}", path.display());
+  if path.is_dir() {
+    if let Ok(entries) = std::fs::read_dir(path) {
+      for entry in entries.flatten() {
+        register_rerun_if_changed_recursive(&entry.path());
+      }
+    }
+  }
+}
+
+fn collect_docs_book_assets(base: &Path, current: &Path, assets: &mut Vec<(String, PathBuf, &'static str)>) {
+  let entries = match std::fs::read_dir(current) {
+    Ok(entries) => entries,
+    Err(_) => return,
+  };
+
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.is_dir() {
+      collect_docs_book_assets(base, &path, assets);
+      continue;
+    }
+    if !path.is_file() {
+      continue;
+    }
+
+    let Ok(relative) = path.strip_prefix(base) else {
+      continue;
+    };
+    let url_path = relative.components().map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let content_type = docs_content_type(&url_path);
+    assets.push((url_path, path, content_type));
+  }
+}
+
+fn docs_content_type(path: &str) -> &'static str {
+  let lower = path.to_ascii_lowercase();
+  if lower.ends_with(".html") {
+    "text/html; charset=utf-8"
+  } else if lower.ends_with(".css") {
+    "text/css; charset=utf-8"
+  } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
+    "application/javascript; charset=utf-8"
+  } else if lower.ends_with(".json") {
+    "application/json; charset=utf-8"
+  } else if lower.ends_with(".svg") {
+    "image/svg+xml"
+  } else if lower.ends_with(".png") {
+    "image/png"
+  } else if lower.ends_with(".woff2") {
+    "font/woff2"
+  } else if lower.ends_with(".txt") {
+    "text/plain; charset=utf-8"
+  } else if lower.ends_with(".md") {
+    "text/markdown; charset=utf-8"
+  } else {
+    "application/octet-stream"
+  }
+}
+
+fn rust_string_literal(value: &str) -> String {
+  format!("{value:?}")
 }

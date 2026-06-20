@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](./introduction.md)
+[Bot Quickstart](./SKILL.md)
 
 # Getting Started
 
@@ -29,6 +30,7 @@
 - [Events & Webhooks](./api/events.md)
 - [Authentication](./api/authentication.md)
 - [CORS](./api/cors.md)
+- [Documentation](./api/documentation.md)
 - [Library API](./api/library.md)
 
 # Plugin Development

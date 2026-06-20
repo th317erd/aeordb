@@ -103,6 +103,7 @@ class AeorLogin extends HTMLElement {
             </div>
             <button class="button button-primary" type="submit" style="width:100%">Login</button>
           </form>
+          <div class="login-docs-link">Looking for the documentation? It can be found here <a href="./docs/">./docs/</a></div>
         </div>
       </div>
     `;

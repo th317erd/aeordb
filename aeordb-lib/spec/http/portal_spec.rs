@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::StorageEngine;
-use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
+use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests, docs_routes};
 
 /// Create a fresh in-memory app with engine support.
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
@@ -84,6 +84,7 @@ async fn test_portal_index_returns_html() {
   let bytes = body_bytes(response.into_body()).await;
   let body_str = String::from_utf8_lossy(&bytes);
   assert!(body_str.contains("AeorDB Portal"), "Expected body to contain 'AeorDB Portal', got: {}", &body_str[..body_str.len().min(200)],);
+  assert!(body_str.contains("href=\"./docs/\""), "Portal root should advertise the public documentation route");
 }
 
 #[tokio::test]
@@ -157,6 +158,75 @@ async fn test_portal_assets_require_no_auth() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK, "Portal should be accessible without authentication",);
+}
+
+#[tokio::test]
+async fn test_docs_redirects_to_trailing_slash() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder().method("GET").uri("/docs").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+  assert_eq!(response.headers().get("location").unwrap(), "/docs/");
+}
+
+#[tokio::test]
+async fn test_docs_index_returns_mdbook_html_without_auth() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder().method("GET").uri("/docs/").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
+  assert_eq!(content_type, "text/html; charset=utf-8");
+
+  let bytes = body_bytes(response.into_body()).await;
+  let body_str = String::from_utf8_lossy(&bytes);
+  assert!(body_str.contains("AeorDB Documentation"), "Expected mdBook documentation HTML");
+  assert!(body_str.contains("mdBook") || body_str.contains("mdbook"), "Expected generated mdBook content");
+}
+
+#[tokio::test]
+async fn test_docs_nested_asset_returns_expected_content_type() {
+  if !docs_routes::docs_built_with_mdbook() {
+    return;
+  }
+
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder().method("GET").uri("/docs/api/files.html").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
+  assert_eq!(content_type, "text/html; charset=utf-8");
+
+  let bytes = body_bytes(response.into_body()).await;
+  let body_str = String::from_utf8_lossy(&bytes);
+  assert!(body_str.contains("Files") || body_str.contains("Directories"), "Expected files API documentation");
+}
+
+#[tokio::test]
+async fn test_docs_skill_markdown_returns_bot_quickstart() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder().method("GET").uri("/docs/SKILL.md").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
+  assert_eq!(content_type, "text/markdown; charset=utf-8");
+
+  let bytes = body_bytes(response.into_body()).await;
+  let body_str = String::from_utf8_lossy(&bytes);
+  assert!(body_str.contains("# Bot Quickstart"));
+  assert!(body_str.contains("GET /system/health"));
+  assert!(body_str.contains("POST /files/search"));
 }
 
 // ---------------------------------------------------------------------------

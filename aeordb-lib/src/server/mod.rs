@@ -6,6 +6,7 @@ pub mod cache_invalidation;
 pub mod cluster_routes;
 pub mod conflict_routes;
 pub mod cors;
+pub mod docs_routes;
 pub mod download_routes;
 pub mod engine_routes;
 pub mod fetch_routes;
@@ -672,6 +673,11 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/settings.mjs", get(portal_routes::portal_asset))
     .route("/shared/{*path}", get(portal_routes::portal_shared_asset))
     .route("/aeor/{*path}", get(portal_routes::portal_aeor_asset))
+    // Public mdBook documentation. This is intentionally unauthenticated so
+    // humans and agents can discover how to use an AeorDB endpoint.
+    .route("/docs", get(docs_routes::docs_redirect))
+    .route("/docs/", get(docs_routes::docs_index))
+    .route("/docs/{*path}", get(docs_routes::docs_asset))
     // Sync routes (JWT auth, verified inside handler)
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
