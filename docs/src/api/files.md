@@ -941,7 +941,7 @@ curl -X DELETE http://localhost:6830/files/share-links/a1b2c3d4-... \
 
 ### GET /files/shared-with-me
 
-List paths that have been shared with the current user. Scans all `.permissions` files to find paths where the calling user has group-level access. This is used by the portal to discover entry points when the user has no root-level permissions.
+List paths that have been shared with the current user. AeorDB resolves the caller's group memberships against the cached grants index, returning paths where those groups have access. This is used by the portal to discover entry points when the user has no root-level permissions.
 
 **Auth:** Requires a user-bound token. Share tokens receive 403. Root users receive an empty list (they already have access to everything).
 

@@ -447,9 +447,9 @@ pub async fn unshare(
 // GET /files/shared-with-me — find all paths where the user has permissions
 // ---------------------------------------------------------------------------
 
-/// Scan all `.permissions` files and return paths where the calling user
-/// has at least one matching group. Used by the file browser to discover
-/// accessible entry points for non-root users.
+/// Return paths where the calling user has at least one matching group.
+/// Used by the file browser to discover accessible entry points for
+/// non-root users.
 pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   // Share tokens don't use .permissions — they have scoped key rules
   if let Err(response) = reject_share_key(&claims, "Not available for share links") {
@@ -472,82 +472,58 @@ pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Ex
     Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
   };
 
-  // Scan .permissions files with depth + result guardrails to avoid
-  // unbounded traversal on huge databases.
-  const MAX_SCAN_DEPTH: i32 = 10;
-  const MAX_PERM_FILES: usize = 1_000;
+  if user_groups.is_empty() {
+    return Json(serde_json::json!({ "paths": [] })).into_response();
+  }
 
   let ops = DirectoryOps::new(&state.engine);
-  let perm_files = match crate::engine::directory_listing::list_directory_recursive(
-    &state.engine,
-    "/",
-    MAX_SCAN_DEPTH,
-    Some(".aeordb-permissions"),
-    Some(MAX_PERM_FILES),
-  ) {
-    Ok(entries) => entries,
+  let grants_index = match state.engine.grants_index_cache.get(&(), &state.engine) {
+    Ok(index) => index,
     Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
   };
 
   let mut shared_paths: Vec<serde_json::Value> = Vec::new();
 
-  for entry in &perm_files {
-    let data = match ops.read_file_buffered(&entry.path) {
-      Ok(d) => d,
-      Err(_) => continue,
-    };
-    let perms = match PathPermissions::deserialize(&data) {
-      Ok(p) => p,
-      Err(_) => continue,
-    };
-
-    // Extract the directory path once (strip /.aeordb-permissions suffix)
-    let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
-      entry.path[..entry.path.len() - "/.aeordb-permissions".len()].to_string()
-    } else if entry.path == "/.aeordb-permissions" {
-      "/".to_string()
-    } else {
+  // Collect EVERY grant matching the user's groups — one user may have
+  // multiple shares in the same directory (e.g. share-file-A and
+  // share-file-B with different path_patterns).
+  for group in &user_groups {
+    let Some(records) = grants_index.by_group.get(group) else {
       continue;
     };
-
-    // Collect EVERY link in this .permissions file that matches the user's
-    // groups — one user may have multiple shares in the same directory
-    // (e.g. share-file-A and share-file-B with different path_patterns).
-    for link in &perms.links {
-      if user_groups.contains(&link.group) {
-        // For file-pattern shares, look up the file's metadata so the
-        // client can render a real preview/listing entry instead of a
-        // placeholder.
-        let metadata = if let Some(ref pattern) = link.path_pattern {
-          let file_path = if dir_path == "/" { format!("/{}", pattern) } else { format!("{}/{}", dir_path, pattern) };
-          ops.get_metadata(&file_path).ok().flatten().map(|fr| {
-            serde_json::json!({
-                "size": fr.total_size,
-                "created_at": fr.created_at,
-                "updated_at": fr.updated_at,
-                "content_type": fr.content_type,
-            })
+    for grant in records {
+      // For file-pattern shares, look up the file's metadata so the
+      // client can render a real preview/listing entry instead of a
+      // placeholder.
+      let metadata = if let Some(ref pattern) = grant.path_pattern {
+        let file_path = if grant.dir_path == "/" { format!("/{}", pattern) } else { format!("{}/{}", grant.dir_path, pattern) };
+        ops.get_metadata(&file_path).ok().flatten().map(|fr| {
+          serde_json::json!({
+              "size": fr.total_size,
+              "created_at": fr.created_at,
+              "updated_at": fr.updated_at,
+              "content_type": fr.content_type,
           })
-        } else {
-          None
-        };
+        })
+      } else {
+        None
+      };
 
-        let mut entry_value = serde_json::json!({
-            "path": dir_path,
-            "permissions": link.allow,
-            "path_pattern": link.path_pattern,
-        });
-        if let Some(meta) = metadata {
-          if let Some(obj) = entry_value.as_object_mut() {
-            if let Some(meta_obj) = meta.as_object() {
-              for (k, v) in meta_obj {
-                obj.insert(k.clone(), v.clone());
-              }
+      let mut entry_value = serde_json::json!({
+          "path": grant.dir_path.clone(),
+          "permissions": grant.allow.clone(),
+          "path_pattern": grant.path_pattern.clone(),
+      });
+      if let Some(meta) = metadata {
+        if let Some(obj) = entry_value.as_object_mut() {
+          if let Some(meta_obj) = meta.as_object() {
+            for (k, v) in meta_obj {
+              obj.insert(k.clone(), v.clone());
             }
           }
         }
-        shared_paths.push(entry_value);
       }
+      shared_paths.push(entry_value);
     }
   }
 

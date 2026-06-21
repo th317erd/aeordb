@@ -1042,6 +1042,37 @@ async fn grants_index_invalidates_after_share_change() {
 }
 
 #[tokio::test]
+async fn shared_with_me_returns_user_workspace_grant() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth_root = root_bearer_token(&jwt_manager);
+
+  let upload = Request::builder()
+    .method("PUT")
+    .uri("/files/workspaces/wyatt/readme.txt")
+    .header("content-type", "text/plain")
+    .header("authorization", &auth_root)
+    .body(Body::from("workspace"))
+    .unwrap();
+  let resp = app.oneshot(upload).await.unwrap();
+  assert_eq!(resp.status(), StatusCode::CREATED);
+
+  let user_id = create_test_user(&engine, "wyatt");
+  share_directory_with_user(&engine, "/workspaces/wyatt", &user_id, "crudlify", None);
+
+  let auth = user_bearer_token(&jwt_manager, &user_id);
+  let req = Request::builder().method("GET").uri("/files/shared-with-me").header("authorization", &auth).body(Body::empty()).unwrap();
+  let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
+  assert_eq!(resp.status(), StatusCode::OK);
+
+  let json = body_json(resp.into_body()).await;
+  let paths = json["paths"].as_array().expect("paths array");
+  assert_eq!(paths.len(), 1);
+  assert_eq!(paths[0]["path"], "/workspaces/wyatt");
+  assert_eq!(paths[0]["permissions"], "crudlify");
+  assert!(paths[0]["path_pattern"].is_null());
+}
+
+#[tokio::test]
 async fn root_user_listing_is_unaffected_by_grants() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth_root = root_bearer_token(&jwt_manager);
