@@ -9,6 +9,7 @@ import {
   formatPercent,
   formatUptime,
 } from '/shared/utils.js';
+import { dashboardMetrics } from '/metrics.mjs';
 
 const COUNT_DEFINITIONS = [
   // `revisionKey`: when set, the card shows a small subtitle with the
@@ -56,8 +57,7 @@ const CHART_COLORS = ['#f0883e', '#3fb950', '#d2a8ff', '#58a6ff'];
 class AeorDashboard extends HTMLElement {
   constructor() {
     super();
-    this._interval        = null;
-    this._eventSource     = null;
+    this._unsubscribe     = null;
     this._activityHistory = [];
     this._storageChart    = null;
     this._activityChart   = null;
@@ -66,74 +66,16 @@ class AeorDashboard extends HTMLElement {
 
   connectedCallback() {
     this.render();
-    this.fetchStats(); // initial load
-    this.connectSSE();
+    if (this._unsubscribe)
+      this._unsubscribe();
+    this._unsubscribe = dashboardMetrics.subscribe((snapshot) => this.applyMetricsSnapshot(snapshot));
+    dashboardMetrics.start({ allowNoAuth: window.aeordbAuthDisabled === true });
   }
 
   disconnectedCallback() {
-    if (this._eventSource) {
-      this._eventSource.close();
-      this._eventSource = null;
-    }
-    if (this._interval) {
-      clearInterval(this._interval);
-      this._interval = null;
-    }
-  }
-
-  connectSSE() {
-    // Build SSE URL — subscribe to metrics events
-    let url = '/system/events?events=metrics';
-    if (window.AUTH && window.AUTH.token) {
-      url += '&token=' + encodeURIComponent(window.AUTH.token);
-    }
-
-    // EventSource doesn't support Authorization headers natively.
-    // For --auth=false mode, no token is needed. For auth mode,
-    // we'd need a polyfill or query-param token. For now, direct connect.
-    try {
-      this._eventSource = new EventSource(url);
-
-      this._eventSource.addEventListener('metrics', (event) => {
-        try {
-          const envelope = JSON.parse(event.data);
-          // SSE delivers the full EngineEvent envelope (event_id, event_type,
-          // payload, ...). The stats body is in `payload`. Tolerate the older
-          // unwrapped shape too in case a peer or proxy strips the envelope.
-          const data = envelope && envelope.payload ? envelope.payload : envelope;
-          // Identity is static; the pulse omits it. Keep the last seen one
-          // (from the initial /system/stats fetch) so the bar doesn't blank.
-          this._stats = { ...(this._stats || {}), ...data };
-          this.updateIdentityBar(this._stats.identity);
-          this.updateStatCards(data);
-          this.updateThroughput(data.throughput);
-          this.updateHealthIndicators(data.health);
-          this.updateMemory(data.memory);
-          this.updateStorageChart(data);
-          this.recordActivityPoint(data);
-          this.updateActivityChart();
-
-          const errorContainer = this.querySelector('#dashboard-error');
-          if (errorContainer)
-            errorContainer.innerHTML = '';
-        } catch (_) {
-          // malformed event, skip
-        }
-      });
-
-      this._eventSource.onerror = () => {
-        // SSE failed — fall back to polling
-        if (this._eventSource) {
-          this._eventSource.close();
-          this._eventSource = null;
-        }
-        if (!this._interval) {
-          this._interval = setInterval(() => this.fetchStats(), 15000);
-        }
-      };
-    } catch (_) {
-      // EventSource not supported — fall back to polling
-      this._interval = setInterval(() => this.fetchStats(), 15000);
+    if (this._unsubscribe) {
+      this._unsubscribe();
+      this._unsubscribe = null;
     }
   }
 
@@ -270,32 +212,28 @@ class AeorDashboard extends HTMLElement {
     `;
   }
 
-  async fetchStats() {
-    try {
-      const response = await window.api('/system/stats');
+  applyMetricsSnapshot(snapshot) {
+    this._activityHistory = snapshot.history || [];
 
-      if (!response.ok)
-        throw new Error(`Stats request failed (${response.status})`);
-
-      const data = await response.json();
-      this._stats = data;
-
-      this.updateIdentityBar(data.identity);
-      this.updateStatCards(data);
-      this.updateThroughput(data.throughput);
-      this.updateHealthIndicators(data.health);
-      this.updateMemory(data.memory);
-      this.updateStorageChart(data);
-      this.recordActivityPoint(data);
+    if (snapshot.stats) {
+      this._stats = snapshot.stats;
+      this.updateIdentityBar(this._stats.identity);
+      this.updateStatCards(this._stats);
+      this.updateThroughput(this._stats.throughput);
+      this.updateHealthIndicators(this._stats.health);
+      this.updateMemory(this._stats.memory);
+      this.updateStorageChart(this._stats);
       this.updateActivityChart();
+    }
 
-      const errorContainer = this.querySelector('#dashboard-error');
-      if (errorContainer)
-        errorContainer.innerHTML = '';
-    } catch (error) {
-      const errorContainer = this.querySelector('#dashboard-error');
-      if (errorContainer)
-        errorContainer.innerHTML = `<div class="alert alert-error">Failed to load stats: ${escapeHtml(error.message)}</div>`;
+    const errorContainer = this.querySelector('#dashboard-error');
+    if (!errorContainer)
+      return;
+
+    if (snapshot.error && !snapshot.stats) {
+      errorContainer.innerHTML = `<div class="alert alert-error">Failed to load stats: ${escapeHtml(snapshot.error.message)}</div>`;
+    } else {
+      errorContainer.innerHTML = '';
     }
   }
 
@@ -515,25 +453,6 @@ class AeorDashboard extends HTMLElement {
 
     html += '</div>';
     container.innerHTML = html;
-  }
-
-  recordActivityPoint(data) {
-    const writesPerSecond = data.throughput?.writes_per_sec?.['1m'] || 0;
-    const readsPerSecond = data.throughput?.reads_per_sec?.['1m'] || 0;
-    const bytesWrittenPerSecond = data.throughput?.bytes_written_per_sec?.['1m'] || 0;
-    const bytesReadPerSecond = data.throughput?.bytes_read_per_sec?.['1m'] || 0;
-
-    this._activityHistory.push({
-      timestamp: Date.now(),
-      writesPerSecond,
-      readsPerSecond,
-      bytesWrittenPerSecond,
-      bytesReadPerSecond,
-    });
-
-    // Keep rolling window of 60 data points (15 minutes at 15s metrics intervals)
-    if (this._activityHistory.length > 60)
-      this._activityHistory.shift();
   }
 
   updateActivityChart() {

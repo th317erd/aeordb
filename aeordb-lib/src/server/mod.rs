@@ -665,6 +665,7 @@ fn create_app_with_all_and_task_queue_inner(
     // Portal (embedded dashboard UI)
     .route("/", get(portal_routes::portal_index))
     .route("/app.mjs", get(portal_routes::portal_asset))
+    .route("/metrics.mjs", get(portal_routes::portal_asset))
     .route("/dashboard.mjs", get(portal_routes::portal_asset))
     .route("/users.mjs", get(portal_routes::portal_asset))
     .route("/groups.mjs", get(portal_routes::portal_asset))

@@ -1,6 +1,7 @@
 'use strict';
 
 import { escapeHtml } from '/shared/utils.js';
+import { dashboardMetrics } from '/metrics.mjs';
 import { showToast } from '/aeor/components/aeor-toast.js';
 import '/shared/components/aeor-crudlify.js';
 
@@ -61,6 +62,7 @@ async function api(path, options = {}) {
 
   if (response.status === 401 && !AUTH._isShareSession) {
     AUTH.clear();
+    dashboardMetrics.stop();
     localStorage.removeItem('aeordb-file-browser');
     window.location.replace('/');
     throw new Error('Unauthorized');
@@ -140,6 +142,7 @@ class AeorLogin extends HTMLElement {
       sessionStorage.removeItem('aeordb_share_token');
       AUTH._isShareSession = false;
       AUTH.setToken(data.token);
+      startAuthenticatedBackgroundTasks();
       navigate();
     } catch (error) {
       errorContainer.innerHTML = `<div class="alert alert-error">${escapeHtml(error.message)}</div>`;
@@ -242,6 +245,11 @@ function connectUserEventStream() {
 
 window.connectUserEventStream = connectUserEventStream;
 
+function startAuthenticatedBackgroundTasks() {
+  connectUserEventStream();
+  dashboardMetrics.start({ allowNoAuth: authDisabled });
+}
+
 // Router
 function navigate() {
   const page = getPageParam();
@@ -281,7 +289,7 @@ function navigate() {
 
   // Subscribe to per-user SSE channel (file share notifications, etc).
   // Idempotent — won't reconnect if already connected.
-  connectUserEventStream();
+  startAuthenticatedBackgroundTasks();
 
   // Show sidebar when logged in
   if (sidebar) sidebar.style.display = 'flex';
@@ -370,6 +378,7 @@ document.querySelectorAll('.nav-link').forEach((element) => {
 // Logout button
 document.getElementById('logout-button').addEventListener('click', () => {
   AUTH.clear();
+  dashboardMetrics.stop();
   localStorage.removeItem('aeordb-file-browser');
   window.location.replace('/');
 });
@@ -389,6 +398,7 @@ async function init() {
       if (statsRes.ok) {
         // Stats endpoint responded without auth — auth is disabled
         authDisabled = true;
+        window.aeordbAuthDisabled = true;
       }
     } catch (_) {
       // Network error — server may be unreachable
@@ -404,6 +414,7 @@ async function init() {
           // auth is disabled (--auth=false sets no signing key)
           if (health.checks?.auth?.signing_key_present === false) {
             authDisabled = true;
+            window.aeordbAuthDisabled = true;
           }
         }
       } catch (_) {
@@ -411,6 +422,8 @@ async function init() {
       }
     }
   }
+  if (AUTH.token || authDisabled)
+    startAuthenticatedBackgroundTasks();
   navigate();
 }
 

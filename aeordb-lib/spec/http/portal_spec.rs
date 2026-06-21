@@ -114,6 +114,19 @@ async fn test_portal_app_mjs_returns_javascript() {
 }
 
 #[tokio::test]
+async fn test_portal_metrics_mjs_returns_javascript() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let request = Request::builder().method("GET").uri("/metrics.mjs").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
+  assert_eq!(content_type, "application/javascript; charset=utf-8");
+}
+
+#[tokio::test]
 async fn test_portal_dashboard_mjs_returns_javascript() {
   let (app, _, _, _temp_dir) = test_app();
 
