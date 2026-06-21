@@ -2,7 +2,7 @@ use axum::{
   Extension,
   body::Body,
   extract::{Path, Query as AxumQuery, State},
-  http::{HeaderMap, StatusCode},
+  http::{header, HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   Json,
 };
@@ -434,44 +434,242 @@ pub async fn engine_store_file(
 /// Constructs the standard response with X-AeorDB-Path, X-AeorDB-Size,
 /// X-AeorDB-Created, X-AeorDB-Updated headers. If `symlink_target` is
 /// provided, adds an X-AeorDB-Link-Target header as well.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HttpByteRange {
+  start: u64,
+  end: u64,
+}
+
+impl HttpByteRange {
+  fn len(self) -> u64 {
+    self.end.saturating_sub(self.start).saturating_add(1)
+  }
+}
+
+fn parse_range_header(headers: &HeaderMap, total_size: u64) -> Result<Option<HttpByteRange>, ()> {
+  let Some(value) = headers.get(header::RANGE) else {
+    return Ok(None);
+  };
+  let value = value.to_str().map_err(|_| ())?.trim();
+  let Some(spec) = value.strip_prefix("bytes=") else {
+    return Ok(None);
+  };
+  if total_size == 0 || spec.contains(',') {
+    return Err(());
+  }
+
+  let (start_spec, end_spec) = spec.split_once('-').ok_or(())?;
+  let last_byte = total_size - 1;
+
+  let (start, end) = if start_spec.is_empty() {
+    let suffix_len: u64 = end_spec.parse().map_err(|_| ())?;
+    if suffix_len == 0 {
+      return Err(());
+    }
+    let start = total_size.saturating_sub(suffix_len);
+    (start, last_byte)
+  } else {
+    let start: u64 = start_spec.parse().map_err(|_| ())?;
+    if start > last_byte {
+      return Err(());
+    }
+    let end = if end_spec.is_empty() {
+      last_byte
+    } else {
+      let requested_end: u64 = end_spec.parse().map_err(|_| ())?;
+      if requested_end < start {
+        return Err(());
+      }
+      requested_end.min(last_byte)
+    };
+    (start, end)
+  };
+
+  Ok(Some(HttpByteRange { start, end }))
+}
+
+fn range_not_satisfiable_response(total_size: u64) -> Response {
+  axum::http::Response::builder()
+    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+    .header(header::ACCEPT_RANGES, "bytes")
+    .header(header::CONTENT_RANGE, format!("bytes */{}", total_size))
+    .body(Body::empty())
+    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+}
+
+struct EngineByteRangeStream {
+  chunk_hashes: Vec<Vec<u8>>,
+  engine: std::sync::Arc<crate::engine::StorageEngine>,
+  include_deleted: bool,
+  current_index: usize,
+  cursor: u64,
+  range_start: u64,
+  range_end_exclusive: u64,
+}
+
+impl EngineByteRangeStream {
+  fn new(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    include_deleted: bool,
+    range: HttpByteRange,
+  ) -> Self {
+    Self {
+      chunk_hashes,
+      engine,
+      include_deleted,
+      current_index: 0,
+      cursor: 0,
+      range_start: range.start,
+      range_end_exclusive: range.end.saturating_add(1),
+    }
+  }
+
+  fn chunk_metadata_len(&self, hash: &[u8]) -> EngineResult<Option<u64>> {
+    if self.include_deleted {
+      return Ok(None);
+    }
+    Ok(self.engine.get_chunk_metadata(hash)?.and_then(|metadata| metadata.raw_value_length))
+  }
+
+  fn read_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
+    let entry = if self.include_deleted {
+      self.engine.read_chunk_verified_including_deleted(hash)?
+    } else {
+      self.engine.read_chunk_verified(hash)?
+    };
+    match entry {
+      Some(value) => Ok(value),
+      None => Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash)))),
+    }
+  }
+}
+
+impl Iterator for EngineByteRangeStream {
+  type Item = EngineResult<Vec<u8>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    while self.current_index < self.chunk_hashes.len() && self.cursor < self.range_end_exclusive {
+      let hash = self.chunk_hashes[self.current_index].clone();
+      self.current_index += 1;
+
+      match self.chunk_metadata_len(&hash) {
+        Ok(Some(chunk_len)) if self.cursor.saturating_add(chunk_len) <= self.range_start => {
+          self.cursor = self.cursor.saturating_add(chunk_len);
+          continue;
+        }
+        Ok(_) => {}
+        Err(error) => return Some(Err(error)),
+      }
+
+      let chunk_start = self.cursor;
+      let data = match self.read_chunk(&hash) {
+        Ok(data) => data,
+        Err(error) => return Some(Err(error)),
+      };
+      let chunk_len = data.len() as u64;
+      let chunk_end = match chunk_start.checked_add(chunk_len) {
+        Some(end) => end,
+        None => {
+          return Some(Err(EngineError::InvalidInput("File chunk offsets overflowed while serving byte range".to_string())));
+        }
+      };
+      self.cursor = chunk_end;
+
+      if chunk_end <= self.range_start {
+        continue;
+      }
+      if chunk_start >= self.range_end_exclusive {
+        return None;
+      }
+
+      let start_in_chunk = self.range_start.saturating_sub(chunk_start).min(chunk_len) as usize;
+      let end_in_chunk = self.range_end_exclusive.saturating_sub(chunk_start).min(chunk_len) as usize;
+      if start_in_chunk >= end_in_chunk {
+        continue;
+      }
+
+      return Some(Ok(data[start_in_chunk..end_in_chunk].to_vec()));
+    }
+
+    None
+  }
+}
+
 fn build_file_streaming_response(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   file_record: &FileRecord,
   symlink_target: Option<&str>,
+  request_headers: &HeaderMap,
+  include_deleted: bool,
+  extra_headers: &[(&'static str, String)],
 ) -> Response {
-  let file_stream = match EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine)) {
-    Ok(s) => s,
-    Err(error) => {
-      tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
-      return ErrorResponse::new(format!(
-        "Failed to stream file '{}': the file data may be corrupted. Contact your administrator",
-        file_record.path
-      ))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-    }
+  let range = match parse_range_header(request_headers, file_record.total_size) {
+    Ok(range) => range,
+    Err(()) => return range_not_satisfiable_response(file_record.total_size),
   };
 
-  let chunk_stream = stream::iter(
-    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-  );
+  let (status, body, served_len, content_range) = if let Some(range) = range {
+    let range_stream = EngineByteRangeStream::new(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine), include_deleted, range);
+    let chunk_stream = stream::iter(
+      range_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+    );
+    (
+      StatusCode::PARTIAL_CONTENT,
+      Body::from_stream(chunk_stream),
+      range.len(),
+      Some(format!("bytes {}-{}/{}", range.start, range.end, file_record.total_size)),
+    )
+  } else {
+    let file_stream = if include_deleted {
+      EngineFileStream::from_chunk_hashes_including_deleted_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine))
+    } else {
+      EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine))
+    };
+    let file_stream = match file_stream {
+      Ok(s) => s,
+      Err(error) => {
+        tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
+        return ErrorResponse::new(format!(
+          "Failed to stream file '{}': the file data may be corrupted. Contact your administrator",
+          file_record.path
+        ))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+      }
+    };
+    let chunk_stream = stream::iter(
+      file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
+    );
+    (StatusCode::OK, Body::from_stream(chunk_stream), file_record.total_size, None)
+  };
 
-  let body = Body::from_stream(chunk_stream);
+  engine.counters().record_read(served_len);
 
   let safe_path = file_record.path.replace(['\n', '\r'], "");
   let mut response_builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
+    .status(status)
+    .header(header::ACCEPT_RANGES, "bytes")
+    .header(header::CONTENT_LENGTH, served_len.to_string())
     .header("X-AeorDB-Path", safe_path)
     .header("X-AeorDB-Size", file_record.total_size.to_string())
     .header("X-AeorDB-Created", file_record.created_at.to_string())
     .header("X-AeorDB-Updated", file_record.updated_at.to_string());
+
+  if let Some(value) = content_range {
+    response_builder = response_builder.header(header::CONTENT_RANGE, value);
+  }
 
   if let Some(target) = symlink_target {
     response_builder = response_builder.header("X-AeorDB-Link-Target", target.replace(['\n', '\r'], ""));
   }
 
   if let Some(ref content_type) = file_record.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
+    response_builder = response_builder.header(header::CONTENT_TYPE, content_type.as_str());
+  }
+
+  for (name, value) in extra_headers {
+    response_builder = response_builder.header(*name, value.as_str());
   }
 
   response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
@@ -710,6 +908,7 @@ fn handle_symlink_resolution(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   path: &str,
   symlink_target: &str,
+  request_headers: &HeaderMap,
   user_id_str: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
@@ -744,7 +943,7 @@ fn handle_symlink_resolution(
         }
       }
 
-      build_file_streaming_response(engine, file_record, Some(symlink_target))
+      build_file_streaming_response(engine, file_record, Some(symlink_target), request_headers, false, &[])
     }
     Ok(ResolvedTarget::Directory(dir_path)) => {
       // Block ALL access to symlinks resolving to /.aeordb-system/ directories —
@@ -792,7 +991,7 @@ fn handle_symlink_resolution(
 }
 
 /// Handle a direct file read: stream the file content as an HTTP response.
-fn handle_file_response(engine: &std::sync::Arc<crate::engine::StorageEngine>, path: &str) -> Response {
+fn handle_file_response(engine: &std::sync::Arc<crate::engine::StorageEngine>, path: &str, request_headers: &HeaderMap) -> Response {
   let directory_ops = DirectoryOps::new(engine);
 
   let file_record = match directory_ops.get_metadata(path) {
@@ -808,43 +1007,7 @@ fn handle_file_response(engine: &std::sync::Arc<crate::engine::StorageEngine>, p
     }
   };
 
-  // Build a 'static stream so axum's Body::from_stream is satisfied. The
-  // EngineFileStream now owns an Arc<StorageEngine> rather than borrowing
-  // from `directory_ops`. We pass the chunk_hashes from the file_record we
-  // just fetched — same as what read_file_streaming would have used.
-  let file_stream = match crate::engine::directory_ops::EngineFileStream::from_chunk_hashes_owned(
-    file_record.chunk_hashes.clone(),
-    std::sync::Arc::clone(engine),
-  ) {
-    Ok(s) => s,
-    Err(error) => {
-      tracing::error!("Engine: failed to read file '{}': {}", path, error);
-      return ErrorResponse::new(format!("Failed to read file '{}'. The file data may be corrupted — contact your administrator", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-  engine.counters().record_read(file_record.total_size);
-
-  let chunk_stream = stream::iter(
-    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-  );
-
-  let body = Body::from_stream(chunk_stream);
-
-  let safe_path = file_record.path.replace(['\n', '\r'], "");
-  let mut response_builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
-    .header("X-AeorDB-Path", safe_path)
-    .header("X-AeorDB-Size", file_record.total_size.to_string())
-    .header("X-AeorDB-Created", file_record.created_at.to_string())
-    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
-
-  if let Some(ref content_type) = file_record.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
-  }
-
-  response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+  build_file_streaming_response(engine, &file_record, None, request_headers, false, &[])
 }
 
 /// Handle recursive directory listing with depth and/or glob parameters.
@@ -981,9 +1144,11 @@ pub async fn engine_get_root(
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
+  headers: HeaderMap,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  engine_get(State(state), Extension(claims), active_key_rules, filtered_listing, Path("/".to_string()), AxumQuery(version_query)).await
+  engine_get(State(state), Extension(claims), active_key_rules, filtered_listing, headers, Path("/".to_string()), AxumQuery(version_query))
+    .await
 }
 
 pub async fn engine_get(
@@ -991,6 +1156,7 @@ pub async fn engine_get(
   Extension(claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
+  headers: HeaderMap,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
@@ -1007,7 +1173,7 @@ pub async fn engine_get(
 
   // If snapshot or version query param is present, read from historical version
   if version_query.snapshot.is_some() || version_query.version.is_some() {
-    return engine_get_at_version(&state, &path, &version_query).await;
+    return engine_get_at_version(&state, &path, &version_query, &headers).await;
   }
 
   // Extract key rules slice for helpers (avoids passing axum Extension around)
@@ -1037,6 +1203,7 @@ pub async fn engine_get(
       &state.engine,
       &path,
       &symlink_record.target,
+      &headers,
       &claims.sub,
       key_rules,
       filter_ref,
@@ -1048,7 +1215,7 @@ pub async fn engine_get(
   // Try as file first
   match directory_ops.get_metadata(&path) {
     Ok(Some(_file_record)) => {
-      return handle_file_response(&state.engine, &path);
+      return handle_file_response(&state.engine, &path, &headers);
     }
     Ok(None) => {
       // Not a file -- fall through to directory listing
@@ -1084,7 +1251,7 @@ pub async fn engine_get(
 }
 
 /// Read a file at a historical version (snapshot or explicit root hash).
-async fn engine_get_at_version(state: &AppState, path: &str, version_query: &EngineGetQuery) -> Response {
+async fn engine_get_at_version(state: &AppState, path: &str, version_query: &EngineGetQuery, request_headers: &HeaderMap) -> Response {
   let vm = VersionManager::new(&state.engine);
 
   // Resolve root hash: snapshot takes precedence
@@ -1129,43 +1296,7 @@ async fn engine_get_at_version(state: &AppState, path: &str, version_query: &Eng
     }
   };
 
-  // Stream the file content from historical chunks (include deleted —
-  // chunks may have been marked deleted after the snapshot was taken)
-  let file_stream = match EngineFileStream::from_chunk_hashes_including_deleted_owned(
-    file_record.chunk_hashes.clone(),
-    std::sync::Arc::clone(&state.engine),
-  ) {
-    Ok(stream) => stream,
-    Err(error) => {
-      tracing::error!("Engine: failed to stream file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!(
-        "Failed to stream file '{}' from historical version. The file data may be corrupted — contact your administrator",
-        path
-      ))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-    }
-  };
-  state.engine.counters().record_read(file_record.total_size);
-
-  let chunk_stream = stream::iter(
-    file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-  );
-
-  let body = Body::from_stream(chunk_stream);
-
-  let mut response_builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
-    .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
-    .header("X-AeorDB-Size", file_record.total_size.to_string())
-    .header("X-AeorDB-Created", file_record.created_at.to_string())
-    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
-
-  if let Some(ref content_type) = file_record.content_type {
-    response_builder = response_builder.header("content-type", content_type.as_str());
-  }
-
-  response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+  build_file_streaming_response(&state.engine, &file_record, None, request_headers, true, &[])
 }
 
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
@@ -1423,6 +1554,7 @@ pub async fn engine_get_by_hash(
   State(state): State<AppState>,
   Extension(_claims): Extension<TokenClaims>,
   active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
+  headers: HeaderMap,
   Path(hex_hash): Path<String>,
 ) -> Response {
   let hash_bytes = match hex::decode(&hex_hash) {
@@ -1503,38 +1635,14 @@ pub async fn engine_get_by_hash(
         }
       };
 
-      let file_stream =
-        match EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(&state.engine)) {
-          Ok(s) => s,
-          Err(e) => {
-            tracing::error!("Engine: failed to read chunks for hash '{}': {}", hex_hash, e);
-            return ErrorResponse::new(format!(
-              "Failed to read file chunks for hash '{}'. The file data may be corrupted — contact your administrator",
-              hex_hash
-            ))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
-          }
-        };
-      state.engine.counters().record_read(file_record.total_size);
-
-      let chunk_stream = stream::iter(
-        file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-      );
-
-      let body = Body::from_stream(chunk_stream);
-
-      let mut response_builder = axum::http::Response::builder()
-        .status(StatusCode::OK)
-        .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
-        .header("X-AeorDB-Hash", &hex_hash)
-        .header("X-AeorDB-Size", file_record.total_size.to_string());
-
-      if let Some(ref ct) = file_record.content_type {
-        response_builder = response_builder.header("content-type", ct.as_str());
-      }
-
-      response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+      build_file_streaming_response(
+        &state.engine,
+        &file_record,
+        None,
+        &headers,
+        false,
+        &[("X-AeorDB-Type", header.entry_type.to_u8().to_string()), ("X-AeorDB-Hash", hex_hash.clone())],
+      )
     }
 
     EntryType::Chunk => {

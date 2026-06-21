@@ -7,7 +7,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
 | PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 413, 500 |
-| GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 404, 500 |
+| GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 206, 404, 416, 500 |
 | POST | `/files/fetch` | Batch read file bodies as JSON strings | Yes | 200, 400, 404, 413, 500 |
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
@@ -91,6 +91,7 @@ Read a file or list a directory. The server determines the type automatically:
 
 - **Headers:**
   - `Authorization: Bearer <token>` (required)
+  - `Range: bytes=<start>-<end>` (optional for file reads) -- single byte ranges only
 
 ### Query Parameters
 
@@ -106,12 +107,15 @@ Read a file or list a directory. The server determines the type automatically:
 
 ### File Response
 
-**Status:** `200 OK`
+**Status:** `200 OK` for full reads, `206 Partial Content` for valid byte-range reads
 
 **Headers:**
 
 | Header | Description |
 |--------|-------------|
+| `Accept-Ranges` | `bytes` for file responses |
+| `Content-Length` | Bytes returned in this response |
+| `Content-Range` | Returned on `206 Partial Content`, e.g. `bytes 1024-2047/4096` |
 | `X-AeorDB-Path` | Canonical path of the file |
 | `X-AeorDB-Size` | File size in bytes |
 | `X-AeorDB-Created-At` | Unix timestamp (milliseconds) |
@@ -119,6 +123,27 @@ Read a file or list a directory. The server determines the type automatically:
 | `Content-Type` | MIME type (if known) |
 
 **Body:** raw file bytes (streamed)
+
+### Byte Range Reads
+
+File reads support HTTP single byte ranges for browser media seeking and partial downloads:
+
+```bash
+curl http://localhost:6830/files/media/movie.mp4 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Range: bytes=1048576-2097151" \
+  -o movie.part
+```
+
+Supported forms:
+
+| Range | Meaning |
+|-------|---------|
+| `bytes=100-199` | Inclusive byte range |
+| `bytes=100-` | From byte 100 through end of file |
+| `bytes=-1024` | Last 1024 bytes |
+
+Unsatisfiable or malformed byte ranges return `416 Range Not Satisfiable` with `Content-Range: bytes */<file_size>`. Multi-range requests are not supported.
 
 ### Directory Response
 
@@ -256,6 +281,7 @@ If both `snapshot` and `version` are provided, `snapshot` takes precedence. Retu
 | Status | Condition |
 |--------|-----------|
 | 404 | Path does not exist as file or directory |
+| 416 | Requested byte range cannot be satisfied |
 | 500 | Internal read failure |
 
 ---

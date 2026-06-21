@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{save_lifecycle_config, LifecycleConfig, StorageEngine};
+use aeordb::engine::{save_lifecycle_config, LifecycleConfig, StorageEngine, DEFAULT_CHUNK_SIZE};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -108,12 +108,103 @@ async fn test_engine_get_file_returns_data() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(response.headers().get("accept-ranges").unwrap().to_str().unwrap(), "bytes");
+  assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), "5");
 
   let bytes = body_bytes(response.into_body()).await;
   assert_eq!(bytes, vec![1u8, 2, 3, 4, 5]);
   let after_read = engine.counters().snapshot();
   assert!(after_read.reads_total > before_read.reads_total, "GET /files should count as a read");
   assert!(after_read.bytes_read_total - before_read.bytes_read_total >= 5, "GET /files should count at least the served bytes");
+}
+
+#[tokio::test]
+async fn test_engine_get_file_supports_byte_ranges() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/test/ranged.bin")
+    .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
+    .body(Body::from(vec![10u8, 11, 12, 13, 14, 15]))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  for (range, content_range, content_length, expected) in [
+    ("bytes=1-3", "bytes 1-3/6", "3", vec![11u8, 12, 13]),
+    ("bytes=3-", "bytes 3-5/6", "3", vec![13u8, 14, 15]),
+    ("bytes=-2", "bytes 4-5/6", "2", vec![14u8, 15]),
+  ] {
+    let app = rebuild_app(&jwt_manager, &engine);
+    let request = Request::builder()
+      .method("GET")
+      .uri("/files/test/ranged.bin")
+      .header("authorization", &auth)
+      .header("range", range)
+      .body(Body::empty())
+      .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers().get("accept-ranges").unwrap().to_str().unwrap(), "bytes");
+    assert_eq!(response.headers().get("content-range").unwrap().to_str().unwrap(), content_range);
+    assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), content_length);
+    assert_eq!(body_bytes(response.into_body()).await, expected);
+  }
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/test/ranged.bin")
+    .header("authorization", &auth)
+    .header("range", "bytes=99-100")
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+  assert_eq!(response.headers().get("accept-ranges").unwrap().to_str().unwrap(), "bytes");
+  assert_eq!(response.headers().get("content-range").unwrap().to_str().unwrap(), "bytes */6");
+  assert!(body_bytes(response.into_body()).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_engine_get_file_byte_range_can_cross_chunks() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE + 8).map(|index| (index % 251) as u8).collect();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/test/chunk-boundary.bin")
+    .header("content-type", "application/octet-stream")
+    .header("authorization", &auth)
+    .body(Body::from(data.clone()))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let range_start = DEFAULT_CHUNK_SIZE - 2;
+  let range_end = DEFAULT_CHUNK_SIZE + 3;
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/test/chunk-boundary.bin")
+    .header("authorization", &auth)
+    .header("range", format!("bytes={}-{}", range_start, range_end))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+  assert_eq!(
+    response.headers().get("content-range").unwrap().to_str().unwrap(),
+    format!("bytes {}-{}/{}", range_start, range_end, data.len())
+  );
+  assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), "6");
+  assert_eq!(body_bytes(response.into_body()).await, data[range_start..=range_end].to_vec());
 }
 
 #[tokio::test]
