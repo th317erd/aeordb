@@ -6,7 +6,9 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{save_lifecycle_config, LifecycleConfig, StorageEngine, DEFAULT_CHUNK_SIZE};
+use aeordb::engine::{
+  save_lifecycle_config, CompressionAlgorithm, DirectoryOps, LifecycleConfig, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
+};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -204,6 +206,93 @@ async fn test_engine_get_file_byte_range_can_cross_chunks() {
     format!("bytes {}-{}/{}", range_start, range_end, data.len())
   );
   assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), "6");
+  assert_eq!(body_bytes(response.into_body()).await, data[range_start..=range_end].to_vec());
+}
+
+#[tokio::test]
+async fn test_engine_get_file_byte_range_can_cross_many_chunks() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 5 + 123).map(|index| (index % 251) as u8).collect();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/many-chunks.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let range_start = DEFAULT_CHUNK_SIZE / 2;
+  let range_end = DEFAULT_CHUNK_SIZE * 4 + 33;
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/test/many-chunks.bin")
+        .header("authorization", &auth)
+        .header("range", format!("bytes={}-{}", range_start, range_end))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+  assert_eq!(
+    response.headers().get("content-range").unwrap().to_str().unwrap(),
+    format!("bytes {}-{}/{}", range_start, range_end, data.len())
+  );
+  assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), (range_end - range_start + 1).to_string());
+  assert_eq!(body_bytes(response.into_body()).await, data[range_start..=range_end].to_vec());
+}
+
+#[tokio::test]
+async fn test_engine_get_file_byte_range_handles_compressed_chunks() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let mut data = Vec::with_capacity(DEFAULT_CHUNK_SIZE * 3 + 97);
+  data.extend(std::iter::repeat(b'a').take(DEFAULT_CHUNK_SIZE));
+  data.extend(std::iter::repeat(b'b').take(DEFAULT_CHUNK_SIZE));
+  data.extend(std::iter::repeat(b'c').take(DEFAULT_CHUNK_SIZE + 97));
+
+  DirectoryOps::new(&engine)
+    .store_file_compressed(
+      &RequestContext::system(),
+      "/test/compressed-ranged.bin",
+      &data,
+      Some("application/octet-stream"),
+      CompressionAlgorithm::Zstd,
+    )
+    .unwrap();
+
+  let range_start = DEFAULT_CHUNK_SIZE - 16;
+  let range_end = DEFAULT_CHUNK_SIZE * 2 + 31;
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/test/compressed-ranged.bin")
+        .header("authorization", &auth)
+        .header("range", format!("bytes={}-{}", range_start, range_end))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+  assert_eq!(
+    response.headers().get("content-range").unwrap().to_str().unwrap(),
+    format!("bytes {}-{}/{}", range_start, range_end, data.len())
+  );
+  assert_eq!(response.headers().get("content-length").unwrap().to_str().unwrap(), (range_end - range_start + 1).to_string());
   assert_eq!(body_bytes(response.into_body()).await, data[range_start..=range_end].to_vec());
 }
 

@@ -3,7 +3,7 @@ use aeordb::engine::directory_ops::{DirectoryOps, chunk_content_hash, directory_
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
-use aeordb::engine::RequestContext;
+use aeordb::engine::{ChunkReadLocation, RequestContext, DEFAULT_CHUNK_SIZE};
 use aeordb::engine::storage_engine::StorageEngine;
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
@@ -66,6 +66,36 @@ fn test_store_file_from_reader_roundtrip_multichunk() {
     streamed.extend_from_slice(&chunk.unwrap());
   }
   assert_eq!(streamed, data);
+}
+
+#[test]
+fn test_storage_engine_read_chunk_span_verified_reads_multiple_chunks() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let data: Vec<u8> = (0..(DEFAULT_CHUNK_SIZE * 3 + 17)).map(|index| (index % 251) as u8).collect();
+  ops.store_file_buffered(&ctx, "/span.bin", &data, Some("application/octet-stream")).unwrap();
+
+  let metadata = ops.get_metadata("/span.bin").unwrap().unwrap();
+  assert!(metadata.chunk_hashes.len() >= 4);
+  let locations: Vec<ChunkReadLocation> = metadata
+    .chunk_hashes
+    .iter()
+    .take(3)
+    .map(|hash| {
+      let chunk = engine.get_chunk_metadata(hash).unwrap().unwrap();
+      ChunkReadLocation { hash: hash.clone(), offset: chunk.offset, total_length: chunk.total_length }
+    })
+    .collect();
+
+  let chunks = engine.read_chunk_span_verified(&locations).unwrap();
+  let mut combined = Vec::new();
+  for chunk in chunks {
+    combined.extend_from_slice(&chunk);
+  }
+  assert_eq!(combined, data[..DEFAULT_CHUNK_SIZE * 3].to_vec());
 }
 
 #[test]

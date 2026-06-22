@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use axum::{
   Extension,
   body::Body,
@@ -25,6 +27,7 @@ use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_conten
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::ChunkReadLocation;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::query_engine::{
@@ -497,27 +500,33 @@ fn range_not_satisfiable_response(total_size: u64) -> Response {
     .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
-struct EngineByteRangeStream {
+const RANGE_READ_SPAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const RANGE_READ_SPAN_MAX_GAP_BYTES: u64 = 256 * 1024;
+
+struct LegacyEngineByteRangeStream {
   chunk_hashes: Vec<Vec<u8>>,
   engine: std::sync::Arc<crate::engine::StorageEngine>,
   include_deleted: bool,
+  use_metadata_skip: bool,
   current_index: usize,
   cursor: u64,
   range_start: u64,
   range_end_exclusive: u64,
 }
 
-impl EngineByteRangeStream {
+impl LegacyEngineByteRangeStream {
   fn new(
     chunk_hashes: Vec<Vec<u8>>,
     engine: std::sync::Arc<crate::engine::StorageEngine>,
     include_deleted: bool,
+    use_metadata_skip: bool,
     range: HttpByteRange,
   ) -> Self {
     Self {
       chunk_hashes,
       engine,
       include_deleted,
+      use_metadata_skip,
       current_index: 0,
       cursor: 0,
       range_start: range.start,
@@ -526,7 +535,7 @@ impl EngineByteRangeStream {
   }
 
   fn chunk_metadata_len(&self, hash: &[u8]) -> EngineResult<Option<u64>> {
-    if self.include_deleted {
+    if self.include_deleted || !self.use_metadata_skip {
       return Ok(None);
     }
     Ok(self.engine.get_chunk_metadata(hash)?.and_then(|metadata| metadata.raw_value_length))
@@ -545,7 +554,7 @@ impl EngineByteRangeStream {
   }
 }
 
-impl Iterator for EngineByteRangeStream {
+impl Iterator for LegacyEngineByteRangeStream {
   type Item = EngineResult<Vec<u8>>;
 
   fn next(&mut self) -> Option<Self::Item> {
@@ -596,6 +605,208 @@ impl Iterator for EngineByteRangeStream {
   }
 }
 
+#[derive(Debug, Clone)]
+struct PlannedRangeChunk {
+  hash: Vec<u8>,
+  file_start: u64,
+  file_end: u64,
+  wal_offset: u64,
+  wal_total_length: u32,
+}
+
+impl PlannedRangeChunk {
+  fn file_len(&self) -> u64 {
+    self.file_end.saturating_sub(self.file_start)
+  }
+
+  fn wal_end(&self) -> EngineResult<u64> {
+    self
+      .wal_offset
+      .checked_add(self.wal_total_length as u64)
+      .ok_or_else(|| EngineError::InvalidInput("Chunk WAL offset overflowed while planning byte range".to_string()))
+  }
+
+  fn location(&self) -> ChunkReadLocation {
+    ChunkReadLocation { hash: self.hash.clone(), offset: self.wal_offset, total_length: self.wal_total_length }
+  }
+}
+
+struct CoalescedEngineByteRangeStream {
+  chunks: Vec<PlannedRangeChunk>,
+  engine: std::sync::Arc<crate::engine::StorageEngine>,
+  next_index: usize,
+  pending: VecDeque<Vec<u8>>,
+  range_start: u64,
+  range_end_exclusive: u64,
+}
+
+impl CoalescedEngineByteRangeStream {
+  fn new(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    range: HttpByteRange,
+    total_size: u64,
+  ) -> EngineResult<Option<Self>> {
+    let range_start = range.start;
+    let range_end_exclusive = range.end.saturating_add(1);
+    let mut chunks = Vec::new();
+    let mut cursor = 0u64;
+    let mut total_metadata_size = 0u64;
+
+    for hash in chunk_hashes {
+      let metadata =
+        engine.get_chunk_metadata(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(&hash))))?;
+      let chunk_len =
+        metadata.raw_value_length.ok_or_else(|| EngineError::InvalidInput(format!("Chunk length unavailable: {}", hex::encode(&hash))))?;
+      total_metadata_size = total_metadata_size
+        .checked_add(chunk_len)
+        .ok_or_else(|| EngineError::InvalidInput("File metadata chunk lengths overflowed while planning byte range".to_string()))?;
+      let chunk_start = cursor;
+      let chunk_end = chunk_start
+        .checked_add(chunk_len)
+        .ok_or_else(|| EngineError::InvalidInput("File chunk offsets overflowed while planning byte range".to_string()))?;
+      cursor = chunk_end;
+
+      if chunk_end <= range_start {
+        continue;
+      }
+      if chunk_start >= range_end_exclusive {
+        break;
+      }
+
+      chunks.push(PlannedRangeChunk {
+        hash,
+        file_start: chunk_start,
+        file_end: chunk_end,
+        wal_offset: metadata.offset,
+        wal_total_length: metadata.total_length,
+      });
+    }
+
+    if total_metadata_size != total_size {
+      tracing::debug!(
+        expected_size = total_size,
+        metadata_size = total_metadata_size,
+        "Range stream falling back to per-chunk reads because cheap chunk metadata does not match logical file size"
+      );
+      return Ok(None);
+    }
+
+    Ok(Some(Self { chunks, engine, next_index: 0, pending: VecDeque::new(), range_start, range_end_exclusive }))
+  }
+
+  fn load_next_span(&mut self) -> EngineResult<()> {
+    if self.next_index >= self.chunks.len() {
+      return Ok(());
+    }
+
+    let start_index = self.next_index;
+    let first = &self.chunks[start_index];
+    let span_start = first.wal_offset;
+    let mut span_end = first.wal_end()?;
+    self.next_index += 1;
+
+    while self.next_index < self.chunks.len() {
+      let next = &self.chunks[self.next_index];
+      if next.wal_offset < span_end {
+        break;
+      }
+      let gap = next.wal_offset - span_end;
+      let next_end = next.wal_end()?;
+      let span_len = next_end
+        .checked_sub(span_start)
+        .ok_or_else(|| EngineError::InvalidInput("Chunk WAL span underflowed while planning byte range".to_string()))?;
+      if gap > RANGE_READ_SPAN_MAX_GAP_BYTES || span_len > RANGE_READ_SPAN_MAX_BYTES {
+        break;
+      }
+      span_end = next_end;
+      self.next_index += 1;
+    }
+
+    let span_chunks = &self.chunks[start_index..self.next_index];
+    let locations: Vec<ChunkReadLocation> = span_chunks.iter().map(PlannedRangeChunk::location).collect();
+    let values = self.engine.read_chunk_span_verified(&locations)?;
+    if values.len() != span_chunks.len() {
+      return Err(EngineError::InvalidInput(format!(
+        "Chunk span returned {} values for {} planned chunks",
+        values.len(),
+        span_chunks.len()
+      )));
+    }
+
+    for (chunk, data) in span_chunks.iter().zip(values) {
+      let expected_len = chunk.file_len();
+      if data.len() as u64 != expected_len {
+        return Err(EngineError::CorruptEntry {
+          offset: chunk.wal_offset,
+          reason: format!("Chunk length mismatch: expected {}, decoded {}", expected_len, data.len()),
+        });
+      }
+
+      let start_in_chunk = self.range_start.saturating_sub(chunk.file_start).min(expected_len) as usize;
+      let end_in_chunk = self.range_end_exclusive.saturating_sub(chunk.file_start).min(expected_len) as usize;
+      if start_in_chunk < end_in_chunk {
+        self.pending.push_back(data[start_in_chunk..end_in_chunk].to_vec());
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl Iterator for CoalescedEngineByteRangeStream {
+  type Item = EngineResult<Vec<u8>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    loop {
+      if let Some(data) = self.pending.pop_front() {
+        return Some(Ok(data));
+      }
+      if self.next_index >= self.chunks.len() {
+        return None;
+      }
+      if let Err(error) = self.load_next_span() {
+        return Some(Err(error));
+      }
+    }
+  }
+}
+
+enum EngineByteRangeStream {
+  Coalesced(CoalescedEngineByteRangeStream),
+  Legacy(LegacyEngineByteRangeStream),
+}
+
+impl EngineByteRangeStream {
+  fn new(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    include_deleted: bool,
+    range: HttpByteRange,
+    total_size: u64,
+  ) -> EngineResult<Self> {
+    if include_deleted {
+      Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, true, false, range)))
+    } else {
+      match CoalescedEngineByteRangeStream::new(chunk_hashes.clone(), std::sync::Arc::clone(&engine), range, total_size)? {
+        Some(stream) => Ok(Self::Coalesced(stream)),
+        None => Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, false, false, range))),
+      }
+    }
+  }
+}
+
+impl Iterator for EngineByteRangeStream {
+  type Item = EngineResult<Vec<u8>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    match self {
+      EngineByteRangeStream::Coalesced(stream) => stream.next(),
+      EngineByteRangeStream::Legacy(stream) => stream.next(),
+    }
+  }
+}
+
 fn build_file_streaming_response(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   file_record: &FileRecord,
@@ -610,7 +821,24 @@ fn build_file_streaming_response(
   };
 
   let (status, body, served_len, content_range) = if let Some(range) = range {
-    let range_stream = EngineByteRangeStream::new(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine), include_deleted, range);
+    let range_stream = match EngineByteRangeStream::new(
+      file_record.chunk_hashes.clone(),
+      std::sync::Arc::clone(engine),
+      include_deleted,
+      range,
+      file_record.total_size,
+    ) {
+      Ok(stream) => stream,
+      Err(error) => {
+        tracing::error!("Engine: failed to prepare range stream for '{}': {}", file_record.path, error);
+        return ErrorResponse::new(format!(
+          "Failed to stream file range '{}': the file data may be corrupted. Contact your administrator",
+          file_record.path
+        ))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+      }
+    };
     let chunk_stream = stream::iter(
       range_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
     );

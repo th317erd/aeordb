@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
@@ -10,7 +10,7 @@ use fs2::FileExt;
 
 use arc_swap::ArcSwap;
 
-use crate::engine::append_writer::AppendWriter;
+use crate::engine::append_writer::{read_span_at, AppendWriter};
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
@@ -39,9 +39,18 @@ pub struct WriteBatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkEntryMetadata {
+  pub offset: u64,
+  pub total_length: u32,
   pub stored_value_length: u64,
   pub raw_value_length: Option<u64>,
   pub compression_algo: CompressionAlgorithm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkReadLocation {
+  pub hash: Vec<u8>,
+  pub offset: u64,
+  pub total_length: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1843,6 +1852,80 @@ impl StorageEngine {
     }
   }
 
+  fn decode_verified_chunk_entry_from_buffer(
+    &self,
+    requested_hash: &[u8],
+    entry_offset: u64,
+    entry_buffer: &[u8],
+  ) -> EngineResult<Vec<u8>> {
+    if entry_buffer.len() < EntryHeader::FIXED_HEADER_SIZE {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Entry buffer too short: {} bytes", entry_buffer.len()),
+      });
+    }
+
+    let hash_algo_raw = u16::from_le_bytes([entry_buffer[7], entry_buffer[8]]);
+    let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
+    let full_header_size = EntryHeader::FIXED_HEADER_SIZE + hash_algo.hash_length();
+    if entry_buffer.len() < full_header_size {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Entry buffer too short for full header: {} bytes", entry_buffer.len()),
+      });
+    }
+
+    let mut cursor = Cursor::new(&entry_buffer[..full_header_size]);
+    let header = EntryHeader::deserialize(&mut cursor)?;
+    if header.total_length as usize != entry_buffer.len() {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Entry total_length {} does not match buffered length {}", header.total_length, entry_buffer.len()),
+      });
+    }
+
+    let header_size = header.header_size() as u64;
+    let payload_size = header.key_length as u64 + header.value_length as u64;
+    let max_payload = (header.total_length as u64).saturating_sub(header_size);
+    if payload_size > max_payload {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!(
+          "key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({})",
+          header.key_length, header.value_length, header.total_length, header_size,
+        ),
+      });
+    }
+
+    let key_start = full_header_size;
+    let key_end = key_start + header.key_length as usize;
+    let value_end = key_end + header.value_length as usize;
+    if value_end > entry_buffer.len() {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Entry payload extends past buffered length {}", entry_buffer.len()),
+      });
+    }
+
+    let key = entry_buffer[key_start..key_end].to_vec();
+    let value = entry_buffer[key_end..value_end].to_vec();
+    if key.as_slice() != requested_hash {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Chunk key mismatch: expected {}, found {}", hex::encode(requested_hash), hex::encode(&key)),
+      });
+    }
+
+    if !header.verify(&key, &value) {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("Hash verification failed for entry at offset {}. Data may be corrupt.", entry_offset),
+      });
+    }
+
+    self.decode_chunk_entry(requested_hash, header, value)
+  }
+
   /// Read a non-deleted chunk and return its decompressed bytes.
   pub fn read_chunk(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
     match self.get_entry(hash)? {
@@ -1879,10 +1962,87 @@ impl StorageEngine {
     };
 
     Ok(Some(ChunkEntryMetadata {
+      offset: kv_entry.offset,
+      total_length: kv_entry.total_length,
       stored_value_length,
       raw_value_length: Some(stored_value_length),
       compression_algo: CompressionAlgorithm::None,
     }))
+  }
+
+  /// Read multiple live chunks from one WAL span and verify each entry.
+  ///
+  /// The caller decides which chunks are close enough to coalesce. This method
+  /// revalidates that each chunk is still the live KV entry at the expected
+  /// offset, then performs one offset-based read over the covering span.
+  pub fn read_chunk_span_verified(&self, locations: &[ChunkReadLocation]) -> EngineResult<Vec<Vec<u8>>> {
+    let _operation = self.operation_guard("read_chunk_span_verified")?;
+    if locations.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let snapshot = self.kv_snapshot.load();
+    let (reader, span_start, span_len) = {
+      let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let mut span_start = u64::MAX;
+      let mut span_end = 0u64;
+
+      for location in locations {
+        let kv_entry = match snapshot.get(&location.hash) {
+          Some(entry) if !entry.is_deleted() => entry,
+          _ => return Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(&location.hash)))),
+        };
+        if kv_entry.entry_type() != KV_TYPE_CHUNK {
+          return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(&location.hash))));
+        }
+        if kv_entry.offset != location.offset || kv_entry.total_length != location.total_length {
+          return Err(EngineError::CorruptEntry {
+            offset: location.offset,
+            reason: format!(
+              "Chunk KV entry moved while planning span: expected offset {} length {}, found offset {} length {}",
+              location.offset, location.total_length, kv_entry.offset, kv_entry.total_length,
+            ),
+          });
+        }
+        Self::validate_kv_entry_offset(&writer, &kv_entry, &location.hash, "read_chunk_span_verified")?;
+
+        let entry_end = location
+          .offset
+          .checked_add(location.total_length as u64)
+          .ok_or_else(|| EngineError::InvalidInput("Chunk span offset overflowed".to_string()))?;
+        span_start = span_start.min(location.offset);
+        span_end = span_end.max(entry_end);
+      }
+
+      let span_len =
+        span_end.checked_sub(span_start).ok_or_else(|| EngineError::InvalidInput("Chunk span length underflowed".to_string()))?;
+      let span_len: usize =
+        span_len.try_into().map_err(|_| EngineError::InvalidInput(format!("Chunk span too large to buffer: {} bytes", span_len)))?;
+      (writer.open_shared_reader()?, span_start, span_len)
+    };
+
+    let span = read_span_at(&reader, span_start, span_len).map_err(EngineError::IoError)?;
+    let mut chunks = Vec::with_capacity(locations.len());
+    for location in locations {
+      let relative_start = location
+        .offset
+        .checked_sub(span_start)
+        .ok_or_else(|| EngineError::InvalidInput("Chunk span relative offset underflowed".to_string()))?;
+      let relative_start: usize =
+        relative_start.try_into().map_err(|_| EngineError::InvalidInput(format!("Chunk relative offset too large: {}", relative_start)))?;
+      let relative_end = relative_start
+        .checked_add(location.total_length as usize)
+        .ok_or_else(|| EngineError::InvalidInput("Chunk span relative end overflowed".to_string()))?;
+      if relative_end > span.len() {
+        return Err(EngineError::CorruptEntry {
+          offset: location.offset,
+          reason: format!("Chunk entry extends past buffered span: {} > {}", relative_end, span.len()),
+        });
+      }
+      chunks.push(self.decode_verified_chunk_entry_from_buffer(&location.hash, location.offset, &span[relative_start..relative_end])?);
+    }
+
+    Ok(chunks)
   }
 
   /// Read a chunk including deleted entries and return its decompressed bytes.

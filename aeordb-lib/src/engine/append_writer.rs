@@ -24,6 +24,12 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()
   Ok(())
 }
 
+pub(crate) fn read_span_at(file: &File, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
+  let mut buffer = vec![0u8; length];
+  read_exact_at(file, &mut buffer, offset)?;
+  Ok(buffer)
+}
+
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
@@ -71,6 +77,12 @@ impl AppendWriter {
 
   pub fn file_path(&self) -> &Path {
     &self.file_path
+  }
+
+  /// Open an independent read handle for offset-based reads. This avoids
+  /// holding the writer lock while a large cold range read is blocked on disk.
+  pub(crate) fn open_shared_reader(&self) -> EngineResult<File> {
+    Ok(File::open(&self.file_path)?)
   }
 
   /// Set the current write offset. Used after KV block creation to skip
