@@ -688,7 +688,8 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
     return magic_link_request_ok_response();
   }
 
-  let configured_base_url = configured_magic_link_base_url();
+  let configured_login_url = configured_magic_link_login_url(&code);
+  let login_url_for_log = configured_login_url.clone().unwrap_or_else(|| build_magic_link_url("", &code));
 
   // Log the magic link URL at debug level only, AND gate on an explicit
   // env var so production debug logging never leaks secrets. Operators
@@ -698,20 +699,19 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   if std::env::var("AEORDB_LOG_MAGIC_LINKS").is_ok() {
     tracing::debug!(
       email = %email,
-      magic_link_url = %build_magic_link_url(configured_base_url.as_deref().unwrap_or(""), &code),
+      magic_link_url = %login_url_for_log,
       "Magic link generated (AEORDB_LOG_MAGIC_LINKS enabled — dev only)"
     );
   } else {
     match crate::engine::email_config::load_email_config(state.engine.as_ref()) {
       Ok(Some(config)) => {
-        let Some(base_url) = configured_base_url else {
+        let Some(login_url) = configured_login_url else {
           tracing::warn!(
             email = %email,
-            "Magic link email not sent: AEORDB_MAGIC_LINK_BASE_URL is not configured"
+            "Magic link email not sent: AEORDB_MAGIC_LINK_URL_TEMPLATE or AEORDB_MAGIC_LINK_BASE_URL is not configured"
           );
           return magic_link_request_ok_response();
         };
-        let login_url = build_magic_link_url(&base_url, &code);
         let (subject, html, text) = crate::engine::email_template::build_magic_link_login(&login_url);
         let email_for_send = email.clone();
         tokio::spawn(async move {
@@ -770,6 +770,28 @@ fn configured_magic_link_base_url() -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
+fn configured_magic_link_url_template() -> Option<String> {
+  std::env::var("AEORDB_MAGIC_LINK_URL_TEMPLATE").ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
+fn configured_magic_link_login_url(code: &str) -> Option<String> {
+  if let Some(template) = configured_magic_link_url_template() {
+    return Some(build_magic_link_url_from_template(&template, code));
+  }
+
+  configured_magic_link_base_url().map(|base_url| build_magic_link_url(&base_url, code))
+}
+
+fn build_magic_link_url_from_template(template: &str, code: &str) -> String {
+  let encoded_code = url_encode_query_value(code);
+  if template.contains("{code}") {
+    return template.replace("{code}", &encoded_code);
+  }
+
+  let separator = if template.contains('?') { '&' } else { '?' };
+  format!("{}{}code={}", template, separator, encoded_code)
+}
+
 fn build_magic_link_url(base: &str, code: &str) -> String {
   let base = base.trim().trim_end_matches('/');
   format!("{}/auth/magic-link/verify?code={}", base, url_encode_query_value(code))
@@ -802,6 +824,18 @@ mod magic_link_route_tests {
   fn magic_link_url_can_be_relative_for_explicit_dev_logging() {
     let url = build_magic_link_url("", "abc123");
     assert_eq!(url, "/auth/magic-link/verify?code=abc123");
+  }
+
+  #[test]
+  fn magic_link_url_template_replaces_code_placeholder() {
+    let url = build_magic_link_url_from_template("https://genesis-forge.com/?code={code}", "abc+ /?");
+    assert_eq!(url, "https://genesis-forge.com/?code=abc%2B%20%2F%3F");
+  }
+
+  #[test]
+  fn magic_link_url_template_appends_code_when_placeholder_is_missing() {
+    let url = build_magic_link_url_from_template("https://genesis-forge.com/login?from=email", "abc123");
+    assert_eq!(url, "https://genesis-forge.com/login?from=email&code=abc123");
   }
 }
 

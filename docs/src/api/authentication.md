@@ -121,7 +121,10 @@ Request a magic link for passwordless authentication. The server always returns 
 
 When email is configured, AeorDB sends the link only for an existing active user whose username matches the requested email address. AeorDB does not create users from this endpoint. Services that want first-login signup must create the user through the user administration API first, then request the magic link.
 
-Emailed magic links require `AEORDB_MAGIC_LINK_BASE_URL` to be set to the public origin of the server, for example `https://files.example.com`. AeorDB deliberately does not derive bearer login links from request `Host` or proxy headers.
+Emailed magic links require either `AEORDB_MAGIC_LINK_URL_TEMPLATE` or `AEORDB_MAGIC_LINK_BASE_URL`.
+Use `AEORDB_MAGIC_LINK_URL_TEMPLATE` when an application shell must consume the login code, for example `https://app.example.com/?code={code}`.
+If only `AEORDB_MAGIC_LINK_BASE_URL` is set, AeorDB builds a direct API verification URL like `https://files.example.com/auth/magic-link/verify?code=...`.
+AeorDB deliberately does not derive bearer login links from request `Host` or proxy headers.
 
 In development mode, set `AEORDB_LOG_MAGIC_LINKS=1` to log the magic link URL via tracing instead of sending email. If `AEORDB_MAGIC_LINK_BASE_URL` is not set, the logged URL is relative.
 
