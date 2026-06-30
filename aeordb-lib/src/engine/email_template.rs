@@ -62,6 +62,39 @@ pub fn build_share_notification(sharer_name: &str, paths: &[String], permissions
   (subject, html_body, text_body)
 }
 
+/// Build a magic-link login email.
+/// Returns (subject, html_body, text_body).
+pub fn build_magic_link_login(login_url: &str) -> (String, String, String) {
+  let subject = "Your AeorDB login link".to_string();
+
+  let html_body = format!(
+    r#"<!DOCTYPE html>
+<html>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:0;background:#f6f8fa;">
+  <div style="max-width:560px;margin:40px auto;background:#ffffff;border-radius:8px;border:1px solid #d0d7de;overflow:hidden;">
+    <div style="padding:32px;">
+      <h2 style="margin:0 0 16px;color:#24292f;font-size:20px;">Sign in to AeorDB</h2>
+      <p style="margin:0 0 24px;color:#57606a;font-size:14px;line-height:1.5;">Use this magic link to sign in. The link expires shortly and can only be used once.</p>
+      <a href="{url}" style="display:inline-block;padding:10px 24px;background:#e87400;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;">Sign in</a>
+      <p style="margin:24px 0 0;color:#57606a;font-size:12px;line-height:1.5;">If you did not request this email, you can ignore it.</p>
+    </div>
+    <div style="padding:16px 32px;background:#f6f8fa;border-top:1px solid #d0d7de;font-size:12px;color:#57606a;">
+      Sent from AeorDB
+    </div>
+  </div>
+</body>
+</html>"#,
+    url = html_escape(login_url),
+  );
+
+  let text_body = format!(
+    "Use this magic login link to sign in:\n\n{}\n\nThis link expires shortly and can only be used once.\n\nIf you did not request this email, you can ignore it.\n\n--\nSent from AeorDB",
+    login_url
+  );
+
+  (subject, html_body, text_body)
+}
+
 fn html_escape(s: &str) -> String {
   s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -139,5 +172,17 @@ mod tests {
     assert!(html.contains("\u{1F4C4} /a/file.txt"));
     // Folder icon for dir/ (trailing slash)
     assert!(html.contains("\u{1F4C1} /a/dir/"));
+  }
+
+  #[test]
+  fn test_magic_link_login_email() {
+    let (subject, html, text) = build_magic_link_login("https://example.com/api/v1/auth/magic-link/verify?code=abc123&x=1");
+
+    assert_eq!(subject, "Your AeorDB login link");
+    assert!(html.contains("Sign in to AeorDB"));
+    assert!(html.contains("https://example.com/api/v1/auth/magic-link/verify?code=abc123&amp;x=1"));
+    assert!(!html.contains("&x=1\""));
+    assert!(text.contains("https://example.com/api/v1/auth/magic-link/verify?code=abc123&x=1"));
+    assert!(text.contains("Sent from AeorDB"));
   }
 }

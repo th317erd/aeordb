@@ -630,12 +630,32 @@ pub struct VerifyMagicLinkQuery {
 /// POST /auth/magic-link — request a magic link for the given email.
 ///
 /// Always returns 200 to prevent email enumeration. In dev mode, the magic link
-/// URL is logged via tracing (no email is actually sent).
+/// URL can be logged via tracing by setting AEORDB_LOG_MAGIC_LINKS. Otherwise,
+/// AeorDB sends the link when email and AEORDB_MAGIC_LINK_BASE_URL are configured.
 pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Json<MagicLinkRequest>) -> Response {
   // Rate-limit by email.
   if let Err(error) = state.rate_limiter.check_rate_limit(&payload.email) {
     metrics::counter!(crate::metrics::definitions::AUTH_RATE_LIMIT_HITS_TOTAL).increment(1);
     return ErrorResponse::new(error.to_string()).with_status(StatusCode::TOO_MANY_REQUESTS).into_response();
+  }
+
+  match system_store::get_user_by_username(&state.engine, &payload.email) {
+    Ok(Some(_)) => {}
+    Ok(None) => {
+      tracing::debug!(
+        email = %payload.email,
+        "Magic link requested for unknown user"
+      );
+      return magic_link_request_ok_response();
+    }
+    Err(error) => {
+      tracing::warn!(
+        email = %payload.email,
+        "Failed to look up user for magic link request: {}",
+        error
+      );
+      return magic_link_request_ok_response();
+    }
   }
 
   let code = generate_magic_link_code();
@@ -652,8 +672,12 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   };
   if let Err(error) = system_store::store_magic_link(&state.engine, &ctx, &record) {
     tracing::error!("Failed to store magic link: {}", error);
-    // Still return 200 to prevent enumeration.
+    // Still return 200 to prevent enumeration, but do not send or log an
+    // unusable bearer link.
+    return magic_link_request_ok_response();
   }
+
+  let configured_base_url = configured_magic_link_base_url();
 
   // Log the magic link URL at debug level only, AND gate on an explicit
   // env var so production debug logging never leaks secrets. Operators
@@ -663,10 +687,51 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   if std::env::var("AEORDB_LOG_MAGIC_LINKS").is_ok() {
     tracing::debug!(
       email = %payload.email,
-      magic_link_url = %format!("/auth/magic-link/verify?code={}", code),
+      magic_link_url = %build_magic_link_url(configured_base_url.as_deref().unwrap_or(""), &code),
       "Magic link generated (AEORDB_LOG_MAGIC_LINKS enabled — dev only)"
     );
   } else {
+    match crate::engine::email_config::load_email_config(state.engine.as_ref()) {
+      Ok(Some(config)) => {
+        let Some(base_url) = configured_base_url else {
+          tracing::warn!(
+            email = %payload.email,
+            "Magic link email not sent: AEORDB_MAGIC_LINK_BASE_URL is not configured"
+          );
+          return magic_link_request_ok_response();
+        };
+        let login_url = build_magic_link_url(&base_url, &code);
+        let (subject, html, text) = crate::engine::email_template::build_magic_link_login(&login_url);
+        let email = payload.email.clone();
+        tokio::spawn(async move {
+          if let Err(error) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
+            tracing::warn!(
+              email = %email,
+              "Failed to send magic link email: {}",
+              error
+            );
+          } else {
+            tracing::info!(
+              email = %email,
+              "Magic link email sent"
+            );
+          }
+        });
+      }
+      Ok(None) => {
+        tracing::debug!(
+          email = %payload.email,
+          "Magic link generated but email is not configured"
+        );
+      }
+      Err(error) => {
+        tracing::warn!(
+          email = %payload.email,
+          "Failed to load email config for magic link: {}",
+          error
+        );
+      }
+    }
     // Log a redacted line so operators see SOMETHING in dev without the secret.
     tracing::debug!(
       email = %payload.email,
@@ -674,6 +739,10 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
     );
   }
 
+  magic_link_request_ok_response()
+}
+
+fn magic_link_request_ok_response() -> Response {
   (
     StatusCode::OK,
     Json(serde_json::json!({
@@ -681,6 +750,48 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
     })),
   )
     .into_response()
+}
+
+fn configured_magic_link_base_url() -> Option<String> {
+  std::env::var("AEORDB_MAGIC_LINK_BASE_URL")
+    .ok()
+    .map(|value| value.trim().trim_end_matches('/').to_string())
+    .filter(|value| !value.is_empty())
+}
+
+fn build_magic_link_url(base: &str, code: &str) -> String {
+  let base = base.trim().trim_end_matches('/');
+  format!("{}/auth/magic-link/verify?code={}", base, url_encode_query_value(code))
+}
+
+fn url_encode_query_value(value: &str) -> String {
+  let mut output = String::with_capacity(value.len());
+  for &byte in value.as_bytes() {
+    let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+    if unreserved {
+      output.push(byte as char);
+    } else {
+      output.push_str(&format!("%{:02X}", byte));
+    }
+  }
+  output
+}
+
+#[cfg(test)]
+mod magic_link_route_tests {
+  use super::*;
+
+  #[test]
+  fn magic_link_url_uses_explicit_base_and_encodes_code() {
+    let url = build_magic_link_url("https://files.example.com/", "abc+ /?");
+    assert_eq!(url, "https://files.example.com/auth/magic-link/verify?code=abc%2B%20%2F%3F");
+  }
+
+  #[test]
+  fn magic_link_url_can_be_relative_for_explicit_dev_logging() {
+    let url = build_magic_link_url("", "abc123");
+    assert_eq!(url, "/auth/magic-link/verify?code=abc123");
+  }
 }
 
 /// GET /auth/magic-link/verify?code=... — verify a magic link code.
