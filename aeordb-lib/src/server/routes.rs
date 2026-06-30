@@ -631,31 +631,47 @@ pub struct VerifyMagicLinkQuery {
 ///
 /// Always returns 200 to prevent email enumeration. In dev mode, the magic link
 /// URL can be logged via tracing by setting AEORDB_LOG_MAGIC_LINKS. Otherwise,
-/// AeorDB sends the link when email and AEORDB_MAGIC_LINK_BASE_URL are configured.
+/// AeorDB sends the link for existing active users when email and
+/// AEORDB_MAGIC_LINK_BASE_URL are configured.
 pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Json<MagicLinkRequest>) -> Response {
+  let email = payload.email.trim().to_string();
+  if email.is_empty() || email.contains('\r') || email.contains('\n') {
+    tracing::debug!("Magic link requested with invalid email");
+    return magic_link_request_ok_response();
+  }
+
   // Rate-limit by email.
-  if let Err(error) = state.rate_limiter.check_rate_limit(&payload.email) {
+  if let Err(error) = state.rate_limiter.check_rate_limit(&email) {
     metrics::counter!(crate::metrics::definitions::AUTH_RATE_LIMIT_HITS_TOTAL).increment(1);
     return ErrorResponse::new(error.to_string()).with_status(StatusCode::TOO_MANY_REQUESTS).into_response();
   }
 
-  match system_store::get_user_by_username(&state.engine, &payload.email) {
-    Ok(Some(_)) => {}
+  let user = match system_store::get_user_by_username(&state.engine, &email) {
+    Ok(Some(user)) => user,
     Ok(None) => {
       tracing::debug!(
-        email = %payload.email,
+        email = %email,
         "Magic link requested for unknown user"
       );
       return magic_link_request_ok_response();
     }
     Err(error) => {
       tracing::warn!(
-        email = %payload.email,
+        email = %email,
         "Failed to look up user for magic link request: {}",
         error
       );
       return magic_link_request_ok_response();
     }
+  };
+
+  if !user.is_active {
+    tracing::debug!(
+      email = %email,
+      user_id = %user.user_id,
+      "Magic link requested for inactive user"
+    );
+    return magic_link_request_ok_response();
   }
 
   let code = generate_magic_link_code();
@@ -663,13 +679,8 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   let expires_at = chrono::Utc::now() + chrono::Duration::seconds(crate::auth::magic_link::DEFAULT_MAGIC_LINK_EXPIRY_SECONDS);
 
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  let record = MagicLinkRecord {
-    code_hash: code_hash.clone(),
-    email: payload.email.clone(),
-    created_at: chrono::Utc::now(),
-    expires_at,
-    is_used: false,
-  };
+  let record =
+    MagicLinkRecord { code_hash: code_hash.clone(), email: email.clone(), created_at: chrono::Utc::now(), expires_at, is_used: false };
   if let Err(error) = system_store::store_magic_link(&state.engine, &ctx, &record) {
     tracing::error!("Failed to store magic link: {}", error);
     // Still return 200 to prevent enumeration, but do not send or log an
@@ -686,7 +697,7 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   // pipeline.
   if std::env::var("AEORDB_LOG_MAGIC_LINKS").is_ok() {
     tracing::debug!(
-      email = %payload.email,
+      email = %email,
       magic_link_url = %build_magic_link_url(configured_base_url.as_deref().unwrap_or(""), &code),
       "Magic link generated (AEORDB_LOG_MAGIC_LINKS enabled — dev only)"
     );
@@ -695,24 +706,24 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
       Ok(Some(config)) => {
         let Some(base_url) = configured_base_url else {
           tracing::warn!(
-            email = %payload.email,
+            email = %email,
             "Magic link email not sent: AEORDB_MAGIC_LINK_BASE_URL is not configured"
           );
           return magic_link_request_ok_response();
         };
         let login_url = build_magic_link_url(&base_url, &code);
         let (subject, html, text) = crate::engine::email_template::build_magic_link_login(&login_url);
-        let email = payload.email.clone();
+        let email_for_send = email.clone();
         tokio::spawn(async move {
-          if let Err(error) = crate::engine::email_sender::send_email(&config, &email, &subject, &html, &text).await {
+          if let Err(error) = crate::engine::email_sender::send_email(&config, &email_for_send, &subject, &html, &text).await {
             tracing::warn!(
-              email = %email,
+              email = %email_for_send,
               "Failed to send magic link email: {}",
               error
             );
           } else {
             tracing::info!(
-              email = %email,
+              email = %email_for_send,
               "Magic link email sent"
             );
           }
@@ -720,13 +731,13 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
       }
       Ok(None) => {
         tracing::debug!(
-          email = %payload.email,
+          email = %email,
           "Magic link generated but email is not configured"
         );
       }
       Err(error) => {
         tracing::warn!(
-          email = %payload.email,
+          email = %email,
           "Failed to load email config for magic link: {}",
           error
         );
@@ -734,7 +745,7 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
     }
     // Log a redacted line so operators see SOMETHING in dev without the secret.
     tracing::debug!(
-      email = %payload.email,
+      email = %email,
       "Magic link generated (URL not logged; set AEORDB_LOG_MAGIC_LINKS=1 to log)"
     );
   }
@@ -844,8 +855,8 @@ pub async fn verify_magic_link(State(state): State<AppState>, Query(query): Quer
   // Issue a JWT for this email.
   // Look up the user by email so we can use their UUID as `sub`.
   // Permission middleware expects a UUID — using the raw email would fail auth.
-  let sub = match system_store::get_user_by_username(&state.engine, &record.email) {
-    Ok(Some(user)) => user.user_id.to_string(),
+  let user = match system_store::get_user_by_username(&state.engine, &record.email) {
+    Ok(Some(user)) => user,
     Ok(None) => {
       tracing::warn!("Magic link verified for '{}' but no user record found", record.email);
       return ErrorResponse::new(
@@ -864,6 +875,17 @@ pub async fn verify_magic_link(State(state): State<AppState>, Query(query): Quer
       .into_response();
     }
   };
+
+  if !user.is_active {
+    tracing::warn!("Magic link verified for inactive user '{}'", record.email);
+    return ErrorResponse::new(
+      "No active user account exists for this email address. Contact your administrator to activate the account".to_string(),
+    )
+    .with_status(StatusCode::UNAUTHORIZED)
+    .into_response();
+  }
+
+  let sub = user.user_id.to_string();
 
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {

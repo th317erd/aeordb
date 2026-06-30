@@ -119,7 +119,9 @@ curl -X POST http://localhost:6830/auth/token \
 
 Request a magic link for passwordless authentication. The server always returns `200 OK` regardless of whether the email exists, to prevent email enumeration.
 
-When email is configured, AeorDB sends the link only for an existing user whose username matches the requested email address. Emailed magic links require `AEORDB_MAGIC_LINK_BASE_URL` to be set to the public origin of the server, for example `https://files.example.com`. AeorDB deliberately does not derive bearer login links from request `Host` or proxy headers.
+When email is configured, AeorDB sends the link only for an existing active user whose username matches the requested email address. AeorDB does not create users from this endpoint. Services that want first-login signup must create the user through the user administration API first, then request the magic link.
+
+Emailed magic links require `AEORDB_MAGIC_LINK_BASE_URL` to be set to the public origin of the server, for example `https://files.example.com`. AeorDB deliberately does not derive bearer login links from request `Host` or proxy headers.
 
 In development mode, set `AEORDB_LOG_MAGIC_LINKS=1` to log the magic link URL via tracing instead of sending email. If `AEORDB_MAGIC_LINK_BASE_URL` is not set, the logged URL is relative.
 

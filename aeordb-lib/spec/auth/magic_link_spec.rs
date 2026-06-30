@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::JwtManager;
 use aeordb::auth::magic_link::{generate_magic_link_code, hash_magic_link_code};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::{EventBus, StorageEngine};
+use aeordb::engine::{DirectoryOps, EngineError, EventBus, StorageEngine};
 use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
@@ -56,6 +56,15 @@ fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>, rate_
 async fn body_json(body: Body) -> serde_json::Value {
   let bytes = body.collect().await.unwrap().to_bytes().to_vec();
   serde_json::from_slice(&bytes).expect("valid JSON response body")
+}
+
+fn count_magic_links(engine: &StorageEngine) -> usize {
+  let ops = DirectoryOps::new(engine);
+  match ops.list_directory("/.aeordb-system/magic-links") {
+    Ok(entries) => entries.len(),
+    Err(EngineError::NotFound(_)) => 0,
+    Err(error) => panic!("failed to list magic links: {}", error),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +120,7 @@ async fn test_request_magic_link_returns_200_always() {
 
 #[tokio::test]
 async fn test_request_magic_link_returns_200_for_nonexistent_email() {
-  let (app, _, _, _, _temp_dir) = test_app();
+  let (app, _, engine, _, _temp_dir) = test_app();
 
   let request = Request::builder()
     .method("POST")
@@ -122,6 +131,47 @@ async fn test_request_magic_link_returns_200_for_nonexistent_email() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::OK);
+  assert!(system_store::get_user_by_username(&engine, "nobody@nowhere.invalid").unwrap().is_none());
+  assert_eq!(count_magic_links(&engine), 0, "requesting a link must not create a magic-link record for an unknown user");
+}
+
+#[tokio::test]
+async fn test_request_magic_link_existing_user_stores_link() {
+  let (app, _, engine, _, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let user = aeordb::engine::user::User::new("user@example.com", Some("user@example.com"));
+  system_store::store_user(&engine, &ctx, &user).unwrap();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/auth/magic-link")
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"email":"user@example.com"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(count_magic_links(&engine), 1, "existing users should get a stored magic-link record");
+}
+
+#[tokio::test]
+async fn test_request_magic_link_inactive_user_does_not_store_link() {
+  let (app, _, engine, _, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let mut user = aeordb::engine::user::User::new("inactive@example.com", Some("inactive@example.com"));
+  user.is_active = false;
+  system_store::store_user(&engine, &ctx, &user).unwrap();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/auth/magic-link")
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"email":"inactive@example.com"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(count_magic_links(&engine), 0, "inactive users should not get a stored magic-link record");
 }
 
 #[tokio::test]
