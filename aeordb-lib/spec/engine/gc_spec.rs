@@ -5,6 +5,7 @@ use aeordb::engine::{
   directory_content_hash, file_path_hash, save_lifecycle_config, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine,
   VersionManager,
 };
+use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
 use aeordb::engine::tree_walker::walk_version_tree;
@@ -241,6 +242,39 @@ fn test_gc_mark_preserves_live_path_file_record_when_head_lost_reference() {
 
   run_gc(&engine, &ctx, false).unwrap();
   assert_eq!(ops.read_file_buffered("/head-lost.txt").unwrap(), body);
+}
+
+#[test]
+fn test_gc_mark_fails_closed_when_live_btree_child_is_missing() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for i in 0..(BTREE_CONVERSION_THRESHOLD + 100) {
+    ops.store_file_buffered(&ctx, &format!("/gc-btree/file_{:05}.txt", i), b"content", Some("text/plain")).unwrap();
+  }
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let root_children = ops.list_directory("/").unwrap();
+  let gc_btree_child = root_children.iter().find(|child| child.name == "gc-btree").expect("root should list /gc-btree");
+  let (_header, _key, root_data) = engine.get_entry(&gc_btree_child.hash).unwrap().expect("HEAD-reachable /gc-btree content should exist");
+  let root_node = BTreeNode::deserialize(&root_data, hash_length, 0).unwrap();
+  let child_to_remove = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+  let child_kv = engine.get_kv_entry(&child_to_remove).expect("B-tree child should be live before simulated corruption");
+  engine.remove_kv_entry(&child_to_remove).unwrap();
+  engine.write_void_at(child_kv.offset, child_kv.total_length).unwrap();
+
+  let err = gc_mark(&engine).expect_err("GC mark must fail closed when a live B-tree child is missing");
+  let err = err.to_string();
+  assert!(
+    err.contains("B-tree child not found during GC mark") || err.contains("B-tree child hash resolved to"),
+    "unexpected error: {}",
+    err
+  );
 }
 
 // ─── Sweep phase ────────────────────────────────────────────────────────────

@@ -13,6 +13,15 @@ use crate::engine::hot_tail;
 use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_VOID};
 use crate::engine::storage_engine::StorageEngine;
 
+/// Structured B-tree directory issue used by repair logic. The CLI still
+/// renders `btree_directory_issues` as strings for human-readable output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BTreeDirectoryIssue {
+  pub path: String,
+  pub node_hash: Option<String>,
+  pub reason: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ExpectedKvEntry {
   offset: u64,
@@ -65,6 +74,7 @@ pub struct VerifyReport {
   pub unlisted_files: Vec<String>,        // files that exist but aren't in parent dir
   pub dangling_file_records: Vec<String>, // live path-key FileRecords with missing chunks
   pub btree_directory_issues: Vec<String>,
+  pub btree_directory_issue_details: Vec<BTreeDirectoryIssue>,
 
   // KV index
   pub kv_entries: u64,
@@ -120,6 +130,7 @@ impl VerifyReport {
       unlisted_files: Vec::new(),
       dangling_file_records: Vec::new(),
       btree_directory_issues: Vec::new(),
+      btree_directory_issue_details: Vec::new(),
       kv_entries: 0,
       stale_kv_entries: 0,
       missing_kv_entries: 0,
@@ -220,12 +231,36 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
   {
     let ops = DirectoryOps::new(engine);
     let ctx = crate::engine::request_context::RequestContext::system();
-    match ops.rebuild_directory_tree(&ctx) {
-      Ok(count) => {
-        report.repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
+
+    let mut targeted_repair_failed = false;
+    let mut targeted_repair_succeeded = false;
+    if !report.btree_directory_issue_details.is_empty() {
+      let mut paths: Vec<String> = report.btree_directory_issue_details.iter().map(|issue| issue.path.clone()).collect();
+      paths.sort();
+      paths.dedup();
+      for path in paths {
+        match ops.repair_directory_index_from_path_records(&path) {
+          Ok(count) => {
+            targeted_repair_succeeded = true;
+            report.repairs.push(format!("B-tree directory repaired from path records: {} ({} directory written)", path, count));
+          }
+          Err(e) => {
+            targeted_repair_failed = true;
+            report.repairs.push(format!("B-tree directory targeted repair failed for {}: {}", path, e));
+          }
+        }
       }
-      Err(e) => {
-        report.repairs.push(format!("Directory tree rebuild failed: {}", e));
+    }
+
+    let missing_kv_needs_full_rebuild = report.missing_kv_entries > 0 && report.file_records > 0 && !targeted_repair_succeeded;
+    if targeted_repair_failed || !report.missing_children.is_empty() || missing_kv_needs_full_rebuild {
+      match ops.rebuild_directory_tree(&ctx) {
+        Ok(count) => {
+          report.repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
+        }
+        Err(e) => {
+          report.repairs.push(format!("Directory tree rebuild failed: {}", e));
+        }
       }
     }
   }
@@ -536,7 +571,7 @@ fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &
   match ops.list_directory_with_btree_warnings(path) {
     Ok((children, warnings)) => {
       for warning in warnings {
-        report.btree_directory_issues.push(format_btree_directory_issue(path, &warning));
+        record_btree_directory_issue(report, path, &warning);
       }
       for child in &children {
         let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path.trim_end_matches('/'), child.name) };
@@ -561,8 +596,15 @@ fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &
   }
 }
 
-fn format_btree_directory_issue(path: &str, warning: &crate::engine::btree::BTreeWalkWarning) -> String {
-  format!("{} (B-tree node {}: {})", path, warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()), warning.reason)
+fn record_btree_directory_issue(report: &mut VerifyReport, path: &str, warning: &crate::engine::btree::BTreeWalkWarning) {
+  let node_hash = warning.node_hash_hex();
+  let issue = BTreeDirectoryIssue { path: path.to_string(), node_hash, reason: warning.reason.clone() };
+  report.btree_directory_issues.push(format_btree_directory_issue(&issue));
+  report.btree_directory_issue_details.push(issue);
+}
+
+fn format_btree_directory_issue(issue: &BTreeDirectoryIssue) -> String {
+  format!("{} (B-tree node {}: {})", issue.path, issue.node_hash.as_deref().unwrap_or("inline-root"), issue.reason)
 }
 
 fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) {
@@ -681,7 +723,9 @@ fn walk_snapshot_tree(
     ) {
       Ok(result) => {
         for warning in &result.warnings {
-          missing.push(format_btree_directory_issue(dir_path, warning));
+          let issue =
+            BTreeDirectoryIssue { path: dir_path.to_string(), node_hash: warning.node_hash_hex(), reason: warning.reason.clone() };
+          missing.push(format_btree_directory_issue(&issue));
         }
         result.entries
       }

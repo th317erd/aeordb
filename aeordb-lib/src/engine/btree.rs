@@ -581,6 +581,13 @@ pub fn btree_list_with_mode(
     }
     Err(error) => return btree_walk_error(mode, Some(root_hash), error),
   };
+  if node_data.0.entry_type != EntryType::DirectoryIndex {
+    return btree_walk_error(
+      mode,
+      Some(root_hash),
+      EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
+    );
+  }
   btree_list_loaded_node(Some(root_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode)
 }
 

@@ -84,6 +84,30 @@ pub fn symlink_identity_hash(path: &str, target: &str, algo: &HashAlgorithm) -> 
   algo.compute_hash(&input)
 }
 
+fn immediate_child_under(parent: &str, path: &str) -> Option<(String, bool)> {
+  let parent = normalize_path(parent);
+  let path = normalize_path(path);
+  if path == parent {
+    return None;
+  }
+
+  let rest = if parent == "/" {
+    path.strip_prefix('/')?
+  } else {
+    let prefix = format!("{}/", parent.trim_end_matches('/'));
+    path.strip_prefix(&prefix)?
+  };
+
+  if rest.is_empty() {
+    return None;
+  }
+
+  let mut segments = rest.split('/').filter(|segment| !segment.is_empty());
+  let first = segments.next()?.to_string();
+  let direct = segments.next().is_none();
+  Some((first, direct))
+}
+
 /// Compute the domain-prefixed hash for a chunk.
 pub fn chunk_content_hash(data: &[u8], algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   let mut input = Vec::with_capacity(6 + data.len());
@@ -1670,6 +1694,243 @@ impl<'a> DirectoryOps<'a> {
     );
 
     Ok(dirs_written)
+  }
+
+  /// Rebuild one directory index from authoritative live path records.
+  ///
+  /// This is narrower than [`rebuild_directory_tree`]: it repairs a damaged
+  /// B-tree directory without rewriting the whole tree. It reconstructs direct
+  /// files and symlinks from live path keys, restores child directories implied
+  /// by descendant path records, and preserves any readable child directories
+  /// already present in the damaged directory.
+  pub fn repair_directory_index_from_path_records(&self, path: &str) -> EngineResult<usize> {
+    let _namespace = self.engine.namespace_write_guard()?;
+    let normalized = normalize_path(path);
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+
+    let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo)?;
+    Self::sort_rebuilt_children(&mut children);
+    let (content_key, dir_size) = self.store_rebuilt_directory(&normalized, children, hash_length, &algo)?;
+
+    if normalized != "/" {
+      let now_ms = chrono::Utc::now().timestamp_millis();
+      let child = ChildEntry {
+        name: file_name(&normalized).unwrap_or("").to_string(),
+        entry_type: EntryType::DirectoryIndex.to_u8(),
+        hash: content_key,
+        total_size: dir_size,
+        content_type: None,
+        created_at: now_ms,
+        updated_at: now_ms,
+        virtual_time: now_ms as u64,
+        node_id: 0,
+      };
+      self.update_parent_directories(&normalized, child)?;
+    }
+
+    tracing::info!(path = %normalized, "Repaired directory index from live path records");
+    Ok(1)
+  }
+
+  fn collect_repair_children_for_directory(
+    &self,
+    dir_path: &str,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+  ) -> EngineResult<Vec<ChildEntry>> {
+    let snapshot = self.engine.kv_snapshot.load();
+    let all_entries = snapshot.iter_all()?;
+    let mut children: std::collections::BTreeMap<String, ChildEntry> = std::collections::BTreeMap::new();
+
+    // Preserve readable directory children first. If a damaged B-tree branch is
+    // missing, this keeps empty subdirectories from readable branches instead
+    // of relying only on descendant file/symlink records.
+    if let Ok((existing_children, _warnings)) = self.list_directory_with_btree_warnings(dir_path) {
+      for child in existing_children {
+        if child.entry_type == EntryType::DirectoryIndex.to_u8() {
+          let child_path =
+            if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child.name) };
+          if self.directory_child_hash_for_path(&child_path, hash_length, algo)?.is_some() {
+            children.insert(child.name.clone(), child);
+          }
+        }
+      }
+    }
+
+    for entry in &all_entries {
+      match entry.entry_type() {
+        crate::engine::kv_store::KV_TYPE_FILE_RECORD => {
+          let Some(child) = self.repair_child_from_file_record(entry, dir_path, hash_length, algo, &mut children)? else {
+            continue;
+          };
+          children.insert(child.name.clone(), child);
+        }
+        crate::engine::kv_store::KV_TYPE_SYMLINK => {
+          let Some(child) = self.repair_child_from_symlink_record(entry, dir_path, algo, &mut children)? else {
+            continue;
+          };
+          children.insert(child.name.clone(), child);
+        }
+        _ => {}
+      }
+    }
+
+    Ok(children.into_values().collect())
+  }
+
+  fn repair_child_from_file_record(
+    &self,
+    entry: &crate::engine::kv_store::KVEntry,
+    dir_path: &str,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+    children: &mut std::collections::BTreeMap<String, ChildEntry>,
+  ) -> EngineResult<Option<ChildEntry>> {
+    let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
+      return Ok(None);
+    };
+    let record = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
+      Ok(record) => record,
+      Err(_) => return Ok(None),
+    };
+    let path = normalize_path(&record.path);
+    if path == "/" || path.starts_with("/.aeordb-") {
+      return Ok(None);
+    }
+    let path_key = file_path_hash(&path, algo)?;
+    if entry.hash != path_key {
+      return Ok(None);
+    }
+    if !self.file_record_chunks_live(&record)? {
+      return Ok(None);
+    }
+
+    let Some((child_name, direct_child)) = immediate_child_under(dir_path, &path) else {
+      return Ok(None);
+    };
+    if !direct_child {
+      self.add_implied_directory_child(dir_path, &child_name, algo, hash_length, children)?;
+      return Ok(None);
+    }
+
+    let identity_key = file_identity_hash(&path, record.content_type.as_deref(), &record.chunk_hashes, algo)?;
+    let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
+    Ok(Some(ChildEntry {
+      name: child_name,
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: child_hash,
+      total_size: record.total_size,
+      content_type: record.content_type.clone(),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      virtual_time: 0,
+      node_id: 0,
+    }))
+  }
+
+  fn repair_child_from_symlink_record(
+    &self,
+    entry: &crate::engine::kv_store::KVEntry,
+    dir_path: &str,
+    algo: &HashAlgorithm,
+    children: &mut std::collections::BTreeMap<String, ChildEntry>,
+  ) -> EngineResult<Option<ChildEntry>> {
+    let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
+      return Ok(None);
+    };
+    let record = match SymlinkRecord::deserialize(&value, header.entry_version) {
+      Ok(record) => record,
+      Err(_) => return Ok(None),
+    };
+    let path = normalize_path(&record.path);
+    if path == "/" || path.starts_with("/.aeordb-") {
+      return Ok(None);
+    }
+    let path_key = symlink_path_hash(&path, algo)?;
+    if entry.hash != path_key {
+      return Ok(None);
+    }
+
+    let Some((child_name, direct_child)) = immediate_child_under(dir_path, &path) else {
+      return Ok(None);
+    };
+    if !direct_child {
+      self.add_implied_directory_child(dir_path, &child_name, algo, algo.hash_length(), children)?;
+      return Ok(None);
+    }
+
+    let identity_key = symlink_identity_hash(&path, &record.target, algo)?;
+    let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
+    Ok(Some(ChildEntry {
+      name: child_name,
+      entry_type: EntryType::Symlink.to_u8(),
+      hash: child_hash,
+      total_size: 0,
+      content_type: None,
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      virtual_time: 0,
+      node_id: 0,
+    }))
+  }
+
+  fn add_implied_directory_child(
+    &self,
+    dir_path: &str,
+    child_name: &str,
+    algo: &HashAlgorithm,
+    hash_length: usize,
+    children: &mut std::collections::BTreeMap<String, ChildEntry>,
+  ) -> EngineResult<()> {
+    if children.contains_key(child_name) {
+      return Ok(());
+    }
+    let child_path =
+      if dir_path == "/" { format!("/{}", child_name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child_name) };
+    let Some((child_hash, total_size, timestamp)) = self.directory_child_hash_for_path(&child_path, hash_length, algo)? else {
+      return Ok(());
+    };
+    children.insert(
+      child_name.to_string(),
+      ChildEntry {
+        name: child_name.to_string(),
+        entry_type: EntryType::DirectoryIndex.to_u8(),
+        hash: child_hash,
+        total_size,
+        content_type: None,
+        created_at: timestamp,
+        updated_at: timestamp,
+        virtual_time: timestamp as u64,
+        node_id: 0,
+      },
+    );
+    Ok(())
+  }
+
+  fn directory_child_hash_for_path(
+    &self,
+    path: &str,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+  ) -> EngineResult<Option<(Vec<u8>, u64, i64)>> {
+    let dir_key = directory_path_hash(path, algo)?;
+    let Some((header, _key, value)) = self.engine.get_entry(&dir_key)? else {
+      return Ok(None);
+    };
+    if value.len() == hash_length {
+      return match self.engine.get_entry(&value)? {
+        Some((_target_header, _target_key, target_value)) => Ok(Some((value, target_value.len() as u64, header.timestamp))),
+        None => Ok(None),
+      };
+    }
+    let content_key = if !value.is_empty() && crate::engine::btree::is_btree_format(&value) {
+      let root = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
+      root.content_hash(hash_length, algo)?
+    } else {
+      directory_content_hash(&value, algo)?
+    };
+    Ok(Some((content_key, value.len() as u64, header.timestamp)))
   }
 
   fn file_record_chunks_live(&self, record: &FileRecord) -> EngineResult<bool> {

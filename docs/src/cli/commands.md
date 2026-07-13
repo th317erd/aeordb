@@ -141,7 +141,7 @@ aeordb verify --repair --force-fix-in-place --yes --database data.aeordb
 
 `aeordb verify` reports damaged B-tree directory branches under the Directory Consistency section. Normal read paths can return the readable portion of a damaged B-tree directory, but verification surfaces the missing or corrupt branch so it is not silently hidden.
 
-When `--repair` is used, B-tree directory issues trigger a live directory tree rebuild from current path-key FileRecords.
+When `--repair` is used, B-tree directory issues are repaired by first rebuilding only the affected B-tree directory from current live path records. If targeted repair cannot recover the issue, repair falls back to rebuilding the live directory tree from path-key FileRecords.
 
 ### Emergency Spill Recovery
 

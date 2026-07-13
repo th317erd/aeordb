@@ -4,7 +4,7 @@ use crate::engine::btree::{BTreeNode, is_btree_format};
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
 use crate::engine::engine_event::{EVENT_GC_COMPLETED, EVENT_GC_STARTED};
 use crate::engine::entry_type::EntryType;
-use crate::engine::errors::EngineResult;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::engine_counters::{estimated_chunk_payload_bytes, CountersSnapshot};
 use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::{
@@ -207,7 +207,7 @@ fn walk_versions_bfs(
     let mut to_read: Vec<(Vec<u8>, String, u64)> = Vec::with_capacity(frontier.len());
     let mut visited_dups = 0u64;
     let mut leaves_skipped = 0u64;
-    let mut not_in_kv = 0u64;
+    let not_in_kv = 0u64;
     let dedup_start = std::time::Instant::now();
     for (hash, path) in frontier.drain(..) {
       if !live.insert(hash.clone()) {
@@ -231,7 +231,11 @@ fn walk_versions_bfs(
           to_read.push((hash, path, kv.offset));
         }
         None => {
-          not_in_kv += 1;
+          return Err(EngineError::NotFound(format!(
+            "Reachable entry not found during GC mark: path={} hash={}",
+            path,
+            hex::encode(&hash)
+          )));
         }
       }
     }
@@ -251,7 +255,13 @@ fn walk_versions_bfs(
     for (hash, path, _offset) in to_read {
       let entry = match engine.get_entry_including_deleted(&hash)? {
         Some(e) => e,
-        None => continue,
+        None => {
+          return Err(EngineError::NotFound(format!(
+            "Reachable entry disappeared during GC mark: path={} hash={}",
+            path,
+            hex::encode(&hash)
+          )));
+        }
       };
       let (header, _key, value) = entry;
 
@@ -260,7 +270,13 @@ fn walk_versions_bfs(
         live.insert(value.clone());
         match engine.get_entry_including_deleted(&value)? {
           Some((_h, _k, v)) => v,
-          None => continue,
+          None => {
+            return Err(EngineError::NotFound(format!(
+              "Hard-link target not found during GC mark: path={} target={}",
+              path,
+              hex::encode(&value)
+            )));
+          }
         }
       } else {
         value
@@ -371,12 +387,18 @@ fn collect_btree_children(
       for child_hash in &internal.children {
         live.insert(child_hash.clone());
         // B-tree internal nodes may be deleted at HEAD but snapshot-referenced.
-        let Some((_header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? else {
+        let Some((header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? else {
           return Err(crate::engine::errors::EngineError::NotFound(format!(
             "B-tree child not found during GC mark: {}",
             hex::encode(child_hash)
           )));
         };
+        if header.entry_type != EntryType::DirectoryIndex {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("B-tree child hash resolved to {:?} during GC mark: {}", header.entry_type, hex::encode(child_hash)),
+          });
+        }
         let sub_children = collect_btree_children(engine, &child_data, hash_length, live)?;
         all_children.extend(sub_children);
       }
@@ -445,7 +467,7 @@ fn mark_entry_recursive(
       if debug {
         eprintln!("[gc-rec]   hash={} path={:?} NOT-FOUND", hex::encode(&hash[..8.min(hash.len())]), path);
       }
-      return Ok(());
+      return Err(EngineError::NotFound(format!("System entry not found during GC mark: path={} hash={}", path, hex::encode(hash))));
     }
   };
 
@@ -458,7 +480,13 @@ fn mark_entry_recursive(
     live.insert(value.clone());
     match engine.get_entry_including_deleted(&value)? {
       Some((_h, _k, v)) => v,
-      None => return Ok(()),
+      None => {
+        return Err(EngineError::NotFound(format!(
+          "System hard-link target not found during GC mark: path={} target={}",
+          path,
+          hex::encode(&value)
+        )));
+      }
     }
   } else {
     value

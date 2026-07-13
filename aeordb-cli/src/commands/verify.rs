@@ -397,7 +397,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       }
       if !report.btree_directory_issues.is_empty() {
         println!("  {} B-tree directory branch(es) are missing or corrupt.", report.btree_directory_issues.len());
-        println!("  Repair will rebuild the live directory tree from path-key FileRecords.");
+        println!("  Repair will first rebuild affected B-tree directories from live path records, then fall back to a full directory-tree rebuild if needed.");
       }
       if !report.broken_snapshots.is_empty() {
         println!("  {} snapshots reference data that no longer exists.", report.broken_snapshots.len());

@@ -793,10 +793,59 @@ fn verify_reports_btree_directory_issue_and_repair_rebuilds_tree() {
 
   let repair_report = verify::verify_and_repair(&engine, db_str);
   assert!(
-    repair_report.repairs.iter().any(|repair| repair.contains("Directory tree rebuilt")),
-    "repair should rebuild live directory tree when B-tree issues are present: {:?}",
+    repair_report.repairs.iter().any(|repair| repair.contains("B-tree directory repaired from path records: /btree-repair")),
+    "repair should use targeted B-tree directory repair when only B-tree branches are damaged: {:?}",
     repair_report.repairs
   );
+  assert!(
+    !repair_report.repairs.iter().any(|repair| repair.contains("Directory tree rebuilt")),
+    "targeted B-tree repair should avoid the full directory tree rebuild fallback when it succeeds: {:?}",
+    repair_report.repairs
+  );
+
+  drop(engine);
+  let reopened = StorageEngine::open(db_str).unwrap();
+  let reopened_ops = DirectoryOps::new(&reopened);
+  let repaired_children = reopened_ops.list_directory("/btree-repair").unwrap();
+  assert_eq!(repaired_children.len(), count, "targeted repair should restore every live path-key child");
+}
+
+#[test]
+fn targeted_btree_repair_preserves_symlinks_and_implied_child_directories() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let count = BTREE_CONVERSION_THRESHOLD + 100;
+
+  for i in 0..count {
+    ops.store_file_buffered(&ctx, &format!("/btree-mixed/file_{:05}.txt", i), b"content", Some("text/plain")).unwrap();
+  }
+  ops.store_file_buffered(&ctx, "/btree-mixed/nested/deep.txt", b"deep", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/btree-mixed/link", "/btree-mixed/file_00000.txt").unwrap();
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = directory_path_hash("/btree-mixed", &algo).unwrap();
+  let (_header, _key, raw) = engine.get_entry(&dir_key).unwrap().unwrap();
+  let root_data = if raw.len() == hash_length { engine.get_entry(&raw).unwrap().unwrap().2 } else { raw };
+  let root_node = BTreeNode::deserialize(&root_data, hash_length, 0).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  let partial_children = ops.list_directory("/btree-mixed").unwrap();
+  assert!(partial_children.len() < count + 2, "test setup should damage one B-tree branch");
+
+  let repaired = ops.repair_directory_index_from_path_records("/btree-mixed").unwrap();
+  assert_eq!(repaired, 1);
+
+  let children = ops.list_directory("/btree-mixed").unwrap();
+  assert_eq!(children.len(), count + 2);
+  assert!(children.iter().any(|child| child.name == "link" && child.entry_type == EntryType::Symlink.to_u8()));
+  assert!(children.iter().any(|child| child.name == "nested" && child.entry_type == EntryType::DirectoryIndex.to_u8()));
+  assert_eq!(ops.read_file_buffered("/btree-mixed/nested/deep.txt").unwrap(), b"deep");
 }
 
 #[test]

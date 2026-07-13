@@ -7,6 +7,7 @@ use aeordb::engine::btree::{
 };
 use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
+use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::server::create_temp_engine_for_tests;
@@ -1228,4 +1229,29 @@ fn test_btree_list_best_effort_skips_missing_child_node() {
   assert_eq!(result.warnings[0].node_hash.as_deref(), Some(child_to_delete.as_slice()));
   assert!(!result.entries.is_empty(), "best-effort listing should keep readable branches");
   assert!(result.entries.len() < 120, "best-effort listing should skip the missing branch");
+}
+
+#[test]
+fn test_btree_list_rejects_child_hash_with_wrong_entry_type() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+
+  let leaf = BTreeNode::Leaf(LeafNode { entries: vec![make_entry("alpha")] });
+  let leaf_hash = store_btree_node(&engine, &leaf, hash_length, &algo).unwrap();
+  let bad_child_hash = engine.compute_hash(b"btree:bad-child").unwrap();
+  engine.store_entry(EntryType::Void, &bad_child_hash, &[]).unwrap();
+
+  let root = BTreeNode::Internal(InternalNode { keys: vec!["middle".to_string()], children: vec![leaf_hash, bad_child_hash.clone()] });
+  let root_hash = store_btree_node(&engine, &root, hash_length, &algo).unwrap();
+
+  let err = btree_list(&engine, &root_hash, hash_length, false).expect_err("strict B-tree listing should reject non-B-tree child entries");
+  assert!(err.to_string().contains("B-tree node hash resolved to Void entry"), "unexpected error: {}", err);
+
+  let result = btree_list_with_mode(&engine, &root_hash, hash_length, false, BTreeWalkMode::BestEffort).unwrap();
+  assert!(!result.is_complete());
+  assert_eq!(result.warnings.len(), 1);
+  assert_eq!(result.warnings[0].node_hash.as_deref(), Some(bad_child_hash.as_slice()));
+  assert_eq!(result.entries.len(), 1);
+  assert_eq!(result.entries[0].name, "alpha");
 }
