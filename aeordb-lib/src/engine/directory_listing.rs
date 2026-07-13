@@ -35,13 +35,26 @@ pub fn count_live_tree(engine: &StorageEngine) -> EngineResult<(u64, u64)> {
 /// This walks directory entries only. File sizes come from `ChildEntry::total_size`,
 /// so it does not read file payload chunks and is safe to run during startup.
 pub fn measure_live_tree(engine: &StorageEngine) -> EngineResult<LiveTreeMetrics> {
-  let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
-  let root_key = directory_path_hash("/", &algo)?;
-  let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
-  let root_value = match ops.read_directory_data(&root_key)? {
-    Some((_header, value)) => value,
-    None => return Ok(LiveTreeMetrics::default()),
+  let hash_length = engine.hash_algo().hash_length();
+  let head_hash = engine.head_hash()?;
+  // HEAD is authoritative. The mutable dir:/ path-key can lag after HEAD
+  // movement and later point at swept B-tree nodes, so startup counters must
+  // not use it except for empty/legacy databases without a valid HEAD.
+  let root_value = if !head_hash.is_empty() && !head_hash.iter().all(|&byte| byte == 0) {
+    match engine.get_entry(&head_hash)? {
+      Some((_header, _key, value)) => value,
+      None => {
+        return Err(crate::engine::errors::EngineError::NotFound(format!("HEAD root directory not found: {}", hex::encode(&head_hash))));
+      }
+    }
+  } else {
+    let algo = engine.hash_algo();
+    let root_key = directory_path_hash("/", &algo)?;
+    let ops = crate::engine::directory_ops::DirectoryOps::new(engine);
+    match ops.read_directory_data(&root_key)? {
+      Some((_header, value)) => value,
+      None => return Ok(LiveTreeMetrics::default()),
+    }
   };
   let mut metrics = LiveTreeMetrics::default();
   if !root_value.is_empty() {

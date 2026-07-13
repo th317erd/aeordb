@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use aeordb::engine::directory_ops::directory_path_hash;
 use aeordb::engine::engine_counters::{EngineCounters, CountersSnapshot};
+use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, VersionManager};
 
 fn create_engine(directory: &tempfile::TempDir) -> StorageEngine {
@@ -430,6 +432,32 @@ fn test_initialize_from_kv_counts_files() {
     "startup logical size should come from the live tree"
   );
   assert_eq!(snapshot.chunk_data_size, snapshot.logical_data_size, "uncompressed unique chunks should initialize from KV entry sizes");
+}
+
+#[test]
+fn test_initialize_from_kv_counts_from_head_when_root_path_key_is_stale() {
+  let ctx = RequestContext::system();
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/old.txt", b"old", None).unwrap();
+  let stale_root_hash = engine.head_hash().unwrap();
+
+  ops.store_file_buffered(&ctx, "/new.txt", b"new-data", None).unwrap();
+
+  // Simulate a stale mutable dir:/ hard-link. This has happened after HEAD
+  // movement + GC paths: the path-key can point at an older root even though
+  // HEAD is authoritative and newer.
+  let algo = engine.hash_algo();
+  let root_key = directory_path_hash("/", &algo).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &root_key, &stale_root_hash).unwrap();
+
+  let counters = EngineCounters::initialize_from_kv(&engine);
+  let snapshot = counters.snapshot();
+
+  assert_eq!(snapshot.files, 2, "startup file counter should walk HEAD, not the stale root path-key");
+  assert_eq!(snapshot.logical_data_size, (b"old".len() + b"new-data".len()) as u64);
 }
 
 #[test]
