@@ -1068,10 +1068,31 @@ impl<'a> DirectoryOps<'a> {
 
   /// List the children of a directory.
   ///
-  /// If the directory index or child entries are corrupt, logs a warning
-  /// and returns an empty listing instead of failing the entire operation.
-  /// `NotFound` is still returned as an error (directory genuinely doesn't exist).
+  /// B-tree directory damage is handled best-effort: readable branches are
+  /// returned and damaged branches are logged. `NotFound` is still returned as
+  /// an error when the directory genuinely doesn't exist.
   pub fn list_directory(&self, path: &str) -> EngineResult<Vec<ChildEntry>> {
+    let normalized = normalize_path(path);
+    let (children, warnings) = self.list_directory_with_btree_warnings(&normalized)?;
+    for warning in warnings {
+      tracing::warn!(
+        path = %normalized,
+        node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
+        reason = %warning.reason,
+        "B-tree directory index partially unreadable; returning partial listing"
+      );
+    }
+    Ok(children)
+  }
+
+  /// List directory children and return any best-effort B-tree traversal
+  /// warnings. This is used by verify so damaged B-tree branches are surfaced
+  /// as repairable directory issues instead of disappearing behind the normal
+  /// read-path fallback.
+  pub fn list_directory_with_btree_warnings(
+    &self,
+    path: &str,
+  ) -> EngineResult<(Vec<ChildEntry>, Vec<crate::engine::btree::BTreeWalkWarning>)> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -1114,24 +1135,25 @@ impl<'a> DirectoryOps<'a> {
           );
         }
         if value.is_empty() {
-          return Ok(Vec::new());
+          return Ok((Vec::new(), Vec::new()));
         }
         if crate::engine::btree::is_btree_format(&value) {
-          // B-tree format: value is the root node data
-          match crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false) {
-            Ok(children) => self.filter_live_children(&normalized, children),
-            Err(e) => {
-              tracing::warn!("Corrupt B-tree directory index at '{}': {}. Returning empty listing.", normalized, e);
-              Ok(Vec::new())
-            }
-          }
+          let result = crate::engine::btree::btree_list_from_node_with_mode(
+            &value,
+            self.engine,
+            hash_length,
+            false,
+            crate::engine::btree::BTreeWalkMode::BestEffort,
+          )?;
+          let children = self.filter_live_children(&normalized, result.entries)?;
+          Ok((children, result.warnings))
         } else {
           // Flat format
           match deserialize_child_entries(&value, hash_length, header.entry_version) {
-            Ok(children) => self.filter_live_children(&normalized, children),
+            Ok(children) => Ok((self.filter_live_children(&normalized, children)?, Vec::new())),
             Err(e) => {
               tracing::warn!("Corrupt directory index at '{}': {}. Returning empty listing.", normalized, e);
-              Ok(Vec::new())
+              Ok((Vec::new(), Vec::new()))
             }
           }
         }

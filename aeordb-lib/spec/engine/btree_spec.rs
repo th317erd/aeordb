@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aeordb::engine::btree::{
   BTreeNode, LeafNode, InternalNode, BTREE_MAX_LEAF_ENTRIES, BTREE_MAX_INTERNAL_KEYS, BTREE_LEAF_MARKER, BTREE_INTERNAL_MARKER,
   is_btree_format, btree_insert, btree_insert_batched, btree_lookup, btree_list, btree_list_from_node, btree_delete, btree_from_entries,
-  store_btree_node,
+  store_btree_node, btree_list_with_mode, BTreeWalkMode,
 };
 use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
@@ -1201,4 +1201,31 @@ fn test_btree_insert_batched_many_splits() {
 
   let entries = btree_list(&engine, &last_hash, hash_length, false).unwrap();
   assert_eq!(entries.len(), 500);
+}
+
+#[test]
+fn test_btree_list_best_effort_skips_missing_child_node() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+
+  let entries: Vec<ChildEntry> = (0..120).map(|i| make_entry(&format!("item_{:05}", i))).collect();
+  let root_hash = btree_from_entries(&engine, entries, hash_length, &algo).unwrap();
+  let root_entry = engine.get_entry(&root_hash).unwrap().unwrap();
+  let root_node = BTreeNode::deserialize(&root_entry.2, hash_length, root_entry.0.entry_version).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal root for 120 entries"),
+  };
+
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  assert!(btree_list(&engine, &root_hash, hash_length, false).is_err(), "strict B-tree listing should fail on missing child node");
+
+  let result = btree_list_with_mode(&engine, &root_hash, hash_length, false, BTreeWalkMode::BestEffort).unwrap();
+  assert!(!result.is_complete());
+  assert_eq!(result.warnings.len(), 1);
+  assert_eq!(result.warnings[0].node_hash.as_deref(), Some(child_to_delete.as_slice()));
+  assert!(!result.entries.is_empty(), "best-effort listing should keep readable branches");
+  assert!(result.entries.len() < 120, "best-effort listing should skip the missing branch");
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use aeordb::engine::btree::{BTREE_CONVERSION_THRESHOLD, is_btree_format};
+use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD, is_btree_format};
 use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::version_manager::VersionManager;
@@ -179,6 +179,36 @@ fn test_btree_directory_add_many_after_conversion() {
   let dir_key = directory_path_hash("/grow2", &algo).unwrap();
   let raw_data = resolve_directory_value(&engine, &dir_key);
   assert!(is_btree_format(&raw_data));
+}
+
+#[test]
+fn test_btree_directory_listing_best_effort_with_missing_child_node() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let count = BTREE_CONVERSION_THRESHOLD + 100;
+  store_n_files(&engine, "/damaged", count);
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = directory_path_hash("/damaged", &algo).unwrap();
+  let raw_data = resolve_directory_value(&engine, &dir_key);
+  let root_node = BTreeNode::deserialize(&raw_data, hash_length, 0).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  let ops = DirectoryOps::new(&engine);
+  let (checked_children, warnings) = ops.list_directory_with_btree_warnings("/damaged").unwrap();
+  assert_eq!(warnings.len(), 1);
+  assert_eq!(warnings[0].node_hash.as_deref(), Some(child_to_delete.as_slice()));
+  assert!(!checked_children.is_empty(), "readable B-tree branches should still be returned");
+  assert!(checked_children.len() < count, "missing B-tree branch should be skipped");
+
+  let normal_children = ops.list_directory("/damaged").unwrap();
+  assert_eq!(normal_children.len(), checked_children.len());
 }
 
 // ---------------------------------------------------------------------------

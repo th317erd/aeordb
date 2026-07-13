@@ -65,7 +65,21 @@ pub fn measure_live_tree(engine: &StorageEngine) -> EngineResult<LiveTreeMetrics
 
 fn measure_walk(engine: &StorageEngine, dir_value: &[u8], hash_length: usize, metrics: &mut LiveTreeMetrics) -> EngineResult<()> {
   let children = if crate::engine::btree::is_btree_format(dir_value) {
-    crate::engine::btree::btree_list_from_node(dir_value, engine, hash_length, false)?
+    let result = crate::engine::btree::btree_list_from_node_with_mode(
+      dir_value,
+      engine,
+      hash_length,
+      false,
+      crate::engine::btree::BTreeWalkMode::BestEffort,
+    )?;
+    for warning in &result.warnings {
+      tracing::warn!(
+        node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
+        reason = %warning.reason,
+        "Live tree counter walk skipped damaged B-tree branch"
+      );
+    }
+    result.entries
   } else {
     deserialize_child_entries(dir_value, hash_length, 0)?
   };
@@ -82,6 +96,12 @@ fn measure_walk(engine: &StorageEngine, dir_value: &[u8], hash_length: usize, me
           if !sub_value.is_empty() {
             measure_walk(engine, &sub_value, hash_length, metrics)?;
           }
+        } else {
+          tracing::warn!(
+            child = %child.name,
+            child_hash = %hex::encode(&child.hash),
+            "Live tree counter walk skipped missing directory child"
+          );
         }
       }
       // Symlinks and other types don't contribute to file/dir counts.

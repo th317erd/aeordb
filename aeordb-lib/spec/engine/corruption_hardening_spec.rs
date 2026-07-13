@@ -3,7 +3,8 @@
 //! Tests the scanner recovery, KV rebuild, lost+found quarantine, and
 //! directory listing resilience when faced with corrupt data.
 
-use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
+use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
 use aeordb::engine::file_header::read_active_header;
 use aeordb::engine::gc;
 use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
@@ -755,6 +756,47 @@ fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
   let root = ops.list_directory("/").unwrap();
   assert!(!root.iter().any(|child| child.name == "broken"), "repair must not re-list a file whose chunks are missing: {:?}", root);
   assert!(ops.read_file_buffered("/broken/dangling.txt").is_err(), "direct read should still report the underlying chunk loss");
+}
+
+#[test]
+fn verify_reports_btree_directory_issue_and_repair_rebuilds_tree() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap();
+  let count = BTREE_CONVERSION_THRESHOLD + 100;
+
+  for i in 0..count {
+    ops.store_file_buffered(&ctx, &format!("/btree-repair/file_{:05}.txt", i), b"content", Some("text/plain")).unwrap();
+  }
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = directory_path_hash("/btree-repair", &algo).unwrap();
+  let (_header, _key, raw) = engine.get_entry(&dir_key).unwrap().unwrap();
+  let root_data = if raw.len() == hash_length { engine.get_entry(&raw).unwrap().unwrap().2 } else { raw };
+  let root_node = BTreeNode::deserialize(&root_data, hash_length, 0).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  let report = verify::verify(&engine, db_str);
+  assert!(
+    report.btree_directory_issues.iter().any(|issue| issue.contains("/btree-repair")),
+    "verify should report damaged B-tree directories: {:?}",
+    report.btree_directory_issues
+  );
+
+  let repair_report = verify::verify_and_repair(&engine, db_str);
+  assert!(
+    repair_report.repairs.iter().any(|repair| repair.contains("Directory tree rebuilt")),
+    "repair should rebuild live directory tree when B-tree issues are present: {:?}",
+    repair_report.repairs
+  );
 }
 
 #[test]

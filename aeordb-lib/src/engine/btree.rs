@@ -19,6 +19,43 @@ pub const BTREE_CONVERSION_THRESHOLD: usize = 256;
 pub const BTREE_LEAF_MARKER: u8 = 0x00;
 pub const BTREE_INTERNAL_MARKER: u8 = 0x01;
 
+/// B-tree traversal policy for callers with different safety needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BTreeWalkMode {
+  /// Any missing/corrupt node aborts the walk.
+  Strict,
+  /// Missing/corrupt child nodes are reported and skipped so read-only callers
+  /// can return partial data without treating one damaged branch as an empty
+  /// directory.
+  BestEffort,
+}
+
+/// A recoverable B-tree walk problem observed during best-effort traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BTreeWalkWarning {
+  pub node_hash: Option<Vec<u8>>,
+  pub reason: String,
+}
+
+impl BTreeWalkWarning {
+  pub fn node_hash_hex(&self) -> Option<String> {
+    self.node_hash.as_ref().map(hex::encode)
+  }
+}
+
+/// Result of a B-tree listing that may be partial.
+#[derive(Debug, Clone, Default)]
+pub struct BTreeListResult {
+  pub entries: Vec<ChildEntry>,
+  pub warnings: Vec<BTreeWalkWarning>,
+}
+
+impl BTreeListResult {
+  pub fn is_complete(&self) -> bool {
+    self.warnings.is_empty()
+  }
+}
+
 /// A B-tree node — either a leaf containing ChildEntry data,
 /// or an internal node containing sorted keys and child node hashes.
 #[derive(Debug, Clone)]
@@ -510,21 +547,7 @@ pub fn btree_lookup(
 /// B-tree nodes marked as deleted (common when walking historical snapshots) are
 /// still reachable.
 pub fn btree_list(engine: &StorageEngine, root_hash: &[u8], hash_length: usize, include_deleted: bool) -> EngineResult<Vec<ChildEntry>> {
-  let node_data = if include_deleted { engine.get_entry_including_deleted(root_hash)? } else { engine.get_entry(root_hash)? }
-    .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-  let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
-
-  match node {
-    BTreeNode::Leaf(leaf) => Ok(leaf.entries),
-    BTreeNode::Internal(internal) => {
-      let mut all_entries = Vec::new();
-      for child_hash in &internal.children {
-        let child_entries = btree_list(engine, child_hash, hash_length, include_deleted)?;
-        all_entries.extend(child_entries);
-      }
-      Ok(all_entries)
-    }
-  }
+  Ok(btree_list_with_mode(engine, root_hash, hash_length, include_deleted, BTreeWalkMode::Strict)?.entries)
 }
 
 /// List all children starting from a serialized root node.
@@ -539,17 +562,74 @@ pub fn btree_list_from_node(
   hash_length: usize,
   include_deleted: bool,
 ) -> EngineResult<Vec<ChildEntry>> {
-  let node = BTreeNode::deserialize(root_data, hash_length, 0)?;
-  match node {
-    BTreeNode::Leaf(leaf) => Ok(leaf.entries),
-    BTreeNode::Internal(internal) => {
-      let mut all = Vec::new();
-      for child_hash in &internal.children {
-        let entries = btree_list(engine, child_hash, hash_length, include_deleted)?;
-        all.extend(entries);
-      }
-      Ok(all)
+  Ok(btree_list_from_node_with_mode(root_data, engine, hash_length, include_deleted, BTreeWalkMode::Strict)?.entries)
+}
+
+/// List all children in a B-tree directory with an explicit traversal policy.
+pub fn btree_list_with_mode(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+) -> EngineResult<BTreeListResult> {
+  let node_data = if include_deleted { engine.get_entry_including_deleted(root_hash) } else { engine.get_entry(root_hash) };
+  let node_data = match node_data {
+    Ok(Some(data)) => data,
+    Ok(None) => {
+      return btree_walk_error(mode, Some(root_hash), EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(root_hash))))
     }
+    Err(error) => return btree_walk_error(mode, Some(root_hash), error),
+  };
+  btree_list_loaded_node(Some(root_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode)
+}
+
+/// List all children starting from serialized root node data with an explicit
+/// traversal policy.
+pub fn btree_list_from_node_with_mode(
+  root_data: &[u8],
+  engine: &StorageEngine,
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+) -> EngineResult<BTreeListResult> {
+  btree_list_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode)
+}
+
+fn btree_list_loaded_node(
+  node_hash: Option<&[u8]>,
+  node_data: &[u8],
+  entry_version: u8,
+  engine: &StorageEngine,
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+) -> EngineResult<BTreeListResult> {
+  let node = match BTreeNode::deserialize(node_data, hash_length, entry_version) {
+    Ok(node) => node,
+    Err(error) => return btree_walk_error(mode, node_hash, error),
+  };
+  match node {
+    BTreeNode::Leaf(leaf) => Ok(BTreeListResult { entries: leaf.entries, warnings: Vec::new() }),
+    BTreeNode::Internal(internal) => {
+      let mut result = BTreeListResult::default();
+      for child_hash in &internal.children {
+        let mut child_result = btree_list_with_mode(engine, child_hash, hash_length, include_deleted, mode)?;
+        result.entries.append(&mut child_result.entries);
+        result.warnings.append(&mut child_result.warnings);
+      }
+      Ok(result)
+    }
+  }
+}
+
+fn btree_walk_error(mode: BTreeWalkMode, node_hash: Option<&[u8]>, error: EngineError) -> EngineResult<BTreeListResult> {
+  match mode {
+    BTreeWalkMode::Strict => Err(error),
+    BTreeWalkMode::BestEffort => Ok(BTreeListResult {
+      entries: Vec::new(),
+      warnings: vec![BTreeWalkWarning { node_hash: node_hash.map(Vec::from), reason: error.to_string() }],
+    }),
   }
 }
 

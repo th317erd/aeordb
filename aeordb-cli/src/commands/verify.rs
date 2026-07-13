@@ -303,6 +303,10 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   for dangling in &report.dangling_file_records {
     println!("    - {}", dangling);
   }
+  println!("  B-tree issues:      {:>8}", report.btree_directory_issues.len());
+  for issue in &report.btree_directory_issues {
+    println!("    - {}", issue);
+  }
   println!("  Unlisted files:     {:>8}", report.unlisted_files.len());
   for uf in &report.unlisted_files {
     println!("    - {}", uf);
@@ -390,6 +394,10 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       }
       if !report.dangling_file_records.is_empty() {
         println!("  {} live path-key FileRecords reference chunks that are not live.", report.dangling_file_records.len());
+      }
+      if !report.btree_directory_issues.is_empty() {
+        println!("  {} B-tree directory branch(es) are missing or corrupt.", report.btree_directory_issues.len());
+        println!("  Repair will rebuild the live directory tree from path-key FileRecords.");
       }
       if !report.broken_snapshots.is_empty() {
         println!("  {} snapshots reference data that no longer exists.", report.broken_snapshots.len());

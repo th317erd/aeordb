@@ -371,10 +371,14 @@ fn collect_btree_children(
       for child_hash in &internal.children {
         live.insert(child_hash.clone());
         // B-tree internal nodes may be deleted at HEAD but snapshot-referenced.
-        if let Some((_header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? {
-          let sub_children = collect_btree_children(engine, &child_data, hash_length, live)?;
-          all_children.extend(sub_children);
-        }
+        let Some((_header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? else {
+          return Err(crate::engine::errors::EngineError::NotFound(format!(
+            "B-tree child not found during GC mark: {}",
+            hex::encode(child_hash)
+          )));
+        };
+        let sub_children = collect_btree_children(engine, &child_data, hash_length, live)?;
+        all_children.extend(sub_children);
       }
     }
   }

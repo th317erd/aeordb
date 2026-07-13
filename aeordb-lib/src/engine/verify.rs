@@ -64,6 +64,7 @@ pub struct VerifyReport {
   pub missing_children: Vec<String>,      // paths where child doesn't exist
   pub unlisted_files: Vec<String>,        // files that exist but aren't in parent dir
   pub dangling_file_records: Vec<String>, // live path-key FileRecords with missing chunks
+  pub btree_directory_issues: Vec<String>,
 
   // KV index
   pub kv_entries: u64,
@@ -118,6 +119,7 @@ impl VerifyReport {
       missing_children: Vec::new(),
       unlisted_files: Vec::new(),
       dangling_file_records: Vec::new(),
+      btree_directory_issues: Vec::new(),
       kv_entries: 0,
       stale_kv_entries: 0,
       missing_kv_entries: 0,
@@ -138,6 +140,7 @@ impl VerifyReport {
       || !self.missing_children.is_empty()
       || !self.unlisted_files.is_empty()
       || !self.dangling_file_records.is_empty()
+      || !self.btree_directory_issues.is_empty()
       || self.stale_kv_entries > 0
       || self.missing_kv_entries > 0
       || !self.invalid_kv_offsets.is_empty()
@@ -211,7 +214,10 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
   }
 
   // Repair 3: Rebuild directory tree
-  if (report.missing_kv_entries > 0 && report.file_records > 0) || !report.missing_children.is_empty() {
+  if (report.missing_kv_entries > 0 && report.file_records > 0)
+    || !report.missing_children.is_empty()
+    || !report.btree_directory_issues.is_empty()
+  {
     let ops = DirectoryOps::new(engine);
     let ctx = crate::engine::request_context::RequestContext::system();
     match ops.rebuild_directory_tree(&ctx) {
@@ -527,8 +533,11 @@ fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &
     }
   }
 
-  match ops.list_directory(path) {
-    Ok(children) => {
+  match ops.list_directory_with_btree_warnings(path) {
+    Ok((children, warnings)) => {
+      for warning in warnings {
+        report.btree_directory_issues.push(format_btree_directory_issue(path, &warning));
+      }
       for child in &children {
         let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path.trim_end_matches('/'), child.name) };
 
@@ -550,6 +559,10 @@ fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &
       // Directory itself doesn't exist or is corrupt
     }
   }
+}
+
+fn format_btree_directory_issue(path: &str, warning: &crate::engine::btree::BTreeWalkWarning) -> String {
+  format!("{} (B-tree node {}: {})", path, warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()), warning.reason)
 }
 
 fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) {
@@ -659,8 +672,19 @@ fn walk_snapshot_tree(
   }
 
   let children = if crate::engine::btree::is_btree_format(&value) {
-    match crate::engine::btree::btree_list_from_node(&value, engine, hash_length, true) {
-      Ok(c) => c,
+    match crate::engine::btree::btree_list_from_node_with_mode(
+      &value,
+      engine,
+      hash_length,
+      true,
+      crate::engine::btree::BTreeWalkMode::BestEffort,
+    ) {
+      Ok(result) => {
+        for warning in &result.warnings {
+          missing.push(format_btree_directory_issue(dir_path, warning));
+        }
+        result.entries
+      }
       Err(_) => {
         missing.push(format!("{} (corrupt btree)", dir_path));
         return;
