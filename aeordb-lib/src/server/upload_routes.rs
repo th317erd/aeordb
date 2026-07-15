@@ -17,7 +17,7 @@ use crate::engine::EntryType;
 use crate::server::blocking::run_engine_blocking;
 use crate::server::state::AppState;
 
-const MAX_CONCURRENT_BLOB_COMMITS: usize = 2;
+const MAX_CONCURRENT_BLOB_COMMITS: usize = 1;
 
 fn blob_commit_semaphore() -> &'static Arc<Semaphore> {
   static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -292,29 +292,6 @@ pub async fn upload_commit(
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
-  let commit_permit: OwnedSemaphorePermit = match Arc::clone(blob_commit_semaphore()).try_acquire_owned() {
-    Ok(permit) => permit,
-    Err(_) => {
-      tracing::warn!(
-        files = file_count,
-        total_chunk_refs,
-        supplied_content_hash_files,
-        supplied_size_files,
-        supplied_logical_file_bytes,
-        max_concurrent_blob_commits = MAX_CONCURRENT_BLOB_COMMITS,
-        "blob commit rejected because commit workers are saturated"
-      );
-      return (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(serde_json::json!({
-          "error": "Too many blob commits are already in progress; retry shortly",
-          "retryable": true
-        })),
-      )
-        .into_response();
-    }
-  };
-
   let commit_signature = blob_commit_signature(&body.files);
   if !BlobCommitInFlightGuard::try_acquire(commit_signature) {
     tracing::warn!(
@@ -335,6 +312,35 @@ pub async fn upload_commit(
       .into_response();
   }
   let commit_guard = BlobCommitInFlightGuard::new(commit_signature);
+
+  let permit_wait_start = std::time::Instant::now();
+  let commit_permit: OwnedSemaphorePermit = match Arc::clone(blob_commit_semaphore()).acquire_owned().await {
+    Ok(permit) => permit,
+    Err(_) => {
+      tracing::error!("blob commit semaphore closed unexpectedly");
+      return (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+          "error": "Blob commit workers are unavailable; retry shortly",
+          "retryable": true
+        })),
+      )
+        .into_response();
+    }
+  };
+  let commit_queue_wait_ms = permit_wait_start.elapsed().as_millis();
+  if commit_queue_wait_ms > 0 {
+    tracing::info!(
+      files = file_count,
+      total_chunk_refs,
+      supplied_content_hash_files,
+      supplied_size_files,
+      supplied_logical_file_bytes,
+      max_concurrent_blob_commits = MAX_CONCURRENT_BLOB_COMMITS,
+      commit_queue_wait_ms,
+      "blob commit entered worker after queue wait"
+    );
+  }
 
   let engine = state.engine.clone();
   let result = run_engine_blocking("upload_commit", "Commit failed", move || {
