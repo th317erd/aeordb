@@ -222,13 +222,18 @@ fn test_field_index_backward_compat_no_values() {
   };
 
   // Deserialize the truncated (old format) data
-  let deserialized = FieldIndex::deserialize(&old_format_index, hash_length).expect("old format deserialization should succeed");
+  let mut deserialized = FieldIndex::deserialize(&old_format_index, hash_length).expect("old format deserialization should succeed");
 
   // Values map should be empty (no values section in old format)
   assert!(deserialized.values.is_empty(), "old format should deserialize with empty values map");
 
   // But entries should still be there
   assert!(!deserialized.entries.is_empty(), "entries should still be present in old format");
+
+  // And removals must still scan legacy entries even though the values map
+  // cannot prove membership.
+  deserialized.remove(&file_hash);
+  assert!(deserialized.entries.is_empty(), "legacy index removal should remove entries without values");
 }
 
 // ============================================================

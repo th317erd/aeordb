@@ -46,6 +46,7 @@ pub struct FieldIndex {
   /// pruned. At 1M files with 100-byte values, this is ~100MB per index field.
   /// Consider capping or implementing lazy loading from disk during recheck.
   pub values: HashMap<Vec<u8>, Vec<u8>>,
+  values_cover_entries: bool,
   dirty: bool,
 }
 
@@ -599,11 +600,12 @@ impl FieldIndex {
   pub fn new(field_name: String, converter: Box<dyn ScalarConverter>) -> Self {
     let nvt_converter = deserialize_converter(&converter.serialize()).expect("converter roundtrip for NVT should never fail");
     let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
-    FieldIndex { field_name, converter, entries: Vec::new(), nvt, values: HashMap::new(), dirty: false }
+    FieldIndex { field_name, converter, entries: Vec::new(), nvt, values: HashMap::new(), values_cover_entries: true, dirty: false }
   }
 
   /// Convert value to scalar and insert in sorted position. Marks NVT dirty.
   pub fn insert(&mut self, value: &[u8], file_hash: Vec<u8>) {
+    self.values_cover_entries = false;
     let scalar = self.converter.to_scalar(value);
     let entry = IndexEntry { scalar, file_hash };
     let position = self
@@ -636,7 +638,11 @@ impl FieldIndex {
 
   /// Remove all entries for a given file hash. Marks NVT dirty.
   pub fn remove(&mut self, file_hash: &[u8]) {
-    self.values.remove(file_hash);
+    let had_value = self.values.remove(file_hash).is_some();
+    if self.values_cover_entries && !had_value {
+      return;
+    }
+
     let original_length = self.entries.len();
     self.entries.retain(|entry| entry.file_hash != file_hash);
     if self.entries.len() != original_length {
@@ -1178,14 +1184,20 @@ impl FieldIndex {
       }
     };
 
+    let values_cover_entries = Self::values_cover_all_entries(&entries, &values);
+
     // Always rebuild NVT from entries on deserialize, since the serialized NVT
     // may be stale (entries modified after last NVT rebuild before serialization).
-    let mut index = FieldIndex { field_name, converter, entries, nvt: resolved_nvt, values, dirty: true };
+    let mut index = FieldIndex { field_name, converter, entries, nvt: resolved_nvt, values, values_cover_entries, dirty: true };
     index.rebuild_nvt();
     Ok(index)
   }
 
   // --- Private helpers ---
+
+  fn values_cover_all_entries(entries: &[IndexEntry], values: &HashMap<Vec<u8>, Vec<u8>>) -> bool {
+    entries.iter().all(|entry| values.contains_key(&entry.file_hash))
+  }
 
   /// Map a scalar in [0.0, 1.0] to a bucket index.
   fn scalar_to_bucket(&self, scalar: f64) -> usize {

@@ -428,6 +428,9 @@ pub struct StorageEngine {
   // tail; violating that invariant can overwrite storage metadata.
   #[allow(dead_code)]
   pub(crate) void_manager: RwLock<VoidManager>,
+  /// Set when a transaction consumes reusable void space and the DiskKVStore
+  /// pending-void snapshot needs one deferred refresh before commit.
+  void_snapshot_dirty: AtomicBool,
   hash_algo: HashAlgorithm,
   /// Atomic counters for O(1) database statistics, maintained in-memory.
   counters: ArcSwap<EngineCounters>,
@@ -1010,6 +1013,7 @@ impl StorageEngine {
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
       void_manager: RwLock::new(void_manager),
+      void_snapshot_dirty: AtomicBool::new(false),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
@@ -1241,6 +1245,7 @@ impl StorageEngine {
       kv_writer: Mutex::new(kv_store),
       kv_snapshot,
       void_manager: RwLock::new(void_manager),
+      void_snapshot_dirty: AtomicBool::new(false),
       hash_algo,
       counters: ArcSwap::from_pointee(EngineCounters::new()),
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
@@ -1458,20 +1463,22 @@ impl StorageEngine {
   /// startup population). Also refreshes the void_count + void_space
   /// counters so dashboard metrics stay accurate.
   pub(crate) fn sync_voids_to_kv_writer(&self) {
-    let (voids, count, total_bytes) = match self.void_manager.read() {
-      Ok(vm) => {
-        let collected: Vec<crate::engine::hot_tail::VoidRecord> =
-          vm.iter().map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size }).collect();
-        let total = vm.total_void_space();
-        let count = vm.void_count() as u64;
-        (collected, count, total)
-      }
-      Err(_) => return,
+    let _ = self.try_sync_voids_to_kv_writer();
+  }
+
+  fn try_sync_voids_to_kv_writer(&self) -> EngineResult<()> {
+    let (voids, count, total_bytes) = {
+      let vm = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let collected: Vec<crate::engine::hot_tail::VoidRecord> =
+        vm.iter().map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size }).collect();
+      let total = vm.total_void_space();
+      let count = vm.void_count() as u64;
+      (collected, count, total)
     };
-    if let Ok(mut kv) = self.kv_writer.lock() {
-      kv.set_pending_voids(voids);
-    }
+    let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    kv.set_pending_voids(voids);
     self.counters.load().set_void_stats(count, total_bytes);
+    Ok(())
   }
 
   /// Open an existing database file.
@@ -1673,9 +1680,11 @@ impl StorageEngine {
     // If we consumed a void, the pending_voids snapshot in kv_writer is stale
     // — refresh it so the next hot tail flush reflects the consumed state.
     if voids_changed_via_consume {
-      if let Ok(vm) = self.void_manager.read() {
+      if kv.transaction_depth > 0 {
+        self.void_snapshot_dirty.store(true, Ordering::Release);
+      } else if let Ok(vm) = self.void_manager.read() {
         let voids: Vec<crate::engine::hot_tail::VoidRecord> =
-          vm.iter().map(|(o, s)| crate::engine::hot_tail::VoidRecord { offset: o, size: s }).collect();
+          vm.iter().map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size }).collect();
         kv.set_pending_voids(voids);
       }
     }
@@ -3235,6 +3244,13 @@ impl StorageEngine {
       let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       if let Err(e) = writer.sync() {
         return Err(self.record_durability_failure("Transaction WAL sync failed", e));
+      }
+    }
+
+    if self.void_snapshot_dirty.swap(false, Ordering::AcqRel) {
+      if let Err(error) = self.try_sync_voids_to_kv_writer() {
+        self.void_snapshot_dirty.store(true, Ordering::Release);
+        return Err(error);
       }
     }
 

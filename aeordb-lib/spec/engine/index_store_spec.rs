@@ -51,6 +51,19 @@ fn test_insert_and_lookup_exact() {
 }
 
 #[test]
+fn test_direct_insert_remove_without_values() {
+  let converter = Box::new(U64Converter::with_range(0, 200));
+  let mut index = FieldIndex::new("age".to_string(), converter);
+
+  let hash_a = vec![0xAA; 32];
+  index.insert(&30u64.to_be_bytes(), hash_a.clone());
+  assert_eq!(index.len(), 1);
+
+  index.remove(&hash_a);
+  assert!(index.is_empty(), "direct inserts without stored values must still be removable");
+}
+
+#[test]
 fn test_insert_many_sorted() {
   let converter = Box::new(U64Converter::with_range(0, 100));
   let mut index = FieldIndex::new("score".to_string(), converter);
