@@ -709,6 +709,13 @@ pub fn gc_sweep(engine: &StorageEngine, live: &HashSet<Vec<u8>>, dry_run: bool) 
 pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> EngineResult<GcResult> {
   let start = std::time::Instant::now();
 
+  // Mutating GC must not observe a half-published namespace update. Directory
+  // B-tree writes are intentionally multi-step (write new nodes, then publish
+  // path keys/HEAD), so a concurrent sweep can otherwise collect nodes that
+  // are about to become reachable. Dry-run GC does not sweep and can remain
+  // non-blocking.
+  let _namespace_guard = if dry_run { None } else { Some(engine.namespace_write_guard()?) };
+
   // Emit GC started event
   ctx.emit(
     EVENT_GC_STARTED,

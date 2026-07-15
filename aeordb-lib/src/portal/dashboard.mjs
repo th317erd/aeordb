@@ -41,6 +41,8 @@ const MEMORY_DEFINITIONS = [
   { path: ['directory_cache', 'estimated_bytes'], label: 'Directory Cache',      format: formatBytes },
   { path: ['index_cache', 'cached_indexes'],      label: 'Cached Indexes',       format: formatNumber },
   { path: ['index_cache', 'pending_mutations'],   label: 'Pending Index Writes', format: formatNumber },
+  { path: ['index_cache', 'evicted_indexes'],     label: 'Evicted Indexes',      format: formatNumber },
+  { path: ['index_cache', 'max_bytes'],           label: 'Index Cache Cap',      format: formatBytes },
 ];
 
 const DARK_THEME = {
@@ -184,6 +186,7 @@ class AeorDashboard extends HTMLElement {
                 <th>Values</th>
                 <th>Memory</th>
                 <th>Dirty</th>
+                <th>Idle</th>
               </tr>
             </thead>
             <tbody id="memory-index-rows"></tbody>
@@ -403,6 +406,7 @@ class AeorDashboard extends HTMLElement {
           <td>${formatNumber(index.values || 0)}</td>
           <td>${formatBytes(index.estimated_bytes || 0)}</td>
           <td>${index.dirty ? 'yes' : 'no'}</td>
+          <td>${index.last_access_age_ms == null ? '\u2014' : formatUptime(index.last_access_age_ms / 1000)}</td>
         </tr>
       `;
     }).join('');

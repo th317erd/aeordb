@@ -45,6 +45,7 @@ pub fn spawn_metrics_pulse(
       let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
       let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
       let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
+      engine.evict_clean_index_cache();
       let memory = engine.memory_stats();
       crate::metrics::record_memory_metrics(&memory);
 

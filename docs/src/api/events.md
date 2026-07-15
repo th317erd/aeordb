@@ -205,10 +205,26 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
       "total_mutations": 102400,
       "flushes": 7,
       "flushed_indexes": 92,
+      "evictions": 3,
+      "evicted_indexes": 12,
+      "evicted_bytes": 268435456,
       "entries": 2500000,
       "values": 350000,
       "estimated_bytes": 734003200,
-      "top_cached_indexes": []
+      "max_bytes": 2147483648,
+      "clean_ttl_ms": 300000,
+      "top_cached_indexes": [
+        {
+          "parent": "/",
+          "field_name": "@path",
+          "strategy": "trigram",
+          "entries": 1200000,
+          "values": 80000,
+          "estimated_bytes": 234881024,
+          "dirty": false,
+          "last_access_age_ms": 42000
+        }
+      ]
     },
     "directory_cache": {
       "entries": 12000,
@@ -224,7 +240,7 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
 }
 ```
 
-`memory.process` is sampled from the operating system. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort diagnostic estimates, not allocator-exact accounting.
+`memory.process` is sampled from the operating system. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort diagnostic estimates, not allocator-exact accounting. Clean index cache entries are evicted after the configured idle TTL or when the configured cache cap is exceeded; dirty indexes are retained until flushed.
 
 **Payload sections:**
 

@@ -35,6 +35,9 @@ pub fn record_memory_metrics(memory: &EngineMemoryStats) {
   metrics::gauge!(definitions::INDEX_CACHE_CACHED_INDEXES).set(memory.index_cache.cached_indexes as f64);
   metrics::gauge!(definitions::INDEX_CACHE_DIRTY_INDEXES).set(memory.index_cache.dirty_indexes as f64);
   metrics::gauge!(definitions::INDEX_CACHE_PENDING_MUTATIONS).set(memory.index_cache.pending_mutations as f64);
+  metrics::gauge!(definitions::INDEX_CACHE_EVICTIONS).set(memory.index_cache.evictions as f64);
+  metrics::gauge!(definitions::INDEX_CACHE_EVICTED_INDEXES).set(memory.index_cache.evicted_indexes as f64);
+  metrics::gauge!(definitions::INDEX_CACHE_EVICTED_BYTES).set(memory.index_cache.evicted_bytes as f64);
   metrics::gauge!(definitions::INDEX_CACHE_ENTRIES).set(memory.index_cache.entries as f64);
   metrics::gauge!(definitions::INDEX_CACHE_VALUES).set(memory.index_cache.values as f64);
   metrics::gauge!(definitions::DIRECTORY_CACHE_ESTIMATED_BYTES).set(memory.directory_cache.estimated_bytes as f64);

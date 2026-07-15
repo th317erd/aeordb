@@ -686,10 +686,26 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
       "total_mutations": 102400,
       "flushes": 7,
       "flushed_indexes": 92,
+      "evictions": 3,
+      "evicted_indexes": 12,
+      "evicted_bytes": 268435456,
       "entries": 2500000,
       "values": 350000,
       "estimated_bytes": 734003200,
-      "top_cached_indexes": []
+      "max_bytes": 2147483648,
+      "clean_ttl_ms": 300000,
+      "top_cached_indexes": [
+        {
+          "parent": "/",
+          "field_name": "@path",
+          "strategy": "trigram",
+          "entries": 1200000,
+          "values": 80000,
+          "estimated_bytes": 234881024,
+          "dirty": false,
+          "last_access_age_ms": 42000
+        }
+      ]
     },
     "directory_cache": {
       "entries": 12000,
@@ -729,6 +745,8 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 `sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
 
 `memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort estimates intended for diagnosis and trend monitoring; they are not allocator-exact byte accounting.
+
+The index cache holds full field/strategy index files while they have unflushed mutations or recent read/write activity. Clean indexes are recoverable from disk and may be evicted after `clean_ttl_ms` of idleness or earlier when the cache exceeds `max_bytes`. Dirty indexes are never evicted before they are flushed. Defaults are 2 GiB and 5 minutes; override with `AEORDB_INDEX_CACHE_MAX_BYTES` and `AEORDB_INDEX_CACHE_CLEAN_TTL_SECS`.
 
 **Example:**
 
@@ -805,6 +823,9 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_index_cache_cached_indexes` | Cached field/strategy index count |
 | `aeordb_index_cache_dirty_indexes` | Cached indexes with unflushed mutations |
 | `aeordb_index_cache_pending_mutations` | Pending index mutations in the shared buffer |
+| `aeordb_index_cache_evictions` | Number of clean index eviction passes that removed at least one index |
+| `aeordb_index_cache_evicted_indexes` | Total clean indexes evicted from memory since startup |
+| `aeordb_index_cache_evicted_bytes` | Estimated clean index bytes evicted from memory since startup |
 | `aeordb_index_cache_entries` | Indexed scalar entry count currently cached |
 | `aeordb_index_cache_values` | Raw indexed value count currently cached |
 | `aeordb_directory_cache_estimated_bytes` | Estimated directory content cache memory |

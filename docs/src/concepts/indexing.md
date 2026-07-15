@@ -298,6 +298,17 @@ The task:
 4. Buffers index writes in memory and flushes them periodically
 5. Reports progress via `GET /system/tasks`
 
+## Index Cache Eviction
+
+Index writes use a shared in-memory buffer so large reindex and sync workloads do not rewrite full index files after every file mutation. Dirty indexes stay resident until their buffered mutations are flushed. Once an index is clean, it is recoverable from its on-disk index file and may be evicted from memory.
+
+By default, clean indexes are eligible for eviction after 5 minutes of no access and the clean cache is capped at 2 GiB. Metrics and `/system/stats` expose the current cache cap, clean TTL, evictions, largest cached indexes, and per-index idle age. Override the defaults with:
+
+| Variable | Default | Description |
+|---|---:|---|
+| `AEORDB_INDEX_CACHE_MAX_BYTES` | `2147483648` | Maximum estimated bytes for clean cached indexes. Set `0` to disable the byte cap. |
+| `AEORDB_INDEX_CACHE_CLEAN_TTL_SECS` | `300` | Idle seconds after which clean cached indexes are eligible for eviction. |
+
 During reindexing, queries still work but may return incomplete results. The query response includes a `meta.reindexing` field with the current progress:
 
 ```json

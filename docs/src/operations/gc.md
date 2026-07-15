@@ -118,7 +118,9 @@ Example cron configuration (`/.config/cron.json`):
 
 ## Concurrency and Safety
 
-GC should not be run concurrently with writes. The sweep phase re-verifies each candidate against the current KV state before overwriting to mitigate races, but for full safety, callers should ensure exclusive access during GC.
+Non-dry-run GC takes AeorDB's namespace write barrier before it starts mark-and-sweep. Reads can continue, but namespace writes that publish path keys, directory indexes, or HEAD wait until the GC run completes. This prevents GC from seeing a half-published B-tree directory update and sweeping nodes that are about to become reachable.
+
+The sweep phase still re-verifies each candidate against the current KV state before overwriting, and write paths record successful write hashes in the GC recheck set while GC is active. Batch writes and HEAD updates participate in this recheck path.
 
 Before a non-dry-run GC, AeorDB normally creates an engine-internal `_aeordb_pre_gc_*` snapshot as a safety net. If lifecycle configuration has `"snapshot_writes_enabled": false`, GC skips that safety snapshot and continues with the mark-and-sweep run. Existing snapshots are still honored as live roots either way.
 

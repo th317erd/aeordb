@@ -130,6 +130,8 @@ The task checks for cancellation after each batch, so it will stop within one ba
 
 Files are processed in batches of 50. Index file updates are cached in memory and flushed after 262,144 index mutations or 30 seconds by default, plus one final flush at completion. This avoids rewriting the full on-disk index file after every file/field update during large reindexes.
 
+After a flush succeeds, those cached indexes are clean and recoverable from disk. AeorDB may evict clean indexes after the configured idle TTL or when the clean index cache exceeds its byte cap. Dirty indexes are not evicted before flush, so a crash can repeat work after the last durable checkpoint but will not silently drop unflushed index mutations.
+
 After each batch, the task:
 
 1. Advances the checkpoint when all prior index mutations are durable

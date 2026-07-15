@@ -21,6 +21,10 @@ const DEFAULT_NVT_BUCKET_COUNT: usize = 1024;
 pub const DEFAULT_INDEX_BUFFER_FLUSH_WRITES: usize = 262_144;
 /// Default maximum age of unflushed buffered index mutations.
 pub const DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+/// Default upper bound for clean in-memory index cache entries.
+pub const DEFAULT_INDEX_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default idle age before a clean in-memory index may be evicted.
+pub const DEFAULT_INDEX_CACHE_CLEAN_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
@@ -67,11 +71,26 @@ impl IndexWriteBufferOptions {
   }
 }
 
+fn configured_index_cache_max_bytes() -> u64 {
+  std::env::var("AEORDB_INDEX_CACHE_MAX_BYTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(DEFAULT_INDEX_CACHE_MAX_BYTES)
+}
+
+fn configured_index_cache_clean_ttl() -> Duration {
+  let seconds = std::env::var("AEORDB_INDEX_CACHE_CLEAN_TTL_SECS")
+    .ok()
+    .and_then(|value| value.parse::<u64>().ok())
+    .unwrap_or_else(|| DEFAULT_INDEX_CACHE_CLEAN_TTL.as_secs());
+  Duration::from_secs(seconds)
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct IndexWriteBufferStats {
   pub mutations: usize,
   pub flushes: usize,
   pub flushed_indexes: usize,
+  pub evictions: usize,
+  pub evicted_indexes: usize,
+  pub evicted_bytes: u64,
   pub cached_indexes: usize,
   pub dirty_indexes: usize,
   pub deleted_indexes: usize,
@@ -79,6 +98,8 @@ pub struct IndexWriteBufferStats {
   pub entries: usize,
   pub values: usize,
   pub estimated_bytes: u64,
+  pub max_bytes: u64,
+  pub clean_ttl_ms: u64,
   pub top_cached_indexes: Vec<CachedIndexMemoryStats>,
 }
 
@@ -91,6 +112,7 @@ pub struct CachedIndexMemoryStats {
   pub values: usize,
   pub estimated_bytes: u64,
   pub dirty: bool,
+  pub last_access_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -113,12 +135,16 @@ pub(crate) struct IndexFlushSnapshot {
 pub(crate) struct SharedIndexWriteBuffer {
   options: IndexWriteBufferOptions,
   indexes: HashMap<BufferedIndexKey, FieldIndex>,
+  last_access: HashMap<BufferedIndexKey, Instant>,
   dirty_keys: HashSet<BufferedIndexKey>,
   deleted_keys: HashSet<BufferedIndexKey>,
   pending_mutations: usize,
   total_mutations: usize,
   flush_count: usize,
   flushed_indexes: usize,
+  eviction_count: usize,
+  evicted_indexes: usize,
+  evicted_bytes: u64,
   last_flush: Instant,
 }
 
@@ -133,12 +159,16 @@ impl SharedIndexWriteBuffer {
     SharedIndexWriteBuffer {
       options,
       indexes: HashMap::new(),
+      last_access: HashMap::new(),
       dirty_keys: HashSet::new(),
       deleted_keys: HashSet::new(),
       pending_mutations: 0,
       total_mutations: 0,
       flush_count: 0,
       flushed_indexes: 0,
+      eviction_count: 0,
+      evicted_indexes: 0,
+      evicted_bytes: 0,
       last_flush: Instant::now(),
     }
   }
@@ -156,7 +186,12 @@ impl SharedIndexWriteBuffer {
     self.pending_mutations > 0 && (self.pending_mutations >= options.flush_after_writes || self.last_flush.elapsed() >= options.flush_after)
   }
 
+  fn touch(&mut self, key: &BufferedIndexKey) {
+    self.last_access.insert(key.clone(), Instant::now());
+  }
+
   fn stats(&self) -> IndexWriteBufferStats {
+    let now = Instant::now();
     let mut top_cached_indexes: Vec<CachedIndexMemoryStats> = self
       .indexes
       .iter()
@@ -168,6 +203,7 @@ impl SharedIndexWriteBuffer {
         values: index.values.len(),
         estimated_bytes: index.estimated_memory_bytes(),
         dirty: self.dirty_keys.contains(key),
+        last_access_age_ms: self.last_access.get(key).map(|instant| now.saturating_duration_since(*instant).as_millis() as u64),
       })
       .collect();
     top_cached_indexes.sort_by(|left, right| right.estimated_bytes.cmp(&left.estimated_bytes));
@@ -181,6 +217,9 @@ impl SharedIndexWriteBuffer {
       mutations: self.total_mutations,
       flushes: self.flush_count,
       flushed_indexes: self.flushed_indexes,
+      evictions: self.eviction_count,
+      evicted_indexes: self.evicted_indexes,
+      evicted_bytes: self.evicted_bytes,
       cached_indexes: self.indexes.len(),
       dirty_indexes: self.dirty_keys.len(),
       deleted_indexes: self.deleted_keys.len(),
@@ -188,16 +227,22 @@ impl SharedIndexWriteBuffer {
       entries,
       values,
       estimated_bytes,
+      max_bytes: configured_index_cache_max_bytes(),
+      clean_ttl_ms: configured_index_cache_clean_ttl().as_millis() as u64,
       top_cached_indexes,
     }
   }
 
-  fn get_index_clone(&self, key: &BufferedIndexKey, hash_length: usize) -> EngineResult<Option<FieldIndex>> {
+  fn get_index_clone(&mut self, key: &BufferedIndexKey, hash_length: usize) -> EngineResult<Option<FieldIndex>> {
     if self.deleted_keys.contains(key) {
       return Ok(None);
     }
     match self.indexes.get(key) {
-      Some(index) => Ok(Some(index.deep_clone(hash_length)?)),
+      Some(index) => {
+        let clone = index.deep_clone(hash_length)?;
+        self.touch(key);
+        Ok(Some(clone))
+      }
       None => Ok(None),
     }
   }
@@ -225,6 +270,7 @@ impl SharedIndexWriteBuffer {
   fn put_index(&mut self, key: BufferedIndexKey, index: FieldIndex) {
     self.deleted_keys.remove(&key);
     self.indexes.insert(key.clone(), index);
+    self.touch(&key);
     self.dirty_keys.insert(key);
     self.pending_mutations += 1;
     self.total_mutations += 1;
@@ -253,7 +299,8 @@ impl SharedIndexWriteBuffer {
       index.insert_expanded(value, file_key.to_vec());
     }
 
-    self.dirty_keys.insert(key);
+    self.dirty_keys.insert(key.clone());
+    self.touch(&key);
     self.pending_mutations += 1;
     self.total_mutations += 1;
     Ok(())
@@ -266,6 +313,7 @@ impl SharedIndexWriteBuffer {
     if !self.indexes.contains_key(&key) {
       if let Some(index) = initial_index {
         self.indexes.insert(key.clone(), index);
+        self.touch(&key);
       } else {
         return;
       }
@@ -278,7 +326,8 @@ impl SharedIndexWriteBuffer {
     let before_values = index.values.len();
     index.remove(file_key);
     if index.len() != before_entries || index.values.len() != before_values {
-      self.dirty_keys.insert(key);
+      self.dirty_keys.insert(key.clone());
+      self.touch(&key);
       self.pending_mutations += 1;
       self.total_mutations += 1;
     }
@@ -286,6 +335,7 @@ impl SharedIndexWriteBuffer {
 
   fn delete_index(&mut self, key: BufferedIndexKey) {
     self.indexes.remove(&key);
+    self.last_access.remove(&key);
     self.dirty_keys.remove(&key);
     self.deleted_keys.insert(key);
     self.pending_mutations += 1;
@@ -330,6 +380,84 @@ impl SharedIndexWriteBuffer {
       }
     }
     self.pending_mutations = self.pending_mutations.saturating_add(snapshot.saves.len() + snapshot.deletes.len());
+  }
+
+  fn evict_clean_indexes(&mut self, max_bytes: u64, clean_ttl: Duration) -> usize {
+    if self.indexes.is_empty() {
+      return 0;
+    }
+
+    let now = Instant::now();
+    let mut total_bytes: u64 = self.indexes.values().map(|index| index.estimated_memory_bytes()).sum();
+    let mut to_evict: HashSet<BufferedIndexKey> = HashSet::new();
+
+    for key in self.indexes.keys() {
+      if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) {
+        continue;
+      }
+      let idle_for = self.last_access.get(key).map(|last| now.saturating_duration_since(*last)).unwrap_or(clean_ttl);
+      if idle_for >= clean_ttl {
+        to_evict.insert(key.clone());
+      }
+    }
+
+    let ttl_bytes: u64 = to_evict.iter().filter_map(|key| self.indexes.get(key)).map(|index| index.estimated_memory_bytes()).sum();
+    total_bytes = total_bytes.saturating_sub(ttl_bytes);
+
+    if max_bytes > 0 && total_bytes > max_bytes {
+      let mut candidates: Vec<(BufferedIndexKey, Instant, u64)> = self
+        .indexes
+        .iter()
+        .filter_map(|(key, index)| {
+          if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) || to_evict.contains(key) {
+            return None;
+          }
+          let last_access = self.last_access.get(key).copied().unwrap_or(now);
+          Some((key.clone(), last_access, index.estimated_memory_bytes()))
+        })
+        .collect();
+
+      candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| right.2.cmp(&left.2)));
+
+      for (key, _last_access, estimated_bytes) in candidates {
+        if total_bytes <= max_bytes {
+          break;
+        }
+        total_bytes = total_bytes.saturating_sub(estimated_bytes);
+        to_evict.insert(key);
+      }
+    }
+
+    if to_evict.is_empty() {
+      return 0;
+    }
+
+    let mut evicted_bytes = 0u64;
+    let mut evicted = 0usize;
+    for key in to_evict {
+      if let Some(index) = self.indexes.remove(&key) {
+        evicted_bytes = evicted_bytes.saturating_add(index.estimated_memory_bytes());
+        evicted += 1;
+      }
+      self.last_access.remove(&key);
+    }
+
+    if evicted > 0 {
+      self.eviction_count += 1;
+      self.evicted_indexes += evicted;
+      self.evicted_bytes = self.evicted_bytes.saturating_add(evicted_bytes);
+      tracing::debug!(
+        evicted,
+        evicted_bytes,
+        cached_indexes = self.indexes.len(),
+        remaining_estimated_bytes = self.indexes.values().map(|index| index.estimated_memory_bytes()).sum::<u64>(),
+        max_bytes,
+        clean_ttl_ms = clean_ttl.as_millis(),
+        "Evicted clean in-memory index cache entries"
+      );
+    }
+
+    evicted
   }
 
   pub(crate) fn emergency_snapshot_json(&mut self, hash_length: usize) -> EngineResult<serde_json::Value> {
@@ -449,6 +577,9 @@ impl<'a> IndexWriteBuffer<'a> {
       mutations: self.total_mutations,
       flushes: self.flush_count,
       flushed_indexes: self.flushed_indexes,
+      evictions: manager_stats.evictions,
+      evicted_indexes: manager_stats.evicted_indexes,
+      evicted_bytes: manager_stats.evicted_bytes,
       cached_indexes: manager_stats.cached_indexes,
       dirty_indexes: manager_stats.dirty_indexes,
       deleted_indexes: manager_stats.deleted_indexes,
@@ -456,6 +587,8 @@ impl<'a> IndexWriteBuffer<'a> {
       entries: manager_stats.entries,
       values: manager_stats.values,
       estimated_bytes: manager_stats.estimated_bytes,
+      max_bytes: manager_stats.max_bytes,
+      clean_ttl_ms: manager_stats.clean_ttl_ms,
       top_cached_indexes: manager_stats.top_cached_indexes,
     }
   }
@@ -1199,7 +1332,7 @@ impl<'a> IndexManager<'a> {
     let key = Self::buffer_key(path, field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
     {
-      let buffer = self.lock_buffer()?;
+      let mut buffer = self.lock_buffer()?;
       if let Some(index) = buffer.get_index_clone(&key, hash_length)? {
         return Ok(Some(index));
       }
@@ -1406,6 +1539,17 @@ impl<'a> IndexManager<'a> {
     }
   }
 
+  pub fn evict_clean_indexes(&self) -> usize {
+    self.evict_clean_indexes_with_policy(configured_index_cache_max_bytes(), configured_index_cache_clean_ttl())
+  }
+
+  pub fn evict_clean_indexes_with_policy(&self, max_bytes: u64, clean_ttl: Duration) -> usize {
+    match self.lock_buffer() {
+      Ok(mut buffer) => buffer.evict_clean_indexes(max_bytes, clean_ttl),
+      Err(_) => 0,
+    }
+  }
+
   pub fn flush_buffered_indexes_if_due(&self) -> EngineResult<bool> {
     self.flush_buffered_indexes_if_due_with_options(None)
   }
@@ -1474,7 +1618,11 @@ impl<'a> IndexManager<'a> {
     }
 
     match result {
-      Ok(()) => Ok(snapshot.saves.len()),
+      Ok(()) => {
+        let flushed = snapshot.saves.len();
+        self.evict_clean_indexes();
+        Ok(flushed)
+      }
       Err(error) => {
         if let Ok(mut buffer) = self.lock_buffer() {
           buffer.restore_failed_flush(&snapshot);

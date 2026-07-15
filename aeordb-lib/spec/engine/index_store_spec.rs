@@ -3,6 +3,7 @@ use aeordb::engine::index_store::{FieldIndex, IndexManager};
 use aeordb::engine::scalar_converter::{HashConverter, PhoneticConverter, StringConverter, TrigramConverter, U64Converter};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
+use std::time::Duration;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ctx = RequestContext::system();
@@ -353,6 +354,54 @@ fn test_overwrite_index_via_save() {
 
   let loaded = index_manager.load_index("/users", "age").unwrap().unwrap();
   assert_eq!(loaded.len(), 2);
+}
+
+#[test]
+fn test_clean_index_cache_eviction_keeps_dirty_indexes() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let index_manager = IndexManager::new(&engine);
+
+  let mut index = FieldIndex::new("name".to_string(), Box::new(StringConverter::new(256)));
+  index.insert_expanded(b"alice", vec![0xAA; 32]);
+  index_manager.save_index("/users", &index).unwrap();
+
+  let stats = index_manager.buffered_index_stats();
+  assert_eq!(stats.cached_indexes, 1);
+  assert_eq!(stats.dirty_indexes, 1);
+
+  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
+  assert_eq!(evicted, 0, "dirty indexes must never be evicted");
+
+  let stats = index_manager.buffered_index_stats();
+  assert_eq!(stats.cached_indexes, 1);
+  assert_eq!(stats.dirty_indexes, 1);
+}
+
+#[test]
+fn test_clean_index_cache_eviction_drops_flushed_indexes_only_from_memory() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let index_manager = IndexManager::new(&engine);
+
+  let mut index = FieldIndex::new("name".to_string(), Box::new(StringConverter::new(256)));
+  index.insert_expanded(b"alice", vec![0xAA; 32]);
+  index_manager.save_index("/users", &index).unwrap();
+  index_manager.flush_buffered_indexes().unwrap();
+
+  let stats = index_manager.buffered_index_stats();
+  assert_eq!(stats.cached_indexes, 1);
+  assert_eq!(stats.dirty_indexes, 0);
+
+  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
+  assert_eq!(evicted, 1, "flushed clean index should be evicted from memory");
+
+  let stats = index_manager.buffered_index_stats();
+  assert_eq!(stats.cached_indexes, 0);
+  assert_eq!(stats.dirty_indexes, 0);
+
+  let loaded = index_manager.load_index("/users", "name").unwrap();
+  assert!(loaded.is_some(), "eviction must not delete the persisted index");
 }
 
 // --- NVT-backed lookup tests ---

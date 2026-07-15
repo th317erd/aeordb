@@ -8,6 +8,7 @@ use aeordb::engine::{
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
+use aeordb::engine::storage_engine::WriteBatch;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -95,6 +96,41 @@ fn test_iter_kv_entries_returns_live_entries() {
 
   let entries = engine.iter_kv_entries().unwrap();
   assert!(!entries.is_empty(), "should have KV entries after storing a file");
+}
+
+#[test]
+fn test_gc_recheck_records_flush_batch_hashes() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let key_a = engine.compute_hash(b"gc-recheck:batch:a").unwrap();
+  let key_b = engine.compute_hash(b"gc-recheck:batch:b").unwrap();
+  let mut batch = WriteBatch::new();
+  batch.add(EntryType::DirectoryIndex, key_a.clone(), b"a".to_vec());
+  batch.add(EntryType::DirectoryIndex, key_b.clone(), b"b".to_vec());
+
+  engine.begin_gc_recheck();
+  engine.flush_batch(batch).unwrap();
+  let pending = engine.take_gc_recheck();
+  engine.end_gc_recheck();
+
+  assert!(pending.contains(&key_a), "flush_batch must record first batch key for GC recheck");
+  assert!(pending.contains(&key_b), "flush_batch must record second batch key for GC recheck");
+}
+
+#[test]
+fn test_gc_recheck_records_flush_batch_and_head_hash() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let head_key = engine.compute_hash(b"gc-recheck:head").unwrap();
+  let side_key = engine.compute_hash(b"gc-recheck:side").unwrap();
+  let mut batch = WriteBatch::new();
+  batch.add(EntryType::DirectoryIndex, side_key.clone(), b"side".to_vec());
+
+  engine.begin_gc_recheck();
+  engine.flush_batch_and_update_head(batch, &head_key).unwrap();
+  let pending = engine.take_gc_recheck();
+  engine.end_gc_recheck();
+
+  assert!(pending.contains(&side_key), "flush_batch_and_update_head must record batch keys for GC recheck");
+  assert!(pending.contains(&head_key), "flush_batch_and_update_head must record the published HEAD hash for GC recheck");
 }
 
 // ─── Test helpers ───────────────────────────────────────────────────────────

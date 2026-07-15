@@ -376,9 +376,14 @@ pub struct IndexCacheMemoryStats {
   pub total_mutations: usize,
   pub flushes: usize,
   pub flushed_indexes: usize,
+  pub evictions: usize,
+  pub evicted_indexes: usize,
+  pub evicted_bytes: u64,
   pub entries: usize,
   pub values: usize,
   pub estimated_bytes: u64,
+  pub max_bytes: u64,
+  pub clean_ttl_ms: u64,
   pub top_cached_indexes: Vec<crate::engine::index_store::CachedIndexMemoryStats>,
 }
 
@@ -1443,6 +1448,10 @@ impl StorageEngine {
     IndexManager::new(self).buffered_index_stats()
   }
 
+  pub fn evict_clean_index_cache(&self) -> usize {
+    IndexManager::new(self).evict_clean_indexes()
+  }
+
   /// Mirror VoidManager state into the DiskKVStore's pending_voids so the
   /// next hot tail flush includes the current void snapshot. Call after any
   /// operation that changes the void set (GC sweep, void consumption,
@@ -1659,6 +1668,7 @@ impl StorageEngine {
     let kv_entry = KVEntry { type_flags: entry_type.to_kv_type(), hash: key.to_vec(), offset, total_length };
     kv.insert(kv_entry)?;
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
+    self.record_gc_recheck(key);
 
     // If we consumed a void, the pending_voids snapshot in kv_writer is stale
     // — refresh it so the next hot tail flush reflects the consumed state.
@@ -1682,9 +1692,6 @@ impl StorageEngine {
         tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
       }
     }
-
-    // If GC is running, record the hash so the sweep phase can spare it.
-    self.record_gc_recheck(key);
 
     Ok(offset)
   }
@@ -2135,6 +2142,9 @@ impl StorageEngine {
       writer.update_file_header(&header)?;
       self.last_published_hot_tail_offset.store(header.hot_tail_offset, Ordering::Release);
     }
+    if !head_hash.is_empty() {
+      self.record_gc_recheck(head_hash);
+    }
     Ok(())
   }
 
@@ -2187,6 +2197,7 @@ impl StorageEngine {
     let kv_entry = KVEntry { type_flags: kv_type, hash: key.to_vec(), offset, total_length };
     kv.insert(kv_entry)?;
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
+    self.record_gc_recheck(key);
 
     Ok(offset)
   }
@@ -2231,6 +2242,9 @@ impl StorageEngine {
     }
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
+    for entry in &batch.entries {
+      self.record_gc_recheck(&entry.key);
+    }
 
     let pending_expansion = kv.needs_expansion.take();
     drop(kv);
@@ -2277,6 +2291,12 @@ impl StorageEngine {
     for (i, entry) in batch.entries.iter().enumerate() {
       let kv_entry = KVEntry { type_flags: entry.kv_type, hash: entry.key.clone(), offset: offsets[i], total_length: totals[i] };
       kv.insert(kv_entry)?;
+    }
+    for entry in &batch.entries {
+      self.record_gc_recheck(&entry.key);
+    }
+    if !head_hash.is_empty() {
+      self.record_gc_recheck(head_hash);
     }
 
     // Update HEAD and hot_tail_offset in the same lock hold. Inside a
@@ -2357,9 +2377,14 @@ impl StorageEngine {
       total_mutations: index_stats.mutations,
       flushes: index_stats.flushes,
       flushed_indexes: index_stats.flushed_indexes,
+      evictions: index_stats.evictions,
+      evicted_indexes: index_stats.evicted_indexes,
+      evicted_bytes: index_stats.evicted_bytes,
       entries: index_stats.entries,
       values: index_stats.values,
       estimated_bytes: index_stats.estimated_bytes,
+      max_bytes: index_stats.max_bytes,
+      clean_ttl_ms: index_stats.clean_ttl_ms,
       top_cached_indexes: index_stats.top_cached_indexes,
     };
     let estimated_engine_owned_bytes = index_cache.estimated_bytes.saturating_add(directory_cache.estimated_bytes);
