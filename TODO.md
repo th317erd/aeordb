@@ -1,5 +1,11 @@
 # AeorDB Active TODO
 
+- [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
+  - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.
+  - [x] Verify current GC, void reuse, compaction, compression, and cursor/snapshot behavior in code.
+  - [x] Convert answered questions into explicit implementation requirements and benchmark gates.
+  - [x] Re-run a consistency and test-plan review over the amended document.
+
 - [x] Add reserved-region validation for reusable void ranges.
 - [x] Guard void loading, registration, consumption, and KV expansion paths.
 - [x] Extend verify diagnostics for invalid hot-tail voids and KV entry offsets.

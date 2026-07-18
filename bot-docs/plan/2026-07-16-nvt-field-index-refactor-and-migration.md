@@ -68,6 +68,15 @@ These are acceptance requirements, not implementation suggestions.
 28. Logical page order is independent from physical WAL placement, but range
     scans batch/coalesce bounded physical reads instead of issuing one random
     read per logical page.
+29. A query cursor is an unsigned, stateless description of one immutable
+    namespace root; it grants no authority and stores no physical index state.
+30. Pagination position, ordering, offsets, pages, and limits are request
+    parameters, not part of the stable root cursor.
+31. GC never reclaims an entry in the same complete mark generation that first
+    finds it unreachable. Reclamation requires a later complete mark and the
+    configured pending-delete grace period.
+32. GC scan cadence controls scheduling only. Pending-delete grace controls the
+    minimum reclamation age, and cursor lifetime cannot exceed that guarantee.
 
 ## Scope Boundary: Keep the KV Stable
 
@@ -77,8 +86,17 @@ current `NormalizedVectorTable` behavior. This project must not change:
 - KV block format or version;
 - KV stage sizes;
 - fixed KV bucket-page placement;
-- KV lookup, flush, expansion, or recovery semantics; or
+- KV key ordering, lookup, flush, or expansion semantics; or
 - KV startup and snapshot behavior.
+
+The approved GC quarantine is one narrow metadata exception. It may add
+versioned pending-delete generation state or assign currently unused upper
+`type_flags` bits without changing serialized entry width, bucket placement,
+NVT behavior, key resolution, or which revision wins. Full WAL/KV rebuild may
+conservatively discard quarantine state and restart grace; it must never infer
+eligibility from missing metadata. If those constraints cannot be met with the
+existing format, use a separate GC control artifact rather than versioning or
+redesigning the KV.
 
 The shared `NormalizedVectorTable` abstraction is currently a coupling hazard,
 but its bytes are also embedded in v0 `FieldIndex` files. The first refactor
@@ -115,7 +133,7 @@ facades during migration, but move new behavior behind explicit boundaries:
 | `engine/indexing_pipeline.rs` | Produce one typed `IndexMutationIntent`; format-specific writers consume it. Parsing/extraction must not write indexes directly. |
 | `engine/query_engine.rs` | Split predicate compilation, costing, page scans, document-set composition, sorting, aggregation, and execution into planner/executor modules. |
 | `engine/file_header.rs`, `entry_type.rs`, `entry_header.rs`, `entry_scanner.rs`, `storage_engine.rs` | Add a reader-capability header version, versioned `IndexArtifact`, and direct append/read primitives. |
-| `engine/gc.rs`, `backup.rs`, `verify.rs`, repair modules | Teach maintenance code artifact reachability and derived-data repair policy before v1 can be activated. |
+| `engine/gc.rs`, KV quarantine metadata, `backup.rs`, `verify.rs`, repair modules | Add two-mark pending deletion, then teach maintenance code artifact reachability and derived-data repair policy before v1 can be activated. |
 | server task/routes and CLI | Add migration control, validation, rollback, finalization, and diagnostics without overloading ordinary reindex. |
 
 Compatibility rules:
@@ -158,7 +176,11 @@ implementation and tests.
 | v0 itself may contain stale postings. | v0/v1 equality can reject a correct authoritative rebuild or bless two wrong indexes. | Authoritative source evaluation is the oracle; v0 comparison is diagnostic. |
 | Existing v0 numeric config passed integer bounds through `f64`. | "Fixing" bounds during migration silently changes results. | Preserve effective v0 converter semantics; typed config is an explicit new-definition upgrade. |
 | Immutable page revisions scatter physically in the WAL. | Logical range scans become one random HDD read per page. | Page descriptors plus bounded physical-offset prefetch/coalescing and optional locality compaction. |
-| GC can race readers of retired manifests. | A long query/cursor may read artifacts after sweep. | Generation leases are GC roots; cursor leases are TTL/count/byte bounded. |
+| GC can race readers of retired manifests or quarantined roots. | An in-flight query may read artifacts after sweep. | Request-lifetime generation pins are GC roots; stateless root cursors rely on pending-delete grace between requests rather than persistent leases. |
+| A complete mark can still produce a transient false-negative because of traversal, race, or damaged-tree behavior. | One bad mark can immediately destroy authoritative or derived data. | First mark transitions entries to pending deletion; only a later complete mark after grace may reclaim them. Any incomplete mark advances no deletion state. |
+| GC cadence doubles as implicit retention. | Hourly scheduling can unintentionally turn "second sweep" into a one-hour deletion policy. | Configure scan cadence and pending-delete grace independently; require both elapsed grace and a later successful mark. |
+| Stateless cursors can name roots that later become unreachable. | A valid continuation can fail immediately after a write/GC cycle. | Permit reads while the root is pending deletion without refreshing it; cap the advertised cursor expiration at the root's reclamation boundary. |
+| Unsigned base64 cursors are client-editable. | Treating cursor fields as trusted policy or authorization state creates a security boundary accidentally. | Cursor grants no authority; reapply normal scope authorization and treat `expires_at` as an advisory server hint. Missing/reclaimed roots return `410`. |
 | One value/query can expand into unbounded tokens/postings. | User data can bypass cache budgets and exhaust memory/disk. | Definition and query complexity limits with explicit strict/lenient failure semantics. |
 | Logical backup/peer sync does not naturally carry internal artifacts. | Restored active pointers can reference absent pages or foreign ordinals. | Distinguish physical copy from logical transfer; omitted indexes restore as `needs_rebuild`. |
 | Current namespace mutation lock is global. | Premature per-scope locking introduces deadlocks during cutover. | Use existing global namespace barrier initially; shard only after lock-order proof. |
@@ -314,6 +336,25 @@ Reasons to avoid ordinary `.aeordb-indexes/*.idx` FileRecords for v1 artifacts:
 - millions of pages should not become children in a directory B-tree;
 - direct artifact keys allow one KV lookup per page or tile; and
 - GC, verify, backup, and repair can apply index-specific policy.
+
+The current FileRecord representation deliberately causes v0 index files to
+travel with namespace snapshots and some replication/export paths. V1 must not
+lose that operational capability merely by changing entry types, but it also
+must not copy database-local document ordinals into a logically different
+database. The transfer contract is therefore explicit:
+
+- physical database copies retain the complete artifact closure;
+- namespace snapshots pin source data and index definitions, not a duplicate of
+  every derived generation;
+- snapshot/version queries may use an existing artifact generation only when its
+  complete definition fingerprint and `SourceVersion` match the requested root;
+- logical backup, patch, and peer sync rebuild derived artifacts by default; and
+- an optional compatible-artifact transfer copies one closed, validated
+  generation only after both endpoints negotiate identical artifact format,
+  hash algorithm, definition fingerprint, source root, and ordinal catalog.
+
+This preserves reproducibility without making ordinary snapshots grow with
+index churn or treating locally assigned ordinals as portable identity.
 
 All IndexArtifacts except active-pointer slots are immutable and content-addressed. A page
 rewrite or NVT-tile correction creates a new artifact; it never changes the
@@ -563,11 +604,14 @@ Initial target sizes and split thresholds must be benchmarked. Start testing at
 64 KiB target pages with split near 90% and compaction below 30%, but do not
 hard-code these values into the format.
 
-Benchmark per-page compression independently by artifact kind. Compression must
-remain bounded and page-local; checksums/content identity cover a documented
-canonical byte representation, and decompression limits are validated before
-allocation. A flush batch also has a byte cap so many dirty pages cannot become
-one unbounded `WriteBatch` allocation.
+V1 begins with uncompressed pages. Prior index-compression work found that zstd
+did not justify its complexity for hash-heavy index payloads. The manifest
+still carries an explicit `compression = none` field so a future format can add
+page-local compression without reinterpretation, but compression is not a Phase
+3 implementation or rollout requirement. Any future codec requires new
+artifact-kind-specific production benchmarks, bounded decompression, and a new
+format capability. A flush batch also has a byte cap so many dirty pages cannot
+become one unbounded `WriteBatch` allocation.
 
 ### 6. Canonical Value Store
 
@@ -587,10 +631,15 @@ The value store must support:
 
 Definitions set explicit limits for canonical bytes per value/document,
 multi-value count, expanded token count, and postings per document. Trigram and
-phonetic expansion deduplicate identical tokens before admission. Exceeding a
-limit records deterministic strict/lenient `unindexable` state or rejects the
-write according to policy; values are never silently truncated into false query
-semantics.
+phonetic expansion deduplicate identical tokens before admission. A
+deterministically malformed, unsupported, or over-limit document records a
+versioned per-document `unindexable` state according to configured field
+semantics. A parser/plugin crash, dependency disappearance, timeout, or
+nondeterministic result degrades the whole affected generation because it cannot
+be reinterpreted as "this document has no value." Authoritative file writes
+remain successful unless the failure is part of a broader durability failure,
+but queries must fall back or return an explicit incomplete-index error. Values
+are never silently truncated or omitted into false query semantics.
 
 Virtual metadata may be read directly from FileRecords when that is cheaper, but
 the planner needs an explicit cost model rather than an implicit fallback.
@@ -599,6 +648,10 @@ the planner needs an explicit cost model rather than an implicit fallback.
 
 The FieldNvt is a logical array of optional hints divided into independently
 addressable tiles.
+
+Use 1,024 cells as the provisional v1 tile size, encoded in the NVT manifest
+rather than the schema. Phase 0 benchmarks 256, 1,024, and 4,096 cells and may
+change the default before rollout without changing the format.
 
 ```rust
 struct FieldNvtCell {
@@ -759,9 +812,10 @@ Concurrency rules:
 - Read pages and tiles are immutable `Arc` values.
 - Page cache misses coalesce concurrent loads for the same artifact.
 - Readers pin one manifest generation for the duration of a scan.
-- A generation-lease registry exposes all in-flight reader, migration, compaction,
-  and consistent-cursor roots to GC. Compaction retires old artifacts only after
-  those leases expire/release.
+- A generation-pin registry exposes in-flight request, migration, and compaction
+  roots to GC. These short-lived internal pins exist only while work is active;
+  they are not a persistent cursor-consistency API. Compaction retires old
+  artifacts only after those pins release.
 - Cache admission reserves bytes before loading. Query pinning that would exceed
   the hard budget is backpressured/rejected rather than silently oversubscribing.
 - Cancellation and deadlines release pins promptly; temporary sort/bitmap/parser
@@ -879,13 +933,47 @@ Planner ordering must be observable through `EXPLAIN`.
   `usize::MAX` results from every field and directory.
 - Fuzzy queries probe only token pages required by the query and fetch canonical
   values only for candidates that survive posting intersection/union.
-- Keyset cursors contain the query/definition fingerprint, complete sort tuple,
-  unique FileKey tie-breaker, source version, and consistency mode. They are
-  authenticated or strictly validated; callers cannot inject arbitrary planner state.
-- Default live cursors document their concurrent-write behavior. A strict
-  consistent mode creates a TTL-bounded query lease pinning source and manifest
-  roots; otherwise a stale source/definition cursor is rejected explicitly.
-- Artifact retention and GC account for unexpired consistent-cursor leases.
+- A cursor is a stable root-view token, not a changing pagination-position token.
+  Version 1 canonically base64url-encodes only cursor format version, database
+  identity, immutable namespace root hash, and advisory `expires_at`.
+- Cursors are deliberately unsigned and unencrypted. They grant no authority,
+  and every request reapplies normal path/scope authorization. Decoders enforce
+  exact versioned lengths and reject malformed, cross-database, unavailable, or
+  structurally invalid roots. Base64 is transport encoding, not trusted state.
+- `expires_at` is a server hint. A client may alter or ignore it, but doing so
+  cannot retain bytes or make a reclaimed root resolve. Missing roots or roots
+  eligible for reclamation return `410 cursor_expired` and never fall through
+  to live HEAD.
+- `page`, `offset`, `limit`, `order_by`, and optional logical `after`/`before`
+  positions remain query/request parameters. No physical WAL offset, page ID,
+  NVT cell, manifest pointer, or planner state crosses the API boundary.
+- Reject ambiguous pagination combinations: `page` is one-based syntactic sugar
+  for an offset derived with checked arithmetic and cannot be combined with
+  explicit `offset`, `after`, or `before`; `after` and `before` are mutually
+  exclusive. Limits and logical positions are type/size bounded.
+- Deep offset/page traversal must use page/catalog live counts or bounded scans
+  where possible. Optional logical keyset positions remain available for plans
+  where rank/offset skipping cannot be bounded efficiently; changing a position
+  parameter does not change the root cursor.
+- Cursor creation against a live root caps its advertised lifetime to the
+  configured maximum cursor TTL and pending-delete grace. Creation against a
+  pending root additionally caps it at that root's current reclamation boundary.
+  Reclamation-eligible or missing roots cannot produce a cursor.
+- Reads from pending-delete roots are permitted until eligibility, but they do
+  not clear, refresh, or extend quarantine. A request acquires only a temporary
+  in-memory root/generation pin so a concurrent sweep cannot reclaim its closure
+  before that request completes.
+- A continuation uses any local index generation whose `SourceVersion` and full
+  definition fingerprint match the cursor root. Otherwise it performs the
+  authoritative historical fallback or returns an explicit dependency error; it
+  never silently uses indexes for current HEAD.
+- Query/search also accept explicit `snapshot` and `version` selectors for
+  caller-managed retention beyond cursor grace. The current implementation
+  supports these selectors for file reads, not queries, and its query cursor
+  embeds HEAD without validating it; both gaps are part of this phase.
+- Historical execution resolves index configuration and parser dependencies from
+  the selected root. If exact semantics cannot be reproduced, return an explicit
+  consistency error instead of evaluating with current-root configuration.
 
 ### 5. Degraded and Fallback Behavior
 
@@ -895,8 +983,9 @@ Fallback is capability-specific, never a euphemism for partial results:
 - content fields may use authoritative parser/plugin re-evaluation only when
   the exact pinned definition dependency is available and resource limits permit;
 - otherwise the query returns an explicit index-unavailable/reconciling error;
-- per-document parser failures are recorded as versioned `unindexable` state,
-  with strict versus lenient policy defined by configuration; and
+- deterministic document-level parse/limit failures are recorded as versioned
+  `unindexable` state with explicit field semantics, while operational
+  parser/plugin failures degrade the generation; and
 - no stale manifest, incomplete overlay, or parser failure may be presented as
   a complete negative match.
 
@@ -1203,23 +1292,89 @@ phonetic indexes, limiting concurrent migrations by bytes rather than count.
 
 ### GC
 
+GC scheduling and reclamation retention are independent controls. Keep the
+existing configurable scan cadence and add a configurable pending-delete grace
+period. The normal engine invariant remains two complete successful marks;
+setting grace to zero permits reclamation on the next complete run, never in the
+same run that first discovers the entry.
+
+```rust
+struct GcQuarantinePolicy {
+  pending_delete_grace_ms: u64,
+  maximum_cursor_ttl_ms: u64,
+}
+
+enum GcReachabilityState {
+  Live,
+  PendingDelete {
+    first_unreachable_generation: u64,
+    pending_since_ms: u64,
+  },
+}
+```
+
+`maximum_cursor_ttl_ms` must not exceed the pending-delete grace after
+saturating subtraction of the documented safety margin. If the administrator
+configures a shorter grace, new cursor hints are shortened accordingly.
+Existing `expires_at` values are advisory: an administrative retention change
+or actual reclamation may make a cursor fail earlier with `410 cursor_expired`.
+
+Pending-delete state follows these rules:
+
+1. A complete mark identifies every authoritative and derived root and reports
+   whether traversal was complete. A traversal/read/allocation/cancellation error
+   makes the mark incomplete.
+2. An incomplete mark creates no pending-delete candidates, advances no existing
+   candidate toward eligibility, and reclaims nothing.
+3. The first complete mark that finds an entry unreachable records its mark
+   generation and `pending_since`; the entry remains in KV and remains readable.
+4. Intermediate marks never reset `pending_since`. A mark that finds the entry
+   reachable from HEAD, a named snapshot, fork, active maintenance root, or other
+   authoritative root clears pending deletion.
+5. Reclamation requires a later complete mark generation, elapsed grace, a final
+   reachability/KV-offset recheck, and no request/task pin. Cadence alone never
+   determines minimum retention.
+6. Reading a pending root is allowed before eligibility and takes a temporary
+   request pin, but does not refresh or clear pending deletion.
+7. Reclamation-eligible roots are logically expired even if physical sweep has
+   not yet converted their entries to reusable voids.
+8. Crash or rebuild uncertainty resets candidates conservatively to live/not-yet-
+   eligible. Recovery may leak space for another grace period; it may never
+   shorten the period or reclaim early.
+
+Ordinary disk pressure never bypasses these rules. An emergency root-only CLI
+may explicitly reclaim already-pending candidates before elapsed grace only
+after a fresh complete mark, dry-run byte/path-class report, and `--yes`; it
+cannot reclaim entries first discovered by that same mark. The command warns
+that outstanding root cursors can immediately become `410 cursor_expired`.
+
+Do not repurpose `EntryHeader.timestamp` for access or quarantine state. It is
+outside content identity, but dirty KV rebuild uses it to resolve mutable-key
+chronology; changing it on reads could make stale entries win recovery ordering.
+Store quarantine generation metadata in a versioned KV/GC control representation.
+The two currently unused high KV flag bits are candidates for alternating A/B
+quarantine generations only after serialization, dirty-rebuild, and crash-order
+tests prove the encoding. A durable generation rotation barrier must precede any
+sweep that treats the older color as eligible.
+
 - Treat both valid A/B pointer slots, their active/previous manifests, migration
   leases, and grace-period v0/v1 roots as derived GC roots.
-- Include in-flight query/consistent-cursor/compaction generation leases captured
+- Include in-flight query and compaction generation pins captured
   at the GC mark boundary; do not sweep an artifact merely because a newer
   manifest became active during the cycle.
 - Traverse manifest-to-page/tile/value/catalog references.
 - Treat NVT manifests/tiles as a separate disposable root family; loss never
   degrades posting correctness.
 - Reclaim orphaned builds, superseded immutable revisions, expired NVT
-  generations, and canceled migration artifacts only when no lease references them.
+  generations, and canceled migration artifacts only when no task lease or
+  request pin references them.
 - Bound artifact marking memory through partitioned/streamed mark state rather
   than adding every artifact hash to the existing monolithic live `HashSet`.
 - Trigger derived cleanup by orphan bytes/KV-key count and free-space pressure,
   not only wall-clock age. Migration pauses before breaching its disk reserve.
 - Add a crash-safe reuse or compaction policy for reclaimed artifact-sized voids.
   Current chunk-only void reuse is insufficient for sustained immutable-index churn.
-- Any random void reuse must preserve old leased generations and obey a
+- Any random void reuse must preserve old pinned generations and obey a
   write/sync-before-pointer durability order; otherwise append and compact later.
 - Never infer user-content liveness from index artifacts.
 
@@ -1276,7 +1431,13 @@ Verification distinguishes:
 - authoritative database corruption;
 - derived posting/value page corruption;
 - stale or missing NVT hints; and
-- migration/checkpoint inconsistencies.
+- migration/checkpoint inconsistencies;
+- malformed or contradictory quarantine generations; and
+- entries that became reclaimable without two complete mark generations or the
+  configured grace period.
+
+Repair resolves uncertain quarantine state by retaining/resetting grace. It
+never guesses that an ambiguous candidate is safe to reclaim.
 
 Repairing NVT hints must never require rewriting authoritative files. Corrupt
 posting pages trigger index degradation and authoritative reindex of the affected
@@ -1305,6 +1466,11 @@ Expose per-index and aggregate metrics:
 - degraded indexes and fallback scans;
 - v0 dual-write time and cost;
 - artifact live/orphan/retired bytes, KV-key count, reclamation lag, and disk reserve;
+- GC mark generation/completeness, configured cadence and pending-delete grace,
+  pending entry/byte counts by generation, oldest pending age, and next eligible
+  reclamation boundary;
+- historical-root cursor outcomes (`live`, `pending`, `expired`, `missing`,
+  `cross_database`) and temporary root pins without logging cursor contents;
 - per-task I/O throughput/throttle time and foreground-latency backoff;
 - parser failures/unindexable document counts by definition without exposing values; and
 - migration/reconciliation phase, documents/bytes/pages completed and total,
@@ -1340,7 +1506,10 @@ and redacted before returning any cardinality or planner detail.
 - [ ] Freeze missing/null/multi-value/NOT/coercion/collation/fuzzy semantics.
 - [ ] Characterize authorization-before-pagination/count/aggregate behavior and cursor consistency.
 - [ ] Characterize ordered-batch, HEAD `SourceVersion`, dirty-startup, GC, and void-reuse behavior.
-- [ ] Confirm no phase changes KV bytes or behavior.
+- [ ] Characterize current GC cadence configuration, mark completeness/error
+      handling, sweep races, and every use of KV flags/header timestamps.
+- [ ] Confirm field-index phases do not change KV layout/NVT behavior and that
+      quarantine metadata cannot affect ordering, lookup, or rebuild winners.
 
 Exit: reproducible baseline and characterization suite.
 
@@ -1375,9 +1544,14 @@ Exit: stable typed semantics and shared cross-field identity.
 - [ ] Implement fixed-width hashed KV keys and canonical bounded cross-platform codecs.
 - [ ] Update scanner for lazy artifact payload verification and update verify, counters, and diagnostics.
 - [ ] Implement posting/NVT manifests, active pointers, immutable radix directories,
-      posting/value/scope pages, and generation leases.
+      posting/value/scope pages, request-lifetime generation pins, and durable
+      migration/maintenance leases.
 - [ ] Implement checksums, identity validation, prefix-safe publication ordering,
       previous-generation fallback, and explicit soft/hard durability behavior.
+- [ ] Implement generic two-mark pending deletion with independent configurable
+      grace before enabling reclamation of authoritative or derived entries.
+- [ ] Persist quarantine generations crash-safely and make incomplete marks,
+      rebuild uncertainty, and failed generation rotation retain rather than reclaim.
 - [ ] Add an artifact reclamation skeleton before any v1 write path can be enabled.
 - [ ] Add fault injection at every write/publish boundary.
 
@@ -1436,7 +1610,16 @@ Exit: complex queries are bounded, correct, and strategy options have real behav
 ### Phase 8: Sorting, Pagination, Aggregation, and Global Search
 
 - [ ] Push limits/cursors into ordered scans.
-- [ ] Implement validated keyset cursors plus TTL-bounded consistent query leases.
+- [ ] Implement the canonical unsigned base64url root cursor containing only
+      format version, database identity, root hash, and advisory expiration.
+- [ ] Keep page/offset/limit/order and logical after/before positions as request
+      parameters; reject all client-supplied physical index state.
+- [ ] Bound cursor hints by maximum TTL, pending-delete grace, and an existing
+      root's reclamation boundary; return `410` after logical expiration.
+- [ ] Add query/search `snapshot` and `version` selectors for retention beyond
+      cursor grace without introducing persistent cursor objects or leases.
+- [ ] Resolve query definitions from the selected historical root and use a
+      matching retained generation or an authoritative historical fallback.
 - [ ] Stream indexed sorts and bounded top-K sorts.
 - [ ] Stream aggregate/group calculations from value pages.
 - [ ] Replace global `usize::MAX` fan-out with bounded top-K merging.
@@ -1468,6 +1651,8 @@ Exit: copied v0 production databases migrate online with concurrent writes and s
 - [ ] Run crash/restart soak with migration, writes, deletes, and queries concurrently.
 - [ ] Verify lazy startup, bounded derived GC, canceled-build cleanup, backup/restore,
       snapshot/fork transitions, and peer/patch behavior.
+- [ ] Verify pending-delete quarantine under short/long GC cadence, configurable
+      grace, failed marks, restart, concurrent historical reads, and disk pressure.
 - [ ] Verify root-only migration controls and authorization-safe query/EXPLAIN behavior.
 - [ ] Migrate a copy of the FS-Server1 database and compare memory/performance/results.
 - [ ] Deploy compatibility binary with v1 disabled by default.
@@ -1522,7 +1707,47 @@ Exit: v1 is the default for new indexes; existing production indexes have an ope
   explicit header capability upgrade, before and after artifacts exist.
 - Restore backup with and without derived indexes.
 - GC while migration lease and old manifest readers are active.
-- Expire/revoke consistent-cursor leases and reclaim only after their roots release.
+- Retired migration generations enter the same pending-delete lifecycle and are
+  not reclaimed while task/request pins or grace-period roots remain active.
+
+### GC and Cursor Tests
+
+- A newly unreachable entry remains readable and present in KV after its first
+  complete mark regardless of grace value.
+- Reclamation requires a later complete mark generation, elapsed grace, final
+  reachability/offset verification, and no active request/task pin.
+- Hourly marks with a 24-hour grace do not reclaim before the first successful
+  mark after 24 hours; intermediate marks do not reset `pending_since`.
+- Zero grace still requires a second complete mark. Long cadence delays physical
+  reclamation without weakening the minimum conditions.
+- Mark traversal error, malformed B-tree node, cancellation, allocation failure,
+  panic containment, or unreadable root advances no deletion state.
+- A pending entry that becomes reachable through HEAD, snapshot, fork, migration,
+  or active artifact generation has quarantine cleared before sweep.
+- Crash before/after candidate publication, generation rotation, final recheck,
+  KV removal, void registration, and hot-tail flush never causes early deletion.
+- Dirty KV rebuild with missing/stale quarantine metadata restarts the grace
+  conservatively and never treats uncertainty as eligibility.
+- Cursor creation against a live root uses a stable token and conservative TTL;
+  creation against a pending root caps the hint at its reclamation boundary.
+- Cursor creation against an eligible, reclaimed, malformed, or cross-database
+  root fails explicitly. A missing historical root never falls back to HEAD.
+- Reading a pending root succeeds before eligibility, does not refresh quarantine,
+  and holds a request pin that wins a concurrent sweep race.
+- Client-modified `expires_at` is harmless: authorization remains enforced and
+  access succeeds only while the named root resolves and is not logically expired.
+- Page, offset, limit, order, and logical keyset position changes reuse the same
+  root cursor and produce results from exactly that immutable root.
+- Ambiguous/overflowing pagination combinations and oversized decoded cursors or
+  logical positions fail before planning or allocation.
+- Scope/share/JWT restrictions apply identically to current, pending, snapshot,
+  version, and client-constructed root cursors before counts or other observables.
+- GC grace/cursor TTL configuration changes are validated, documented, and tested
+  with both shorter and longer values, including early `410` after an admin
+  deliberately reduces retention.
+- Emergency early reclamation requires an already-pending candidate, a new
+  complete mark, dry-run reporting, root authority, and explicit confirmation;
+  newly discovered candidates remain protected.
 
 ### Resource and Performance Tests
 
@@ -1564,8 +1789,10 @@ develop, benchmark, or test migration by opening the production database directl
 - `docs/src/concepts/indexing.md`: authoritative NVT/page/value/catalog architecture.
 - `docs/src/concepts/storage-engine.md`: `IndexArtifact` and derived-data durability.
 - `docs/src/api/querying.md`: planner, scope partitioning, authorization,
-  cursor consistency, fallback, strategy, limits, and `EXPLAIN` behavior.
-- `docs/src/api/admin.md`: migration/status/validation/finalization endpoints and metrics.
+  stateless root cursors, pagination parameters, expiration semantics, fallback,
+  strategy, limits, and `EXPLAIN` behavior.
+- `docs/src/api/admin.md`: migration/status/validation/finalization endpoints,
+  GC cadence, pending-delete grace, cursor TTL bounds, and metrics.
 - `docs/src/operations/reindex.md`: distinction between reindex and format migration.
 - New `docs/src/operations/index-migration.md`: preflight, rollout, rollback, and recovery.
 - `docs/src/SUMMARY.md`: link the new operations page.
@@ -1575,58 +1802,86 @@ develop, benchmark, or test migration by opening the production database directl
   migration and diagnostic workflow.
 - Release notes with old-binary compatibility boundary.
 
-## Decisions to Confirm Before Phase 3
+## Resolved Decisions and Implementation Directives
 
-1. **Artifact representation:** approve dedicated `IndexArtifact` entries rather
-   than v1 pages represented as internal FileRecords. Recommendation: approve.
-2. **Document ordinal width:** use `u64` logically; choose compressed bitmap
-   implementation after benchmark. Recommendation: `u64` API with segmented
-   32-bit bitmap containers.
-3. **Initial page target:** benchmark 16, 64, and 256 KiB. Recommendation: begin
-   with 64 KiB and encode limits in manifest, not schema constants.
-4. **NVT tile size:** benchmark 256, 1,024, and 4,096 cells per artifact.
-5. **Freshness policy:** decide whether an index mutation-intent failure rejects
-   the user write or acknowledges it while marking the index degraded. Recommendation:
-   preserve authoritative write success unless the failure indicates a broader
-   durability failure, then force authoritative query fallback.
-6. **Grace finalization:** manual only versus policy-assisted. Recommendation:
-   manual finalization for the first production migrations.
-7. **Backup policy:** omit derived pages by default versus include active pages.
-   Recommendation: omit by default after restore/reindex tooling is proven.
-8. **v0 cleanup delay:** choose minimum retention after finalization. Recommendation:
-   retain until at least one verified backup and one clean restart on v1.
-9. **Derived publication durability:** choose sync thresholds and whether an
-   operator may request hard-durable index generations. Recommendation: batch
-   soft-durable publications aggressively, always validate on recovery, and use
-   explicit barriers for migration cutover/finalization rather than per mutation.
-10. **Cursor consistency:** default live keyset behavior versus strict leases.
-    Recommendation: default documented live behavior; offer explicit consistent
-    leases with a bounded TTL and return a stale-cursor error after expiry.
-11. **Artifact reclamation:** random void reuse versus append plus compaction.
-    Recommendation: implement generation cleanup first; enable artifact void
-    reuse only after power-cut tests prove write/sync-before-pointer ordering.
-12. **Page compression:** none versus page-local compression by artifact kind.
-    Recommendation: benchmark current zstd and uncompressed pages on HDD/SSD;
-    persist the choice per manifest and never span compression across pages.
-13. **Parser failure policy:** strict index degradation versus versioned
-    per-document exclusion. Recommendation: explicit config with strict default
-    for identity/range fields and observable lenient mode for search corpora.
-14. **Consistent-query lease capacity:** maximum TTL, count, and pinned bytes.
-    Recommendation: enforce all three and reject admission before exceeding the
-    global index memory/artifact-retention budgets.
-15. **File-header capability format:** approve a new explicitly dispatched header
-    version with minimum-reader bits before introducing IndexArtifact. Recommendation:
-    approve; a system-record-only marker cannot safely fence old clean-start binaries.
+1. **Artifact representation:** use dedicated versioned `IndexArtifact` entries,
+   not internal FileRecords. Preserve artifact portability explicitly: physical
+   copies include artifacts; logical snapshot/backup/peer transfer rebuilds by
+   default; compatible closed-generation transfer is optional and negotiated.
+   Namespace snapshots remain the durable source-consistency mechanism and must
+   never reference an artifact closure they do not contain or cannot reproduce.
+2. **Document ordinal width:** expose logical `u64` ordinals and begin with
+   segmented 32-bit compressed-bitmap containers behind that abstraction.
+3. **Initial page target:** begin at 64 KiB and benchmark 16, 64, and 256 KiB.
+   Persist the chosen target/limits in manifests rather than schema constants.
+4. **NVT tile size:** use 1,024 cells provisionally and benchmark 256, 1,024,
+   and 4,096 in Phase 0. Tile size is a manifest tuning value, not a format
+   invariant. This was the only item without an inline answer; it is resolved as
+   a benchmark gate rather than a permanent architecture choice.
+5. **Freshness policy:** preserve an authoritative file write when only derived
+   index mutation fails. Mark the index degraded/reconciling before dropping the
+   mutation and force an authoritative fallback or explicit query error. A
+   broader durability failure follows the database-wide durability latch policy.
+6. **Grace finalization and tooling:** first production migrations finalize only
+   through an explicit operator action. Ship both the root-only task API and the
+   dedicated `aeordb index` CLI workflow for preflight, migrate, status,
+   pause/resume, validate, rollback, finalize, and cleanup.
+7. **Backup policy:** logical backups omit derived pages by default after
+   restore/reindex tooling is proven. Physical copies retain them. Optional
+   inclusion exports only a validated closed generation compatible with the
+   selected source root.
+8. **V0 cleanup delay:** retain v0 through at least one verified backup and one
+   clean v1 restart, then require explicit cleanup. Finalization alone does not
+   reclaim it immediately.
+9. **Derived publication durability:** batch soft-durable publications
+   aggressively, validate/reconcile them on recovery, and require explicit hard
+   barriers for migration cutover/finalization rather than every mutation.
+10. **Cursor representation:** use a stable unsigned base64url root cursor with
+    format version, database identity, immutable root hash, and advisory
+    `expires_at`. It grants no authority and stores no physical/planner state.
+    Keep page, offset, limit, order, and logical keyset position in the request.
+    Reads from pending roots do not refresh retention; missing roots return `410`.
+11. **GC quarantine:** separate configurable scan cadence from configurable
+    pending-delete grace. The first complete mark records pending deletion; only
+    a later complete mark after elapsed grace may reclaim. Failed/incomplete
+    marks advance nothing. Grace zero means the next successful run, not the
+    discovery run. Cursor TTL hints cannot exceed this retention guarantee.
+12. **Artifact reclamation:** existing support is only partial. GC creates and
+    tracks reusable voids, but `StorageEngine::can_reuse_void_for_entry` currently
+    admits only `Chunk`, and there is no general in-place compactor. Implement
+    generation reachability/cleanup first. Enable IndexArtifact void reuse or a
+    replacement compaction path only after crash/power-cut ordering tests.
+13. **Page compression:** ship v1 pages uncompressed. Prior zstd work did not
+    justify the complexity for current hash-heavy index data. Encode `none` in
+    manifests and require a future capability/version plus new page-kind-specific
+    evidence before adding another codec.
+14. **Parser failure policy:** fail gracefully without pretending partial data is
+    complete. Deterministic malformed/unsupported/over-limit documents receive
+    observable versioned `unindexable` state according to field semantics.
+    Operational parser/plugin failures degrade the generation and trigger
+    fallback/error; they are not treated as negative matches.
+15. **Query pin capacity:** there are no persistent cursor objects or leases to
+    budget. Request-lifetime root/page/generation pins still count against the
+    global memory budget and release on completion/cancellation. Between requests,
+    disk retention comes only from authoritative roots and GC quarantine.
+16. **File-header capability format:** add and explicitly dispatch a new header
+    version with minimum-reader capability bits before the first IndexArtifact is
+    written. A system-record-only marker cannot fence old clean-start binaries.
 
 ## Definition of Done
 
 The refactor is complete only when:
 
-- the KV remains compatible and unchanged;
+- KV layout, ordering, lookup, NVT, and revision resolution remain compatible;
+  quarantine metadata is behaviorally isolated and conservatively rebuildable;
 - no field-index operation requires loading, cloning, sorting, or serializing a complete index;
 - memory remains within a configured hard budget under many-index sustained writes;
 - dirty startup remains lazy with respect to total derived payload bytes;
 - immutable artifact churn has bounded WAL/KV amplification and a tested reclamation path;
+- authoritative and derived garbage passes pending-delete grace plus a later
+  complete mark before reclamation, independently of GC cadence;
+- stateless root cursors remain fixed across paging requests, never pin durable
+  cursor objects, and fail explicitly instead of falling through to live HEAD;
 - NVT deletion and random gaps preserve query correctness;
 - point, range, fuzzy, boolean, sort, aggregate, pagination, and global-search
   results match authoritative reference execution;
