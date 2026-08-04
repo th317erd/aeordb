@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-1-seed",
+  "coverage_stage": "p0b-2-core",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [10, 11, 12, 13, 14, 15],
@@ -135,12 +135,165 @@
         "header-blake3-256-adopted-physical-id"
       ],
       "fixture_ids_64": ["header-sha512-valid-ab"]
+    },
+    {
+      "id": "whole-entity-v1",
+      "family": "core-entity-framing",
+      "magic_u32_le": "0x0ae012db",
+      "version": 1,
+      "entry_type_registry": {
+        "0x01": "Chunk",
+        "0x02": "FileRecord",
+        "0x03": "DirectoryIndex",
+        "0x04": "DeletionRecord",
+        "0x05": "Snapshot",
+        "0x06": "Void",
+        "0x07": "Fork",
+        "0x08": "Symlink",
+        "0x09": "IndexArtifact",
+        "0x0a": "GcArtifact"
+      },
+      "layout": [
+        { "offset": 0, "length": 4, "field": "magic", "rule": "u32 LE 0x0ae012db" },
+        { "offset": 4, "length": 1, "field": "entity_version", "rule": "exactly 1" },
+        { "offset": 5, "length": 1, "field": "entry_type", "rule": "permanent EntryType byte" },
+        { "offset": 6, "length": 2, "field": "allocated_header_length", "rule": "exactly 77 + H" },
+        { "offset": 8, "length": 4, "field": "total_length", "rule": "header + key + stored value" },
+        { "offset": 12, "length": 1, "field": "flags", "rule": "only registered v1 bits" },
+        { "offset": 13, "length": 2, "field": "hash_algorithm", "rule": "database algorithm ID" },
+        { "offset": 15, "length": 1, "field": "compression_algorithm", "rule": "registered codec" },
+        { "offset": 16, "length": 1, "field": "encryption_algorithm", "rule": "zero in v1" },
+        { "offset": 17, "length": 4, "field": "key_length", "rule": "checked u32 LE" },
+        { "offset": 21, "length": 4, "field": "value_length", "rule": "checked stored-value u32 LE" },
+        { "offset": 25, "length": 8, "field": "timestamp_ms", "rule": "Unix epoch u64 LE" },
+        { "offset": 33, "length": 8, "field": "write_sequence", "rule": "nonzero and no greater than reserved high water" },
+        { "offset": 41, "length_formula": "H", "field": "integrity_hash", "rule": "database hash over frozen aeordb-entry-v1 domain" },
+        { "offset_formula": "41 + H", "length": 32, "field": "reserved", "rule": "zero in v1" },
+        { "offset_formula": "73 + H", "length": 4, "field": "header_crc32", "rule": "CRC-32/ISO-HDLC over header bytes before this field" },
+        { "offset_formula": "77 + H", "length_formula": "K", "field": "key", "rule": "exact key bytes" },
+        { "offset_formula": "77 + H + K", "length_formula": "V", "field": "stored_value", "rule": "exact bounded bytes; may stream" }
+      ],
+      "identity": ["entry_type", "key", "stored_value representation"],
+      "key_domain": "kind-specific; the common integrity domain includes exact key bytes",
+      "integrity_hash": "H('aeordb-entry-v1\\0' || entity_version u8 || entry_type u8 || flags u8 || hash_algorithm u16 LE || compression u8 || encryption u8 || K u32 LE || V u32 LE || key || stored_value)",
+      "checksum": "crc32-iso-hdlc over bytes 0..(73 + H - 1)",
+      "body_formula": "77 + H + K + V",
+      "hard_cap": 4294967295,
+      "key_cap": 1073741824,
+      "stored_value_cap": 1073741824,
+      "canonical_order": "fixed header, exact key, exact stored value",
+      "reserve_zero_ranges": [{ "start_formula": "41 + H", "length": 32 }],
+      "malformed_behavior": "reject unknown type/version/algorithm/flags, unreserved sequence, CRC/integrity mismatch, nonzero reserve, overflow, truncation, and length disagreement before publication",
+      "trailing_behavior": "total_length consumes the complete entity; adjacent WAL bytes are never exposed to the codec",
+      "bounded_decode": "read 12-byte prefix, validate checked lengths and family caps, then read exact header/key or stream value; allocated header is at most 4096 bytes",
+      "producer_owner": "Child 01 P3a writer slice",
+      "consumer_owners": ["Child 01 readers", "Child 02 dirty startup/durability", "Child 04 physical inventory", "Child 07 migration"],
+      "capability": "WholeEntityV1 bit 0",
+      "typed_hash_roles": [
+        { "field": "integrity_hash", "role": "fingerprint" },
+        { "field": "key", "role": "identity" }
+      ],
+      "fixture_ids_32": ["entity-blake3-256-directory-root-valid"],
+      "fixture_ids_64": ["entity-sha512-directory-root-valid"]
+    },
+    {
+      "id": "directory-index-v1",
+      "family": "namespace-authority",
+      "magic_ascii": "ADIR",
+      "version": 1,
+      "kind_registry": {
+        "0x0001": "leaf-node-writer-disabled",
+        "0x0002": "internal-node-writer-disabled",
+        "0x0003": "NamespaceRootV1"
+      },
+      "identity": ["directory_kind", "complete ADIR value including CRC"],
+      "key_domain": "H('aeordb.directory-index.immutable.v1\\0' || directory_kind u16 LE || complete value)",
+      "checksum": "crc32-iso-hdlc over the complete value except its final 4 bytes",
+      "body_formula": "NamespaceRootV1 body = 72 + 2H; complete value = 108 + 2H",
+      "hard_cap": 236,
+      "canonical_order": "32-byte ADIR envelope, exact kind body, trailing CRC",
+      "reserve_zero_ranges": [
+        { "start": 24, "length": 8 },
+        { "start_formula": "value 72 + 2H", "length": 32 }
+      ],
+      "malformed_behavior": "reject unknown kind/version, disabled leaf/internal v1 writers, wrong lengths/counts/codecs, unknown capabilities, zero typed edges, reserve/trailing/CRC/key mismatch",
+      "trailing_behavior": "complete value length is exact; bytes after CRC are rejected",
+      "bounded_decode": "fixed envelope and at most 236-byte value; immediate namespace and semantic edges are shallow-validated separately",
+      "producer_owner": "Child 03 namespace publication through Child 01 codec",
+      "consumer_owners": ["Child 03 read-view resolver", "Child 04 GC", "Child 06 query/API", "Child 07 migration"],
+      "capability": "NamespaceRootV1 bit 1",
+      "typed_hash_roles": [
+        { "field": "entity key/root_hash", "role": "identity" },
+        { "field": "namespace_tree_root", "role": "graph-edge-authority" },
+        { "field": "semantic_state_root", "role": "graph-edge-authority" }
+      ],
+      "fixture_ids_32": ["adir-blake3-256-namespace-root-valid"],
+      "fixture_ids_64": ["adir-sha512-namespace-root-valid"]
+    },
+    {
+      "id": "semantic-object-v1",
+      "family": "semantic-authority",
+      "magic_ascii": "ASEM",
+      "version": 1,
+      "kind_registry": {
+        "0x0001": "SemanticStateRootV1",
+        "0x0002": "SemanticCatalogLeafV1",
+        "0x0003": "SemanticCatalogInternalV1",
+        "0x0004": "SemanticDefinitionRecordV1"
+      },
+      "identity": ["object_kind", "complete ASEM object including CRC"],
+      "key_domain": "H('aeordb.semantic-object.immutable.v1\\0' || object_kind u16 LE || complete object)",
+      "checksum": "crc32-iso-hdlc over the complete object except its final 4 bytes",
+      "body_formula": "36 + kind body; state body 112 + 3H; definition body 16 + H + D; leaf body 16 + H + records; internal body 20 + P + child_count * (12 + H)",
+      "hard_cap": 1048576,
+      "kind_caps": {
+        "SemanticStateRootV1": 4096,
+        "SemanticCatalogInternalV1": 65536,
+        "SemanticCatalogLeafV1": 1048576,
+        "SemanticDefinitionRecordV1": 1048576
+      },
+      "canonical_order": "32-byte ASEM envelope, exact kind body, trailing CRC; leaf records and internal edges strictly ordered",
+      "reserve_zero_ranges": [
+        { "start": 28, "length": 4 },
+        { "kind": "SemanticStateRootV1", "start_formula": "body 80 + 3H", "length": 32 }
+      ],
+      "malformed_behavior": "reject unknown kind/version/capability/class, wrong counts/formulas, noncanonical state/root presence, duplicate or unordered records/edges, bad radix depth, zero required IDs, reserve/trailing/CRC/key mismatch, or cap violation",
+      "trailing_behavior": "object_total_length and each kind body consume exact bytes",
+      "bounded_decode": "validate common lengths and kind cap before allocation; catalog traversal uses an explicit stack no deeper than H digest bytes",
+      "producer_owner": "Child 03 semantic compiler through Child 01 codec",
+      "consumer_owners": ["Child 03 semantic resolver", "Child 04 GC", "Child 05 index definitions", "Child 06 query", "Child 07 migration/backup"],
+      "capability": "SemanticStateV1 bit 2",
+      "typed_hash_roles": [
+        { "field": "object_id", "role": "identity" },
+        { "field": "semantic_id", "role": "identity" },
+        { "field": "definition_object_id", "role": "graph-edge-authority" },
+        { "field": "catalog_root", "role": "graph-edge-authority" },
+        { "field": "child_object_id", "role": "graph-edge-authority" },
+        { "field": "compiler_fingerprint", "role": "fingerprint" },
+        { "field": "semantic_registry_fingerprint", "role": "fingerprint" },
+        { "field": "lookup_digest", "role": "hint" }
+      ],
+      "fixture_ids_32": [
+        "asem-blake3-256-definition-valid",
+        "asem-blake3-256-catalog-leaf-valid",
+        "asem-blake3-256-catalog-internal-valid",
+        "asem-blake3-256-state-complete",
+        "asem-blake3-256-state-content-only"
+      ],
+      "fixture_ids_64": [
+        "asem-sha512-definition-valid",
+        "asem-sha512-catalog-leaf-valid",
+        "asem-sha512-catalog-internal-valid",
+        "asem-sha512-state-complete",
+        "asem-sha512-state-content-only"
+      ]
     }
   ],
-  "p0b_1_limits": {
-    "fixture_family_count": 1,
-    "fixture_count": 10,
+  "p0b_progress": {
+    "fixture_family_count": 4,
+    "fixture_count": 24,
     "production_writer_exists": false,
-    "remaining_p0b_2_scope": "All remaining Round 10-15 entity, artifact, control, canonical-value, APOS, SystemFamily, and malformed fixture families"
+    "completed_scope": "DatabaseHeaderV4 plus P0b-2 core whole-entity, NamespaceRoot, and semantic object families",
+    "remaining_p0b_2_scope": "IndexArtifact, GcArtifact, controls, canonical values/config/path/glob/file-key/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
   }
 }

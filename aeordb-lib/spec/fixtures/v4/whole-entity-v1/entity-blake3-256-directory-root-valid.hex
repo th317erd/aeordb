@@ -1,0 +1,44 @@
+# fixture: entity-blake3-256-directory-root-valid
+# contract: WholeEntityV1
+# hash: blake3-256 (32 bytes)
+# expected: entity:entry-type=0x03
+# canonical key: 4415359575280e81de596a9c54aeb13aa1a6e6cbef1361cb0d9e1487c6de5dfe
+# relation: wraps:namespace-root-valid
+# hex offsets are absolute within this fixture
+# field +0x000 len 4: magic
+# field +0x004 len 1: entity_version
+# field +0x005 len 1: entry_type
+# field +0x006 len 2: allocated_header_length
+# field +0x008 len 4: total_length
+# field +0x00c len 1: flags
+# field +0x00d len 2: hash_algorithm
+# field +0x00f len 1: compression_algorithm
+# field +0x010 len 1: encryption_algorithm
+# field +0x011 len 4: key_length
+# field +0x015 len 4: value_length
+# field +0x019 len 8: timestamp_ms
+# field +0x021 len 8: write_sequence
+# field +0x029 len 32: integrity_hash
+# field +0x049 len 32: reserved
+# field +0x069 len 4: header_crc32
+# field +0x06d: key then stored_value
+00000000: db12e00a01036d003901000000010000
+00000010: 0020000000ac0000000068e5cf8b0100
+00000020: 000b00000000000000ac9a6dc7c9f938
+00000030: 71aee9fc26836aa36fba0c4b145cbc75
+00000040: 218b30777aea320f2300000000000000
+00000050: 00000000000000000000000000000000
+00000060: 00000000000000000016b4ee62441535
+00000070: 9575280e81de596a9c54aeb13aa1a6e6
+00000080: cbef1361cb0d9e1487c6de5dfe414449
+00000090: 520100030020000000ac000000880000
+000000a0: 00000000000000000000000000000000
+000000b0: 007f006c000000000000000000000000
+000000c0: 00000000000000000000000000000000
+000000d0: 0001000100101112131415161718191a
+000000e0: 1b1c1d1e1f202122232425262728292a
+000000f0: 2b2c2d2e2f808182838485868788898a
+00000100: 8b8c8d8e8f909192939495969798999a
+00000110: 9b9c9d9e9f0000000000000000000000
+00000120: 00000000000000000000000000000000
+00000130: 000000000079187fad

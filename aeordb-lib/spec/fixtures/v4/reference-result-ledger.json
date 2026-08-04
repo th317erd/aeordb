@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b1-v1",
+  "tool_revision": "p0b2-core-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -61,6 +61,90 @@
       "fixture_id": "header-blake3-256-adopted-physical-id",
       "expected": "selected:44",
       "observed": "selected:44",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "entity-blake3-256-directory-root-valid",
+      "expected": "entity:entry-type=0x03",
+      "observed": "entity:entry-type=0x03",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adir-blake3-256-namespace-root-valid",
+      "expected": "directory:namespace-root",
+      "observed": "directory:namespace-root",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-definition-valid",
+      "expected": "semantic:definition:class=2",
+      "observed": "semantic:definition:class=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-catalog-leaf-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-catalog-internal-valid",
+      "expected": "semantic:catalog-internal:children=2",
+      "observed": "semantic:catalog-internal:children=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-state-complete",
+      "expected": "semantic:state:complete",
+      "observed": "semantic:state:complete",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-state-content-only",
+      "expected": "semantic:state:content-only:reason=1",
+      "observed": "semantic:state:content-only:reason=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "entity-sha512-directory-root-valid",
+      "expected": "entity:entry-type=0x03",
+      "observed": "entity:entry-type=0x03",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adir-sha512-namespace-root-valid",
+      "expected": "directory:namespace-root",
+      "observed": "directory:namespace-root",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-definition-valid",
+      "expected": "semantic:definition:class=2",
+      "observed": "semantic:definition:class=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-catalog-leaf-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-catalog-internal-valid",
+      "expected": "semantic:catalog-internal:children=2",
+      "observed": "semantic:catalog-internal:children=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-state-complete",
+      "expected": "semantic:state:complete",
+      "observed": "semantic:state:complete",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-state-content-only",
+      "expected": "semantic:state:content-only:reason=1",
+      "observed": "semantic:state:content-only:reason=1",
       "result": "pass"
     }
   ]

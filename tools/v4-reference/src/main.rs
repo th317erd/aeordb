@@ -1,3 +1,5 @@
+mod core;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -8,8 +10,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use core::{CoreFormat, HashProfile};
+
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b1-v1";
+const TOOL_REVISION: &str = "p0b2-core-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -21,30 +25,23 @@ const INITIAL_CAPABILITIES: &[u8; 32] = &[
 type DynResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Copy)]
-enum HashProfile {
-  Blake3_256,
-  Sha512,
+enum FixtureFormat {
+  DatabaseHeaderV4,
+  Core(CoreFormat),
 }
 
-impl HashProfile {
-  fn algorithm_id(self) -> u16 {
+impl FixtureFormat {
+  fn id(self) -> &'static str {
     match self {
-      Self::Blake3_256 => 0x0001,
-      Self::Sha512 => 0x0003,
+      Self::DatabaseHeaderV4 => "database-header-v4",
+      Self::Core(format) => format.id(),
     }
   }
 
-  fn width(self) -> usize {
+  fn family(self) -> &'static str {
     match self {
-      Self::Blake3_256 => 32,
-      Self::Sha512 => 64,
-    }
-  }
-
-  fn label(self) -> &'static str {
-    match self {
-      Self::Blake3_256 => "blake3-256",
-      Self::Sha512 => "sha512",
+      Self::DatabaseHeaderV4 => "DatabaseHeaderV4",
+      Self::Core(format) => format.family(),
     }
   }
 }
@@ -79,9 +76,11 @@ impl HeaderFields {
 #[derive(Clone)]
 struct FixtureCase {
   id: &'static str,
+  format: FixtureFormat,
   profile: HashProfile,
   expected: &'static str,
   relation: Option<&'static str>,
+  canonical_key: Option<String>,
   bytes: Vec<u8>,
 }
 
@@ -108,6 +107,7 @@ struct ReferenceTool {
 #[derive(Debug, Deserialize, Serialize)]
 struct FixtureManifestEntry {
   id: String,
+  format_id: String,
   family: String,
   hash_algorithm: String,
   hash_width: usize,
@@ -116,6 +116,7 @@ struct FixtureManifestEntry {
   byte_length: usize,
   sha256: String,
   blake3: String,
+  canonical_key: Option<String>,
   expected: String,
   relation: Option<String>,
 }
@@ -159,22 +160,23 @@ fn main() -> DynResult<()> {
 
 fn generate(fixture_root: &Path) -> DynResult<()> {
   let cases = fixture_cases();
-  let header_root = fixture_root.join("database-header-v4");
-  fs::create_dir_all(&header_root)?;
 
   let mut entries = Vec::with_capacity(cases.len());
   let mut results = Vec::with_capacity(cases.len());
   for case in &cases {
-    let binary_rel = format!("database-header-v4/{}.bin", case.id);
-    let annotation_rel = format!("database-header-v4/{}.hex", case.id);
+    let fixture_directory = fixture_root.join(case.format.id());
+    fs::create_dir_all(&fixture_directory)?;
+    let binary_rel = format!("{}/{}.bin", case.format.id(), case.id);
+    let annotation_rel = format!("{}/{}.hex", case.format.id(), case.id);
     fs::write(fixture_root.join(&binary_rel), &case.bytes)?;
     fs::write(fixture_root.join(&annotation_rel), annotated_hex(case))?;
 
-    let observed = observed_result(&case.bytes);
+    let (observed, observed_key) = observed_result(case, &case.bytes);
     let result = if observed == case.expected { "pass" } else { "fail" };
     entries.push(FixtureManifestEntry {
       id: case.id.to_string(),
-      family: "DatabaseHeaderV4".to_string(),
+      format_id: case.format.id().to_string(),
+      family: case.format.family().to_string(),
       hash_algorithm: case.profile.label().to_string(),
       hash_width: case.profile.width(),
       binary: binary_rel,
@@ -182,6 +184,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
       byte_length: case.bytes.len(),
       sha256: sha256_hex(&case.bytes),
       blake3: blake3::hash(&case.bytes).to_hex().to_string(),
+      canonical_key: observed_key,
       expected: case.expected.to_string(),
       relation: case.relation.map(str::to_string),
     });
@@ -196,7 +199,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-1-seed".to_string(),
+    stage: "p0b-2-core".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -218,7 +221,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-1-seed" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-core" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -234,7 +237,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
 
   let expected_cases: BTreeMap<&str, FixtureCase> = fixture_cases().into_iter().map(|case| (case.id, case)).collect();
   if expected_cases.len() != manifest.fixtures.len() {
-    return Err("fixture manifest does not cover the complete P0b-1 seed set".into());
+    return Err("fixture manifest does not cover the complete P0b-2 core set".into());
   }
 
   let mut ledger_results = Vec::with_capacity(manifest.fixtures.len());
@@ -250,13 +253,14 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
     if actual != case.bytes {
       return Err(format!("fixture bytes differ from independent reference construction: {}", entry.id).into());
     }
-    if entry.byte_length != HEADER_REGION_LENGTH || actual.len() != HEADER_REGION_LENGTH {
-      return Err(format!("fixture does not contain exactly two v4 slots: {}", entry.id).into());
-    }
-    if entry.hash_width != case.profile.width()
+    if entry.byte_length != actual.len()
+      || entry.format_id != case.format.id()
+      || entry.family != case.format.family()
+      || entry.hash_width != case.profile.width()
       || entry.hash_algorithm != case.profile.label()
       || entry.sha256 != sha256_hex(&actual)
       || entry.blake3 != blake3::hash(&actual).to_hex().as_str()
+      || entry.canonical_key != case.canonical_key
       || entry.expected != case.expected
       || entry.relation.as_deref() != case.relation
     {
@@ -267,7 +271,10 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
       return Err(format!("annotated hex mismatch: {}", entry.id).into());
     }
 
-    let observed = observed_result(&actual);
+    let (observed, observed_key) = observed_result(case, &actual);
+    if observed_key != case.canonical_key {
+      return Err(format!("fixture canonical key mismatch: {}", entry.id).into());
+    }
     let result = if observed == case.expected { "pass" } else { "fail" };
     if result != "pass" {
       return Err(format!("fixture outcome mismatch: {} expected {} observed {}", entry.id, case.expected, observed).into());
@@ -288,7 +295,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
     return Err("reference result ledger does not match a fresh verification".into());
   }
 
-  println!("v4 reference fixtures: PASS ({} DatabaseHeaderV4 cases)", manifest.fixtures.len());
+  println!("v4 reference fixtures: PASS ({} independent cases)", manifest.fixtures.len());
   Ok(())
 }
 
@@ -338,72 +345,56 @@ fn fixture_cases() -> Vec<FixtureCase> {
   adopted_b.physical_instance_id = sequence_bytes(0xb0);
   let adopted = header_region(adopted_a, adopted_b);
 
-  vec![
-    FixtureCase {
-      id: "header-blake3-256-valid-ab",
-      profile: HashProfile::Blake3_256,
-      expected: "selected:42",
-      relation: Some("physical-instance-original"),
-      bytes: valid_32,
-    },
-    FixtureCase { id: "header-sha512-valid-ab", profile: HashProfile::Sha512, expected: "selected:42", relation: None, bytes: valid_64 },
-    FixtureCase {
-      id: "header-blake3-256-one-valid-slot",
-      profile: HashProfile::Blake3_256,
-      expected: "selected:42:redundancy-degraded",
-      relation: None,
-      bytes: one_valid,
-    },
-    FixtureCase {
-      id: "header-blake3-256-equal-identical",
-      profile: HashProfile::Blake3_256,
-      expected: "selected:42",
-      relation: None,
-      bytes: equal_identical,
-    },
-    FixtureCase {
-      id: "header-blake3-256-equal-ambiguous",
-      profile: HashProfile::Blake3_256,
-      expected: "error:ambiguous_equal_sequence",
-      relation: None,
-      bytes: equal_ambiguous,
-    },
-    FixtureCase {
-      id: "header-blake3-256-no-valid-slot",
-      profile: HashProfile::Blake3_256,
-      expected: "error:no_valid_slot",
-      relation: None,
-      bytes: no_valid,
-    },
-    FixtureCase {
-      id: "header-blake3-256-unknown-capability",
-      profile: HashProfile::Blake3_256,
-      expected: "error:unsupported_required_capability",
-      relation: None,
-      bytes: unknown_capability,
-    },
-    FixtureCase {
-      id: "header-blake3-256-nonzero-reserved",
-      profile: HashProfile::Blake3_256,
-      expected: "error:reserved_nonzero",
-      relation: None,
-      bytes: nonzero_reserved,
-    },
-    FixtureCase {
-      id: "header-blake3-256-nonzero-hash-padding",
-      profile: HashProfile::Blake3_256,
-      expected: "error:hash_padding_nonzero",
-      relation: None,
-      bytes: nonzero_hash_padding,
-    },
-    FixtureCase {
-      id: "header-blake3-256-adopted-physical-id",
-      profile: HashProfile::Blake3_256,
-      expected: "selected:44",
-      relation: Some("adopts:header-blake3-256-valid-ab"),
-      bytes: adopted,
-    },
-  ]
+  let mut cases = vec![
+    header_fixture("header-blake3-256-valid-ab", HashProfile::Blake3_256, "selected:42", Some("physical-instance-original"), valid_32),
+    header_fixture("header-sha512-valid-ab", HashProfile::Sha512, "selected:42", None, valid_64),
+    header_fixture("header-blake3-256-one-valid-slot", HashProfile::Blake3_256, "selected:42:redundancy-degraded", None, one_valid),
+    header_fixture("header-blake3-256-equal-identical", HashProfile::Blake3_256, "selected:42", None, equal_identical),
+    header_fixture("header-blake3-256-equal-ambiguous", HashProfile::Blake3_256, "error:ambiguous_equal_sequence", None, equal_ambiguous),
+    header_fixture("header-blake3-256-no-valid-slot", HashProfile::Blake3_256, "error:no_valid_slot", None, no_valid),
+    header_fixture(
+      "header-blake3-256-unknown-capability",
+      HashProfile::Blake3_256,
+      "error:unsupported_required_capability",
+      None,
+      unknown_capability,
+    ),
+    header_fixture("header-blake3-256-nonzero-reserved", HashProfile::Blake3_256, "error:reserved_nonzero", None, nonzero_reserved),
+    header_fixture(
+      "header-blake3-256-nonzero-hash-padding",
+      HashProfile::Blake3_256,
+      "error:hash_padding_nonzero",
+      None,
+      nonzero_hash_padding,
+    ),
+    header_fixture(
+      "header-blake3-256-adopted-physical-id",
+      HashProfile::Blake3_256,
+      "selected:44",
+      Some("adopts:header-blake3-256-valid-ab"),
+      adopted,
+    ),
+  ];
+  cases.extend(core::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Core(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
+  cases
+}
+
+fn header_fixture(
+  id: &'static str,
+  profile: HashProfile,
+  expected: &'static str,
+  relation: Option<&'static str>,
+  bytes: Vec<u8>,
+) -> FixtureCase {
+  FixtureCase { id, format: FixtureFormat::DatabaseHeaderV4, profile, expected, relation, canonical_key: None, bytes }
 }
 
 fn header_region(slot_a: HeaderFields, slot_b: HeaderFields) -> Vec<u8> {
@@ -537,27 +528,49 @@ fn decode_slot(slot: &[u8]) -> Result<SelectedSlot, &'static str> {
   Ok(SelectedSlot { sequence: read_u64(slot, 10)?, redundancy_degraded: false })
 }
 
-fn observed_result(bytes: &[u8]) -> String {
-  match select_header_region(bytes) {
-    Ok(selected) if selected.redundancy_degraded => format!("selected:{}:redundancy-degraded", selected.sequence),
-    Ok(selected) => format!("selected:{}", selected.sequence),
-    Err(error) => format!("error:{error}"),
+fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>) {
+  match case.format {
+    FixtureFormat::DatabaseHeaderV4 => {
+      let observed = match select_header_region(bytes) {
+        Ok(selected) if selected.redundancy_degraded => format!("selected:{}:redundancy-degraded", selected.sequence),
+        Ok(selected) => format!("selected:{}", selected.sequence),
+        Err(error) => format!("error:{error}"),
+      };
+      (observed, None)
+    }
+    FixtureFormat::Core(format) => core::observe(format, case.profile, bytes),
   }
 }
 
 fn annotated_hex(case: &FixtureCase) -> String {
   let mut output = String::new();
   output.push_str(&format!("# fixture: {}\n", case.id));
-  output.push_str("# contract: DatabaseHeaderV4, two 1024-byte slots, data offset 2048\n");
+  match case.format {
+    FixtureFormat::DatabaseHeaderV4 => output.push_str("# contract: DatabaseHeaderV4, two 1024-byte slots, data offset 2048\n"),
+    FixtureFormat::Core(_) => output.push_str(&format!("# contract: {}\n", case.format.family())),
+  }
   output.push_str(&format!("# hash: {} ({} bytes)\n", case.profile.label(), case.profile.width()));
   output.push_str(&format!("# expected: {}\n", case.expected));
+  if let Some(key) = &case.canonical_key {
+    output.push_str(&format!("# canonical key: {key}\n"));
+  }
   if let Some(relation) = case.relation {
     output.push_str(&format!("# relation: {relation}\n"));
   }
-  output.push_str("# hex offsets are absolute within the 2048-byte header region\n");
-  output.push_str("# slot A starts 0x000; slot B starts 0x400; field offsets below are slot-relative\n");
-  for (offset, length, name) in header_field_annotations() {
-    output.push_str(&format!("# field +0x{offset:03x} len {length:>3}: {name}\n"));
+  match case.format {
+    FixtureFormat::DatabaseHeaderV4 => {
+      output.push_str("# hex offsets are absolute within the 2048-byte header region\n");
+      output.push_str("# slot A starts 0x000; slot B starts 0x400; field offsets below are slot-relative\n");
+      for (offset, length, name) in header_field_annotations() {
+        output.push_str(&format!("# field +0x{offset:03x} len {length:>3}: {name}\n"));
+      }
+    }
+    FixtureFormat::Core(format) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in core::annotation_lines(format, case.profile, &case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
   }
   for (line, chunk) in case.bytes.chunks(16).enumerate() {
     output.push_str(&format!("{:08x}: {}\n", line * 16, hex::encode(chunk)));
@@ -692,7 +705,9 @@ mod tests {
   #[test]
   fn fixture_cases_match_their_expected_outcomes() {
     for case in fixture_cases() {
-      assert_eq!(observed_result(&case.bytes), case.expected, "fixture {}", case.id);
+      let (observed, canonical_key) = observed_result(&case, &case.bytes);
+      assert_eq!(observed, case.expected, "fixture {}", case.id);
+      assert_eq!(canonical_key, case.canonical_key, "fixture {} key", case.id);
     }
   }
 }

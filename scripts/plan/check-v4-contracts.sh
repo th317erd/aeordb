@@ -137,12 +137,29 @@ result_ledger="$fixture_root/reference-result-ledger.json"
 jq -e --arg campaign "$campaign_id" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-1-seed" and
+  .coverage_stage == "p0b-2-core" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
   (.capability_bits[] | select(.bit == 17).name) == "RootLifecycleRetirementV1" and
-  (.formats | length) == 1 and
+  (.formats | length) == 4 and
+  ([.formats[].id] | length) == ([.formats[].id] | unique | length) and
+  all(.formats[];
+    (.identity | length) > 0 and
+    (.body_formula | length) > 0 and
+    .hard_cap > 0 and
+    (.checksum | length) > 0 and
+    (.canonical_order | length) > 0 and
+    (.reserve_zero_ranges | length) > 0 and
+    (.malformed_behavior | length) > 0 and
+    (.trailing_behavior | length) > 0 and
+    (.bounded_decode | length) > 0 and
+    (.producer_owner | length) > 0 and
+    (.consumer_owners | length) > 0 and
+    (.capability | length) > 0 and
+    (.typed_hash_roles | length) > 0 and
+    (.fixture_ids_32 | length) > 0 and
+    (.fixture_ids_64 | length) > 0) and
   .formats[0].id == "database-header-v4" and
   .formats[0].slot_length == 1024 and
   .formats[0].slot_count == 2 and
@@ -153,43 +170,60 @@ jq -e --arg campaign "$campaign_id" '
   any(.formats[0].layout[]; .field == "slot_crc32" and .offset == 1020 and .length == 4) and
   (.formats[0].fixture_ids_32 | length) > 0 and
   (.formats[0].fixture_ids_64 | length) > 0
-' "$contract_registry" >/dev/null || fail "P0b-1 format contract registry is incomplete"
+' "$contract_registry" >/dev/null || fail "P0b-2 core format contract registry is incomplete"
 
 jq -e --arg campaign "$campaign_id" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-1-seed" and
+  .stage == "p0b-2-core" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
-  .fixture_count == 10 and
+  .fixture_count == 24 and
   .fixture_count == (.fixtures | length) and
   ([.fixtures[].id] | length) == ([.fixtures[].id] | unique | length) and
   any(.fixtures[]; .hash_width == 32) and
   any(.fixtures[]; .hash_width == 64) and
-  all(.fixtures[]; .byte_length == 2048) and
+  all(.fixtures[]; .byte_length > 0) and
   any(.fixtures[]; .expected == "error:ambiguous_equal_sequence") and
   any(.fixtures[]; .expected == "error:unsupported_required_capability") and
   any(.fixtures[]; .expected == "error:reserved_nonzero") and
-  any(.fixtures[]; .relation == "adopts:header-blake3-256-valid-ab")
-' "$fixture_manifest" >/dev/null || fail "P0b-1 fixture manifest is incomplete"
+  any(.fixtures[]; .relation == "adopts:header-blake3-256-valid-ab") and
+  all(.fixtures[]; has("format_id") and has("canonical_key"))
+' "$fixture_manifest" >/dev/null || fail "P0b-2 core fixture manifest is incomplete"
 
 diff -u \
-  <(jq -r '.formats[0].fixture_ids_32[], .formats[0].fixture_ids_64[]' "$contract_registry" | sort) \
+  <(jq -r '.formats[] | .fixture_ids_32[], .fixture_ids_64[]' "$contract_registry" | sort) \
   <(jq -r '.fixtures[].id' "$fixture_manifest" | sort) >/dev/null \
   || fail "contract-registry fixture IDs differ from the fixture manifest"
 
-while IFS=$'\t' read -r binary annotation; do
+while IFS=$'\t' read -r binary annotation byte_length; do
   [[ -f "$fixture_root/$binary" ]] || fail "missing fixture binary: $binary"
   [[ -f "$fixture_root/$annotation" ]] || fail "missing annotated fixture hex: $annotation"
-  [[ "$(stat -c %s "$fixture_root/$binary")" == "2048" ]] || fail "fixture binary is not 2048 bytes: $binary"
-done < <(jq -r '.fixtures[] | [.binary, .annotated_hex] | @tsv' "$fixture_manifest")
+  [[ "$(stat -c %s "$fixture_root/$binary")" == "$byte_length" ]] || fail "fixture binary length differs from manifest: $binary"
+done < <(jq -r '.fixtures[] | [.binary, .annotated_hex, .byte_length] | @tsv' "$fixture_manifest")
 
 jq -e --arg campaign "$campaign_id" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  (.results | length) == 10 and
+  (.results | length) == 24 and
   all(.results[]; .result == "pass" and .expected == .observed)
-' "$result_ledger" >/dev/null || fail "P0b-1 reference result ledger is not green"
+' "$result_ledger" >/dev/null || fail "P0b-2 core reference result ledger is not green"
+
+required_p0b2_core_formats=(
+  whole-entity-v1
+  directory-index-v1
+  semantic-object-v1
+)
+for format_id in "${required_p0b2_core_formats[@]}"; do
+  jq -e --arg format_id "$format_id" 'any(.formats[]; .id == $format_id)' \
+    "$contract_registry" >/dev/null \
+    || fail "P0b-2 core format is absent from the contract registry: $format_id"
+  jq -e --arg format_id "$format_id" \
+    'any(.fixtures[]; .format_id == $format_id and .hash_width == 32) and
+     any(.fixtures[]; .format_id == $format_id and .hash_width == 64)' \
+    "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 core format lacks both hash-width fixtures: $format_id"
+done
 
 reference_jobs=${CARGO_BUILD_JOBS:-4}
 if ((reference_jobs > 6)); then
