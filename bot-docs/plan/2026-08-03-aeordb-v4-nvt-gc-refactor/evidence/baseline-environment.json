@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "captured_at": "2026-08-04T13:38:56-07:00",
+  "source": {
+    "decision_baseline": "5d3e284652f9fec7a5c843f1946132574af4d469",
+    "entry_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+    "entry_commit_time": "2026-08-04T13:29:07-07:00",
+    "branch": "development",
+    "remote": "git@github.com:th317erd/aeordb.git",
+    "remote_branch_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+    "ahead": 0,
+    "behind": 0,
+    "decision_to_entry_drift": [
+      {
+        "commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+        "classification": "ratified_plan_only",
+        "subject": "docs: ratify v4 nvt gc implementation campaign"
+      }
+    ]
+  },
+  "worktree": {
+    "tracked_changes_at_entry": [],
+    "preserved_untracked_paths": [
+      ".codex/DETAILS.md",
+      ".codex/wip.md",
+      "downloads/"
+    ]
+  },
+  "toolchain": {
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "rustc_host": "x86_64-unknown-linux-gnu",
+    "llvm": "22.1.6",
+    "cargo": "1.97.1 (c980f4866 2026-06-30)",
+    "rustfmt": "1.9.0-stable (8bab26f4f6 2026-07-14)",
+    "clippy": "0.1.97 (8bab26f4f6 2026-07-14)",
+    "ripgrep": "14.1.0",
+    "jq": "1.7",
+    "git": "2.43.0",
+    "cargo_job_cap": 6,
+    "p0a_jobs_used": 4
+  },
+  "platform": {
+    "hostname": "wyatt-laptop",
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux 7.0.0-28-generic x86_64",
+    "logical_cpus": 16,
+    "memory_total_kib": 16045456,
+    "memory_available_kib_at_capture": 8064548,
+    "swap_total_kib": 17301496,
+    "repository_filesystem": {
+      "mount": "/home",
+      "source": "/dev/mapper/home_crypt",
+      "type": "ext4",
+      "options": "rw,relatime"
+    },
+    "temporary_filesystem": {
+      "mount": "/tmp",
+      "source": "tmpfs",
+      "type": "tmpfs",
+      "options": "rw,noatime,inode64"
+    }
+  },
+  "workspace": {
+    "version": "0.9.5",
+    "edition": "2021",
+    "members": [
+      "aeordb@0.9.5",
+      "aeordb-cli@0.9.5",
+      "aeordb-plugin-sdk@0.9.5",
+      "aeordb-parser-plaintext@0.9.0"
+    ],
+    "default_members": [
+      "aeordb-cli"
+    ],
+    "portal_dependencies": [
+      {
+        "path": "/home/wyatt/Projects/aeor-web-components",
+        "commit": "b608faab73778560e7f99c49ac9624b0a23de609",
+        "entry_state": "missing",
+        "p0a_action": "restored from git@github.com:th317erd/aeor-web-components.git"
+      },
+      {
+        "path": "/home/wyatt/Projects/aeordb-workspace/aeordb-web-components",
+        "commit": "927aeda8708fe07dcd3465c942be0341ead82c67",
+        "entry_state": "present"
+      }
+    ]
+  },
+  "surface_counts": {
+    "axum_route_registrations": 93,
+    "rust_spec_files": 162,
+    "cargo_test_targets": 160,
+    "documentation_markdown_pages": 36,
+    "documentation_summary_entries": 33,
+    "rust_files": 352,
+    "production_rust_lines": 66903
+  },
+  "hotspots": [
+    {"path": "aeordb-lib/src/engine/storage_engine.rs", "lines": 3645},
+    {"path": "aeordb-lib/src/engine/directory_ops.rs", "lines": 3497},
+    {"path": "aeordb-lib/src/engine/query_engine.rs", "lines": 2844},
+    {"path": "aeordb-lib/src/server/engine_routes.rs", "lines": 2761},
+    {"path": "aeordb-lib/src/engine/index_store.rs", "lines": 1727},
+    {"path": "aeordb-lib/src/engine/disk_kv_store.rs", "lines": 1171},
+    {"path": "aeordb-lib/src/engine/gc.rs", "lines": 930},
+    {"path": "aeordb-lib/src/engine/btree.rs", "lines": 813},
+    {"path": "aeordb-lib/src/server/mod.rs", "lines": 761},
+    {"path": "aeordb-lib/src/engine/task_worker.rs", "lines": 625}
+  ],
+  "entry_gate": {
+    "git_diff_check": "pass",
+    "cargo_fmt_check": "pass_with_preexisting_rustfmt_width_warnings",
+    "initial_characterization": {
+      "result": "failed_before_tests",
+      "reason": "required aeor-web-components checkout was absent",
+      "classification": "environment_prerequisite",
+      "preserved_log": "/tmp/codex/aeordb-v4-p0a/run1.log"
+    },
+    "characterization_after_dependency_restore": "pass"
+  }
+}

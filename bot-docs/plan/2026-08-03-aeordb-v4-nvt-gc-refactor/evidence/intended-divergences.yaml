@@ -1,0 +1,124 @@
+schema_version: 1
+campaign_id: aeordb-v4-nvt-gc-2026-08-03
+source_commit: a40b0158999650a0e0402011ac41372eff7d4fc2
+policy: >-
+  Only the listed, owner-ratified differences may survive old/new comparison.
+  Any other difference is a regression or requires a new owner ruling.
+
+allowed_divergences:
+  - id: V4-PERSISTENT-BYTES
+    phase: P1-P3
+    behavior: v4 headers, controls, tags, checksums, reserved space, and capability bits use the frozen v4 layouts.
+    preserves:
+      - bounded v0/v3 readers
+      - unknown-version rejection
+      - reader-before-writer activation
+    proof: independent 32-byte and 64-byte golden fixtures plus native-platform parity
+
+  - id: V4-ROOT-AUTHORITY
+    phase: P2-P3
+    behavior: one selected semantic root and typed SystemFamily registry replace scattered HEAD, root, and protected-literal authority.
+    preserves:
+      - current authorization before historical reads
+      - immutable content identity
+      - current v3 behavior until capability activation
+    proof: producer convergence gate and root-publication model
+
+  - id: V4-HISTORICAL-ROOT-SELECTOR
+    phase: P7
+    behavior: authorized queries may select a retained root with an explicit root_hash request parameter.
+    preserves:
+      - page, offset, and limit as request parameters
+      - current-scope authorization
+      - server-reported root hash and expires_at on every response
+    proof: query reference and authorization/concealment matrix
+
+  - id: V4-APOS
+    phase: P7
+    behavior: search hits can opt into generated-on-demand APOS locators under the frozen coordinate contract.
+    preserves:
+      - no positional index
+      - no mandatory full-file response
+      - exact extraction ranges
+    proof: independent locator oracle and range-fetch round trip
+
+  - id: V4-GC-LIFECYCLE
+    phase: P4
+    behavior: physical objects move through timestamped pending-delete quarantine and bounded mark workspaces before reclamation.
+    preserves:
+      - no early reclaim
+      - crash direction retains or leaks rather than losing acknowledged data
+      - minimum two complete marks
+      - configurable grace period independent of scan cadence
+    proof: GC state-machine oracle, crash matrix, and copied-production dry run
+
+  - id: V4-ASYNC-DERIVED-COVERAGE
+    phase: P6
+    behavior: user commit publishes authoritative namespace state before derived parser, posting, page, and NVT coverage completes.
+    preserves:
+      - exact fallback when coverage is absent, stale, or corrupt
+      - no acknowledged derived state ahead of authority
+      - truthful coverage diagnostics
+    proof: async coverage fault tests and reference-result equality
+
+  - id: V4-INDEX-PAGES-AND-SPARSE-NVT
+    phase: P5
+    behavior: immutable ordered posting pages plus a sparse rebuildable NVT replace whole-index resident mutable blobs.
+    preserves:
+      - KV remains unordered and out of redesign scope
+      - NVT is a hint, never membership or order authority
+      - forward page continuation metadata
+    proof: absent/stale/corrupt NVT equivalence and memory/read-amplification reports
+
+  - id: V4-STRICT-ERRORS
+    phase: P2-P9
+    behavior: durability, authority, and correctness-bearing failures become typed terminal or degraded states instead of empty success or ignored errors.
+    preserves:
+      - reviewed optional telemetry and cleanup exceptions
+      - bounded retry for classified operational failures
+      - emergency spill and read-only durability latch
+    proof: shrinking error-squelch allowlist and fault injection
+
+  - id: V4-BOUNDED-MEMORY
+    phase: P2-P6
+    behavior: one memory coordinator admits and evicts material cache, KV snapshot, directory, index, query, and GC ownership under configured budgets.
+    preserves:
+      - correctness under eviction
+      - clean derived data is reconstructible
+      - dirty authority is never dropped
+    proof: owner metrics, pressure tests, and RSS bounds
+
+  - id: V4-CONFIG-RESOLUTION
+    phase: P2
+    behavior: one resolver applies defaults, stored configuration, environment, and CLI precedence with source diagnostics.
+    preserves:
+      - environment and CLI values can satisfy a required value when stored config is absent or malformed
+      - invalid effective values fail explicitly
+    proof: precedence matrix and startup diagnostics
+
+  - id: V4-SIDE-BY-SIDE-MIGRATION
+    phase: P3-P8
+    behavior: migration clones into a v4 destination, reconciles producers and families, then performs an explicit cutover.
+    preserves:
+      - source database remains untouched
+      - no automatic startup migration
+      - no in-place v3-to-v4 conversion
+      - explicit rollback boundary before v4-only acknowledged writes
+    proof: migration operation ledger, crash matrix, copied-production qualification, and operator gate
+
+  - id: V4-VOID-AND-PHYSICAL-INVENTORY
+    phase: P4
+    behavior: a typed physical inventory and selected Void catalog replace direct or ambiguous reusable-space decisions.
+    preserves:
+      - reclaimed ranges never overlap headers, KV, hot tail, or live objects
+      - interrupted settlement is recoverable
+    proof: complete physical model, overlap assertions, and allocator fault tests
+
+forbidden_divergences:
+  - redesigning KV ordering, page placement, or lookup semantics
+  - making NVT or any derived index authoritative
+  - persisting query cursors, query sessions, or positional indexes
+  - automatic or in-place production migration
+  - weakening durability barriers for performance
+  - reducing authorization or concealment checks for historical roots
+  - accepting an unlisted behavior difference because it appears beneficial

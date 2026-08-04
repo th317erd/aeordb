@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "source_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+  "mode": "debug",
+  "database_location": "disposable tempfile databases on /tmp tmpfs",
+  "log_root": "/tmp/codex/aeordb-v4-p0a",
+  "characterization": {
+    "command": "timeout 30m cargo test -j 4 -p aeordb --test converter_spec --test nvt_spec --test query_pagination_spec --test gc_spec --test tree_walker_spec --test upload_commit_spec --test content_hash_spec -- --test-threads=1",
+    "tests": 202,
+    "targets": [
+      "content_hash_spec",
+      "converter_spec",
+      "gc_spec",
+      "nvt_spec",
+      "query_pagination_spec",
+      "tree_walker_spec",
+      "upload_commit_spec"
+    ],
+    "run_1": {
+      "result": "environment_failure",
+      "exit_status": 101,
+      "elapsed_seconds": 113.71,
+      "max_rss_kib": 491484,
+      "filesystem_input_blocks": 861432,
+      "filesystem_output_blocks": 3817072,
+      "reason": "aeor-web-components checkout missing before build.rs"
+    },
+    "run_2": {
+      "result": "pass",
+      "exit_status": 0,
+      "passed": 202,
+      "failed": 0,
+      "elapsed_seconds": 72.14,
+      "max_rss_kib": 1552268,
+      "filesystem_input_blocks": 1503176,
+      "filesystem_output_blocks": 6575600,
+      "raw_log_sha256": "016c159413d599945f6c9945d7af17a3e5f0e6209bb835ac68ffa609222d2528",
+      "normalized_result_sha256": "1a9d52bf492c031649e4454cca92449890015a4c91f6ce896c05ef7e88f22966",
+      "classification": "dependency-recovery build plus tests"
+    },
+    "run_3": {
+      "result": "pass",
+      "exit_status": 0,
+      "passed": 202,
+      "failed": 0,
+      "elapsed_seconds": 39.31,
+      "max_rss_kib": 89064,
+      "filesystem_input_blocks": 75504,
+      "filesystem_output_blocks": 0,
+      "raw_log_sha256": "416691ac28aeae27cd16fde8d4bb84fb3b95f46fdf8bc26907fe2227deefb0d1",
+      "normalized_result_sha256": "1a9d52bf492c031649e4454cca92449890015a4c91f6ce896c05ef7e88f22966",
+      "classification": "warm-cache tests"
+    },
+    "noise_floor": {
+      "normalized_diff": "empty",
+      "stable_fields": [
+        "target order",
+        "test names",
+        "test counts",
+        "pass/fail/ignored status"
+      ],
+      "allowed_noise": [
+        "Cargo compilation lines",
+        "per-target elapsed seconds",
+        "whole-command elapsed time",
+        "CPU scheduling",
+        "RSS and filesystem counters"
+      ],
+      "normalization": "retain Running/running/test/test-result lines and replace each finished-in duration with <elapsed>"
+    }
+  },
+  "focused_probes": [
+    {
+      "id": "small-files",
+      "command": "timeout 15m cargo test -j 4 -p aeordb --test stress_test_spec test_stress_many_small_files -- --exact --nocapture",
+      "result": "pass",
+      "observations": {
+        "files_stored": 2000,
+        "store_seconds": 1.84,
+        "files_per_second": 1086,
+        "reads": 100,
+        "read_seconds_reported": 0.00,
+        "reads_per_second": 56908,
+        "command_elapsed_seconds": 2.03,
+        "max_rss_kib": 88780,
+        "filesystem_input_blocks": 0,
+        "filesystem_output_blocks": 0
+      }
+    },
+    {
+      "id": "indexed-query",
+      "command": "timeout 15m cargo test -j 4 -p aeordb --test stress_test_spec test_stress_query_indexed_files -- --exact --nocapture",
+      "result": "pass",
+      "observations": {
+        "indexed_files": 200,
+        "store_seconds": 0.21,
+        "files_per_second": 931,
+        "eq_query_seconds": 0.001,
+        "between_query_seconds": 0.001,
+        "contains_query_seconds": 0.005,
+        "command_elapsed_seconds": 0.40,
+        "max_rss_kib": 88288
+      }
+    },
+    {
+      "id": "mixed-workload",
+      "command": "timeout 15m cargo test -j 4 -p aeordb --test stress_test_spec test_stress_mixed_workload -- --exact --nocapture",
+      "result": "pass",
+      "observations": {
+        "seeded_files": 200,
+        "operations": 439,
+        "workload_seconds": 0.2,
+        "operations_per_second": 2727,
+        "reads": 249,
+        "writes": 90,
+        "scans": 60,
+        "deletes": 40,
+        "command_elapsed_seconds": 0.49,
+        "max_rss_kib": 88208
+      }
+    },
+    {
+      "id": "btree-insert",
+      "command": "timeout 15m cargo test -j 4 -p aeordb --test btree_spec test_btree_insert_performance_1000 -- --exact --nocapture",
+      "result": "pass",
+      "observations": {
+        "existing_entries": 500,
+        "inserts": 500,
+        "test_reported_milliseconds": 101,
+        "command_elapsed_seconds": 1.49,
+        "max_rss_kib": 1252724,
+        "measurement_note": "command RSS and I/O include compilation of this test target"
+      }
+    }
+  ],
+  "broad_gate_attempts": [
+    {
+      "id": "workspace-default-tempfs",
+      "command": "timeout 45m cargo test -j 4 --workspace --all-targets",
+      "result": "environment_failure",
+      "exit_status": 101,
+      "elapsed_seconds": 274.42,
+      "max_rss_kib": 1569660,
+      "log_sha256": "ddaaaf5ad893f572fb44dd117642f4c08210186aa2a4d42d7fb3cf492a65390d",
+      "failure": "Three disk_kv_store_spec fixtures overlapped and exhausted the 7.7 GiB /tmp tmpfs.",
+      "classification": "test-environment resource contention; each failing assertion reported ENOSPC"
+    },
+    {
+      "id": "disk-kv-serial-disk-backed",
+      "command": "timeout 15m env TMPDIR=/home/wyatt/.cache/aeordb-test-tmp cargo test -j 4 -p aeordb --test disk_kv_store_spec -- --test-threads=1",
+      "result": "pass",
+      "exit_status": 0,
+      "passed": 48,
+      "failed": 0,
+      "elapsed_seconds": 78.63,
+      "max_rss_kib": 285984,
+      "log_sha256": "f4815bff8eb886903f39ca0e2af450533a80a403cc12cc64a6de0d0e8a11564d",
+      "classification": "isolated rerun confirmed the default broad-gate failures were tmpfs pressure"
+    },
+    {
+      "id": "workspace-serial-disk-backed",
+      "command": "timeout 45m env TMPDIR=/home/wyatt/.cache/aeordb-test-tmp cargo test -j 4 --workspace --all-targets -- --test-threads=1",
+      "result": "baseline_regression",
+      "exit_status": 101,
+      "elapsed_seconds": 1725.87,
+      "max_rss_kib": 285756,
+      "log_sha256": "ea4c5dac8e26825ae44c9eb24d4c6c265e503879574752dd14ab248e78a08dc8",
+      "failure": "symlink_ecosystem_spec::test_gc_with_symlink_and_snapshot",
+      "reproduction": "timeout 5m env TMPDIR=/home/wyatt/.cache/aeordb-test-tmp cargo test -j 4 -p aeordb --test symlink_ecosystem_spec test_gc_with_symlink_and_snapshot -- --exact --test-threads=1",
+      "root_cause": "GC dereferences every value whose length equals the hash length as a hard link. A valid /link -> /target SymlinkRecord serializes to exactly 32 bytes and is misread as a Blake3 hash.",
+      "disposition": "Freeze as a deterministic entry-baseline defect and correct it in a separate implementation commit before Child 01 P0b."
+    }
+  ],
+  "limitations": [
+    "These are local debug-mode characterization values, not release or production service SLOs.",
+    "Temporary databases live on tmpfs, so the probes do not characterize durable disk latency.",
+    "Maximum RSS is the timed command-process maximum and can include rustc during a compile-skewed run.",
+    "P0a does not mutate or benchmark an evidence or production database.",
+    "Native macOS/Windows and copied-production measurements remain later phase gates."
+  ]
+}

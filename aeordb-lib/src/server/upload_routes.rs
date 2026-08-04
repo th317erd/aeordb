@@ -378,3 +378,41 @@ pub async fn upload_commit(
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use super::*;
+
+  #[test]
+  fn blob_commit_duplicate_guard_rejects_until_drop() {
+    let signature = u64::MAX - 17;
+
+    assert!(BlobCommitInFlightGuard::try_acquire(signature));
+    let guard = BlobCommitInFlightGuard::new(signature);
+    assert!(!BlobCommitInFlightGuard::try_acquire(signature));
+
+    drop(guard);
+
+    assert!(BlobCommitInFlightGuard::try_acquire(signature));
+    drop(BlobCommitInFlightGuard::new(signature));
+  }
+
+  #[tokio::test]
+  async fn blob_commit_semaphore_queues_until_worker_releases() {
+    let first = Arc::clone(blob_commit_semaphore()).acquire_owned().await.expect("blob commit semaphore must remain open");
+    let second = Arc::clone(blob_commit_semaphore()).acquire_owned();
+    tokio::pin!(second);
+
+    assert!(tokio::time::timeout(Duration::from_millis(25), second.as_mut()).await.is_err());
+
+    drop(first);
+
+    let second = tokio::time::timeout(Duration::from_secs(1), second.as_mut())
+      .await
+      .expect("queued blob commit did not wake after the worker permit was released")
+      .expect("blob commit semaphore closed unexpectedly");
+    drop(second);
+  }
+}

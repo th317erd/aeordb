@@ -1,0 +1,274 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "source_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+  "route_source": "aeordb-lib/src/server/mod.rs:522",
+  "route_registration_count": 93,
+  "route_groups": [
+    {
+      "name": "large_upload_routes",
+      "registration_count": 19,
+      "body_limit_bytes": 10737418240,
+      "authentication": "auth and permission middleware on this router and again after merge into protected_routes",
+      "paths": [
+        "/blobs/{hex_hash}",
+        "/files/search",
+        "/files/query",
+        "/files/fetch",
+        "/files/download",
+        "/files/mkdir",
+        "/files/copy",
+        "/files/share",
+        "/files/shares",
+        "/files/shared-with-me",
+        "/files/share-link",
+        "/files/share-links",
+        "/files/share-links/{key_id}",
+        "/files/deleted",
+        "/files/restore",
+        "/files",
+        "/files/",
+        "/files/{*path}",
+        "/blobs/chunks/{hash}"
+      ]
+    },
+    {
+      "name": "medium_upload_routes",
+      "registration_count": 1,
+      "body_limit_bytes": 10485760,
+      "authentication": "protected_routes middleware after merge",
+      "paths": [
+        "/versions/import"
+      ]
+    },
+    {
+      "name": "blob_manifest_routes",
+      "registration_count": 2,
+      "body_limit_constant": "BLOB_MANIFEST_BODY_LIMIT_BYTES",
+      "authentication": "protected_routes middleware after merge",
+      "paths": [
+        "/blobs/check",
+        "/blobs/commit"
+      ]
+    },
+    {
+      "name": "protected_routes_direct",
+      "registration_count": 50,
+      "body_limit_bytes": 1048576,
+      "authentication": "auth and permission middleware",
+      "paths": [
+        "/auth/keys",
+        "/auth/keys/{key_id}",
+        "/auth/keys/users",
+        "/auth/keys/admin",
+        "/auth/keys/admin/{key_id}",
+        "/system/metrics",
+        "/system/stats",
+        "/system/users",
+        "/system/users/{user_id}",
+        "/system/groups",
+        "/system/groups/{name}",
+        "/versions/export",
+        "/versions/diff",
+        "/versions/promote",
+        "/system/email-config",
+        "/system/email-test",
+        "/system/gc",
+        "/system/repair",
+        "/system/tasks",
+        "/system/tasks/reindex",
+        "/system/tasks/gc",
+        "/system/tasks/cleanup",
+        "/system/tasks/{id}",
+        "/system/cron",
+        "/system/cron/{id}",
+        "/system/lifecycle",
+        "/blobs/config",
+        "/system/events",
+        "/events/me",
+        "/versions/snapshots",
+        "/versions/restore",
+        "/versions/snapshots/{name}",
+        "/versions/forks",
+        "/versions/forks/{name}/promote",
+        "/versions/forks/{name}",
+        "/versions/history/{*path}",
+        "/versions/restore/{*path}",
+        "/sync/conflicts",
+        "/sync/conflicts/{*path}",
+        "/sync/resolve/{*path}",
+        "/sync/dismiss/{*path}",
+        "/sync/status",
+        "/sync/peers",
+        "/sync/peers/{node_id}",
+        "/sync/trigger",
+        "/sync/join",
+        "/links/{*path}",
+        "/plugins/{name}",
+        "/plugins/{name}/invoke",
+        "/plugins"
+      ]
+    },
+    {
+      "name": "public_routes",
+      "registration_count": 21,
+      "body_limit_bytes": 1048576,
+      "authentication": "none unless handler states otherwise",
+      "paths": [
+        "/system/health",
+        "/auth/token",
+        "/auth/magic-link",
+        "/auth/magic-link/verify",
+        "/auth/refresh",
+        "/",
+        "/app.mjs",
+        "/metrics.mjs",
+        "/dashboard.mjs",
+        "/users.mjs",
+        "/groups.mjs",
+        "/files.mjs",
+        "/snapshots.mjs",
+        "/settings.mjs",
+        "/shared/{*path}",
+        "/aeor/{*path}",
+        "/docs",
+        "/docs/",
+        "/docs/{*path}",
+        "/sync/diff",
+        "/sync/chunks"
+      ],
+      "handler_authenticated_paths": [
+        "/sync/diff",
+        "/sync/chunks"
+      ]
+    }
+  ],
+  "embedded_library_surfaces": {
+    "storage": [
+      "StorageEngine::create",
+      "StorageEngine::open",
+      "StorageEngine::get_entry",
+      "StorageEngine::store_entry",
+      "StorageEngine::flush_batch",
+      "StorageEngine::flush_batch_and_update_head",
+      "StorageEngine::update_head",
+      "StorageEngine::rebuild_kv",
+      "StorageEngine::shutdown"
+    ],
+    "directory": [
+      "DirectoryOps::store_file_buffered",
+      "DirectoryOps::store_files_buffered_batch",
+      "DirectoryOps::merge_json_file",
+      "DirectoryOps::merge_json_files_batch",
+      "DirectoryOps::store_file_from_reader",
+      "DirectoryOps::finalize_file",
+      "DirectoryOps::read_file_streaming",
+      "DirectoryOps::read_file_buffered",
+      "DirectoryOps::delete_file",
+      "DirectoryOps::delete_directory",
+      "DirectoryOps::list_directory",
+      "DirectoryOps::create_directory",
+      "DirectoryOps::restore_deleted_file",
+      "DirectoryOps::rebuild_directory_tree",
+      "DirectoryOps::repair_directory_index_from_path_records",
+      "DirectoryOps::store_symlink",
+      "DirectoryOps::delete_symlink",
+      "DirectoryOps::rename_file",
+      "DirectoryOps::copy_file",
+      "DirectoryOps::copy_path",
+      "DirectoryOps::rename_symlink"
+    ],
+    "query": [
+      "QueryEngine::execute",
+      "QueryBuilder",
+      "FieldQueryBuilder"
+    ]
+  },
+  "current_root_and_family_contract": {
+    "typed_system_family_registry_exists": false,
+    "system_path_authority": {
+      "source": "aeordb-lib/src/engine/directory_ops.rs:317",
+      "roots": [
+        "/.aeordb-system",
+        "/.aeordb-config"
+      ]
+    },
+    "index_suppression_authority": {
+      "source": "aeordb-lib/src/engine/directory_ops.rs:30",
+      "segment_names": [
+        ".aeordb-logs",
+        ".aeordb-indexes",
+        ".aeordb-config"
+      ]
+    },
+    "other_persisted_families": [
+      "/.aeordb-conflicts",
+      "<directory>/.aeordb-permissions",
+      "<directory>/.aeordb-indexes",
+      ".aeordb-functions"
+    ],
+    "system_store_subfamilies": [
+      "/.aeordb-system/config",
+      "/.aeordb-system/api-keys",
+      "/.aeordb-system/users",
+      "/.aeordb-system/groups",
+      "/.aeordb-system/permissions",
+      "/.aeordb-system/magic-links",
+      "/.aeordb-system/refresh-tokens",
+      "/.aeordb-system/cluster/node_id",
+      "/.aeordb-system/cluster/peers",
+      "/.aeordb-system/plugins",
+      "/.aeordb-system/sync-peers",
+      "/.aeordb-system/join-audit"
+    ],
+    "legacy_migration_aliases": [
+      {"from": "/.aeordb-system/apikeys", "to": "/.aeordb-system/api-keys"},
+      {"from": "/.aeordb-system/cluster/sync", "to": "/.aeordb-system/sync-peers"}
+    ]
+  },
+  "documentation_pages": [
+    "docs/src/SKILL.md",
+    "docs/src/SUMMARY.md",
+    "docs/src/introduction.md",
+    "docs/src/getting-started/installation.md",
+    "docs/src/getting-started/quick-start.md",
+    "docs/src/getting-started/configuration.md",
+    "docs/src/concepts/architecture.md",
+    "docs/src/concepts/storage-engine.md",
+    "docs/src/concepts/versioning.md",
+    "docs/src/concepts/indexing.md",
+    "docs/src/concepts/replication.md",
+    "docs/src/concepts/users-and-workspaces.md",
+    "docs/src/api/files.md",
+    "docs/src/api/merge-patch.md",
+    "docs/src/api/querying.md",
+    "docs/src/api/versioning.md",
+    "docs/src/api/upload-protocol.md",
+    "docs/src/api/admin.md",
+    "docs/src/api/plugins.md",
+    "docs/src/api/events.md",
+    "docs/src/api/authentication.md",
+    "docs/src/api/cors.md",
+    "docs/src/api/documentation.md",
+    "docs/src/api/library.md",
+    "docs/src/plugins/parsers.md",
+    "docs/src/plugins/query-plugins.md",
+    "docs/src/plugins/default-plugins.md",
+    "docs/src/plugins/sdk-reference.md",
+    "docs/src/operations/gc.md",
+    "docs/src/operations/reindex.md",
+    "docs/src/operations/tasks.md",
+    "docs/src/operations/backup.md",
+    "docs/src/operations/cluster.md",
+    "docs/src/operations/threat-model.md",
+    "docs/src/operations/api-versioning.md",
+    "docs/src/cli/commands.md"
+  ],
+  "baseline_debt": [
+    "Route classification is implicit in router construction rather than a checked registry.",
+    "System/protected/internal family membership is duplicated across source modules.",
+    "The large-upload router carries auth/permission layers before being merged into another auth/permission route layer.",
+    "Two routes in public_routes perform JWT validation inside handlers.",
+    "Raw hash and historical-root route classes are not represented by one shared read-view contract."
+  ]
+}

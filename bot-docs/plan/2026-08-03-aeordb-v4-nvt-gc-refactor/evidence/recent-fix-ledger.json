@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "source_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+  "selection": "Production hardening commits after the last June feature wave and before the ratified campaign plans.",
+  "fixes": [
+    {
+      "commit": "a5bdd3e72b1acce7847e54adf488226e6651d0cd",
+      "subject": "Fix live counter rebuild from HEAD",
+      "risk_preserved": "Startup counters must describe the selected live tree even when stable root path keys are stale.",
+      "guards": [
+        "engine_counters_spec::test_initialize_from_kv_counts_from_head_when_root_path_key_is_stale",
+        "engine_counters_spec::test_live_counters_initialized_on_reopen"
+      ],
+      "status": "guarded"
+    },
+    {
+      "commit": "01f0a6e41ff33b4cb9371614e0f612b3e1804fb1",
+      "subject": "Harden B-tree walks and repair reporting",
+      "risk_preserved": "A damaged child must be reported; best-effort listing may continue but must not become a complete authoritative traversal.",
+      "guards": [
+        "btree_spec::test_btree_list_best_effort_skips_missing_child_node",
+        "btree_spec::test_btree_list_rejects_child_hash_with_wrong_entry_type",
+        "corruption_hardening_spec::verify_reports_btree_directory_issue_and_repair_rebuilds_tree"
+      ],
+      "status": "guarded"
+    },
+    {
+      "commit": "4ecbd319ad886f34b1c0e0896ae8473f3ffa361d",
+      "subject": "Improve B-tree repair and GC mark safety",
+      "risk_preserved": "GC must fail closed on incomplete live-tree traversal and targeted repair must preserve non-file children.",
+      "guards": [
+        "gc_spec::test_gc_mark_fails_closed_when_live_btree_child_is_missing",
+        "corruption_hardening_spec::targeted_btree_repair_preserves_symlinks_and_implied_child_directories"
+      ],
+      "status": "guarded"
+    },
+    {
+      "commit": "cc2c4c6250c3f68e1070d0e4cb3f33716b0dac61",
+      "subject": "Harden GC and evict clean index cache",
+      "risk_preserved": "GC rechecks concurrent writes and index eviction only drops clean, reconstructible state.",
+      "guards": [
+        "gc_spec::test_gc_recheck_records_flush_batch_hashes",
+        "gc_spec::test_gc_recheck_records_flush_batch_and_head_hash",
+        "index_store_spec::test_clean_index_cache_eviction_keeps_dirty_indexes",
+        "index_store_spec::test_clean_index_cache_eviction_drops_flushed_indexes_only_from_memory"
+      ],
+      "status": "guarded"
+    },
+    {
+      "commit": "67cd185a3f934441fdd144bf95cddc852e8d7930",
+      "subject": "Reduce commit latency under large indexes",
+      "risk_preserved": "Metadata index mutation stays in the shared write buffer and does not synchronously flush during blob commit.",
+      "guards": [
+        "upload_commit_spec::test_commit_multichunk_file_records_whole_file_hash",
+        "index_store_spec::test_clean_index_cache_eviction_keeps_dirty_indexes",
+        "index_values_spec::test_field_index_value_overwritten_on_reinsert"
+      ],
+      "status": "guarded"
+    },
+    {
+      "commit": "779b91ce59f63c6982fe9c63765740782a07ab03",
+      "subject": "Queue blob commit backpressure",
+      "risk_preserved": "Distinct commits queue behind one worker instead of receiving a saturation 429, while a concurrently duplicated manifest is rejected as retryable.",
+      "guards": [
+        "server::upload_routes::tests::blob_commit_duplicate_guard_rejects_until_drop",
+        "server::upload_routes::tests::blob_commit_semaphore_queues_until_worker_releases"
+      ],
+      "status": "guarded"
+    }
+  ],
+  "open_gaps": []
+}

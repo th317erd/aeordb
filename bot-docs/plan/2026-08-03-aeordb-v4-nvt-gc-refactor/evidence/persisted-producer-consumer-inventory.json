@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "source_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
+  "persistent_formats": [
+    {
+      "id": "database_header",
+      "source": "aeordb-lib/src/engine/file_header.rs",
+      "current_version": 3,
+      "slot_bytes": 256,
+      "slot_count": 2,
+      "header_region_bytes": 512,
+      "integrity": "CRC32 over the first 252 bytes of each slot",
+      "selection": "highest valid u64 sequence",
+      "readers": ["FileHeader::read", "AppendWriter::open", "verify", "header_repair", "backup"],
+      "writers": ["FileHeader::write", "AppendWriter::update_header", "header_repair", "kv_expand"]
+    },
+    {
+      "id": "entry_header",
+      "source": "aeordb-lib/src/engine/entry_header.rs",
+      "current_version": 0,
+      "fixed_bytes": 31,
+      "variable_bytes": "hash length",
+      "magic_hex": "0AE012DB",
+      "max_key_bytes": 1073741824,
+      "max_value_bytes": 1073741824,
+      "readers": ["EntryHeader::deserialize", "entry_scanner", "verify", "StorageEngine::read_entry_header_at"],
+      "writers": ["AppendWriter", "StorageEngine::store_entry*", "StorageEngine::flush_batch"]
+    },
+    {
+      "id": "file_record",
+      "source": "aeordb-lib/src/engine/file_record.rs",
+      "read_versions": [0, 1],
+      "write_version": 1,
+      "v1_addition": "raw whole-file content_hash after timestamps",
+      "readers": ["DirectoryOps", "batch_commit", "query_engine", "indexing_pipeline", "tree_walker", "backup", "GC", "HTTP fetch/download"],
+      "writers": ["DirectoryOps::materialize_file_record_entries", "batch_commit", "backup/import", "sync"]
+    },
+    {
+      "id": "directory_index",
+      "source": "aeordb-lib/src/engine/directory_entry.rs and aeordb-lib/src/engine/btree.rs",
+      "entry_header_version": 0,
+      "representations": ["flat ChildEntry vector", "B-tree leaf", "B-tree internal"],
+      "btree_markers": {"leaf": 0, "internal": 1},
+      "btree_limits": {"max_leaf_entries": 40, "min_leaf_entries": 20, "max_internal_keys": 77, "min_internal_keys": 38, "conversion_threshold": 256},
+      "readers": ["DirectoryOps", "directory_listing", "tree_walker", "version_tree", "GC", "verify", "backup"],
+      "writers": ["DirectoryOps", "batch_commit", "btree", "backup", "repair"]
+    },
+    {
+      "id": "kv_block",
+      "source": "aeordb-lib/src/engine/disk_kv_store.rs and aeordb-lib/src/engine/kv_pages.rs",
+      "current_version": 1,
+      "page_magic_hex": "AE0DB905",
+      "page_header_bytes": 10,
+      "max_entries_per_page": 32,
+      "readers": ["DiskKVStore", "ReadSnapshot", "verify", "rebuild_kv"],
+      "writers": ["DiskKVStore::flush", "DiskKVStore::resize", "StorageEngine::rebuild_kv", "kv_expand"]
+    },
+    {
+      "id": "kv_nvt",
+      "source": "aeordb-lib/src/engine/nvt.rs",
+      "current_version": 1,
+      "role": "current KV bucket lookup hint",
+      "readers": ["DiskKVStore", "ReadSnapshot", "KVStore"],
+      "writers": ["DiskKVStore flush/resize", "KVStore"]
+    },
+    {
+      "id": "field_index",
+      "source": "aeordb-lib/src/engine/index_store.rs",
+      "current_version": 0,
+      "storage": "files under <directory>/.aeordb-indexes",
+      "payload": "converter, NVT, sorted scalar/hash entries, and raw values map",
+      "readers": ["IndexManager", "QueryEngine", "reindex", "verify through ordinary file reads"],
+      "writers": ["SharedIndexWriteBuffer through IndexManager", "reindex", "index cleanup"]
+    },
+    {
+      "id": "hot_tail",
+      "source": "aeordb-lib/src/engine/hot_tail.rs",
+      "format_version": 1,
+      "write_record_version": 1,
+      "void_record_version": 1,
+      "magic_hex": "AE017DB10D",
+      "readers": ["DiskKVStore::open", "StorageEngine dirty rebuild", "verify", "emergency spill replay"],
+      "writers": ["DiskKVStore::flush_hot_buffer", "StorageEngine transaction/timer/shutdown paths"]
+    },
+    {
+      "id": "json_system_documents",
+      "source": "aeordb-lib/src/engine/schema_version.rs and aeordb-lib/src/engine/system_store.rs",
+      "current_version": 0,
+      "version_field": "$v",
+      "typed_payloads": [
+        "ApiKeyRecord",
+        "MagicLinkRecord",
+        "RefreshTokenRecord",
+        "User",
+        "Group",
+        "PathPermissions",
+        "PathIndexConfig",
+        "PeerConfig",
+        "PeerConfigList",
+        "PeerSyncState"
+      ]
+    }
+  ],
+  "entry_type_to_kv_tag": [
+    {"entry_type": "Chunk", "entry_tag": 1, "kv_type": "KV_TYPE_CHUNK", "kv_tag": 0},
+    {"entry_type": "FileRecord", "entry_tag": 2, "kv_type": "KV_TYPE_FILE_RECORD", "kv_tag": 1},
+    {"entry_type": "DirectoryIndex", "entry_tag": 3, "kv_type": "KV_TYPE_DIRECTORY", "kv_tag": 2},
+    {"entry_type": "DeletionRecord", "entry_tag": 4, "kv_type": "KV_TYPE_DELETION", "kv_tag": 3},
+    {"entry_type": "Snapshot", "entry_tag": 5, "kv_type": "KV_TYPE_SNAPSHOT", "kv_tag": 4},
+    {"entry_type": "Void", "entry_tag": 6, "kv_type": "KV_TYPE_VOID", "kv_tag": 5},
+    {"entry_type": "Fork", "entry_tag": 7, "kv_type": "KV_TYPE_FORK", "kv_tag": 7},
+    {"entry_type": "Symlink", "entry_tag": 8, "kv_type": "KV_TYPE_SYMLINK", "kv_tag": 9}
+  ],
+  "kv_only_tags": [
+    {"name": "KV_TYPE_HEAD", "tag": 6},
+    {"name": "KV_TYPE_VERSION", "tag": 8}
+  ],
+  "kv_flags": [
+    {"name": "KV_FLAG_PENDING", "value": 16},
+    {"name": "KV_FLAG_DELETED", "value": 32}
+  ],
+  "stable_keys_and_root_mutation": {
+    "file_keys": [
+      {"domain": "file:", "role": "path key"},
+      {"domain": "filec:", "role": "serialized FileRecord content key"},
+      {"domain": "fileid:", "role": "path/content-type/chunk-list identity key"}
+    ],
+    "directory_keys": [
+      {"domain": "dir:", "role": "directory path key"},
+      {"domain": "dirc:", "role": "serialized directory content key"}
+    ],
+    "other_domains": ["chunk:", "system::", "sysfileid:", "symlinkid:", "del:"],
+    "head_update_callers": [
+      "aeordb-cli/src/commands/promote.rs",
+      "aeordb-lib/src/engine/backup.rs",
+      "aeordb-lib/src/engine/batch_commit.rs",
+      "aeordb-lib/src/engine/directory_ops.rs",
+      "aeordb-lib/src/engine/storage_engine.rs",
+      "aeordb-lib/src/engine/version_manager.rs",
+      "aeordb-lib/src/server/backup_routes.rs",
+      "aeordb-lib/src/server/version_routes.rs"
+    ],
+    "raw_entry_writer_files": [
+      "aeordb-lib/src/engine/auto_heal.rs",
+      "aeordb-lib/src/engine/backup.rs",
+      "aeordb-lib/src/engine/batch_commit.rs",
+      "aeordb-lib/src/engine/btree.rs",
+      "aeordb-lib/src/engine/directory_ops.rs",
+      "aeordb-lib/src/engine/storage_engine.rs",
+      "aeordb-lib/src/engine/sync_api.rs",
+      "aeordb-lib/src/engine/sync_engine.rs",
+      "aeordb-lib/src/engine/task_queue.rs",
+      "aeordb-lib/src/engine/version_manager.rs",
+      "aeordb-lib/src/server/upload_routes.rs"
+    ],
+    "directory_mutator_caller_files": [
+      "aeordb-cli/src/bin/crash-soak-worker.rs",
+      "aeordb-cli/src/bin/gc-bench.rs",
+      "aeordb-cli/src/bin/soak-worker.rs",
+      "aeordb-cli/src/commands/start.rs",
+      "aeordb-lib/src/engine/conflict_store.rs",
+      "aeordb-lib/src/engine/cron_scheduler.rs",
+      "aeordb-lib/src/engine/directory_ops.rs",
+      "aeordb-lib/src/engine/email_config.rs",
+      "aeordb-lib/src/engine/index_store.rs",
+      "aeordb-lib/src/engine/indexing_pipeline.rs",
+      "aeordb-lib/src/engine/integrity_scanner.rs",
+      "aeordb-lib/src/engine/json_store.rs",
+      "aeordb-lib/src/engine/lifecycle_config.rs",
+      "aeordb-lib/src/engine/lost_found.rs",
+      "aeordb-lib/src/engine/range_extract.rs",
+      "aeordb-lib/src/engine/sync_api.rs",
+      "aeordb-lib/src/engine/sync_apply.rs",
+      "aeordb-lib/src/engine/sync_engine.rs",
+      "aeordb-lib/src/engine/system_store.rs",
+      "aeordb-lib/src/lib.rs",
+      "aeordb-lib/src/plugins/wasm_runtime.rs",
+      "aeordb-lib/src/server/cluster_routes.rs",
+      "aeordb-lib/src/server/engine_routes.rs",
+      "aeordb-lib/src/server/share_routes.rs",
+      "aeordb-lib/src/server/symlink_routes.rs"
+    ]
+  },
+  "persistent_consumers": {
+    "namespace": ["DirectoryOps", "batch_commit", "sync_apply", "sync_engine", "version_manager", "backup/import", "server file/link/share routes"],
+    "traversal": ["directory_listing", "btree", "tree_walker", "version_tree", "GC", "verify", "repair", "backup", "download"],
+    "derived": ["IndexingPipeline", "IndexManager", "QueryEngine", "reindex task worker", "parser registry"],
+    "control": ["system_store", "task_queue", "cron_scheduler", "lifecycle_config", "permissions", "auth/provider", "cluster/sync"]
+  },
+  "memory_owners": [
+    {
+      "owner": "DiskKVStore",
+      "state": ["write_buffer HashMap", "hot_buffer Vec", "pending_voids Vec", "shared NVT", "ArcSwap ReadSnapshot"],
+      "bound": "512-entry write/hot flush thresholds; page snapshot size follows KV stage",
+      "risk": "all KV pages stay resident and old Arc snapshot generations survive active readers"
+    },
+    {
+      "owner": "ReadSnapshot",
+      "state": ["write buffer clone", "Arc<Vec<Arc<[u8]>>> pages", "NVT", "type counts"],
+      "bound": "KV stage",
+      "risk": "documented approximately 164 MiB at maximum stage per live page set"
+    },
+    {
+      "owner": "SharedIndexWriteBuffer",
+      "state": ["FieldIndex map", "last-access map", "dirty/deleted sets", "raw values maps"],
+      "bound": "default 2 GiB clean-cache budget; 5 minute clean TTL; dirty indexes are not evictable",
+      "flush": "262144 mutations or 30 seconds by default",
+      "risk": "each FieldIndex values map grows with indexed files; dirty state can exceed clean budget"
+    },
+    {
+      "owner": "directory content cache",
+      "state": "RwLock<HashMap<content_hash, serialized_directory>>",
+      "bound": "none; cleared on snapshot restore",
+      "risk": "unbounded immutable directory generations"
+    },
+    {
+      "owner": "generic caches",
+      "state": ["permissions_cache", "index_config_cache", "grants_index_cache"],
+      "bound": "no TTL or size; explicit invalidation only",
+      "risk": "entry counts are measured but byte ownership is not bounded"
+    },
+    {
+      "owner": "GC",
+      "state": ["monolithic live HashSet", "gc_recheck HashSet", "candidate vectors"],
+      "bound": "none in current implementation",
+      "risk": "live-set memory scales with database object count"
+    },
+    {
+      "owner": "QueryEngine",
+      "state": ["result vectors", "sort/aggregate maps", "loaded FieldIndex clones"],
+      "bound": "request limits cover output but not every intermediate",
+      "risk": "whole-index and whole-result materialization paths remain"
+    }
+  ],
+  "durability_surface": {
+    "coordinator": "partial: aeordb-lib/src/engine/durability.rs centralizes parent-directory sync and durable rename, while database writes remain distributed",
+    "raw_operation_occurrences_by_file": [
+      {"path": "aeordb-lib/src/engine/disk_kv_store.rs", "count": 28},
+      {"path": "aeordb-lib/src/engine/append_writer.rs", "count": 13},
+      {"path": "aeordb-lib/src/engine/storage_engine.rs", "count": 10},
+      {"path": "aeordb-lib/src/engine/file_header.rs", "count": 6},
+      {"path": "aeordb-lib/src/engine/kv_expand.rs", "count": 5},
+      {"path": "aeordb-lib/src/engine/emergency_spill.rs", "count": 4},
+      {"path": "aeordb-lib/src/engine/durability.rs", "count": 2},
+      {"path": "aeordb-lib/src/engine/header_repair.rs", "count": 2},
+      {"path": "aeordb-lib/src/engine/hot_tail.rs", "count": 1}
+    ],
+    "non_database_or_test_tool_occurrences": [
+      "aeordb-cli/src/bin/crash-soak-worker.rs",
+      "aeordb-cli/src/bin/soak-worker.rs",
+      "aeordb-cli/src/commands/emergency_reset.rs",
+      "aeordb-cli/src/commands/verify.rs",
+      "aeordb-lib/src/engine/integrity_scanner.rs",
+      "aeordb-lib/src/server/download_routes.rs",
+      "aeordb-lib/src/server/engine_routes.rs"
+    ],
+    "direct_temp_and_cleanup_paths": [
+      "aeordb-lib/src/engine/backup.rs",
+      "aeordb-lib/src/server/backup_routes.rs",
+      "aeordb-cli/src/commands/export.rs",
+      "aeordb-cli/src/commands/diff.rs",
+      "aeordb-lib/src/engine/task_worker.rs"
+    ],
+    "suppression_baseline": {
+      "let_ignored": 61,
+      "dot_ok": 118,
+      "broad_err_wildcard": 146,
+      "unwrap_in_production_roots": 199,
+      "expect_in_production_roots": 36,
+      "note": "Lexical counts include tests embedded in production modules and are inventory seeds, not P2f classifications."
+    }
+  },
+  "baseline_debt": [
+    "Persistent IDs, tags, versions, readers, and writers are not represented by one machine registry.",
+    "HEAD/root publication has callers outside one semantic-root coordinator.",
+    "Stable path-key replacement is distributed across DirectoryOps, batch, backup, sync, repair, and version paths.",
+    "SystemFamily membership is represented by repeated literals rather than typed policy.",
+    "Memory admission is per-owner or absent rather than coordinated under one process budget.",
+    "Raw durability operations and error handling remain distributed across storage modules."
+  ]
+}
