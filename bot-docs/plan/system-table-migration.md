@@ -1,5 +1,10 @@
 # System Table Migration to /.system/ — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Protected SystemFamily policy and
+> v4 ControlStore representation now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Do not infer
+> current v4 control paths from this historical design.
+
 **Date:** 2026-04-16
 **Depends on:** Replication v2 (all phases complete)
 

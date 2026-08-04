@@ -1,5 +1,9 @@
 # Query Engine — Function-Based Compute-at-Data
 
+> **Partially incorporated on 2026-08-03.** Root-aware planning, index selection,
+> authorization ordering, and bounded execution now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design
 

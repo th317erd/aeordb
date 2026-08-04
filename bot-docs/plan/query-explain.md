@@ -1,5 +1,9 @@
 # Query Engine: EXPLAIN — Spec
 
+> **Partially incorporated on 2026-08-03.** Root binding, coverage diagnostics,
+> and authorization-safe EXPLAIN now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** Medium — debugging and optimization

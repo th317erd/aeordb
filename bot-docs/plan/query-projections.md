@@ -1,5 +1,9 @@
 # Query Engine: Projections — Spec
 
+> **Partially incorporated on 2026-08-03.** Root binding, authorization,
+> historical semantics, and bounded projection execution now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** Low — cosmetic convenience, not a query engine change

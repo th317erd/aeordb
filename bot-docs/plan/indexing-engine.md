@@ -1,5 +1,10 @@
 # Indexing Engine — Scalar Ratio Indexing
 
+> **Partially incorporated on 2026-08-03.** Converter, page, cache, coverage,
+> and NVT contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Preserve this
+> document only for unaffected historical context.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design
 

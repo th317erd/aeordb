@@ -1,5 +1,10 @@
 # Garbage Collection: Mark-and-Sweep Implementation Plan
 
+> **Partially incorporated and replaced for GC execution on 2026-08-03.** Root
+> lifecycle, bounded marking, physical inventory, sweep, and Void authority now
+> belong to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> Do not execute this older implementation sequence independently.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement manual mark-and-sweep garbage collection that reclaims orphaned entries by walking all live version trees and in-place overwriting unreachable entries.

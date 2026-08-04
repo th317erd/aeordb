@@ -1,5 +1,11 @@
 # AeorDB Replication v2 — Content-Addressed Sync Design
 
+> **Partially incorporated on 2026-08-03.** V4 capability negotiation,
+> SystemFamily transfer, physical identity, root selection, and derived-index
+> omission/rebuild now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Other
+> replication-v2 behavior remains authoritative.
+
 **Date:** 2026-04-15
 **Status:** Design spec
 **Replaces:** replication-design.md (openraft approach — abandoned in favor of this simpler model)

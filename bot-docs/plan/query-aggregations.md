@@ -1,5 +1,9 @@
 # Query Engine: Aggregations — Spec
 
+> **Partially incorporated on 2026-08-03.** Root binding, authorization,
+> coverage, total order, and aggregate APOS now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** High — analytics use case

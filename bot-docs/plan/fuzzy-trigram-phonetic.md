@@ -1,5 +1,10 @@
 # Fuzzy Search, Trigram Indexing & Phonetic Matching — Implementation Spec
 
+> **Partially incorporated on 2026-08-03.** Converter, strategy, canonical-value,
+> and query semantics now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Preserve
+> unaffected product behavior and historical research.
+
 **Date:** 2026-04-03
 **Status:** Approved
 **Research:** `bot-docs/docs/fuzzy-search-research.md`, `trigram-indexing-research.md`, `phonetic-indexing-research.md`

@@ -1,5 +1,9 @@
 # Event System — Implementation Spec
 
+> **Partially incorporated on 2026-08-03.** Post-authority emission, operation
+> identity, root metadata, and authorized full-path SSE projection now belong to
+> the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-06
 **Status:** Approved
 

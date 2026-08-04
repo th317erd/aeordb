@@ -1,5 +1,9 @@
 # Task System, Cron Scheduler & Reindex — Spec
 
+> **Partially incorporated on 2026-08-03.** V4 task pins/checkpoints,
+> reconciliation, GC/index task execution, and format migration now belong to
+> the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-11
 **Status:** Approved
 **Priority:** High — no way to reindex existing files after config change

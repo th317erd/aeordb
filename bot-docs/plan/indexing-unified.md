@@ -1,5 +1,10 @@
 # Unified Indexing — ScalarConverter + NVT + Bitmap Compositing
 
+> **Partially incorporated on 2026-08-03.** Converter, page, cache, coverage,
+> and NVT contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Unaffected
+> historical direction remains reference material only where it does not conflict.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** Designed, test-planned, ready for implementation
 **Supersedes:** [indexing-engine.md](./indexing-engine.md) (Sprint 1 prototype)

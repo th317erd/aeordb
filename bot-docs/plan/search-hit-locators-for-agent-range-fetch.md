@@ -1,5 +1,10 @@
 # Search Hit Locators for Agent Range Fetch
 
+> **Partially incorporated on 2026-08-03.** Root-bound on-demand locators,
+> position limits, CRLF behavior, and exact range-fetch continuity now belong to
+> the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). The MVP
+> remains implementation history.
+
 Date: 2026-06-15
 Status: implemented MVP
 Priority: high for agent workflows

@@ -1,3 +1,6 @@
+# Partially incorporated on 2026-08-03. Historical-root authorization,
+# capability admission, protected-family transfer, and route concealment are
+# governed by bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md.
 title: Enhanced API Key System
 spec: bot-docs/plan/enhanced-api-keys.md
 date: 2026-04-14

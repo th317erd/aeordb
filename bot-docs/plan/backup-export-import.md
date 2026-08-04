@@ -1,5 +1,9 @@
 # Version Export, Patch & Import — Implementation Spec
 
+> **Partially incorporated on 2026-08-03.** V4 root/SystemFamily closure,
+> derived-artifact policy, migration identity, and cutover backup behavior now
+> belong to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-06
 **Status:** Approved
 

@@ -1,5 +1,10 @@
 # Task System, Cron & Reindex Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Do not independently execute task
+> persistence, GC/index checkpoint, reconciliation, or migration work from this
+> plan. Those contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a background task system with persistent queue, cron scheduler, and automatic reindexing — with progress visible in query responses.

@@ -1,5 +1,9 @@
 # NVT Field-Index Refactor and Production Migration Plan
 
+> **Superseded in full on 2026-08-03.** Use
+> [AeorDB V4, NVT, GC, and Migration Campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> This file remains historical design evidence and is not implementation authority.
+
 **Date:** 2026-07-16
 **Status:** Revised after engine-level critical review; explicit decisions remain before Phase 3
 **Scope:** User and virtual field indexes, field-index query execution, and migration from `FieldIndex` v0

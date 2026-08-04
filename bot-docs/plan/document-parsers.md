@@ -1,5 +1,9 @@
 # Configurable Document Parsers — Implementation Spec
 
+> **Partially incorporated on 2026-08-03.** Immutable parser/dependency identity,
+> semantic-root behavior, bounded failures, and async indexing now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-04
 **Status:** Approved
 

@@ -1,5 +1,11 @@
 # Users, Groups, and Permissions
 
+> **Partially incorporated on 2026-08-03.** Historical-root authorization,
+> descendant `.aeordb-permissions`, SystemFamily classification, and concealed
+> read behavior now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Other account
+> and permission product behavior remains authoritative.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** Designed, ready for implementation
 

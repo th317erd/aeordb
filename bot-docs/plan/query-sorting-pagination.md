@@ -1,5 +1,9 @@
 # Query Engine: Sorting + Pagination — Spec
 
+> **Partially incorporated on 2026-08-03.** Root selection, total ordering,
+> APOS, pagination validation, and directories-first behavior now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** High — foundational for all query use cases

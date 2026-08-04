@@ -1,5 +1,9 @@
 # Document Parsers Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Do not execute persistence,
+> dependency, or indexing tasks here independently; those contracts now belong
+> to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a configurable document parser pipeline so any file format can be parsed into JSON for indexing, with source path resolution, per-directory logging, and WASM plugin integration.

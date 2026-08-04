@@ -1,5 +1,10 @@
 # Enhanced API Key System — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Historical-root authorization,
+> capability admission, protected-family transfer, and route concealment now
+> belong to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> Other API-key behavior remains authoritative.
+
 **Date:** 2026-04-14
 
 ---

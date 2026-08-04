@@ -1,5 +1,9 @@
 # Garbage Collection: Mark-and-Sweep — Spec
 
+> **Partially incorporated and replaced for GC behavior on 2026-08-03.** The
+> current root lifecycle, bounded mark, physical reclaim, and Void contracts are
+> in the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-08
 **Status:** Approved
 **Priority:** Medium — databases grow forever without it

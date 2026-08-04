@@ -1,3 +1,6 @@
+# Partially incorporated on 2026-08-03. V4 capability negotiation,
+# SystemFamily transfer, physical identity, root selection, and derived-index
+# policy are governed by bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md.
 title: "AeorDB Replication v2: Content-Addressed Sync"
 spec: bot-docs/plan/replication-v2-design.md
 date: 2026-04-15

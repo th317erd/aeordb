@@ -1,5 +1,9 @@
 # Sorting + Pagination Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Do not execute this file's cursor or
+> pagination tasks independently. The current contract and execution sequence
+> are in the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add ORDER BY sorting (single/multi-field, virtual `@` fields), offset pagination, cursor-based pagination with version-locked stability, and a default limit of 20 to all queries.

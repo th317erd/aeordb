@@ -1,5 +1,10 @@
 # Durability and Error-Squelch Audit - 2026-06-15
 
+> **Partially incorporated on 2026-08-03.** Durability coordination,
+> latch/spill policy, and the repository-wide residual error-squelch audit now
+> belong to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> Completed historical fixes remain evidence and regression obligations.
+
 ## Fixed in first pass
 
 - Storage transaction completion now returns `EngineResult<()>` and records a latched durability failure when WAL sync, hot-tail flush, or header update fails.
