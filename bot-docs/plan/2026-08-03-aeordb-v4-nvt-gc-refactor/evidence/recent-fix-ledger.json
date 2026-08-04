@@ -67,6 +67,17 @@
         "server::upload_routes::tests::blob_commit_semaphore_queues_until_worker_releases"
       ],
       "status": "guarded"
+    },
+    {
+      "commit": "9b96586959bd4f3011e088f22bb5f1df01cfacae",
+      "subject": "Constrain GC hard-link dereferencing",
+      "risk_preserved": "GC must interpret hash-sized payloads as hard links only for DirectoryIndex entries; a valid typed record whose serialized length equals the hash length must remain a typed payload.",
+      "guards": [
+        "symlink_ecosystem_spec::test_gc_with_symlink_and_snapshot",
+        "gc_spec::test_gc_mark_collects_snapshot_entries"
+      ],
+      "status": "guarded",
+      "discovered_by": "P0a serial disk-backed workspace baseline"
     }
   ],
   "open_gaps": []
