@@ -10,7 +10,7 @@ fail() {
   exit 1
 }
 
-for tool in git jq rg python3; do
+for tool in cargo git jq rg python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool '$tool' is unavailable"
 done
 
@@ -123,6 +123,82 @@ fi
 if find "$evidence_dir" -type f \( -name '*.aeordb' -o -name '*.db' -o -name '*.sqlite' \) -print -quit | grep -q .; then
   fail "database artifact found in committed evidence"
 fi
+
+reference_root="$repo_root/tools/v4-reference"
+fixture_root="$repo_root/aeordb-lib/spec/fixtures/v4"
+[[ -f "$reference_root/Cargo.toml" ]] || fail "missing independent v4 reference Cargo manifest"
+[[ -f "$reference_root/src/main.rs" ]] || fail "missing independent v4 reference implementation"
+[[ -f "$fixture_root/format-contract-registry.json" ]] || fail "missing v4 format contract registry"
+[[ -f "$fixture_root/format-fixture-manifest.json" ]] || fail "missing v4 format fixture manifest"
+
+contract_registry="$fixture_root/format-contract-registry.json"
+fixture_manifest="$fixture_root/format-fixture-manifest.json"
+result_ledger="$fixture_root/reference-result-ledger.json"
+jq -e --arg campaign "$campaign_id" '
+  .schema_version == 1 and
+  .campaign_id == $campaign and
+  .coverage_stage == "p0b-1-seed" and
+  ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
+  ([.capability_bits[].bit] | length) == 24 and
+  ([.capability_bits[].bit] | unique | length) == 24 and
+  (.capability_bits[] | select(.bit == 17).name) == "RootLifecycleRetirementV1" and
+  (.formats | length) == 1 and
+  .formats[0].id == "database-header-v4" and
+  .formats[0].slot_length == 1024 and
+  .formats[0].slot_count == 2 and
+  .formats[0].data_offset == 2048 and
+  (.formats[0].layout | length) == 36 and
+  ([.formats[0].layout[] | .offset + .length] | max) == 1024 and
+  any(.formats[0].layout[]; .field == "physical_instance_id" and .offset == 464 and .length == 16) and
+  any(.formats[0].layout[]; .field == "slot_crc32" and .offset == 1020 and .length == 4) and
+  (.formats[0].fixture_ids_32 | length) > 0 and
+  (.formats[0].fixture_ids_64 | length) > 0
+' "$contract_registry" >/dev/null || fail "P0b-1 format contract registry is incomplete"
+
+jq -e --arg campaign "$campaign_id" '
+  .schema_version == 1 and
+  .campaign_id == $campaign and
+  .stage == "p0b-1-seed" and
+  .reference_tool.production_dependencies == [] and
+  .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
+  .fixture_count == 10 and
+  .fixture_count == (.fixtures | length) and
+  ([.fixtures[].id] | length) == ([.fixtures[].id] | unique | length) and
+  any(.fixtures[]; .hash_width == 32) and
+  any(.fixtures[]; .hash_width == 64) and
+  all(.fixtures[]; .byte_length == 2048) and
+  any(.fixtures[]; .expected == "error:ambiguous_equal_sequence") and
+  any(.fixtures[]; .expected == "error:unsupported_required_capability") and
+  any(.fixtures[]; .expected == "error:reserved_nonzero") and
+  any(.fixtures[]; .relation == "adopts:header-blake3-256-valid-ab")
+' "$fixture_manifest" >/dev/null || fail "P0b-1 fixture manifest is incomplete"
+
+diff -u \
+  <(jq -r '.formats[0].fixture_ids_32[], .formats[0].fixture_ids_64[]' "$contract_registry" | sort) \
+  <(jq -r '.fixtures[].id' "$fixture_manifest" | sort) >/dev/null \
+  || fail "contract-registry fixture IDs differ from the fixture manifest"
+
+while IFS=$'\t' read -r binary annotation; do
+  [[ -f "$fixture_root/$binary" ]] || fail "missing fixture binary: $binary"
+  [[ -f "$fixture_root/$annotation" ]] || fail "missing annotated fixture hex: $annotation"
+  [[ "$(stat -c %s "$fixture_root/$binary")" == "2048" ]] || fail "fixture binary is not 2048 bytes: $binary"
+done < <(jq -r '.fixtures[] | [.binary, .annotated_hex] | @tsv' "$fixture_manifest")
+
+jq -e --arg campaign "$campaign_id" '
+  .schema_version == 1 and
+  .campaign_id == $campaign and
+  (.results | length) == 10 and
+  all(.results[]; .result == "pass" and .expected == .observed)
+' "$result_ledger" >/dev/null || fail "P0b-1 reference result ledger is not green"
+
+reference_jobs=${CARGO_BUILD_JOBS:-4}
+if ((reference_jobs > 6)); then
+  reference_jobs=6
+fi
+reference_target=${AEORDB_V4_REFERENCE_TARGET_DIR:-/tmp/codex/aeordb-v4-reference-target}
+CARGO_TARGET_DIR="$reference_target" cargo run -j "$reference_jobs" --locked --quiet \
+  --manifest-path "$reference_root/Cargo.toml" -- verify "$fixture_root" \
+  || fail "independent v4 reference verification failed"
 
 printf 'v4 P0 contract evidence: PASS (%s routes, %s docs, entry %s)\n' \
   "$manifest_route_count" "$(wc -l <"$docs_manifest")" "$entry_commit"

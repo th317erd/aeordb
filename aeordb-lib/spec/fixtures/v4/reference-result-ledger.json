@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "tool_revision": "p0b1-v1",
+  "results": [
+    {
+      "fixture_id": "header-blake3-256-valid-ab",
+      "expected": "selected:42",
+      "observed": "selected:42",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-sha512-valid-ab",
+      "expected": "selected:42",
+      "observed": "selected:42",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-one-valid-slot",
+      "expected": "selected:42:redundancy-degraded",
+      "observed": "selected:42:redundancy-degraded",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-equal-identical",
+      "expected": "selected:42",
+      "observed": "selected:42",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-equal-ambiguous",
+      "expected": "error:ambiguous_equal_sequence",
+      "observed": "error:ambiguous_equal_sequence",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-no-valid-slot",
+      "expected": "error:no_valid_slot",
+      "observed": "error:no_valid_slot",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-unknown-capability",
+      "expected": "error:unsupported_required_capability",
+      "observed": "error:unsupported_required_capability",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-nonzero-reserved",
+      "expected": "error:reserved_nonzero",
+      "observed": "error:reserved_nonzero",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-nonzero-hash-padding",
+      "expected": "error:hash_padding_nonzero",
+      "observed": "error:hash_padding_nonzero",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "header-blake3-256-adopted-physical-id",
+      "expected": "selected:44",
+      "observed": "selected:44",
+      "result": "pass"
+    }
+  ]
+}
