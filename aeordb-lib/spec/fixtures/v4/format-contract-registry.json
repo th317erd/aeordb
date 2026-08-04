@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-core",
+  "coverage_stage": "p0b-2-index-pointer",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [10, 11, 12, 13, 14, 15],
@@ -287,13 +287,94 @@
         "asem-sha512-state-complete",
         "asem-sha512-state-content-only"
       ]
+    },
+    {
+      "id": "index-artifact-v1",
+      "family": "derived-index",
+      "magic_ascii": "AIDX",
+      "version": 1,
+      "entry_type": "0x09",
+      "kv_type": "0x0a",
+      "kind_registry": {
+        "0x0001": "FieldIndexActivePointer",
+        "0x0002": "FieldNvtActivePointer",
+        "0x0003": "ScopeCatalogActivePointer",
+        "0x0010": "FieldIndexManifest",
+        "0x0011": "FieldNvtManifest",
+        "0x0012": "ScopeCatalogManifest",
+        "0x0013": "ValueStoreManifest",
+        "0x0020": "ArtifactDirectoryNode",
+        "0x0030": "PostingPage",
+        "0x0031": "ValuePage",
+        "0x0032": "NvtTile",
+        "0x0033": "ScopeCatalogPage",
+        "0x0034": "DocumentStatePage",
+        "0x0040": "MutationJournalSegment",
+        "0x0041": "IndexTaskCheckpoint"
+      },
+      "frozen_body_kinds": ["0x0001", "0x0002", "0x0003"],
+      "pending_body_fixture_kinds": [
+        "0x0010", "0x0011", "0x0012", "0x0013", "0x0020", "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0040", "0x0041"
+      ],
+      "layout": [
+        { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AIDX" },
+        { "offset": 4, "length": 2, "field": "artifact_schema_version", "rule": "per-kind complete codec version; exactly 1 here" },
+        { "offset": 6, "length": 2, "field": "artifact_kind", "rule": "permanent kind ID" },
+        { "offset": 8, "length": 2, "field": "envelope_header_length", "rule": "exactly 32" },
+        { "offset": 10, "length": 2, "field": "artifact_flags", "rule": "zero in v1" },
+        { "offset": 12, "length": 4, "field": "artifact_value_length", "rule": "32 + identity + body + 4" },
+        { "offset": 16, "length": 2, "field": "identity_length", "rule": "kind-specific, 1..4096" },
+        { "offset": 18, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 20, "length": 4, "field": "body_length", "rule": "exact kind body" },
+        { "offset": 24, "length": 8, "field": "generation", "rule": "nonzero kind generation" },
+        { "offset": 32, "length_formula": "I", "field": "identity", "rule": "canonical kind identity" },
+        { "offset_formula": "32 + I", "length_formula": "B", "field": "body", "rule": "canonical kind body" },
+        { "offset_formula": "32 + I + B", "length": 4, "field": "artifact_crc32", "rule": "CRC-32/ISO-HDLC over prior value bytes" }
+      ],
+      "pointer_identity": "owner_id H || slot u8",
+      "pointer_body": "pointer_sequence u64 LE || target_manifest_hash H",
+      "pointer_body_formula": "complete pointer value = 45 + 2H",
+      "identity": ["artifact_kind", "canonical kind identity", "generation", "body"],
+      "key_domain": "pointers: H('aeordb.index-artifact.pointer.v1\\0' || kind u16 LE || identity); immutable kinds: H('aeordb.index-artifact.immutable.v1\\0' || kind u16 LE || complete value)",
+      "checksum": "crc32-iso-hdlc over the complete artifact value except its final 4 bytes",
+      "body_formula": "32 + I + B + 4; active pointers are 45 + 2H",
+      "hard_cap": 67108864,
+      "canonical_order": "32-byte AIDX envelope, canonical identity, exact kind body, trailing CRC; pointer pair selection uses greatest closure-valid pointer_sequence",
+      "reserve_zero_ranges": [{ "start": 18, "length": 2 }],
+      "malformed_behavior": "degrade only the affected index; reject unknown kind/version, flags/reserve, zero generation/sequence/IDs, noncanonical slot, formula/cap/trailing/CRC/key mismatch, and equal-sequence pointers with different targets",
+      "trailing_behavior": "artifact_value_length and kind body consume exact bytes",
+      "bounded_decode": "validate the 32-byte envelope, 1..4096 identity, 64 MiB family cap, and kind cap before allocation; page bodies remain lazy",
+      "producer_owner": "Child 05 index store through Child 01 codec",
+      "consumer_owners": ["Child 05 index runtime", "Child 06 query/coverage", "Child 04 GC", "Child 07 migration/compatible transfer"],
+      "capability": "IndexArtifactV1 bit 7; later body kinds also require their assigned index capability",
+      "typed_hash_roles": [
+        { "field": "entity/artifact key", "role": "identity" },
+        { "field": "owner_id", "role": "identity" },
+        { "field": "target_manifest_hash", "role": "graph-edge-authority" }
+      ],
+      "fixture_ids_32": [
+        "aidx-blake3-256-field-index-pointer-a",
+        "aidx-blake3-256-field-index-pointer-b-max-sequence",
+        "aidx-blake3-256-field-nvt-pointer-a",
+        "aidx-blake3-256-field-nvt-pointer-b-max-sequence",
+        "aidx-blake3-256-scope-catalog-pointer-a",
+        "aidx-blake3-256-scope-catalog-pointer-b-max-sequence"
+      ],
+      "fixture_ids_64": [
+        "aidx-sha512-field-index-pointer-a",
+        "aidx-sha512-field-index-pointer-b-max-sequence",
+        "aidx-sha512-field-nvt-pointer-a",
+        "aidx-sha512-field-nvt-pointer-b-max-sequence",
+        "aidx-sha512-scope-catalog-pointer-a",
+        "aidx-sha512-scope-catalog-pointer-b-max-sequence"
+      ]
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 4,
-    "fixture_count": 24,
+    "fixture_family_count": 5,
+    "fixture_count": 36,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4 plus P0b-2 core whole-entity, NamespaceRoot, and semantic object families",
-    "remaining_p0b_2_scope": "IndexArtifact, GcArtifact, controls, canonical values/config/path/glob/file-key/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, and all three A/B active pointer kinds",
+    "remaining_p0b_2_scope": "Index definitions/manifests/pages/directory/journals/checkpoints, GcArtifact, controls, canonical values/config/path/glob/file-key/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
   }
 }

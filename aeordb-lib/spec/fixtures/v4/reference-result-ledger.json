@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-core-v1",
+  "tool_revision": "p0b2-index-pointer-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -145,6 +145,78 @@
       "fixture_id": "asem-sha512-state-content-only",
       "expected": "semantic:state:content-only:reason=1",
       "observed": "semantic:state:content-only:reason=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-index-pointer-a",
+      "expected": "index:pointer:field-index:slot-a:sequence=1",
+      "observed": "index:pointer:field-index:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-index-pointer-b-max-sequence",
+      "expected": "index:pointer:field-index:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:field-index:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-nvt-pointer-a",
+      "expected": "index:pointer:field-nvt:slot-a:sequence=1",
+      "observed": "index:pointer:field-nvt:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-nvt-pointer-b-max-sequence",
+      "expected": "index:pointer:field-nvt:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:field-nvt:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-catalog-pointer-a",
+      "expected": "index:pointer:scope-catalog:slot-a:sequence=1",
+      "observed": "index:pointer:scope-catalog:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-catalog-pointer-b-max-sequence",
+      "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-index-pointer-a",
+      "expected": "index:pointer:field-index:slot-a:sequence=1",
+      "observed": "index:pointer:field-index:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-index-pointer-b-max-sequence",
+      "expected": "index:pointer:field-index:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:field-index:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-nvt-pointer-a",
+      "expected": "index:pointer:field-nvt:slot-a:sequence=1",
+      "observed": "index:pointer:field-nvt:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-nvt-pointer-b-max-sequence",
+      "expected": "index:pointer:field-nvt:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:field-nvt:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-catalog-pointer-a",
+      "expected": "index:pointer:scope-catalog:slot-a:sequence=1",
+      "observed": "index:pointer:scope-catalog:slot-a:sequence=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-catalog-pointer-b-max-sequence",
+      "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "observed": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
       "result": "pass"
     }
   ]

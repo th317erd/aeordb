@@ -134,15 +134,21 @@ fixture_root="$repo_root/aeordb-lib/spec/fixtures/v4"
 contract_registry="$fixture_root/format-contract-registry.json"
 fixture_manifest="$fixture_root/format-fixture-manifest.json"
 result_ledger="$fixture_root/reference-result-ledger.json"
-jq -e --arg campaign "$campaign_id" '
+expected_format_count=$(jq -er '.p0b_progress.fixture_family_count | numbers' "$contract_registry") \
+  || fail "P0b progress lacks a numeric fixture-family count"
+expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contract_registry") \
+  || fail "P0b progress lacks a numeric fixture count"
+jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-core" and
+  .coverage_stage == "p0b-2-index-pointer" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
   (.capability_bits[] | select(.bit == 17).name) == "RootLifecycleRetirementV1" and
-  (.formats | length) == 4 and
+  (.formats | length) == $format_count and
+  .p0b_progress.fixture_family_count == $format_count and
+  .p0b_progress.fixture_count == $fixture_count and
   ([.formats[].id] | length) == ([.formats[].id] | unique | length) and
   all(.formats[];
     (.identity | length) > 0 and
@@ -172,13 +178,13 @@ jq -e --arg campaign "$campaign_id" '
   (.formats[0].fixture_ids_64 | length) > 0
 ' "$contract_registry" >/dev/null || fail "P0b-2 core format contract registry is incomplete"
 
-jq -e --arg campaign "$campaign_id" '
+jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-core" and
+  .stage == "p0b-2-index-pointer" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
-  .fixture_count == 24 and
+  .fixture_count == $fixture_count and
   .fixture_count == (.fixtures | length) and
   ([.fixtures[].id] | length) == ([.fixtures[].id] | unique | length) and
   any(.fixtures[]; .hash_width == 32) and
@@ -202,10 +208,10 @@ while IFS=$'\t' read -r binary annotation byte_length; do
   [[ "$(stat -c %s "$fixture_root/$binary")" == "$byte_length" ]] || fail "fixture binary length differs from manifest: $binary"
 done < <(jq -r '.fixtures[] | [.binary, .annotated_hex, .byte_length] | @tsv' "$fixture_manifest")
 
-jq -e --arg campaign "$campaign_id" '
+jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  (.results | length) == 24 and
+  (.results | length) == $fixture_count and
   all(.results[]; .result == "pass" and .expected == .observed)
 ' "$result_ledger" >/dev/null || fail "P0b-2 core reference result ledger is not green"
 
@@ -224,6 +230,14 @@ for format_id in "${required_p0b2_core_formats[@]}"; do
     "$fixture_manifest" >/dev/null \
     || fail "P0b-2 core format lacks both hash-width fixtures: $format_id"
 done
+
+jq -e 'any(.formats[]; .id == "index-artifact-v1")' "$contract_registry" >/dev/null \
+  || fail "P0b-2 index format is absent from the contract registry: index-artifact-v1"
+jq -e '
+  any(.fixtures[]; .format_id == "index-artifact-v1" and .hash_width == 32) and
+  any(.fixtures[]; .format_id == "index-artifact-v1" and .hash_width == 64)
+' "$fixture_manifest" >/dev/null \
+  || fail "P0b-2 index format lacks both hash-width fixtures"
 
 reference_jobs=${CARGO_BUILD_JOBS:-4}
 if ((reference_jobs > 6)); then

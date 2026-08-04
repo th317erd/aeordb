@@ -1,4 +1,5 @@
 mod core;
+mod index;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -11,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use core::{CoreFormat, HashProfile};
+use index::IndexFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-core-v1";
+const TOOL_REVISION: &str = "p0b2-index-pointer-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -28,6 +30,7 @@ type DynResult<T> = Result<T, Box<dyn Error>>;
 enum FixtureFormat {
   DatabaseHeaderV4,
   Core(CoreFormat),
+  Index(IndexFormat),
 }
 
 impl FixtureFormat {
@@ -35,6 +38,7 @@ impl FixtureFormat {
     match self {
       Self::DatabaseHeaderV4 => "database-header-v4",
       Self::Core(format) => format.id(),
+      Self::Index(format) => format.id(),
     }
   }
 
@@ -42,6 +46,7 @@ impl FixtureFormat {
     match self {
       Self::DatabaseHeaderV4 => "DatabaseHeaderV4",
       Self::Core(format) => format.family(),
+      Self::Index(format) => format.family(),
     }
   }
 }
@@ -199,7 +204,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-core".to_string(),
+    stage: "p0b-2-index-pointer".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -221,7 +226,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-core" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-index-pointer" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -237,7 +242,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
 
   let expected_cases: BTreeMap<&str, FixtureCase> = fixture_cases().into_iter().map(|case| (case.id, case)).collect();
   if expected_cases.len() != manifest.fixtures.len() {
-    return Err("fixture manifest does not cover the complete P0b-2 core set".into());
+    return Err("fixture manifest does not cover the complete declared fixture set".into());
   }
 
   let mut ledger_results = Vec::with_capacity(manifest.fixtures.len());
@@ -378,6 +383,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
   cases.extend(core::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::Core(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
+  cases.extend(index::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Index(case.format),
     profile: case.profile,
     expected: case.expected,
     relation: case.relation,
@@ -539,6 +553,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
       (observed, None)
     }
     FixtureFormat::Core(format) => core::observe(format, case.profile, bytes),
+    FixtureFormat::Index(_) => index::observe(case.profile, bytes),
   }
 }
 
@@ -547,7 +562,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
   output.push_str(&format!("# fixture: {}\n", case.id));
   match case.format {
     FixtureFormat::DatabaseHeaderV4 => output.push_str("# contract: DatabaseHeaderV4, two 1024-byte slots, data offset 2048\n"),
-    FixtureFormat::Core(_) => output.push_str(&format!("# contract: {}\n", case.format.family())),
+    FixtureFormat::Core(_) | FixtureFormat::Index(_) => output.push_str(&format!("# contract: {}\n", case.format.family())),
   }
   output.push_str(&format!("# hash: {} ({} bytes)\n", case.profile.label(), case.profile.width()));
   output.push_str(&format!("# expected: {}\n", case.expected));
@@ -568,6 +583,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Core(format) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in core::annotation_lines(format, case.profile, &case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Index(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in index::annotation_lines(case.profile, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

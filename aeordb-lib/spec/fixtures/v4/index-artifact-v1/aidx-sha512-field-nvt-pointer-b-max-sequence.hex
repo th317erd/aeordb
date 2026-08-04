@@ -1,0 +1,25 @@
+# fixture: aidx-sha512-field-nvt-pointer-b-max-sequence
+# contract: IndexArtifactV1
+# hash: sha512 (64 bytes)
+# expected: index:pointer:field-nvt:slot-b:sequence=18446744073709551615
+# canonical key: 879c033023006ed64daf50208bfa35c9ca69a1053d63a01408cd8db6057e2df30a31743368dc5c9916398e8ff953b202429be1f5a498e92bcd4eeacaf52585b0
+# relation: targets:FieldNvtManifestV1
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AIDX common envelope
+# envelope artifact_kind: 0x0002
+# identity +0x000 len 64: owner_id
+# identity +0x040 len 1: slot
+# body +0x000 len 8: pointer_sequence
+# body +0x008 len 64: target_manifest_hash
+# value +0x0a9 len 4: artifact_crc32
+00000000: 414944580100020020000000ad000000
+00000010: 4100000048000000be02000000000000
+00000020: 404142434445464748494a4b4c4d4e4f
+00000030: 505152535455565758595a5b5c5d5e5f
+00000040: 606162636465666768696a6b6c6d6e6f
+00000050: 707172737475767778797a7b7c7d7e7f
+00000060: 01ffffffffffffffff82838485868788
+00000070: 898a8b8c8d8e8f909192939495969798
+00000080: 999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8
+00000090: a9aaabacadaeafb0b1b2b3b4b5b6b7b8
+000000a0: b9babbbcbdbebfc0c10346b99f
