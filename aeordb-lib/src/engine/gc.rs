@@ -35,6 +35,10 @@ pub struct GcResult {
   pub dry_run: bool,
 }
 
+fn is_directory_hard_link(entry_type: EntryType, value: &[u8], hash_length: usize) -> bool {
+  entry_type == EntryType::DirectoryIndex && value.len() == hash_length
+}
+
 /// Collect all reachable hashes from HEAD + all snapshots + all forks.
 pub fn gc_mark(engine: &StorageEngine) -> EngineResult<HashSet<Vec<u8>>> {
   let mut live: HashSet<Vec<u8>> = HashSet::new();
@@ -265,8 +269,9 @@ fn walk_versions_bfs(
       };
       let (header, _key, value) = entry;
 
-      // Follow hard-link: if value is exactly a content hash, dereference.
-      let value = if value.len() == hash_length {
+      // Only directory indexes use hash-sized payloads as hard links. Other
+      // typed records can legitimately serialize to exactly hash_length bytes.
+      let value = if is_directory_hard_link(header.entry_type, &value, hash_length) {
         live.insert(value.clone());
         match engine.get_entry_including_deleted(&value)? {
           Some((_h, _k, v)) => v,
@@ -474,9 +479,9 @@ fn mark_entry_recursive(
   let (header, _key, value) = entry;
   let algo = engine.hash_algo();
 
-  // Follow hard link: if value is exactly a content hash, dereference and
-  // mark the content entry too, then use its payload as the working value.
-  let value = if value.len() == hash_length {
+  // Only directory indexes use hash-sized payloads as hard links. Other
+  // typed records can legitimately serialize to exactly hash_length bytes.
+  let value = if is_directory_hard_link(header.entry_type, &value, hash_length) {
     live.insert(value.clone());
     match engine.get_entry_including_deleted(&value)? {
       Some((_h, _k, v)) => v,
