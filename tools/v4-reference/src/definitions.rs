@@ -229,11 +229,19 @@ fn decode_scope(value: &[u8]) -> Result<DecodedScope<'_>, &'static str> {
   Ok(DecodedScope { mode, owner_path, glob })
 }
 
-fn scope_id(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn scope_id(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
   let mut preimage = Vec::with_capacity(34 + bytes.len());
   preimage.extend_from_slice(b"aeordb.index.scope-definition.v1\0");
   preimage.extend_from_slice(bytes);
   profile.digest(&preimage)
+}
+
+pub(crate) fn validate_scope_definition(bytes: &[u8]) -> Result<(), &'static str> {
+  decode_scope(bytes).map(|_| ())
+}
+
+pub(crate) fn sample_scope_definition() -> Vec<u8> {
+  build_scope("/workspace/docs", Some("**/*.md")).expect("sample scope definition")
 }
 
 #[cfg(test)]

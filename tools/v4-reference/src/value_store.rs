@@ -719,9 +719,23 @@ fn metadata_field_name(metadata_id: u16) -> &'static str {
 }
 
 fn value_store_id(profile: HashProfile, bytes: &[u8]) -> String {
+  hex::encode(value_store_id_bytes(profile, bytes))
+}
+
+pub(crate) fn value_store_id_bytes(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
   let mut preimage = b"aeordb.index.value-store-definition.v1\0".to_vec();
   preimage.extend_from_slice(bytes);
-  hex::encode(profile.digest(&preimage))
+  profile.digest(&preimage)
+}
+
+pub(crate) fn validate_value_store_definition(profile: HashProfile, bytes: &[u8]) -> Result<(), &'static str> {
+  decode_definition(profile, bytes).map(|_| ())
+}
+
+pub(crate) fn sample_value_store_definition_for_scope(profile: HashProfile, scope_id: &[u8]) -> Vec<u8> {
+  let mut definition = metadata_definition(profile, 1);
+  definition.scope_id = scope_id.to_vec();
+  build_definition(profile, &definition).expect("sample ValueStore definition with exact ScopeId")
 }
 
 fn checked_end(start: usize, length: usize, available: usize) -> Result<usize, &'static str> {

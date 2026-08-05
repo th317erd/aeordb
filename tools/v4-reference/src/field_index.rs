@@ -477,11 +477,28 @@ fn converter_fingerprint(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
   profile.digest(&input)
 }
 
-fn index_id(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn index_id(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
   let mut input = Vec::with_capacity(40 + bytes.len());
   input.extend_from_slice(b"aeordb.index.field-definition.v1\0");
   input.extend_from_slice(bytes);
   profile.digest(&input)
+}
+
+pub(crate) fn validate_field_index_definition(profile: HashProfile, bytes: &[u8]) -> Result<(), &'static str> {
+  decode_field_index(profile, bytes).map(|_| ())
+}
+
+pub(crate) fn sample_field_index_definition(profile: HashProfile) -> Vec<u8> {
+  let converter = build_converter(converter_row(1).expect("typed exact converter")).expect("sample converter definition");
+  build_field_index(profile, strategy_for_converter(converter_row(1).expect("typed exact converter")), &converter)
+    .expect("sample FieldIndex definition")
+}
+
+pub(crate) fn sample_field_index_definition_for_value_store(profile: HashProfile, value_store_id: &[u8]) -> Vec<u8> {
+  let mut definition = sample_field_index_definition(profile);
+  definition[32..32 + profile.width()].copy_from_slice(value_store_id);
+  validate_field_index_definition(profile, &definition).expect("sample FieldIndex definition with exact ValueStoreId");
+  definition
 }
 
 fn fixture_id(prefix: &str, profile: HashProfile, name: &str) -> &'static str {

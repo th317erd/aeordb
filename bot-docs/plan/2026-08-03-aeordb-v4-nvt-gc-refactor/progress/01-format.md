@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2b-4 ConverterDefinitionV1 and FieldIndexDefinitionV1
+- **Current landing unit:** P0b-2b-5 immutable index manifests
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-3f ValueStoreDefinitionV1 `1fd3a47f846e493e366a7cdd008b1a13a4934061`
+- **Last green commit:** P0b-2b-4 IndexId domain correction `88a4572aade5e6c4727b6550f6d8b46c0ebcef51`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze built-in semantic bundles, ConverterDefinitionV1, and FieldIndexDefinitionV1, then their immutable manifest families in dependency order
+- **Next action:** freeze all four immutable index manifest bodies, keys, coverage fields, references, presence/count implications, and both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -107,3 +107,12 @@
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 61 tests; strict standalone Clippy passed; fresh generation and verification passed all 196 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
 - **Boundary:** this freezes identities and semantic closure only. No production converter, query compiler, index builder, persistent reader/writer, migration path, route, or database changed. Immutable index manifests remain the next dependency.
 - **Post-gate correction:** the cross-round ID review caught an initial helper spelling of `aeordb.index.field-index-definition.v1\0`; the approved Round 5 domain is `aeordb.index.field-definition.v1\0`. A dedicated red/green domain test now pins that exact literal, and every AFIX fixture key was regenerated before any manifest or production reader consumed it.
+
+## P0b-2b-5 Immutable Index Manifests
+
+- **Red proof:** after the 196-fixture definition gate passed, the campaign gate failed with `P0b-2 immutable manifest lacks both hash-width fixtures: index:manifest:scope-catalog:` before any manifest body fixture existed.
+- **Frozen contracts:** exact `ScopeCatalogManifestV1`, `ValueStoreManifestV1`, `FieldIndexManifestV1`, and non-authoritative `FieldNvtManifestV1` identities/bodies; immutable artifact keys; generation equality; codec/capability fields; Round 15 portable coverage names at the approved offsets; explicit root presence; count/high-water implications; and bounded embedded definitions from Round 6.
+- **Independent corpus:** empty and populated variants of all four manifests under both 32- and 64-byte hash profiles add 16 fixtures, bringing the complete corpus to 212. The graph fixtures bind ValueStore to its exact ScopeCatalog artifact and ScopeId, FieldIndex to its exact ValueStore artifact and ValueStoreId, byte-identical correctness coverage across the chain, and NVT basis metadata as a non-GC hint.
+- **Failure proof:** full-byte CRC mutation, envelope/identity generation disagreement, unknown capabilities, root/presence/count mismatch, owner/definition disagreement, codec/reserve/definition length failures, high-water/first/last rules, NVT power-of-two/divisibility/count bounds, and exact prior-closure references are covered.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 65 tests; strict standalone Clippy passed; fresh generation and verification passed all 212 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** manifests remain independent reference bytes only. No production artifact reader/writer, pointer selector, index cache, GC traversal, query path, migration, route, or database changed. Directory/page/journal/checkpoint bodies remain writer-disabled and are next.

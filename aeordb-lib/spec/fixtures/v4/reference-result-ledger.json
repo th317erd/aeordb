@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-field-index-definition-v1",
+  "tool_revision": "p0b2-index-manifests-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -292,6 +292,54 @@
       "result": "pass"
     },
     {
+      "fixture_id": "aidx-blake3-256-scope-catalog-manifest-empty",
+      "expected": "index:manifest:scope-catalog:generation=4609:roots=empty",
+      "observed": "index:manifest:scope-catalog:generation=4609:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-catalog-manifest-populated",
+      "expected": "index:manifest:scope-catalog:generation=4610:roots=populated",
+      "observed": "index:manifest:scope-catalog:generation=4610:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-store-manifest-empty",
+      "expected": "index:manifest:value-store:generation=4865:roots=empty",
+      "observed": "index:manifest:value-store:generation=4865:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-store-manifest-populated",
+      "expected": "index:manifest:value-store:generation=4866:roots=populated",
+      "observed": "index:manifest:value-store:generation=4866:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-index-manifest-empty",
+      "expected": "index:manifest:field-index:generation=4097:roots=empty",
+      "observed": "index:manifest:field-index:generation=4097:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-index-manifest-populated",
+      "expected": "index:manifest:field-index:generation=4098:roots=populated",
+      "observed": "index:manifest:field-index:generation=4098:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-nvt-manifest-empty",
+      "expected": "index:manifest:field-nvt:generation=4353:roots=empty",
+      "observed": "index:manifest:field-nvt:generation=4353:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-nvt-manifest-populated",
+      "expected": "index:manifest:field-nvt:generation=4354:roots=populated",
+      "observed": "index:manifest:field-nvt:generation=4354:roots=populated",
+      "result": "pass"
+    },
+    {
       "fixture_id": "aidx-sha512-field-index-pointer-a",
       "expected": "index:pointer:field-index:slot-a:sequence=1",
       "observed": "index:pointer:field-index:slot-a:sequence=1",
@@ -325,6 +373,54 @@
       "fixture_id": "aidx-sha512-scope-catalog-pointer-b-max-sequence",
       "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
       "observed": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-catalog-manifest-empty",
+      "expected": "index:manifest:scope-catalog:generation=4609:roots=empty",
+      "observed": "index:manifest:scope-catalog:generation=4609:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-catalog-manifest-populated",
+      "expected": "index:manifest:scope-catalog:generation=4610:roots=populated",
+      "observed": "index:manifest:scope-catalog:generation=4610:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-store-manifest-empty",
+      "expected": "index:manifest:value-store:generation=4865:roots=empty",
+      "observed": "index:manifest:value-store:generation=4865:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-store-manifest-populated",
+      "expected": "index:manifest:value-store:generation=4866:roots=populated",
+      "observed": "index:manifest:value-store:generation=4866:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-index-manifest-empty",
+      "expected": "index:manifest:field-index:generation=4097:roots=empty",
+      "observed": "index:manifest:field-index:generation=4097:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-index-manifest-populated",
+      "expected": "index:manifest:field-index:generation=4098:roots=populated",
+      "observed": "index:manifest:field-index:generation=4098:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-nvt-manifest-empty",
+      "expected": "index:manifest:field-nvt:generation=4353:roots=empty",
+      "observed": "index:manifest:field-nvt:generation=4353:roots=empty",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-nvt-manifest-populated",
+      "expected": "index:manifest:field-nvt:generation=4354:roots=populated",
+      "observed": "index:manifest:field-nvt:generation=4354:roots=populated",
       "result": "pass"
     },
     {

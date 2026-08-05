@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-field-index-definition" and
+  .coverage_stage == "p0b-2-index-manifests" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-field-index-definition" and
+  .stage == "p0b-2-index-manifests" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -238,6 +238,19 @@ jq -e '
   any(.fixtures[]; .format_id == "index-artifact-v1" and .hash_width == 64)
 ' "$fixture_manifest" >/dev/null \
   || fail "P0b-2 index format lacks both hash-width fixtures"
+required_p0b2_manifest_results=(
+  'index:manifest:scope-catalog:'
+  'index:manifest:value-store:'
+  'index:manifest:field-index:'
+  'index:manifest:field-nvt:'
+)
+for result_prefix in "${required_p0b2_manifest_results[@]}"; do
+  jq -e --arg result_prefix "$result_prefix" '
+    any(.fixtures[]; .format_id == "index-artifact-v1" and .hash_width == 32 and (.expected | startswith($result_prefix))) and
+    any(.fixtures[]; .format_id == "index-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 immutable manifest lacks both hash-width fixtures: $result_prefix"
+done
 
 required_p0b2_definition_formats=(
   canonical-config-value-v1

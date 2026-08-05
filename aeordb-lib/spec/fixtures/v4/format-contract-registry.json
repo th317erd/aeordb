@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-field-index-definition",
+  "coverage_stage": "p0b-2-index-manifests",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2125,7 +2125,15 @@
         "aidx-blake3-256-field-nvt-pointer-a",
         "aidx-blake3-256-field-nvt-pointer-b-max-sequence",
         "aidx-blake3-256-scope-catalog-pointer-a",
-        "aidx-blake3-256-scope-catalog-pointer-b-max-sequence"
+        "aidx-blake3-256-scope-catalog-pointer-b-max-sequence",
+        "aidx-blake3-256-scope-catalog-manifest-empty",
+        "aidx-blake3-256-scope-catalog-manifest-populated",
+        "aidx-blake3-256-value-store-manifest-empty",
+        "aidx-blake3-256-value-store-manifest-populated",
+        "aidx-blake3-256-field-index-manifest-empty",
+        "aidx-blake3-256-field-index-manifest-populated",
+        "aidx-blake3-256-field-nvt-manifest-empty",
+        "aidx-blake3-256-field-nvt-manifest-populated"
       ],
       "fixture_ids_64": [
         "aidx-sha512-field-index-pointer-a",
@@ -2133,8 +2141,46 @@
         "aidx-sha512-field-nvt-pointer-a",
         "aidx-sha512-field-nvt-pointer-b-max-sequence",
         "aidx-sha512-scope-catalog-pointer-a",
-        "aidx-sha512-scope-catalog-pointer-b-max-sequence"
-      ]
+        "aidx-sha512-scope-catalog-pointer-b-max-sequence",
+        "aidx-sha512-scope-catalog-manifest-empty",
+        "aidx-sha512-scope-catalog-manifest-populated",
+        "aidx-sha512-value-store-manifest-empty",
+        "aidx-sha512-value-store-manifest-populated",
+        "aidx-sha512-field-index-manifest-empty",
+        "aidx-sha512-field-index-manifest-populated",
+        "aidx-sha512-field-nvt-manifest-empty",
+        "aidx-sha512-field-nvt-manifest-populated"
+      ],
+      "immutable_manifest_kinds": {
+        "0x0010": {
+          "name": "FieldIndexManifestV1",
+          "identity": "IndexId H || generation u64 LE",
+          "body_formula": "160 + 4H + D",
+          "complete_formula": "204 + 5H + D",
+          "definition_cap": 262144
+        },
+        "0x0011": {
+          "name": "FieldNvtManifestV1",
+          "identity": "IndexId H || generation u64 LE",
+          "body_formula": "88 + 2H",
+          "complete_formula": "132 + 3H",
+          "definition_cap": 0
+        },
+        "0x0012": {
+          "name": "ScopeCatalogManifestV1",
+          "identity": "ScopeId H || generation u64 LE",
+          "body_formula": "112 + 3H + D",
+          "complete_formula": "156 + 4H + D",
+          "definition_cap": 65536
+        },
+        "0x0013": {
+          "name": "ValueStoreManifestV1",
+          "identity": "ValueStoreId H || generation u64 LE",
+          "body_formula": "144 + 4H + D",
+          "complete_formula": "188 + 5H + D",
+          "definition_cap": 524288
+        }
+      }
     },
     {
       "id": "converter-definition-v1",
@@ -2347,9 +2393,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 14,
-    "fixture_count": 196,
+    "fixture_count": 212,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, canonical config/scope/invocation/dependency/parser/selector definitions, ValueStoreDefinitionV1, all converter semantics bundles/adapters, ConverterDefinitionV1, and FieldIndexDefinitionV1",
-    "remaining_p0b_2_scope": "Index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, canonical semantic definitions through FieldIndexDefinitionV1, and all converter/strategy bundles",
+    "remaining_p0b_2_scope": "Index pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }
