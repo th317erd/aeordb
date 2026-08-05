@@ -101,7 +101,9 @@
       - [x] Remove the competing database-header publication from DiskKVStore expansion finalization.
       - [x] Converge transaction, timer, KV flush/resize, direct in-place writes, and shutdown barriers without changing v3 bytes.
       - [x] Add architecture gates that prohibit raw durability operations outside the coordinator/platform adapter allowlist.
-      - [ ] Activate bounded multi-waiter grouping in the live authority owner; facade-level grouping alone is not production group commit.
+      - [x] Activate bounded multi-waiter grouping in the live authority owner; facade-level grouping alone is not production group commit.
+      - [x] Halt the in-process hard frontier on grouped/setup/unwind failures, wake every pending waiter, reject later hard tickets, and retire terminal waiter records.
+      - [x] Publish batch SSE events and acknowledged-write counters only after hard-authority completion.
     - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.

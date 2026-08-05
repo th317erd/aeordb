@@ -4,8 +4,8 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::durability_coordinator::{
-  CommitClass, DurabilityCommitPlan, DurabilityCoordinator, DurabilityFailureDisposition, DurabilityGroupExecutor, DurabilityOperation,
-  DurabilityWaiterState, classify_native_durability_error,
+  CommitClass, DurabilityCommitPlan, DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition,
+  DurabilityGroupExecutor, DurabilityOperation, DurabilityTicket, DurabilityWaiterState, classify_native_durability_error,
 };
 use crate::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityOperation, sync_file_data_native, verify_file_bytes_native, write_file_at_native,
@@ -468,14 +468,36 @@ where
   )
 }
 
-fn publish_v3_header_slot<'a>(
-  file: &'a File,
-  slot_offset: u64,
-  bytes: &'a [u8; FILE_HEADER_SIZE],
-  dependency: V3HeaderDependency<'a>,
+pub(crate) fn write_header_group_to_inactive_slot_with_dependency<F>(
+  file: &mut File,
+  header: &mut FileHeader,
+  active_slot: usize,
   coordinator: &DurabilityCoordinator,
-) -> EngineResult<()> {
-  let plan = DurabilityCommitPlan::new(
+  tickets: &[DurabilityTicket],
+  mut dependency: F,
+) -> EngineResult<()>
+where
+  F: FnMut() -> std::io::Result<()>,
+{
+  if active_slot > 1 {
+    return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
+  }
+  header.sequence = header.sequence.wrapping_add(1);
+
+  let bytes = header.serialize();
+  let target_slot = 1 - active_slot;
+  let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
+  let mut executor = V3HeaderPublicationExecutor {
+    file,
+    slot_offset,
+    bytes: &bytes,
+    dependency: V3HeaderDependency::Callback { estimated_bytes: 0, action: &mut dependency },
+  };
+  coordinator.execute_group(tickets, &mut executor).map_err(coordinator_error)
+}
+
+pub(crate) fn v3_header_commit_plan() -> Result<DurabilityCommitPlan, DurabilityCoordinatorError> {
+  DurabilityCommitPlan::new(
     CommitClass::HardAuthority,
     vec![
       DurabilityOperation::DependencyAppend,
@@ -486,7 +508,16 @@ fn publish_v3_header_slot<'a>(
       DurabilityOperation::AuthorityReadback,
     ],
   )
-  .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+}
+
+fn publish_v3_header_slot<'a>(
+  file: &'a File,
+  slot_offset: u64,
+  bytes: &'a [u8; FILE_HEADER_SIZE],
+  dependency: V3HeaderDependency<'a>,
+  coordinator: &DurabilityCoordinator,
+) -> EngineResult<()> {
+  let plan = v3_header_commit_plan().map_err(|error| EngineError::InvalidInput(error.to_string()))?;
   let estimated_bytes = FILE_HEADER_SIZE as u64 + dependency.estimated_bytes();
   let ticket = coordinator.admit_sized(plan, estimated_bytes).map_err(coordinator_error)?;
   let mut executor = V3HeaderPublicationExecutor { file, slot_offset, bytes, dependency };

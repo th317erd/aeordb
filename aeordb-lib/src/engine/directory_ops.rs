@@ -716,7 +716,7 @@ impl<'a> DirectoryOps<'a> {
       return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
     }
 
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -737,7 +737,7 @@ impl<'a> DirectoryOps<'a> {
     )?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -852,7 +852,7 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let total_size = data.len() as u64;
@@ -871,7 +871,7 @@ impl<'a> DirectoryOps<'a> {
     )?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -883,7 +883,7 @@ impl<'a> DirectoryOps<'a> {
   /// This avoids loading the entire file into memory for large file restores.
   pub fn restore_file_from_record(&self, ctx: &RequestContext, path: &str, source_record: &FileRecord) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let content_type = source_record.content_type.as_deref().unwrap_or("application/octet-stream");
@@ -903,7 +903,7 @@ impl<'a> DirectoryOps<'a> {
     let published = published?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_file_write(published.existing_total_size, source_record.total_size, 0);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -949,7 +949,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
 
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -999,7 +999,7 @@ impl<'a> DirectoryOps<'a> {
       previous_hash: None,
     });
 
-    txn.commit()?;
+    txn.commit_after(namespace)?;
 
     // Publish process-local side effects only after the hard commit succeeds.
     if let Some(entry_data) = deleted_entry {
@@ -1020,7 +1020,7 @@ impl<'a> DirectoryOps<'a> {
   /// the condition is observable (and GC will eventually reclaim them).
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -1078,7 +1078,7 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    txn.commit()?;
+    txn.commit_after(namespace)?;
 
     // Update process-local state only after the hard commit succeeds.
     self.engine.counters().record_directory_delete();
@@ -1245,7 +1245,7 @@ impl<'a> DirectoryOps<'a> {
   /// Create an empty directory at the given path.
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
 
@@ -1285,7 +1285,7 @@ impl<'a> DirectoryOps<'a> {
       updated_at: now,
       previous_hash: None,
     };
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_directory_create();
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
@@ -1481,7 +1481,7 @@ impl<'a> DirectoryOps<'a> {
   /// it to its parent directory.
   pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -1523,7 +1523,7 @@ impl<'a> DirectoryOps<'a> {
       "size": file_record.total_size,
     }]});
 
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_file_restore(file_record.total_size);
     ctx.emit(crate::engine::engine_event::EVENT_ENTRIES_CREATED, event);
 
@@ -2263,13 +2263,13 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
 
     // Now delete the file itself
     let result = self.delete_file(ctx, path);
-    txn.finish(result)
+    txn.finish_after(result, namespace)
   }
 
   /// Read directory data by path key, following hard links and checking the
@@ -2811,7 +2811,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let normalized_target = normalize_path(target);
 
@@ -2895,7 +2895,7 @@ impl<'a> DirectoryOps<'a> {
       updated_at: record.updated_at,
       previous_hash: None,
     };
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_symlink_write(existing_created_at.is_some());
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
@@ -2919,7 +2919,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let normalized = normalize_path(path);
@@ -2959,7 +2959,7 @@ impl<'a> DirectoryOps<'a> {
       updated_at: record.updated_at,
       previous_hash: None,
     };
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_symlink_delete();
     ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
 
@@ -2972,7 +2972,7 @@ impl<'a> DirectoryOps<'a> {
   /// The file's content (chunk_hashes), content_type, total_size, and
   /// created_at are preserved. Only the path and updated_at change.
   pub fn rename_file(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<FileRecord> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let old_normalized = normalize_path(old_path);
@@ -3070,7 +3070,7 @@ impl<'a> DirectoryOps<'a> {
       updated_at: new_record.updated_at,
       previous_hash: None,
     };
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_write(0);
     ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
@@ -3080,7 +3080,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
   pub fn copy_file(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<FileRecord> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
@@ -3115,12 +3115,12 @@ impl<'a> DirectoryOps<'a> {
       Some((header, _key, value)) => Ok(FileRecord::deserialize(&value, hash_length, header.entry_version)?),
       None => Err(EngineError::NotFound(to_normalized)),
     };
-    txn.finish(result)
+    txn.finish_after(result, namespace)
   }
 
   /// Recursively copy a path (file or directory) to a new location.
   pub fn copy_path(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<Vec<String>> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
@@ -3140,14 +3140,14 @@ impl<'a> DirectoryOps<'a> {
         let sub_copied = self.copy_path(ctx, &child_from, &child_to)?;
         copied.extend(sub_copied);
       }
-      txn.commit()?;
+      txn.commit_after(namespace)?;
       return Ok(copied);
     }
 
     // File
     self.copy_file(ctx, &from_normalized, &to_normalized)?;
     copied.push(to_normalized);
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     Ok(copied)
   }
 
@@ -3157,7 +3157,7 @@ impl<'a> DirectoryOps<'a> {
   /// only its path. created_at is preserved.
   pub fn rename_symlink(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
-    let _namespace = self.engine.namespace_write_guard()?;
+    let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let new_normalized = normalize_path(new_path);
 
@@ -3274,7 +3274,7 @@ impl<'a> DirectoryOps<'a> {
       updated_at: new_record.updated_at,
       previous_hash: None,
     };
-    txn.commit()?;
+    txn.commit_after(namespace)?;
     self.engine.counters().record_write(0);
     ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));

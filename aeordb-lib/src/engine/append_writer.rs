@@ -37,10 +37,11 @@ use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::durability_coordinator::{
-  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot, NativeFileBarrierKind,
+  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot, DurabilityTicket, NativeFileBarrierKind,
 };
 use crate::engine::file_header::{
-  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_with_dependency, write_initial_header_coordinated,
+  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_group_to_inactive_slot_with_dependency,
+  write_header_to_inactive_slot_with_dependency, write_initial_header_coordinated,
 };
 use crate::engine::hash_algorithm::HashAlgorithm;
 
@@ -151,6 +152,33 @@ impl AppendWriter {
       self.active_slot,
       &self.durability_coordinator,
       estimated_dependency_bytes,
+      dependency,
+    )?;
+
+    self.file_header = new_header;
+    self.active_slot = 1 - self.active_slot;
+    Ok(())
+  }
+
+  pub(crate) fn update_header_group_with_dependency<F>(
+    &mut self,
+    header: &FileHeader,
+    tickets: &[DurabilityTicket],
+    dependency: F,
+  ) -> EngineResult<()>
+  where
+    F: FnMut() -> std::io::Result<()>,
+  {
+    let mut new_header = header.clone();
+    new_header.sequence = self.file_header.sequence;
+    new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
+
+    write_header_group_to_inactive_slot_with_dependency(
+      &mut self.file,
+      &mut new_header,
+      self.active_slot,
+      &self.durability_coordinator,
+      tickets,
       dependency,
     )?;
 

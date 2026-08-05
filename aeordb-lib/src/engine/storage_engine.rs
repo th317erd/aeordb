@@ -15,11 +15,16 @@ use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
+use crate::engine::durability_coordinator::{
+  DurabilityCoordinator, DurabilityFailureDisposition, DurabilityHardTurn, DurabilityOperation, DurabilityTicket, DurabilityWaiterState,
+  OsErrorClass, RetryClass,
+};
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::file_header::{FILE_HEADER_SIZE, v3_header_commit_plan};
 use crate::engine::hot_tail::VoidRecord;
 use crate::engine::index_store::{IndexManager, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
@@ -420,6 +425,7 @@ pub struct StorageEngine {
   durability_failure: Mutex<Option<String>>,
   emergency_spill: Mutex<Option<EmergencySpillReport>>,
   last_published_hot_tail_offset: AtomicU64,
+  durability_coordinator: Arc<DurabilityCoordinator>,
   namespace_write_lock: Mutex<()>,
   writer: RwLock<AppendWriter>,
   kv_writer: Mutex<DiskKVStore>,
@@ -487,8 +493,7 @@ impl StorageEngine {
   }
 
   pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
-    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    writer.durability_snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))
+    self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))
   }
 
   pub fn emergency_spill_report(&self) -> Option<EmergencySpillReport> {
@@ -1018,6 +1023,7 @@ impl StorageEngine {
       durability_failure: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(hot_tail_offset),
+      durability_coordinator,
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -1253,6 +1259,7 @@ impl StorageEngine {
       durability_failure: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(file_header.hot_tail_offset),
+      durability_coordinator,
       namespace_write_lock: Mutex::new(()),
       writer: RwLock::new(writer),
       kv_writer: Mutex::new(kv_store),
@@ -1439,6 +1446,27 @@ impl StorageEngine {
     header.hot_tail_offset = hot_tail_offset;
     header.entry_count = entry_count;
     writer.update_header_with_dependency(&header, estimated_dependency_bytes, || kv.prepare_hot_tail_dependency(force).map(|_| ()))?;
+    kv.complete_hot_tail_dependency();
+    Ok(Some((hot_tail_offset, entry_count)))
+  }
+
+  fn publish_hot_tail_authority_group(
+    writer: &mut AppendWriter,
+    kv: &mut DiskKVStore,
+    tickets: &[DurabilityTicket],
+  ) -> EngineResult<Option<(u64, u64)>> {
+    if kv.transaction_depth != 0 {
+      return Err(EngineError::DurabilityFailure(
+        "grouped transaction authority cannot publish while a namespace transaction is active".to_string(),
+      ));
+    }
+
+    let hot_tail_offset = kv.hot_tail_offset();
+    let entry_count = kv.len() as u64;
+    let mut header = writer.file_header().clone();
+    header.hot_tail_offset = hot_tail_offset;
+    header.entry_count = entry_count;
+    writer.update_header_group_with_dependency(&header, tickets, || kv.prepare_hot_tail_dependency(true).map(|_| ()))?;
     kv.complete_hot_tail_dependency();
     Ok(Some((hot_tail_offset, entry_count)))
   }
@@ -3230,10 +3258,7 @@ impl StorageEngine {
     }
   }
 
-  /// End a transaction: decrement the KV store's transaction depth and, when
-  /// it reaches zero, truncate the hot file (completing the deferred work
-  /// that `flush()` skipped while the transaction was active).
-  pub fn end_transaction(&self) -> EngineResult<()> {
+  fn prepare_transaction_completion(&self) -> EngineResult<Option<DurabilityTicket>> {
     let should_commit = match self.kv_writer.lock() {
       Ok(mut kv) => {
         kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
@@ -3245,7 +3270,7 @@ impl StorageEngine {
     };
 
     if !should_commit {
-      return Ok(());
+      return Ok(None);
     }
 
     if self.void_snapshot_dirty.swap(false, Ordering::AcqRel) {
@@ -3255,23 +3280,103 @@ impl StorageEngine {
       }
     }
 
-    let commit_result = {
-      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      let mut kv = self
-        .kv_writer
-        .lock()
-        .map_err(|e| EngineError::IoError(std::io::Error::other(format!("Failed to flush transaction hot tail: {}", e))))?;
-      Self::publish_hot_tail_authority(&mut writer, &mut kv, true)
-    };
+    let estimated_dependency_bytes = self
+      .kv_writer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to estimate transaction hot tail: {error}"))))?
+      .pending_hot_tail_bytes();
+    let plan = v3_header_commit_plan().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    let ticket = self
+      .durability_coordinator
+      .admit_sized(plan, estimated_dependency_bytes.saturating_add(FILE_HEADER_SIZE as u64))
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    Ok(Some(ticket))
+  }
 
-    if let Some((hot_tail_offset, _entry_count)) = match commit_result {
-      Ok(update) => update,
-      Err(error) => return Err(self.record_durability_failure("Transaction hard commit failed", error)),
-    } {
-      self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
+  fn complete_transaction_ticket(&self, ticket: DurabilityTicket) -> EngineResult<()> {
+    let coordinator = Arc::clone(&self.durability_coordinator);
+
+    loop {
+      match coordinator.wait_for_hard_turn(ticket).map_err(|error| EngineError::DurabilityFailure(error.to_string()))? {
+        DurabilityHardTurn::Complete(_) => {
+          return match coordinator.take_waiter_state(ticket).map_err(|error| EngineError::DurabilityFailure(error.to_string()))? {
+            DurabilityWaiterState::Succeeded(_) => Ok(()),
+            DurabilityWaiterState::Failed(failure) => Err(EngineError::DurabilityFailure(failure.message)),
+            DurabilityWaiterState::Pending => {
+              Err(EngineError::DurabilityFailure("transaction waiter remained pending after completion".to_string()))
+            }
+          };
+        }
+        DurabilityHardTurn::Drive(permit) => {
+          let namespace = match self.namespace_write_guard() {
+            Ok(namespace) => namespace,
+            Err(error) => {
+              permit.release();
+              return Err(self.fail_transaction_ticket(&coordinator, ticket, error));
+            }
+          };
+          let group = match coordinator.select_ready_hard_group(true) {
+            Ok(group) => group,
+            Err(error) => {
+              drop(namespace);
+              permit.release();
+              return Err(self.fail_transaction_ticket(&coordinator, ticket, EngineError::DurabilityFailure(error.to_string())));
+            }
+          };
+          if group.is_empty() {
+            drop(namespace);
+            permit.release();
+            continue;
+          }
+
+          let commit_result = (|| -> EngineResult<_> {
+            let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+            let mut kv = self.kv_writer.lock().map_err(|error| {
+              EngineError::IoError(std::io::Error::other(format!("Failed to flush grouped transaction hot tail: {error}")))
+            })?;
+            Self::publish_hot_tail_authority_group(&mut writer, &mut kv, &group)
+          })();
+          drop(namespace);
+
+          match commit_result {
+            Ok(Some((hot_tail_offset, _entry_count))) => {
+              self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
+            }
+            Ok(None) => {}
+            Err(error) => {
+              permit.release();
+              return Err(self.fail_transaction_ticket(&coordinator, ticket, error));
+            }
+          }
+          permit.release();
+        }
+      }
     }
+  }
 
-    Ok(())
+  fn fail_transaction_ticket(&self, coordinator: &DurabilityCoordinator, ticket: DurabilityTicket, error: EngineError) -> EngineError {
+    let _ = coordinator.fail_pending_hard(
+      DurabilityOperation::DependencyAppend,
+      error.to_string(),
+      DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+      1,
+    );
+    let _ = coordinator.take_waiter_state(ticket);
+    error
+  }
+
+  /// End a transaction and wait until its exact hard-authority ticket is at or
+  /// below the proven durability frontier.
+  pub fn end_transaction(&self) -> EngineResult<()> {
+    let result = match self.prepare_transaction_completion() {
+      Ok(Some(ticket)) => self.complete_transaction_ticket(ticket),
+      Ok(None) => Ok(()),
+      Err(error) => Err(error),
+    };
+    match result {
+      Ok(()) => Ok(()),
+      Err(error) => Err(self.record_durability_failure("Transaction hard completion failed", error)),
+    }
   }
 
   /// Try to flush the hot buffer if the KV lock is available.
@@ -3561,6 +3666,46 @@ mod tests {
     let error = transaction.commit().expect_err("transaction completion failure must reach the caller");
     assert!(error.to_string().contains("Failed to end transaction"));
   }
+
+  #[test]
+  fn grouped_driver_setup_failure_halts_its_admitted_waiter() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("grouped-driver-setup-failure.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let coordinator = engine.writer.read().unwrap().durability_coordinator();
+
+    engine.begin_transaction();
+    let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = engine.writer.write().unwrap();
+      panic!("poison grouped writer authority");
+    }));
+
+    assert!(engine.complete_transaction_ticket(ticket).is_err());
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.pending_hard, 0);
+    assert_eq!(snapshot.failed, 0, "the failed driver must retire its own terminal waiter record");
+  }
+
+  #[test]
+  fn grouped_namespace_setup_failure_halts_and_retires_its_waiter() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("grouped-namespace-setup-failure.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let coordinator = Arc::clone(&engine.durability_coordinator);
+
+    engine.begin_transaction();
+    let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = engine.namespace_write_lock.lock().unwrap();
+      panic!("poison grouped namespace authority");
+    }));
+
+    assert!(engine.complete_transaction_ticket(ticket).is_err());
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.pending_hard, 0);
+    assert_eq!(snapshot.failed, 0, "the failed driver must retire its own terminal waiter record");
+  }
 }
 
 thread_local! {
@@ -3615,8 +3760,31 @@ impl<'a> TransactionGuard<'a> {
     self.engine.end_transaction()
   }
 
+  pub(crate) fn commit_after(mut self, namespace: NamespaceWriteGuard<'a>) -> EngineResult<()> {
+    let prepared = self.engine.prepare_transaction_completion();
+    self.completed = true;
+    drop(namespace);
+    let result = match prepared {
+      Err(error) => Err(error),
+      Ok(Some(ticket)) => self.engine.complete_transaction_ticket(ticket),
+      Ok(None) => Ok(()),
+    };
+    match result {
+      Ok(()) => Ok(()),
+      Err(error) => Err(self.engine.record_durability_failure("Namespace transaction hard completion failed", error)),
+    }
+  }
+
   pub fn finish<T>(self, result: EngineResult<T>) -> EngineResult<T> {
     let completion = self.commit();
+    match (result, completion) {
+      (_, Err(error)) => Err(error),
+      (result, Ok(())) => result,
+    }
+  }
+
+  pub(crate) fn finish_after<T>(self, result: EngineResult<T>, namespace: NamespaceWriteGuard<'a>) -> EngineResult<T> {
+    let completion = self.commit_after(namespace);
     match (result, completion) {
       (_, Err(error)) => Err(error),
       (result, Ok(())) => result,

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::engine::native_durability::{
@@ -573,10 +573,12 @@ struct CommitRecord {
 struct CoordinatorState {
   next_sequence: u64,
   hard_frontier: u64,
+  hard_failure: Option<DurabilityFailure>,
   records: BTreeMap<u64, CommitRecord>,
   pending_hard: VecDeque<u64>,
   ledger: VecDeque<DurabilityLedgerEntry>,
   ledger_capacity: usize,
+  driver_active: bool,
 }
 
 impl CoordinatorState {
@@ -584,10 +586,12 @@ impl CoordinatorState {
     Self {
       next_sequence: 1,
       hard_frontier: 0,
+      hard_failure: None,
       records: BTreeMap::new(),
       pending_hard: VecDeque::new(),
       ledger: VecDeque::new(),
       ledger_capacity,
+      driver_active: false,
     }
   }
 
@@ -605,6 +609,7 @@ pub const DEFAULT_GROUP_COMMIT_MAX_DELAY: Duration = Duration::from_millis(100);
 pub const MIN_GROUP_COMMIT_MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_GROUP_COMMIT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_GROUP_COMMIT_MAX_DELAY: Duration = Duration::from_millis(1_000);
+const LIVE_GROUP_DRIVER_DELAY: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurabilityGroupPolicy {
@@ -647,6 +652,7 @@ impl Default for DurabilityGroupPolicy {
 pub struct DurabilityCoordinator {
   id: uuid::Uuid,
   state: Mutex<CoordinatorState>,
+  changed: Condvar,
   group_policy: DurabilityGroupPolicy,
 }
 
@@ -662,14 +668,24 @@ impl DurabilityCoordinator {
   }
 
   pub fn with_policy(group_policy: DurabilityGroupPolicy) -> Self {
-    Self { id: uuid::Uuid::new_v4(), state: Mutex::new(CoordinatorState::new(DEFAULT_DURABILITY_LEDGER_CAPACITY)), group_policy }
+    Self {
+      id: uuid::Uuid::new_v4(),
+      state: Mutex::new(CoordinatorState::new(DEFAULT_DURABILITY_LEDGER_CAPACITY)),
+      changed: Condvar::new(),
+      group_policy,
+    }
   }
 
   pub fn with_ledger_capacity(ledger_capacity: usize) -> Result<Self, DurabilityCoordinatorError> {
     if ledger_capacity == 0 {
       return Err(DurabilityCoordinatorError::InvalidConfiguration("ledger capacity must be nonzero".to_string()));
     }
-    Ok(Self { id: uuid::Uuid::new_v4(), state: Mutex::new(CoordinatorState::new(ledger_capacity)), group_policy: Default::default() })
+    Ok(Self {
+      id: uuid::Uuid::new_v4(),
+      state: Mutex::new(CoordinatorState::new(ledger_capacity)),
+      changed: Condvar::new(),
+      group_policy: Default::default(),
+    })
   }
 
   pub fn admit(&self, plan: DurabilityCommitPlan) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
@@ -678,12 +694,19 @@ impl DurabilityCoordinator {
 
   pub fn admit_sized(&self, plan: DurabilityCommitPlan, estimated_bytes: u64) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
     let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    if plan.class == CommitClass::HardAuthority {
+      if let Some(failure) = &state.hard_failure {
+        return Err(DurabilityCoordinatorError::ExecutorFailure(failure.clone()));
+      }
+    }
     let sequence = state.next_sequence;
     state.next_sequence = state.next_sequence.checked_add(1).ok_or(DurabilityCoordinatorError::SequenceExhausted)?;
     if plan.class == CommitClass::HardAuthority {
       state.pending_hard.push_back(sequence);
     }
     state.records.insert(sequence, CommitRecord { plan, status: CommitStatus::Admitted, estimated_bytes, admitted_at: Instant::now() });
+    drop(state);
+    self.changed.notify_all();
     Ok(DurabilityTicket { coordinator_id: self.id, sequence })
   }
 
@@ -755,6 +778,7 @@ impl DurabilityCoordinator {
               continue;
             }
             let failures = self.fail_group(&sequences, operation, error.to_string(), disposition, attempts)?;
+            self.changed.notify_all();
             execution_guard.armed = false;
             let Some(first_failure) = failures.into_iter().next() else {
               return Err(DurabilityCoordinatorError::StateUnavailable);
@@ -772,24 +796,82 @@ impl DurabilityCoordinator {
     }
     advance_hard_frontier(&mut state);
     execution_guard.armed = false;
+    drop(state);
+    self.changed.notify_all();
     Ok(())
+  }
+
+  /// Permanently halt the in-process hard-authority frontier and wake every
+  /// admitted hard waiter with the same failure evidence.
+  ///
+  /// Once an earlier hard commit can no longer be proven, no later hard
+  /// waiter can safely cross it. The storage engine owns persistence of the
+  /// database latch; this halt prevents waiters from being stranded while the
+  /// latch is recorded.
+  pub fn fail_pending_hard(
+    &self,
+    operation: DurabilityOperation,
+    message: impl Into<String>,
+    disposition: DurabilityFailureDisposition,
+    attempts: u8,
+  ) -> Result<Vec<DurabilityFailure>, DurabilityCoordinatorError> {
+    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    let failures = fail_pending_hard_locked(&mut state, operation, message.into(), disposition, attempts);
+    drop(state);
+    self.changed.notify_all();
+    Ok(failures)
+  }
+
+  pub fn wait_for_hard_turn(&self, ticket: DurabilityTicket) -> Result<DurabilityHardTurn<'_>, DurabilityCoordinatorError> {
+    self.validate_ticket(ticket)?;
+    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    let ticket_record = state.records.get(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+    if ticket_record.plan.class != CommitClass::HardAuthority {
+      return Err(DurabilityCoordinatorError::InvalidPlan("only hard-authority tickets can join the live hard-commit driver".to_string()));
+    }
+
+    loop {
+      let waiter = waiter_state_locked(&state, ticket)?;
+      if !matches!(waiter, DurabilityWaiterState::Pending) {
+        return Ok(DurabilityHardTurn::Complete(waiter));
+      }
+
+      if !state.driver_active {
+        let first_record =
+          state.pending_hard.front().and_then(|sequence| state.records.get(sequence)).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+        match &first_record.status {
+          CommitStatus::Failed(failure) => return Err(DurabilityCoordinatorError::ExecutorFailure(failure.clone())),
+          CommitStatus::Executing | CommitStatus::Proven => {
+            state = self.changed.wait(state).map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+            continue;
+          }
+          CommitStatus::Admitted => {}
+        }
+
+        let now = Instant::now();
+        let candidates = select_ready_hard_group_locked(&state, self.id, self.group_policy, now, true)?;
+        let first_admitted_at = first_record.admitted_at;
+        let live_delay = self.group_policy.max_delay.min(LIVE_GROUP_DRIVER_DELAY);
+        let elapsed = now.checked_duration_since(first_admitted_at).unwrap_or_default();
+        if candidates.len() > 1 || elapsed >= live_delay {
+          state.driver_active = true;
+          drop(state);
+          return Ok(DurabilityHardTurn::Drive(DurabilityDrivePermit { coordinator: self, active: true }));
+        }
+
+        let remaining = live_delay.saturating_sub(elapsed);
+        let (next_state, _) = self.changed.wait_timeout(state, remaining).map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+        state = next_state;
+      } else {
+        state = self.changed.wait(state).map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+      }
+    }
   }
 
   pub fn waiter_state(&self, ticket: DurabilityTicket) -> Result<DurabilityWaiterState, DurabilityCoordinatorError> {
     self.validate_ticket(ticket)?;
     let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-    let record = state.records.get(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
-    match &record.status {
-      CommitStatus::Failed(failure) => Ok(DurabilityWaiterState::Failed(failure.clone())),
-      CommitStatus::Proven if record.plan.class != CommitClass::HardAuthority || ticket.sequence <= state.hard_frontier => {
-        Ok(DurabilityWaiterState::Succeeded(DurabilityCommitReceipt {
-          sequence: ticket.sequence,
-          class: record.plan.class,
-          hard_frontier: state.hard_frontier,
-        }))
-      }
-      CommitStatus::Admitted | CommitStatus::Executing | CommitStatus::Proven => Ok(DurabilityWaiterState::Pending),
-    }
+    waiter_state_locked(&state, ticket)
   }
 
   pub fn take_waiter_state(&self, ticket: DurabilityTicket) -> Result<DurabilityWaiterState, DurabilityCoordinatorError> {
@@ -837,45 +919,7 @@ impl DurabilityCoordinator {
 
   fn select_ready_hard_group_at(&self, now: Instant, force: bool) -> Result<Vec<DurabilityTicket>, DurabilityCoordinatorError> {
     let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-    let Some(first_sequence) = state.pending_hard.front().copied() else {
-      return Ok(Vec::new());
-    };
-    let Some(first) = state.records.get(&first_sequence) else {
-      return Err(DurabilityCoordinatorError::UnknownTicket);
-    };
-    if !matches!(first.status, CommitStatus::Admitted) {
-      return Ok(Vec::new());
-    }
-
-    let mut selected = Vec::new();
-    let mut selected_bytes = 0u64;
-    for sequence in &state.pending_hard {
-      let Some(record) = state.records.get(sequence) else {
-        return Err(DurabilityCoordinatorError::UnknownTicket);
-      };
-      if !matches!(record.status, CommitStatus::Admitted) || record.plan != first.plan {
-        break;
-      }
-      if !selected.is_empty() && selected_bytes.saturating_add(record.estimated_bytes) > self.group_policy.max_bytes {
-        break;
-      }
-      selected.push(DurabilityTicket { coordinator_id: self.id, sequence: *sequence });
-      selected_bytes = selected_bytes.saturating_add(record.estimated_bytes);
-      if selected_bytes >= self.group_policy.max_bytes {
-        break;
-      }
-    }
-
-    let elapsed = now.checked_duration_since(first.admitted_at).unwrap_or_default();
-    if force
-      || self.group_policy.max_delay.is_zero()
-      || selected_bytes >= self.group_policy.max_bytes
-      || elapsed >= self.group_policy.max_delay
-    {
-      Ok(selected)
-    } else {
-      Ok(Vec::new())
-    }
+    select_ready_hard_group_locked(&state, self.id, self.group_policy, now, force)
   }
 
   fn begin_group_execution(
@@ -932,6 +976,14 @@ impl DurabilityCoordinator {
     attempts: u8,
   ) -> Result<Vec<DurabilityFailure>, DurabilityCoordinatorError> {
     let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    let hard_authority = sequences
+      .first()
+      .and_then(|sequence| state.records.get(sequence))
+      .is_some_and(|record| record.plan.class == CommitClass::HardAuthority);
+    if hard_authority {
+      return Ok(fail_pending_hard_locked(&mut state, operation, message, disposition, attempts));
+    }
+
     let mut failures = Vec::with_capacity(sequences.len());
     for sequence in sequences {
       let failure = DurabilityFailure {
@@ -949,6 +1001,133 @@ impl DurabilityCoordinator {
       failures.push(failure);
     }
     Ok(failures)
+  }
+}
+
+fn fail_pending_hard_locked(
+  state: &mut CoordinatorState,
+  operation: DurabilityOperation,
+  message: String,
+  disposition: DurabilityFailureDisposition,
+  attempts: u8,
+) -> Vec<DurabilityFailure> {
+  if let Some(failure) = &state.hard_failure {
+    return vec![failure.clone()];
+  }
+
+  let pending: Vec<_> = state.pending_hard.drain(..).collect();
+  let mut failures = Vec::with_capacity(pending.len());
+  for sequence in pending {
+    let failure = DurabilityFailure {
+      sequence,
+      operation,
+      message: message.clone(),
+      os_error_class: disposition.os_error_class,
+      retry_class: disposition.retry_class,
+      attempts,
+      serious: disposition.serious,
+      uncertain_completion: disposition.uncertain_completion,
+    };
+    if let Some(record) = state.records.get_mut(&sequence) {
+      record.status = CommitStatus::Failed(failure.clone());
+    }
+    failures.push(failure);
+  }
+  if let Some(failure) = failures.first() {
+    state.hard_failure = Some(failure.clone());
+  }
+  failures
+}
+
+pub enum DurabilityHardTurn<'a> {
+  Complete(DurabilityWaiterState),
+  Drive(DurabilityDrivePermit<'a>),
+}
+
+pub struct DurabilityDrivePermit<'a> {
+  coordinator: &'a DurabilityCoordinator,
+  active: bool,
+}
+
+impl DurabilityDrivePermit<'_> {
+  pub fn release(mut self) {
+    self.release_inner();
+  }
+
+  fn release_inner(&mut self) {
+    if !self.active {
+      return;
+    }
+    if let Ok(mut state) = self.coordinator.state.lock() {
+      state.driver_active = false;
+    }
+    self.active = false;
+    self.coordinator.changed.notify_all();
+  }
+}
+
+impl Drop for DurabilityDrivePermit<'_> {
+  fn drop(&mut self) {
+    self.release_inner();
+  }
+}
+
+fn waiter_state_locked(state: &CoordinatorState, ticket: DurabilityTicket) -> Result<DurabilityWaiterState, DurabilityCoordinatorError> {
+  let record = state.records.get(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+  match &record.status {
+    CommitStatus::Failed(failure) => Ok(DurabilityWaiterState::Failed(failure.clone())),
+    CommitStatus::Proven if record.plan.class != CommitClass::HardAuthority || ticket.sequence <= state.hard_frontier => {
+      Ok(DurabilityWaiterState::Succeeded(DurabilityCommitReceipt {
+        sequence: ticket.sequence,
+        class: record.plan.class,
+        hard_frontier: state.hard_frontier,
+      }))
+    }
+    CommitStatus::Admitted | CommitStatus::Executing | CommitStatus::Proven => Ok(DurabilityWaiterState::Pending),
+  }
+}
+
+fn select_ready_hard_group_locked(
+  state: &CoordinatorState,
+  coordinator_id: uuid::Uuid,
+  policy: DurabilityGroupPolicy,
+  now: Instant,
+  force: bool,
+) -> Result<Vec<DurabilityTicket>, DurabilityCoordinatorError> {
+  let Some(first_sequence) = state.pending_hard.front().copied() else {
+    return Ok(Vec::new());
+  };
+  let Some(first) = state.records.get(&first_sequence) else {
+    return Err(DurabilityCoordinatorError::UnknownTicket);
+  };
+  if !matches!(first.status, CommitStatus::Admitted) {
+    return Ok(Vec::new());
+  }
+
+  let mut selected = Vec::new();
+  let mut selected_bytes = 0u64;
+  for sequence in &state.pending_hard {
+    let Some(record) = state.records.get(sequence) else {
+      return Err(DurabilityCoordinatorError::UnknownTicket);
+    };
+    if !matches!(record.status, CommitStatus::Admitted) || record.plan != first.plan {
+      break;
+    }
+    if !selected.is_empty() && selected_bytes.saturating_add(record.estimated_bytes) > policy.max_bytes {
+      break;
+    }
+    selected.push(DurabilityTicket { coordinator_id, sequence: *sequence });
+    selected_bytes = selected_bytes.saturating_add(record.estimated_bytes);
+    if selected_bytes >= policy.max_bytes {
+      break;
+    }
+  }
+
+  let elapsed = now.checked_duration_since(first.admitted_at).unwrap_or_default();
+  if force || policy.max_delay.is_zero() || selected_bytes >= policy.max_bytes || elapsed >= policy.max_delay {
+    Ok(selected)
+  } else {
+    Ok(Vec::new())
   }
 }
 
@@ -1013,16 +1192,38 @@ impl Drop for GroupExecutionGuard<'_> {
     let Ok(mut state) = self.coordinator.state.lock() else {
       return;
     };
+    let hard_authority = self
+      .sequences
+      .first()
+      .and_then(|sequence| state.records.get(sequence))
+      .is_some_and(|record| record.plan.class == CommitClass::HardAuthority);
+    let disposition = DurabilityFailureDisposition::uncertain(OsErrorClass::TimeoutUnknown);
+    if hard_authority {
+      for sequence in self.sequences {
+        state.record_ledger(DurabilityLedgerEntry { sequence: *sequence, operation, succeeded: false });
+      }
+      fail_pending_hard_locked(
+        &mut state,
+        operation,
+        "durability executor unwound before reporting completion".to_string(),
+        disposition,
+        1,
+      );
+      drop(state);
+      self.coordinator.changed.notify_all();
+      return;
+    }
+
     for sequence in self.sequences {
       let failure = DurabilityFailure {
         sequence: *sequence,
         operation,
         message: "durability executor unwound before reporting completion".to_string(),
-        os_error_class: Some(OsErrorClass::TimeoutUnknown),
-        retry_class: RetryClass::AfterRepair,
+        os_error_class: disposition.os_error_class,
+        retry_class: disposition.retry_class,
         attempts: 1,
-        serious: true,
-        uncertain_completion: true,
+        serious: disposition.serious,
+        uncertain_completion: disposition.uncertain_completion,
       };
       state.record_ledger(DurabilityLedgerEntry { sequence: *sequence, operation, succeeded: false });
       if let Some(record) = state.records.get_mut(sequence) {
@@ -1031,6 +1232,8 @@ impl Drop for GroupExecutionGuard<'_> {
         }
       }
     }
+    drop(state);
+    self.coordinator.changed.notify_all();
   }
 }
 

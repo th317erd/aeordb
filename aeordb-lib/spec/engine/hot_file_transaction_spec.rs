@@ -232,6 +232,51 @@ fn store_multiple_files_each_transactional() {
   assert_eq!(ops.read_file_buffered("/docs/c.txt").unwrap(), b"ccc");
 }
 
+#[test]
+fn concurrent_namespace_transactions_share_a_live_header_commit() {
+  use std::sync::{Arc, Barrier};
+
+  let (engine, temp) = create_test_db_with_hot_dir();
+  let engine = Arc::new(engine);
+  let db_path = temp.path().join("test.aeordb");
+  let initial_sequence = {
+    let mut file = std::fs::File::open(&db_path).unwrap();
+    aeordb::engine::file_header::read_active_header(&mut file).unwrap().0.sequence
+  };
+  let workers = 8usize;
+  let start = Arc::new(Barrier::new(workers));
+  let handles: Vec<_> = (0..workers)
+    .map(|index| {
+      let engine = engine.clone();
+      let start = start.clone();
+      std::thread::spawn(move || {
+        start.wait();
+        let path = format!("/grouped/file-{index}.txt");
+        DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), &path, b"group me", Some("text/plain"))
+      })
+    })
+    .collect();
+  for handle in handles {
+    handle.join().unwrap().unwrap();
+  }
+
+  let final_sequence = {
+    let mut file = std::fs::File::open(&db_path).unwrap();
+    aeordb::engine::file_header::read_active_header(&mut file).unwrap().0.sequence
+  };
+  assert!(final_sequence - initial_sequence < workers as u64, "concurrent commits were still published as singletons");
+  assert_eq!(DirectoryOps::new(&engine).list_directory("/grouped").unwrap().len(), workers);
+
+  let engine = Arc::try_unwrap(engine).ok().expect("all grouped writer references should be released");
+  drop(engine);
+  let reopened = StorageEngine::open_with_hot_dir(db_path.to_str().unwrap(), Some(temp.path())).unwrap();
+  let reopened_ops = DirectoryOps::new(&reopened);
+  for index in 0..workers {
+    let path = format!("/grouped/file-{index}.txt");
+    assert_eq!(reopened_ops.read_file_buffered(&path).unwrap(), b"group me");
+  }
+}
+
 // =========================================================================
 // delete_file is transactional
 // =========================================================================

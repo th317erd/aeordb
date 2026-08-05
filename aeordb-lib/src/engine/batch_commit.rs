@@ -74,6 +74,12 @@ struct BatchFileInfo {
   child_entry: ChildEntry,
 }
 
+struct BatchWriteMetric {
+  existing_total_size: Option<u64>,
+  total_size: u64,
+  newly_stored_bytes: u64,
+}
+
 struct PreparedCommitFile {
   chunks: Vec<(Vec<u8>, u64)>,
   content_hash: Vec<u8>,
@@ -98,6 +104,20 @@ struct FinishBatchCommitTimings {
 
 fn live_commit_index_buffer_options() -> IndexWriteBufferOptions {
   IndexWriteBufferOptions::new(DEFAULT_INDEX_BUFFER_FLUSH_WRITES, Duration::from_secs(300))
+}
+
+fn publish_batch_success(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  event_entries: Vec<EntryEventData>,
+  write_metrics: Vec<BatchWriteMetric>,
+) -> u128 {
+  for metric in write_metrics {
+    engine.counters().record_file_write(metric.existing_total_size, metric.total_size, metric.newly_stored_bytes);
+  }
+  let event_emit_start = std::time::Instant::now();
+  ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries }));
+  event_emit_start.elapsed().as_millis()
 }
 
 /// Atomically commit multiple files from pre-uploaded chunks.
@@ -186,7 +206,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   // Serialize the publish phase so mutable path keys, directory entries, and
   // HEAD are advanced as one namespace operation relative to other writers.
   let namespace_wait_start = std::time::Instant::now();
-  let _namespace = engine.namespace_write_guard()?;
+  let namespace = engine.namespace_write_guard()?;
   let namespace_wait_ms = namespace_wait_start.elapsed().as_millis();
   let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
@@ -194,6 +214,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   let publish_start = std::time::Instant::now();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
   let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
+  let mut write_metrics: Vec<BatchWriteMetric> = Vec::with_capacity(files.len());
   let mut first_chunk_sniff_reads = 0usize;
   let mut first_chunk_sniff_bytes = 0u64;
   let mut first_chunk_sniff_us = 0u128;
@@ -238,7 +259,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     )?;
 
     event_entries.push(published.event_entry.clone());
-    engine.counters().record_file_write(published.existing_total_size, total_size, 0);
+    write_metrics.push(BatchWriteMetric { existing_total_size: published.existing_total_size, total_size, newly_stored_bytes: 0 });
     file_infos.push(BatchFileInfo {
       normalized_path: published.normalized_path,
       file_record: published.file_record,
@@ -247,10 +268,11 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   }
   let publish_file_records_ms = publish_start.elapsed().as_millis();
 
-  let (result, finish_timings) = finish_batch_commit(engine, ctx, file_infos, event_entries)?;
+  let (result, mut finish_timings) = finish_batch_commit(engine, ctx, file_infos)?;
   let transaction_commit_start = std::time::Instant::now();
-  txn.commit()?;
+  txn.commit_after(namespace)?;
   let transaction_commit_ms = transaction_commit_start.elapsed().as_millis();
+  finish_timings.event_emit_ms = publish_batch_success(engine, ctx, event_entries, write_metrics);
 
   tracing::info!(
     files = file_count,
@@ -312,14 +334,15 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     normalized_paths.push(normalized);
   }
 
-  let _namespace = engine.namespace_write_guard()?;
+  let namespace = engine.namespace_write_guard()?;
   let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
   let algo = engine.hash_algo();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
   let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
+  let mut write_metrics: Vec<BatchWriteMetric> = Vec::with_capacity(files.len());
 
-  for (file, normalized) in files.iter().zip(normalized_paths.into_iter()) {
+  for (file, normalized) in files.iter().zip(normalized_paths) {
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
     let detected_content_type = detect_content_type(&file.data, file.content_type.as_deref());
     let total_size = file.data.len() as u64;
@@ -349,7 +372,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     )?;
 
     event_entries.push(published.event_entry.clone());
-    engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
+    write_metrics.push(BatchWriteMetric { existing_total_size: published.existing_total_size, total_size, newly_stored_bytes: total_size });
     file_infos.push(BatchFileInfo {
       normalized_path: published.normalized_path,
       file_record: published.file_record,
@@ -357,15 +380,19 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     });
   }
 
-  let result = finish_batch_commit(engine, ctx, file_infos, event_entries).map(|(result, _timings)| result);
-  txn.finish(result)
+  let (result, _timings) = match finish_batch_commit(engine, ctx, file_infos) {
+    Ok(value) => value,
+    Err(error) => return txn.finish_after(Err(error), namespace),
+  };
+  txn.commit_after(namespace)?;
+  publish_batch_success(engine, ctx, event_entries, write_metrics);
+  Ok(result)
 }
 
 fn finish_batch_commit(
   engine: &StorageEngine,
   ctx: &RequestContext,
   file_infos: Vec<BatchFileInfo>,
-  event_entries: Vec<EntryEventData>,
 ) -> EngineResult<(CommitResult, FinishBatchCommitTimings)> {
   let mut timings = FinishBatchCommitTimings::default();
   let algo = engine.hash_algo();
@@ -486,14 +513,11 @@ fn finish_batch_commit(
     timings.head_update_ms += head_update_start.elapsed().as_millis();
   }
 
-  // --- Phase 5: Emit event ---
+  // --- Phase 5: Prepare the result; externally visible publication happens
+  // only after the caller proves hard-authority completion. ---
   let committed = file_infos.len();
   let result_files: Vec<CommittedFile> =
     file_infos.iter().map(|info| CommittedFile { path: info.normalized_path.clone(), size: info.file_record.total_size }).collect();
-
-  let event_emit_start = std::time::Instant::now();
-  ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries }));
-  timings.event_emit_ms = event_emit_start.elapsed().as_millis();
 
   let metadata_index_start = std::time::Instant::now();
   let pipeline = IndexingPipeline::new(engine);
