@@ -9,6 +9,7 @@ mod index_pages;
 mod index_tasks;
 mod parser;
 mod policy;
+mod position;
 mod selector;
 mod semantics;
 mod value_store;
@@ -31,11 +32,12 @@ use definitions::DefinitionFormat;
 use index::IndexFormat;
 use parser::ParserFormat;
 use policy::PolicyFormat;
+use position::PositionFormat;
 use selector::SelectorFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-index-tasks-v1";
+const TOOL_REVISION: &str = "p0b2-apos-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -57,6 +59,7 @@ enum FixtureFormat {
   Index(IndexFormat),
   Parser(ParserFormat),
   Policy(PolicyFormat),
+  Position(PositionFormat),
   Selector(SelectorFormat),
   ValueStore(ValueStoreFormat),
 }
@@ -73,6 +76,7 @@ impl FixtureFormat {
       Self::Index(format) => format.id(),
       Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
+      Self::Position(format) => format.id(),
       Self::Selector(format) => format.id(),
       Self::ValueStore(format) => format.id(),
     }
@@ -89,6 +93,7 @@ impl FixtureFormat {
       Self::Index(format) => format.family(),
       Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
+      Self::Position(format) => format.family(),
       Self::Selector(format) => format.family(),
       Self::ValueStore(format) => format.family(),
     }
@@ -250,7 +255,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-index-tasks".to_string(),
+    stage: "p0b-2-apos".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -274,7 +279,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
   semantics::verify(spec_root)?;
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-index-tasks" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-apos" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -491,6 +496,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(position::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Position(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases.extend(parser::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::Parser(case.format),
@@ -680,6 +694,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
+    FixtureFormat::Position(_) => position::observe(case.profile, bytes),
     FixtureFormat::Selector(_) => selector::observe(case.profile, bytes),
     FixtureFormat::ValueStore(_) => value_store::observe(case.profile, bytes),
   }
@@ -698,6 +713,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Index(_)
     | FixtureFormat::Parser(_)
     | FixtureFormat::Policy(_)
+    | FixtureFormat::Position(_)
     | FixtureFormat::Selector(_)
     | FixtureFormat::ValueStore(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
@@ -758,6 +774,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Policy(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in policy::annotation_lines() {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Position(_) => {
+      output.push_str("# hex offsets are bytes of the canonical unpadded base64url token\n");
+      for line in position::annotation_lines(case.profile, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

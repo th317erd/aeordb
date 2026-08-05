@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-index-tasks-v1",
+  "tool_revision": "p0b2-apos-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1285,6 +1285,66 @@
       "fixture_id": "aivp-sha512-legacy-wasm-valid",
       "expected": "policy:legacy-wasm32",
       "observed": "policy:legacy-wasm32",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-blake3-256-directory-listing-valid",
+      "expected": "position:directory-listing:components=3:decoded=200:tuple=48:order=755f4334:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:directory-listing:components=3:decoded=200:tuple=48:order=755f4334:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-blake3-256-query-valid",
+      "expected": "position:query:components=3:decoded=190:tuple=38:order=8e056d94:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:query:components=3:decoded=190:tuple=38:order=8e056d94:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-blake3-256-global-search-valid",
+      "expected": "position:global-search:components=2:decoded=191:tuple=39:order=f1e5e8d0:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:global-search:components=2:decoded=191:tuple=39:order=f1e5e8d0:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-blake3-256-aggregate-groups-valid",
+      "expected": "position:aggregate-groups:components=2:decoded=183:tuple=31:order=64889683:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:aggregate-groups:components=2:decoded=183:tuple=31:order=64889683:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-blake3-256-maximum-decoded-length-valid",
+      "expected": "position:maximum:route=query:components=32:decoded=1048576:tuple=1048424:order=58321dfb:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:maximum:route=query:components=32:decoded=1048576:tuple=1048424:order=58321dfb:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-sha512-directory-listing-valid",
+      "expected": "position:directory-listing:components=3:decoded=328:tuple=48:order=b136675a:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:directory-listing:components=3:decoded=328:tuple=48:order=b136675a:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-sha512-query-valid",
+      "expected": "position:query:components=3:decoded=318:tuple=38:order=ebc09c9d:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:query:components=3:decoded=318:tuple=38:order=ebc09c9d:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-sha512-global-search-valid",
+      "expected": "position:global-search:components=2:decoded=319:tuple=39:order=7468f327:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:global-search:components=2:decoded=319:tuple=39:order=7468f327:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-sha512-aggregate-groups-valid",
+      "expected": "position:aggregate-groups:components=2:decoded=311:tuple=31:order=ee683ac0:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:aggregate-groups:components=2:decoded=311:tuple=31:order=ee683ac0:root=11121314:file=41424344:revision=71727374",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apos-sha512-maximum-decoded-length-valid",
+      "expected": "position:maximum:route=query:components=32:decoded=1048576:tuple=1048296:order=4f189976:root=11121314:file=41424344:revision=71727374",
+      "observed": "position:maximum:route=query:components=32:decoded=1048576:tuple=1048296:order=4f189976:root=11121314:file=41424344:revision=71727374",
       "result": "pass"
     },
     {

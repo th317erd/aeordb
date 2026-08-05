@@ -464,6 +464,11 @@ pub(crate) fn validate_source_value(bytes: &[u8]) -> Result<(), &'static str> {
   decode_with_bounds(bytes, ValidationBounds::SOURCE_VALUE).map(|_| ())
 }
 
+pub(crate) fn canonicalize_json(input: &str) -> Result<Vec<u8>, String> {
+  let value = parse_json(input)?;
+  encode(&value).map_err(str::to_string)
+}
+
 fn validate_at(
   bytes: &[u8],
   start: usize,

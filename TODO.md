@@ -22,7 +22,7 @@
       - [x] Freeze ArtifactDirectoryNodeV1 and every ordered page/record role.
       - [x] Freeze NvtTileV1 sparse-hint semantics and corruption fallback contract.
       - [x] Freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1.
-      - [ ] Freeze APOS v1 canonical position tokens and malformed-input behavior.
+      - [x] Freeze APOS v1 canonical position tokens and malformed-input behavior.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

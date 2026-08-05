@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2c-3 mutation journals and index task checkpoints
+- **Current landing unit:** P0b-2c-4 APOS logical position tokens
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2c-2 NVT tiles `2038794b8e8207d8c983bd4858deb5a3a15effb7`
+- **Last green commit:** P0b-2c-3 index task artifacts `7096489c63128a95760848e76ec6a63357e795ed`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1, including chain/batch invariants, task phase registries, typed attachments, and external spill descriptors at both hash widths
+- **Next action:** freeze the common `GcArtifactV1` envelope and every bounded-mark, quarantine, sweep, reclaim, lifecycle, and audit body from Round 13 at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -148,3 +148,14 @@
 - **Failure proof:** repaired-CRC tests reject bad owner/codec/flags/identity boundaries, broken record lengths/order/batches/presence/path identities, unknown task/state/phase/capability/attachment roles, unsorted attachments, incoherent journal coverage/progress/lengths, and malformed external workspace/digest/path framing. Linked-journal tests require exact owner, generation, predecessor artifact, ordinal, root, and sequence continuity.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 86 tests in 5.33 seconds; standalone strict Clippy passed; fresh generation and verification passed all 250 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
 - **Boundary:** these are independent reference bytes and validation oracles only. No production journal/checkpoint reader, writer, task queue, index coordinator, GC traversal, migration path, route, or database changed. APOS is next.
+
+## P0b-2c-4 APOS Logical Position Tokens
+
+- **Red proof:** with 250 prior fixtures green, the campaign gate fails with `P0b-2 APOS lacks both hash-width fixtures: position:directory-listing:` before the APOS module or fixture family exists.
+- **Territory:** future producers are directory-listing, query, global-search, and aggregate pagination; consumers are root-aware planners plus HTTP, SDK, UI, and bot clients. APOS carries logical position only and cannot encode authorization, expiry, limits, offsets, pages, WAL offsets, NVT cells, manifests, or physical plans.
+- **Frozen contracts:** exact canonical unpadded base64url spelling, 24 + 4H + T decoded framing, all four route IDs, hash-profile binding, order/root/FileKey/revision identities, CRC, complete tuple components, null/missing states, comparator tags 2 through 8, and the 1 MiB decoded/1,398,102-byte encoded preflight bounds.
+- **Order definition:** `CanonicalRouteOrderDefinitionV1` reuses one bounded `CanonicalConfigValueV1` map with nine required keys. Its domain-separated fingerprint includes route, sort/direction/comparator rows, directories-first, collation, null/missing, multi-value, score, ties, and semantic fingerprints while excluding root and request-window/physical-plan parameters.
+- **Independent corpus:** all four route kinds plus the exact 1 MiB decoded maximum under both hash profiles add ten fixtures, bringing the corpus to 260. Maximum tokens exercise all 32 components and a near-1 MiB bytes payload.
+- **Failure proof:** tests reject malformed, padded, noncanonical, or overlong base64url; wrong magic/version/route/hash profile/length/count/flags; zero root/order/ties; CRC failures; malformed tuple lengths; unknown/reserved states/tags; invalid UTF-8, numeric, finite-f64, signed-zero, and bool payloads; and one byte beyond the hard cap. Unsigned-token context tests require exact route, root, order, resolved FileKey/revision, and recomputed tuple, returning the approved mismatch classes.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 94 tests in 5.34 seconds (246,696 KiB maximum RSS); strict standalone Clippy passed; fresh generation/verification passed all 260 fixtures; and the campaign gate passed with 93 routes and 36 docs using the documented home-volume target override because `/tmp` was full. The final oracle review also added exact nine-key order-definition validation, including route, tie, policy, sort-row, fingerprint, unknown-key, and duplicate-key rejection without changing the valid fixture bytes.
+- **Boundary:** this freezes only the independent public wire oracle. No production cursor decoder/encoder, route ordering, pagination, API schema, SDK, UI, authorization, query planner, or database changed. GcArtifact is next.

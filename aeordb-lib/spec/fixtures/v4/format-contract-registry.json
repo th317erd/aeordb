@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-index-tasks",
+  "coverage_stage": "p0b-2-apos",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2583,13 +2583,113 @@
         "afix-sha512-dmetaphone_primary_v0-valid",
         "afix-sha512-dmetaphone_alt_v0-valid"
       ]
+    },
+    {
+      "id": "logical-position-v1",
+      "family": "public-wire-position",
+      "magic_ascii": "APOS",
+      "version": 1,
+      "identity": "route kind, database hash algorithm, order fingerprint, selected NamespaceRootV1 hash, complete sort tuple, FileKey, and RecordRevisionHash",
+      "layout": [
+        { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII APOS" },
+        { "offset": 4, "length": 2, "field": "schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "route_kind", "rule": "permanent route registry" },
+        { "offset": 8, "length": 4, "field": "total_decoded_length", "rule": "24 + 4H + T" },
+        { "offset": 12, "length": 2, "field": "hash_algorithm", "rule": "must equal opened database profile" },
+        { "offset": 14, "length": 1, "field": "sort_component_count", "rule": "0..32 and exact tuple count" },
+        { "offset": 15, "length": 1, "field": "flags", "rule": "zero" },
+        { "offset": 16, "length": "H", "field": "order_fingerprint", "rule": "nonzero" },
+        { "offset": "16 + H", "length": "H", "field": "selected_namespace_root", "rule": "nonzero authorized immutable root" },
+        { "offset": "16 + 2H", "length": 4, "field": "sort_tuple_length", "rule": "exact T" },
+        { "offset": "20 + 2H", "length": "H", "field": "file_key_tie", "rule": "nonzero immutable FileKey" },
+        { "offset": "20 + 3H", "length": "H", "field": "record_revision_tie", "rule": "nonzero RecordRevisionHash" },
+        { "offset": "20 + 4H", "length": "T", "field": "canonical_sort_tuple", "rule": "exact component framing" },
+        { "offset": "20 + 4H + T", "length": 4, "field": "crc32", "rule": "CRC-32/ISO-HDLC over all prior decoded bytes" }
+      ],
+      "route_kind_registry": {
+        "1": "directory_listing",
+        "2": "query",
+        "3": "global_search",
+        "4": "aggregate_groups"
+      },
+      "component_formula": "comparator_tag u16 LE || state u8 || reserved-zero u8 || payload_length u32 LE || canonical payload",
+      "component_state_registry": {
+        "0": "present",
+        "1": "typed_null",
+        "2": "missing"
+      },
+      "comparator_tag_registry": {
+        "0": "absent-only-for-null-or-missing",
+        "2": "bytes_binary_order_v1",
+        "3": "utf8_binary_order_v1",
+        "4": "u64_order_v1",
+        "5": "i64_order_v1",
+        "6": "f64_finite_order_v1",
+        "7": "timestamp_ms_order_v1",
+        "8": "bool_order_v1"
+      },
+      "canonical_route_order_definition": {
+        "encoding": "one CanonicalConfigValueV1 map",
+        "required_keys": [
+          "default_ties",
+          "directories_first",
+          "multi_value_selector",
+          "name_collation",
+          "null_missing_policy",
+          "route_kind",
+          "score_semantics",
+          "semantic_fingerprints",
+          "sort"
+        ],
+        "fingerprint_domain": "H('aeordb.position-order.v1\\0' || complete CanonicalRouteOrderDefinitionV1)",
+        "excluded_request_fields": ["root_hash", "limit", "page", "offset", "after", "before", "include_total", "physical_plan"]
+      },
+      "body_formula": "canonical unpadded base64url of 24 + 4H + T decoded bytes",
+      "hard_cap": 1048576,
+      "maximum_encoded_length": 1398102,
+      "checksum": "decoded CRC-32/ISO-HDLC; route context separately recomputes order/root/tie semantics",
+      "canonical_order": "tuple component order is the complete route order; null/missing use zero tag/payload; present payloads use the permanent comparator registry",
+      "reserve_zero_ranges": [
+        { "start": 15, "length": 1 },
+        { "component_offset": 3, "length": 1 }
+      ],
+      "malformed_behavior": "return INVALID_POSITION_CURSOR before storage planning for malformed/padded/noncanonical base64url, wrong magic/version/algorithm/width/route/length/count/flags, zero identities, bad tuple/component framing, unknown tags/states, noncanonical payloads, trailing bytes, oversize values, or CRC failure",
+      "trailing_behavior": "no base64 padding and no decoded or encoded trailing bytes",
+      "bounded_decode": "reject encoded length above 1398102 before decode; reject decoded length above 1048576 before tuple allocation; scan at most 32 checked components",
+      "producer_owner": "Child 06 route-order compiler and pagination encoder through Child 01 codec",
+      "consumer_owners": [
+        "Child 01 fixture/reader",
+        "Child 06 root-aware directory/query/search/aggregate pagination",
+        "HTTP/SDK/UI/bot clients as opaque tokens"
+      ],
+      "capability": "LogicalPositionTokenV1 bit 14",
+      "typed_hash_roles": [
+        { "field": "order_fingerprint", "role": "fingerprint" },
+        { "field": "selected_namespace_root", "role": "graph-edge-authority" },
+        { "field": "file_key_tie", "role": "identity" },
+        { "field": "record_revision_tie", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "apos-blake3-256-directory-listing-valid",
+        "apos-blake3-256-query-valid",
+        "apos-blake3-256-global-search-valid",
+        "apos-blake3-256-aggregate-groups-valid",
+        "apos-blake3-256-maximum-decoded-length-valid"
+      ],
+      "fixture_ids_64": [
+        "apos-sha512-directory-listing-valid",
+        "apos-sha512-query-valid",
+        "apos-sha512-global-search-valid",
+        "apos-sha512-aggregate-groups-valid",
+        "apos-sha512-maximum-decoded-length-valid"
+      ]
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 14,
-    "fixture_count": 250,
+    "fixture_family_count": 15,
+    "fixture_count": 260,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, and IndexTaskCheckpointV1",
-    "remaining_p0b_2_scope": "GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, and LogicalPositionTokenV1",
+    "remaining_p0b_2_scope": "GcArtifact, controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }
