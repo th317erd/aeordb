@@ -416,3 +416,13 @@
 - **Malformed proof:** tests reject padded/invalid/oversized base64url, wrong magic/version/route/algorithm/length/count, nonzero flags/component reserves, CRC damage, each zero identity, invalid UTF-8, unknown comparators/states, truncated payloads, nonfinite/negative-zero f64, invalid booleans, and route/root/order/tie context mismatches.
 - **Green proof:** all ten independent both-width APOS fixtures, including the exact 1,048,576-byte decoded boundary, match their oracle summaries. The complete production v4 target passes 39 tests and locked library `cargo check` passes. Strict root Clippy retains the historical 72-error baseline and reports no diagnostic in `position.rs` or its fixture tests.
 - **Boundary:** this is a passive read/validation contract. No APOS writer, route-order compiler, query planner, pagination route, authorization path, migration, or database byte changed.
+
+## P1a-16 Common GC Envelope, Controls, and Physical Incarnations
+
+- **Entry:** `1c79e71`; branch matched `origin/development`, with unrelated user paths excluded.
+- **Territory:** every GC lifecycle, mark, Void, sweep, audit, and repair artifact shares the AGCA envelope and immutable key domain. Six A/B controls select closure-valid immutable roots, while physical-incarnation identities are consumed by inventory, mark, sweep, retirement, repair, and migration.
+- **Red proof:** the focused fixture target failed to compile on the absent `engine::v4::gc` module before production behavior existed.
+- **Implementation:** added the complete 34-kind permanent registry; one bounded 64 MiB AGCA framing/CRC reader; six exact active-control bodies and keys; deterministic closure-aware A/B selection with equal-sequence ambiguity rejection; immutable artifact-key derivation; and borrowed selected-width physical-incarnation decoding for legacy v0 and sequenced v1 entities.
+- **Malformed proof:** repaired-CRC tests reject envelope/version/kind/length/reserve/identity/body/generation damage, zero control identities/sequences/targets, mismatched A/B pairs, ambiguous equal sequences, wrong physical widths, zero identities/offsets/lengths, version/sequence disagreement, unknown entry types, reserve bytes, and WAL extent overflow.
+- **Green proof:** all 24 independent both-width GC control fixtures match their oracle summaries and canonical keys. The complete production v4 target passes 42 tests, locked library `cargo check` passes, and strict root Clippy retains the historical 72-error baseline with no diagnostic in `gc.rs` or its fixture tests.
+- **Boundary:** no GC subfamily writer/reader, startup control selection, mark/sweep worker, Void allocator, repair path, migration, or database byte changed.

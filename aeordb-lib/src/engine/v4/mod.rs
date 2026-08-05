@@ -10,6 +10,7 @@ pub mod database_header;
 pub mod dependency;
 pub mod entity;
 pub mod field_definition;
+pub mod gc;
 pub mod hash;
 pub mod index_artifact;
 pub mod index_nvt;

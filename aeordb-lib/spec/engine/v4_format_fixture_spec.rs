@@ -6,6 +6,10 @@ use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_r
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
+use aeordb::engine::v4::gc::{
+  GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_active_control, decode_gc_artifact_envelope, decode_physical_incarnation,
+  select_gc_active_control,
+};
 use aeordb::engine::v4::index_artifact::{
   IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
 };
@@ -1287,6 +1291,143 @@ fn logical_position_context_revalidates_route_root_order_and_resolved_ties() {
   changed_revision[0] ^= 1;
   let revision_mismatch = PositionContextV1 { record_revision_tie: &changed_revision, ..context };
   assert_eq!(validate_position_context(&position, revision_mismatch).unwrap_err().code(), "invalid_position_cursor");
+}
+
+#[test]
+fn every_gc_active_control_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> =
+    manifest().fixtures.into_iter().filter(|row| row.format_id == "gc-artifact-v1" && row.expected.starts_with("gc:control:")).collect();
+  assert_eq!(rows.len(), 24);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let control = decode_gc_active_control(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let observed = format!(
+      "gc:control:{}:slot-{}:sequence={}:generation={}",
+      control.kind.name(),
+      if control.slot == 0 { 'a' } else { 'b' },
+      control.sequence,
+      control.generation
+    );
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(control.key), row.canonical_key.unwrap(), "fixture {}", row.id);
+    assert_eq!(control.kind.control_target().unwrap().is_control(), false);
+  }
+}
+
+#[test]
+fn gc_envelope_controls_and_pair_selection_fail_closed() {
+  let root = fixture_root();
+  let a = fs::read(root.join("gc-artifact-v1/agca-blake3-256-quarantine-control-a.bin")).unwrap();
+  let b = fs::read(root.join("gc-artifact-v1/agca-blake3-256-quarantine-control-b.bin")).unwrap();
+  let decoded_a = decode_gc_active_control(&a, HashAlgorithm::Blake3_256).unwrap();
+  let decoded_b = decode_gc_active_control(&b, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(select_gc_active_control(&decoded_a, true, &decoded_b, true).unwrap().unwrap().slot, 1);
+  assert_eq!(select_gc_active_control(&decoded_a, true, &decoded_b, false).unwrap().unwrap().slot, 0);
+  assert!(select_gc_active_control(&decoded_a, false, &decoded_b, false).unwrap().is_none());
+
+  for offset in [0usize, 4, 6, 8, 10, 12, 16, 18, 20] {
+    let mut changed = a.clone();
+    changed[offset] ^= 0x80;
+    repair_trailing_crc(&mut changed);
+    assert!(decode_gc_active_control(&changed, HashAlgorithm::Blake3_256).is_err(), "offset {offset} accepted");
+  }
+
+  let mut zero_generation = a.clone();
+  zero_generation[24..32].fill(0);
+  repair_trailing_crc(&mut zero_generation);
+  assert_eq!(
+    decode_gc_active_control(&zero_generation, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let body = 32 + 17;
+  let mut zero_sequence = a.clone();
+  zero_sequence[body..body + 8].fill(0);
+  repair_trailing_crc(&mut zero_sequence);
+  assert_eq!(
+    decode_gc_active_control(&zero_sequence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut zero_target = a.clone();
+  zero_target[body + 8..body + 40].fill(0);
+  repair_trailing_crc(&mut zero_target);
+  assert_eq!(
+    decode_gc_active_control(&zero_target, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut bad_crc = a.clone();
+  *bad_crc.last_mut().unwrap() ^= 1;
+  assert_eq!(decode_gc_artifact_envelope(&bad_crc).unwrap_err().class(), MalformedInputClass::ChecksumOrIntegrityMismatch);
+
+  assert_eq!(GcArtifactKindV1::ALL.len(), 34);
+  for kind in GcArtifactKindV1::ALL {
+    assert_eq!(GcArtifactKindV1::from_u16(kind as u16), Some(kind));
+  }
+
+  let mut equal_b = b;
+  equal_b[body..body + 8].copy_from_slice(&1u64.to_le_bytes());
+  repair_trailing_crc(&mut equal_b);
+  let equal_b = decode_gc_active_control(&equal_b, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(select_gc_active_control(&decoded_a, true, &equal_b, true).unwrap().unwrap().slot, 0);
+
+  let mut ambiguous_b_bytes = fs::read(root.join("gc-artifact-v1/agca-blake3-256-quarantine-control-b.bin")).unwrap();
+  ambiguous_b_bytes[body..body + 8].copy_from_slice(&1u64.to_le_bytes());
+  ambiguous_b_bytes[body + 8] ^= 1;
+  repair_trailing_crc(&mut ambiguous_b_bytes);
+  let ambiguous_b = decode_gc_active_control(&ambiguous_b_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    select_gc_active_control(&decoded_a, true, &ambiguous_b, true).unwrap_err().class(),
+    MalformedInputClass::AmbiguousEqualSequenceSelector
+  );
+
+  let other_b_bytes = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-run-control-b.bin")).unwrap();
+  let other_b = decode_gc_active_control(&other_b_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    select_gc_active_control(&decoded_a, true, &other_b, true).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn physical_incarnation_reader_closes_v0_v1_and_range_invariants() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let h = algorithm.hash_length();
+    for version in [0u8, 1] {
+      let mut bytes = vec![0u8; 24 + 2 * h];
+      bytes[..h].fill(0x11);
+      bytes[h..2 * h].fill(0x22);
+      bytes[2 * h..2 * h + 8].copy_from_slice(&2_048u64.to_le_bytes());
+      bytes[2 * h + 8..2 * h + 16].copy_from_slice(&(if version == 0 { 0 } else { 77u64 }).to_le_bytes());
+      bytes[2 * h + 16..2 * h + 20].copy_from_slice(&4_096u32.to_le_bytes());
+      bytes[2 * h + 20] = 2;
+      bytes[2 * h + 21] = version;
+      let incarnation: PhysicalIncarnationV1<'_> = decode_physical_incarnation(&bytes, algorithm).unwrap();
+      assert_eq!(incarnation.entity_version, version);
+      assert_eq!(incarnation.write_sequence, if version == 0 { 0 } else { 77 });
+
+      for range in [0..h, h..2 * h, 2 * h..2 * h + 8, 2 * h + 16..2 * h + 20] {
+        let mut changed = bytes.clone();
+        changed[range].fill(0);
+        assert!(decode_physical_incarnation(&changed, algorithm).is_err());
+      }
+
+      let mut bad_reserved = bytes.clone();
+      bad_reserved[2 * h + 22] = 1;
+      assert_eq!(decode_physical_incarnation(&bad_reserved, algorithm).unwrap_err().class(), MalformedInputClass::NonzeroReservedOrPadding);
+
+      let mut overflow = bytes;
+      overflow[2 * h..2 * h + 8].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+      overflow[2 * h + 16..2 * h + 20].copy_from_slice(&4u32.to_le_bytes());
+      assert_eq!(
+        decode_physical_incarnation(&overflow, algorithm).unwrap_err().class(),
+        MalformedInputClass::LengthCountOrArithmeticOverflow
+      );
+    }
+  }
 }
 
 #[test]
