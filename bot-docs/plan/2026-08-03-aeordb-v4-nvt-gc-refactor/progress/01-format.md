@@ -297,3 +297,12 @@
 - **Implementation:** added a zero-copy recursive validator for all ten permanent canonical tags with separate frozen config, source-value, and audit-value bounds. It validates every frame before descent, caps value/scalar/key/member/depth amplification, preserves array order, requires strictly increasing UTF-8 map keys, rejects numeric aliases/nonfinite/negative-zero values, and consumes every byte exactly.
 - **Green proof:** all six both-width independent canonical-value fixtures match their oracle summaries. Focused malformed tests reject small-u64 aliases, negative zero, unordered map keys, and one byte beyond the hard cap. The complete v4 target passed 12 tests and locked library `cargo check` passed.
 - **Boundary:** only validation/read behavior exists; no canonical config writer, semantic compiler, configuration resolver, or active v4 path changed.
+
+## P1a-4 Invocation Policy and Dependency Table Readers
+
+- **Entry:** `aa97688`; unrelated user paths remained excluded.
+- **Red proof:** the fixture target failed on the absent `engine::v4::dependency` module before either reader existed.
+- **Implementation:** added the fixed 128-byte InvocationPolicyV1 reader with native/pure-WASM/legacy-WASM context checks and finite structural/resource limits. Added a 256 KiB, 1,024-record DependencyTableV1 reader that validates table and record framing before allocation, borrows IDs/versions, enforces canonical SemVer and absolute dependency IDs, checks strict tuple order, and closes native/WASM role, ABI, executor, fingerprint, artifact, and flags semantics.
+- **Malformed proof:** focused cases reject native policies carrying WASM limits, unaligned wasm32 memory, dependency count amplification, and trailing table bytes with distinct frozen error classes.
+- **Green proof:** all twelve both-width invocation/dependency fixtures match their independent summaries; the complete v4 target passed 14 tests and locked library `cargo check` passed.
+- **Boundary:** execution remains disabled; no native function, WASM module, parser, mapper, or writer is invoked by these readers.

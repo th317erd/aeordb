@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_region, probe_header_version, read_header_region};
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
+use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::HashAlgorithm;
@@ -104,6 +105,49 @@ fn every_canonical_config_fixture_matches_the_independent_oracle() {
     let summary = validate_canonical_value(&bytes, CanonicalValueBounds::CONFIG).unwrap();
     assert_eq!(format!("config:{}:{}={}", summary.tag_name, summary.detail_name, summary.detail), row.expected, "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_invocation_and_dependency_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| row.format_id == "invocation-policy-v1" || row.format_id == "dependency-table-v1")
+    .collect();
+  assert_eq!(rows.len(), 12);
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let observed = if row.format_id == "invocation-policy-v1" {
+      format!("policy:{}", decode_invocation_policy(&bytes).unwrap().name())
+    } else {
+      format!("dependencies:records={}", decode_dependency_table(&bytes).unwrap().records.len())
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn invocation_and_dependency_readers_reject_context_and_count_corruption() {
+  let root = fixture_root();
+  let native = fs::read(root.join("invocation-policy-v1/aivp-blake3-256-native-valid.bin")).unwrap();
+  let mut native_request = native;
+  native_request[24..32].copy_from_slice(&1u64.to_le_bytes());
+  assert_eq!(decode_invocation_policy(&native_request).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let wasm = fs::read(root.join("invocation-policy-v1/aivp-blake3-256-pure-wasm-valid.bin")).unwrap();
+  let mut unaligned_memory = wasm;
+  unaligned_memory[40..48].copy_from_slice(&65_537u64.to_le_bytes());
+  assert_eq!(decode_invocation_policy(&unaligned_memory).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let empty = fs::read(root.join("dependency-table-v1/adpt-blake3-256-empty-valid.bin")).unwrap();
+  let mut amplified = empty.clone();
+  amplified[16..20].copy_from_slice(&1_025u32.to_le_bytes());
+  assert_eq!(decode_dependency_table(&amplified).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+
+  let mut trailing = empty;
+  trailing.push(0);
+  assert_eq!(decode_dependency_table(&trailing).unwrap_err().class(), MalformedInputClass::TruncationOrTrailingBytes);
 }
 
 #[test]

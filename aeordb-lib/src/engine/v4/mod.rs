@@ -7,6 +7,7 @@
 pub mod contract_generated;
 pub mod config_value;
 pub mod database_header;
+pub mod dependency;
 pub mod entity;
 pub mod hash;
 pub mod namespace;
