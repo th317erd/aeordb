@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-refactor",
+  "landing_unit": "P2a-1",
+  "source_commit": "c2f373e",
+  "scope": "current v3 production durability producers and acknowledgement consumers before coordinator activation",
+  "commit_classes": {
+    "hard_authority": [
+      "user-visible file, delete, rename, merge, batch, and blob commit",
+      "HEAD, snapshot, fork, auth, control, and configuration publication",
+      "migration, allocator, quarantine, Void, repair, and shutdown authority"
+    ],
+    "recoverable_soft_state": [
+      "staged chunk/dependency presence when explicitly reported as staged",
+      "derived-index mutation and acceleration journals",
+      "metrics and disposable task progress"
+    ],
+    "disposable": [
+      "clean caches and NVT hints",
+      "transient query and prefetch buffers",
+      "recomputable diagnostics"
+    ]
+  },
+  "current_ledgers": [
+    {
+      "name": "dependency append and KV registration",
+      "entry_points": [
+        "StorageEngine::store_entry_internal",
+        "StorageEngine::store_entry_typed",
+        "StorageEngine::flush_batch"
+      ],
+      "observed_order": [
+        "append or overwrite complete v3 entry bytes",
+        "insert in the in-memory KV write/hot buffers",
+        "publish the current read snapshot",
+        "return without an operation-local barrier"
+      ],
+      "classification": "recoverable dependency only until a later hard authority publication proves it",
+      "gap": "the API surface does not encode staged versus committed durability and expansion failure may be logged after the append"
+    },
+    {
+      "name": "v3 A/B header authority",
+      "entry_points": [
+        "AppendWriter::update_header",
+        "file_header::write_header_to_inactive_slot",
+        "StorageEngine::update_head",
+        "StorageEngine::flush_batch_and_update_head"
+      ],
+      "observed_order": [
+        "sync prior database bytes",
+        "write the inactive v3 header slot with advanced sequence",
+        "sync the database file",
+        "update in-memory active-slot state"
+      ],
+      "classification": "hard authority",
+      "gap": "no mandatory selected-slot read-back and no shared frontier/waiter owner"
+    },
+    {
+      "name": "transaction completion and hot-tail publication",
+      "entry_points": [
+        "StorageEngine::end_transaction",
+        "StorageEngine::force_hot_tail_flush",
+        "StorageEngine::try_flush_hot_buffer"
+      ],
+      "observed_order": [
+        "sync WAL dependencies",
+        "flush complete KV/void hot-tail payload",
+        "write updated v3 A/B header when outside a nested transaction",
+        "publish the last hot-tail boundary"
+      ],
+      "classification": "hard authority when it completes an acknowledged transaction; background durability otherwise",
+      "gap": "timer, explicit, transaction, and shutdown paths duplicate the ordering and failure plumbing"
+    },
+    {
+      "name": "KV page flush, resize, and online expansion",
+      "entry_points": [
+        "DiskKVStore::flush",
+        "DiskKVStore::force_flush_hot_buffer",
+        "DiskKVStore::finalize_expansion",
+        "StorageEngine::expand_kv_block_online"
+      ],
+      "observed_order": [
+        "rewrite mutable KV pages or relocated WAL regions",
+        "sync data and hot-tail state in multiple helper-local barriers",
+        "publish resized v3 header through an inactive slot",
+        "publish replacement in-memory snapshot"
+      ],
+      "classification": "mixed hard authority and recoverable acceleration state",
+      "gap": "barrier ownership is inside DiskKVStore and expansion helpers; Drop can log flush failure without propagating it"
+    },
+    {
+      "name": "in-place deletion, Void, repair, and shutdown",
+      "entry_points": [
+        "StorageEngine::write_deletion_at",
+        "StorageEngine::write_void_at",
+        "header_repair",
+        "StorageEngine::shutdown",
+        "DiskKVStore::drop"
+      ],
+      "observed_order": [
+        "perform operation-specific direct writes",
+        "issue helper-local sync or aggregate failures during shutdown",
+        "log selected Drop-time failures"
+      ],
+      "classification": "hard authority except explicitly rebuildable state",
+      "gap": "direct writer methods and destructor work bypass one failure classifier, latch transition, and hard frontier"
+    }
+  ],
+  "raw_barrier_files": [
+    "aeordb-lib/src/engine/append_writer.rs",
+    "aeordb-lib/src/engine/directory_ops.rs",
+    "aeordb-lib/src/engine/disk_kv_store.rs",
+    "aeordb-lib/src/engine/emergency_spill.rs",
+    "aeordb-lib/src/engine/file_header.rs",
+    "aeordb-lib/src/engine/header_repair.rs",
+    "aeordb-lib/src/engine/integrity_scanner.rs",
+    "aeordb-lib/src/engine/kv_expand.rs",
+    "aeordb-lib/src/engine/native_durability.rs",
+    "aeordb-lib/src/engine/storage_engine.rs",
+    "aeordb-lib/src/engine/sync_engine.rs",
+    "aeordb-lib/src/server/cluster_routes.rs"
+  ],
+  "raw_namespace_mutation_files": [
+    "aeordb-lib/src/engine/native_durability.rs",
+    "aeordb-lib/src/server/engine_routes.rs",
+    "aeordb-lib/src/server/version_routes.rs"
+  ],
+  "acknowledgement_consumers": [
+    "HTTP and embedded file/directory/symlink CRUD",
+    "blob check, staged chunk PUT, and blob commit",
+    "buffered batch and merge helpers",
+    "snapshot, fork, backup/import, restore, and sync",
+    "auth, permissions, system configuration, plugin, and task stores",
+    "GC, repair, integrity, migration, and shutdown tooling"
+  ],
+  "p2a_1_boundary": "The coordinator shell is compiled and tested but no current writer invokes it. P2a-2 must migrate barriers and hard waiters in narrow waves before architecture checks ban these bypasses."
+}

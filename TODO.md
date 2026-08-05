@@ -86,7 +86,16 @@
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
     - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
     - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
-  - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
+  - [ ] P2a: converge every acknowledged v3 write behind one truthful durability coordinator.
+    - [x] P2a-1: freeze the current durability-operation inventory and land the coordinator/ledger shell without changing writers.
+      - [x] Refresh raw write/barrier/replace/header/shutdown producer and consumer territory from current source.
+      - [x] Add the red `v3_contract_facade_spec` for commit classes, operation IDs, ordering, and hard-frontier waiter behavior.
+      - [x] Implement the non-activating coordinator shell and platform-adapter contract.
+      - [x] Run focused and adjacent regressions and record evidence; commit/push is the landing action.
+    - [ ] P2a-2: implement grouped hard-frontier commit and the complete platform failure matrix.
+    - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
+  - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
+  - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
   - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.

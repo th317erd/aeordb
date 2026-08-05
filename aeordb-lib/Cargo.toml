@@ -762,6 +762,10 @@ path = "spec/engine/v4_admission_spec.rs"
 name = "v4_platform_probe_spec"
 path = "spec/engine/v4_platform_probe_spec.rs"
 
+[[test]]
+name = "v3_contract_facade_spec"
+path = "spec/engine/v3_contract_facade_spec.rs"
+
 
 [lints]
 workspace = true
