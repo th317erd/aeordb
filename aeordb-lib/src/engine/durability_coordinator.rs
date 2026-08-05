@@ -6,10 +6,13 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
+use std::fs::File;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::engine::native_durability::{NativeDurabilityError, NativeDurabilityErrorClass};
+use crate::engine::native_durability::{
+  NativeDurabilityError, NativeDurabilityErrorClass, NativeDurabilityOperation, sync_file_all_native, sync_file_data_native,
+};
 use crate::engine::v4::contract_generated::{durability_operation_v1, os_error_class_v1, retry_class_v1};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +20,12 @@ pub enum CommitClass {
   HardAuthority,
   RecoverableSoftState,
   Disposable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeFileBarrierKind {
+  Data,
+  Full,
 }
 
 impl CommitClass {
@@ -682,6 +691,26 @@ impl DurabilityCoordinator {
     self.select_ready_hard_group_at(Instant::now(), force)
   }
 
+  pub fn execute_recoverable_file_barrier(
+    &self,
+    file: &File,
+    barrier_kind: NativeFileBarrierKind,
+    estimated_bytes: u64,
+  ) -> Result<(), DurabilityCoordinatorError> {
+    let plan = DurabilityCommitPlan::new(
+      CommitClass::RecoverableSoftState,
+      vec![DurabilityOperation::DependencyAppend, DurabilityOperation::DataBarrier],
+    )?;
+    let ticket = self.admit_sized(plan, estimated_bytes)?;
+    let mut executor = NativeFileBarrierExecutor { file, barrier_kind };
+    self.execute_group(&[ticket], &mut executor)?;
+    match self.take_waiter_state(ticket)? {
+      DurabilityWaiterState::Succeeded(_) => Ok(()),
+      DurabilityWaiterState::Failed(failure) => Err(DurabilityCoordinatorError::ExecutorFailure(failure)),
+      DurabilityWaiterState::Pending => Err(DurabilityCoordinatorError::StateUnavailable),
+    }
+  }
+
   pub fn execute<E: DurabilityExecutor>(&self, ticket: DurabilityTicket, executor: &mut E) -> Result<(), DurabilityCoordinatorError> {
     let mut adapter = SingleExecutorAdapter { executor };
     self.execute_group(&[ticket], &mut adapter)
@@ -925,6 +954,33 @@ impl DurabilityCoordinator {
 
 struct SingleExecutorAdapter<'a, E> {
   executor: &'a mut E,
+}
+
+struct NativeFileBarrierExecutor<'a> {
+  file: &'a File,
+  barrier_kind: NativeFileBarrierKind,
+}
+
+impl DurabilityGroupExecutor for NativeFileBarrierExecutor<'_> {
+  type Error = NativeDurabilityError;
+
+  fn execute_group(&mut self, _sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
+    match operation {
+      DurabilityOperation::DependencyAppend => Ok(()),
+      DurabilityOperation::DataBarrier => match self.barrier_kind {
+        NativeFileBarrierKind::Data => sync_file_data_native(self.file),
+        NativeFileBarrierKind::Full => sync_file_all_native(self.file),
+      },
+      _ => Err(NativeDurabilityError::invalid(
+        NativeDurabilityOperation::FileBarrier,
+        format!("unsupported operation in recoverable file-barrier plan: {operation:?}"),
+      )),
+    }
+  }
+
+  fn classify_error(&self, _operation: DurabilityOperation, error: &Self::Error, mutation_started: bool) -> DurabilityFailureDisposition {
+    classify_native_durability_error(error, mutation_started)
+  }
 }
 
 impl<E: DurabilityExecutor> DurabilityGroupExecutor for SingleExecutorAdapter<'_, E> {

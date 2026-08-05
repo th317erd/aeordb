@@ -96,6 +96,8 @@
       - [x] Add red tests for compatible-group execution, one barrier per group, mixed-plan refusal, and all-waiter failure.
       - [x] Freeze typed OS error/retry dispositions and bounded retry behavior, including uncertain-completion no-replay.
       - [x] Route v3 A/B header publication and read-back through the coordinator/platform adapter.
+      - [x] Give initial-header publication, AppendWriter, DiskKVStore, and KV expansion one shared database coordinator sequence space.
+      - [x] Remove the competing database-header publication from DiskKVStore expansion finalization.
       - [ ] Converge transaction, timer, KV flush/resize, direct in-place writes, and shutdown barriers without changing v3 bytes.
       - [ ] Add architecture gates that prohibit raw durability operations outside the coordinator/platform adapter allowlist.
     - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.

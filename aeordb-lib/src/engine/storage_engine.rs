@@ -485,6 +485,11 @@ impl StorageEngine {
     self.durability_failure.lock().ok().and_then(|failure| failure.clone())
   }
 
+  pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    writer.durability_snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))
+  }
+
   pub fn emergency_spill_report(&self) -> Option<EmergencySpillReport> {
     self.emergency_spill.lock().ok().and_then(|spill| spill.clone())
   }
@@ -960,6 +965,7 @@ impl StorageEngine {
 
     let mut writer = AppendWriter::create(Path::new(path))?;
     let hash_algo = writer.file_header().hash_algo;
+    let durability_coordinator = writer.durability_coordinator();
 
     // Open a second file handle for the KV store (same .aeordb file)
     let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -971,7 +977,8 @@ impl StorageEngine {
     // hot_tail_offset = after header + KV block
     let hot_tail_offset = kv_block_offset + kv_block_length;
 
-    let kv_store = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
+    let kv_store =
+      DiskKVStore::create_with_coordinator(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0, Arc::clone(&durability_coordinator))?;
 
     // Set the append writer's offset past the KV block so WAL entries
     // don't overwrite the KV pages.
@@ -983,7 +990,9 @@ impl StorageEngine {
       let empty = crate::engine::hot_tail::HotTailPayload::default();
       let end = crate::engine::hot_tail::write_hot_tail(&mut f, hot_tail_offset, &empty, hash_length)?;
       f.set_len(end)?;
-      f.sync_data()?;
+      durability_coordinator
+        .execute_recoverable_file_barrier(&f, crate::engine::durability_coordinator::NativeFileBarrierKind::Data, end - hot_tail_offset)
+        .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
     }
 
     // Update file header with KV layout info
@@ -1104,6 +1113,7 @@ impl StorageEngine {
     let kv_block_stage = file_header.kv_block_stage as usize;
     let hot_tail_offset = file_header.hot_tail_offset;
     let kv_block_valid = kv_block_offset > 0 && hot_tail_offset > kv_block_offset;
+    let durability_coordinator = writer.durability_coordinator();
 
     tracing::debug!(
       kv_block_offset,
@@ -1151,7 +1161,7 @@ impl StorageEngine {
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-      let kv = DiskKVStore::open(
+      let kv = DiskKVStore::open_with_coordinator(
         kv_file,
         hash_algo,
         kv_block_offset,
@@ -1160,6 +1170,7 @@ impl StorageEngine {
         hot_entries,
         hot_voids.clone(),
         file_header.kv_block_version,
+        Arc::clone(&durability_coordinator),
       )?;
       // If any bucket page failed CRC on open, the KV index is unreliable
       // for the buckets involved — trigger dirty startup below so the WAL
@@ -1183,7 +1194,8 @@ impl StorageEngine {
       let hot_tail_offset = kv_block_offset + kv_block_length;
 
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-      let mut kv = DiskKVStore::create(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0)?;
+      let mut kv =
+        DiskKVStore::create_with_coordinator(kv_file, hash_algo, kv_block_offset, hot_tail_offset, 0, Arc::clone(&durability_coordinator))?;
 
       // First pass: rebuild KV store from entry headers, collecting deletion records.
       // Entry offsets are not chronology once GC starts reusing voids, so
@@ -3061,10 +3073,10 @@ impl StorageEngine {
     );
 
     // Read layout info from the file header
-    let (kv_block_offset, file_path, existing_stage) = {
+    let (kv_block_offset, file_path, existing_stage, durability_coordinator) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let header = writer.file_header();
-      (header.kv_block_offset, writer.file_path().to_path_buf(), header.kv_block_stage as usize)
+      (header.kv_block_offset, writer.file_path().to_path_buf(), header.kv_block_stage as usize, writer.durability_coordinator())
     };
 
     let hash_length = hash_algo.hash_length();
@@ -3115,7 +3127,8 @@ impl StorageEngine {
     );
 
     let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
-    let mut new_kv = DiskKVStore::create(kv_file, hash_algo, kv_offset, hot_offset, rebuild_stage)?;
+    let mut new_kv =
+      DiskKVStore::create_with_coordinator(kv_file, hash_algo, kv_offset, hot_offset, rebuild_stage, durability_coordinator)?;
 
     // Insert all entries with auto-flush disabled. We want a single flush
     // at the end so that page writes don't clobber each other across

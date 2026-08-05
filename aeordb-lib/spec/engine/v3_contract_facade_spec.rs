@@ -1,9 +1,10 @@
 use aeordb::engine::durability_coordinator::{
   CommitClass, DurabilityCommitPlan, DurabilityCoordinator, DurabilityExecutor, DurabilityFailureDisposition, DurabilityGroupExecutor,
   DEFAULT_GROUP_COMMIT_MAX_BYTES, DEFAULT_GROUP_COMMIT_MAX_DELAY, DurabilityGroupPolicy, DurabilityOperation, DurabilityWaiterState,
-  OsErrorClass, RetryClass, classify_io_error, classify_native_durability_error,
+  NativeFileBarrierKind, OsErrorClass, RetryClass, classify_io_error, classify_native_durability_error,
 };
 use aeordb::engine::native_durability::{platform_file_identity, preallocate_file};
+use aeordb::engine::storage_engine::StorageEngine;
 
 #[derive(Default)]
 struct RecordingExecutor {
@@ -478,6 +479,46 @@ fn oversized_hard_ticket_is_a_singleton_instead_of_an_accidental_write_limit() {
   assert_eq!(coordinator.select_ready_hard_group(false).unwrap(), vec![oversized]);
   coordinator.execute(oversized, &mut RecordingExecutor::default()).unwrap();
   assert_eq!(coordinator.select_ready_hard_group(false).unwrap(), vec![next]);
+}
+
+#[test]
+fn disk_kv_finalization_cannot_publish_database_header_authority() {
+  let source = include_str!("../../src/engine/disk_kv_store.rs");
+  assert!(!source.contains("write_header_to_inactive_slot"));
+  assert!(!source.contains("read_active_header"));
+}
+
+#[test]
+fn recoverable_file_barriers_use_the_ledger_without_moving_hard_authority() {
+  use std::io::Write;
+
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("soft-barrier.bin");
+  let mut file = std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
+  file.write_all(b"recoverable soft state").unwrap();
+  let coordinator = DurabilityCoordinator::new();
+
+  coordinator.execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Data, 22).unwrap();
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.hard_frontier, 0);
+  assert_eq!(snapshot.proven, 0);
+  assert_eq!(snapshot.ledger.len(), 2);
+  assert_eq!(snapshot.ledger[0].operation, DurabilityOperation::DependencyAppend);
+  assert_eq!(snapshot.ledger[1].operation, DurabilityOperation::DataBarrier);
+  assert!(snapshot.ledger.iter().all(|entry| entry.succeeded));
+  assert_eq!(std::fs::read(path).unwrap(), b"recoverable soft state");
+}
+
+#[test]
+fn storage_engine_uses_one_sequence_space_for_kv_dependencies_and_header_authority() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("one-durability-sequence.aeordb");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+
+  let snapshot = engine.durability_snapshot().unwrap();
+  assert!(snapshot.hard_frontier >= 3, "KV and header work did not share one sequence space: {snapshot:?}");
+  assert!(snapshot.ledger.iter().any(|entry| entry.operation == DurabilityOperation::DataBarrier));
+  assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
@@ -37,6 +38,7 @@ pub struct DiskKVStore {
   /// File handle for the main .aeordb database file.
   /// KV pages are at kv_block_offset; hot tail at hot_tail_offset.
   db_file: File,
+  durability_coordinator: Arc<DurabilityCoordinator>,
   /// Offset of the KV block within the database file.
   kv_block_offset: u64,
   /// Size of the KV block in bytes (pages must fit within this).
@@ -75,6 +77,13 @@ pub struct DiskKVStore {
 }
 
 impl DiskKVStore {
+  fn sync_data_barrier(&self, estimated_bytes: u64) -> EngineResult<()> {
+    self
+      .durability_coordinator
+      .execute_recoverable_file_barrier(&self.db_file, NativeFileBarrierKind::Data, estimated_bytes)
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))
+  }
+
   fn page_arc(page_data: Vec<u8>) -> Arc<[u8]> {
     Arc::<[u8]>::from(page_data.into_boxed_slice())
   }
@@ -115,12 +124,17 @@ impl DiskKVStore {
   /// `db_file` is a clone of the main .aeordb file handle.
   /// `kv_block_offset` is where the KV block starts (typically 256, after file header).
   /// `hot_tail_offset` is where the hot tail lives (end of the file).
-  pub fn create(
+  pub fn create(db_file: File, hash_algo: HashAlgorithm, kv_block_offset: u64, hot_tail_offset: u64, stage: usize) -> EngineResult<Self> {
+    Self::create_with_coordinator(db_file, hash_algo, kv_block_offset, hot_tail_offset, stage, Arc::new(DurabilityCoordinator::new()))
+  }
+
+  pub fn create_with_coordinator(
     mut db_file: File,
     hash_algo: HashAlgorithm,
     kv_block_offset: u64,
     hot_tail_offset: u64,
     stage: usize,
+    durability_coordinator: Arc<DurabilityCoordinator>,
   ) -> EngineResult<Self> {
     let stage = stage.min(KV_STAGE_SIZES.len() - 1);
     let hash_length = hash_algo.hash_length();
@@ -148,7 +162,9 @@ impl DiskKVStore {
     for _ in 0..bucket_count {
       db_file.write_all(&empty_page)?;
     }
-    db_file.sync_data()?;
+    durability_coordinator
+      .execute_recoverable_file_barrier(&db_file, NativeFileBarrierKind::Data, (bucket_count * psize) as u64)
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
     let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
@@ -161,6 +177,7 @@ impl DiskKVStore {
       nvt,
       write_buffer: HashMap::new(),
       db_file,
+      durability_coordinator,
       kv_block_offset,
       kv_block_length,
       hot_tail_offset,
@@ -192,6 +209,30 @@ impl DiskKVStore {
   pub const CURRENT_KV_BLOCK_VERSION: u8 = 1;
 
   pub fn open(
+    db_file: File,
+    hash_algo: HashAlgorithm,
+    kv_block_offset: u64,
+    hot_tail_offset: u64,
+    stage: usize,
+    hot_entries: Vec<KVEntry>,
+    hot_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+    kv_block_version: u8,
+  ) -> EngineResult<Self> {
+    Self::open_with_coordinator(
+      db_file,
+      hash_algo,
+      kv_block_offset,
+      hot_tail_offset,
+      stage,
+      hot_entries,
+      hot_voids,
+      kv_block_version,
+      Arc::new(DurabilityCoordinator::new()),
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn open_with_coordinator(
     mut db_file: File,
     hash_algo: HashAlgorithm,
     kv_block_offset: u64,
@@ -200,6 +241,7 @@ impl DiskKVStore {
     hot_entries: Vec<KVEntry>,
     hot_voids: Vec<crate::engine::hot_tail::VoidRecord>,
     kv_block_version: u8,
+    durability_coordinator: Arc<DurabilityCoordinator>,
   ) -> EngineResult<Self> {
     if kv_block_version != Self::CURRENT_KV_BLOCK_VERSION {
       // The KV-pages-on-disk layout we know how to read is v1. A future
@@ -305,6 +347,7 @@ impl DiskKVStore {
       nvt,
       write_buffer,
       db_file,
+      durability_coordinator,
       kv_block_offset,
       kv_block_length,
       hot_tail_offset,
@@ -451,7 +494,7 @@ impl DiskKVStore {
       self.db_file.write_all(&serialized)?;
     }
 
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
     self.write_buffer.clear();
     Ok(())
   }
@@ -519,7 +562,7 @@ impl DiskKVStore {
       self.db_file.write_all(&serialized)?;
     }
 
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
     self.write_buffer.clear();
 
     tracing::debug!(overflow_count = overflow_entries.len(), modified_buckets = modified_buckets.len(), "flush: pages written");
@@ -554,7 +597,7 @@ impl DiskKVStore {
           let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
           let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
           self.db_file.set_len(end)?; // Truncate stale trailing data
-          self.db_file.sync_data()?;
+          self.sync_data_barrier(0)?;
         }
         self.publish_snapshot_incremental(&modified_buckets);
         self.publish_buffer_only();
@@ -580,7 +623,7 @@ impl DiskKVStore {
       let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)
         .map_err(|e| EngineError::IoError(std::io::Error::other(format!("Failed to write hot tail after page flush: {}", e))))?;
       self.db_file.set_len(end)?;
-      self.db_file.sync_data()?;
+      self.sync_data_barrier(0)?;
     }
 
     self.publish_snapshot_incremental(&modified_buckets);
@@ -630,7 +673,7 @@ impl DiskKVStore {
       self.db_file.seek(SeekFrom::Start(offset))?;
       self.db_file.write_all(&empty_page)?;
     }
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
 
     // Update internal state
     self.stage = new_stage;
@@ -965,7 +1008,7 @@ impl DiskKVStore {
       self.db_file.seek(SeekFrom::Start(slack_offset))?;
       self.db_file.write_all(&vec![0u8; slack_len])?;
     }
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
 
     // Update internal state
     self.kv_block_length = new_block_size;
@@ -1001,23 +1044,12 @@ impl DiskKVStore {
     let payload = hot_tail::HotTailPayload { writes: Vec::new(), voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?;
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
 
-    // Update file header. The bucket pages were already zero-filled and
-    // populated + fsync'd above; we now write a new header advertising
-    // the new layout to the INACTIVE slot. v3 A/B double-buffer leaves
-    // the old slot as a rollback point if the write crashes.
-    {
-      self.db_file.sync_all()?;
-      let (mut header, active_slot) = crate::engine::file_header::read_active_header(&mut self.db_file)?;
-      header.kv_block_length = new_block_size;
-      header.kv_block_stage = target_stage as u8;
-      header.resize_in_progress = false;
-      header.resize_target_stage = 0;
-      header.hot_tail_offset = new_hot_tail;
-      crate::engine::file_header::write_header_to_inactive_slot(&mut self.db_file, &mut header, active_slot)?;
-      self.db_file.sync_all()?;
-    }
+    // Header authority belongs to StorageEngine. It publishes the final v3
+    // A/B slot only after this method has made the relocated pages and hot
+    // tail durable; publishing here as well creates two competing writer
+    // views over one selector.
 
     // Publish new snapshot
     self.publish_full_snapshot_with_new_nvt();
@@ -1053,7 +1085,7 @@ impl DiskKVStore {
     let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?;
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
     Ok(())
   }
 
@@ -1076,7 +1108,7 @@ impl DiskKVStore {
     let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?; // Truncate stale trailing data
-    self.db_file.sync_data()?;
+    self.sync_data_barrier(0)?;
     self.hot_buffer.clear();
 
     Ok(())

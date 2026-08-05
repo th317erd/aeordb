@@ -36,9 +36,11 @@ use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::durability_coordinator::{DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot};
+use crate::engine::durability_coordinator::{
+  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot, NativeFileBarrierKind,
+};
 use crate::engine::file_header::{
-  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated, write_initial_header,
+  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated, write_initial_header_coordinated,
 };
 use crate::engine::hash_algorithm::HashAlgorithm;
 
@@ -59,22 +61,15 @@ impl AppendWriter {
     let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
 
     let mut file_header = FileHeader::new(HashAlgorithm::Blake3_256);
+    let durability_coordinator = Arc::new(DurabilityCoordinator::new());
     // v3: write slot A only (slot B left zeroed), data region starts after
     // both slots.
-    write_initial_header(&mut file, &mut file_header)?;
+    write_initial_header_coordinated(&mut file, &mut file_header, &durability_coordinator)?;
 
     let reader = File::open(path)?;
     let current_offset = HEADER_REGION_SIZE as u64;
 
-    Ok(AppendWriter {
-      file,
-      reader,
-      file_path: path.to_path_buf(),
-      file_header,
-      current_offset,
-      active_slot: 0,
-      durability_coordinator: Arc::new(DurabilityCoordinator::new()),
-    })
+    Ok(AppendWriter { file, reader, file_path: path.to_path_buf(), file_header, current_offset, active_slot: 0, durability_coordinator })
   }
 
   pub fn open(path: &Path) -> EngineResult<Self> {
@@ -236,7 +231,7 @@ impl AppendWriter {
   /// Calls sync_all after writing. For batch operations, use `write_entry_at_nosync`.
   pub fn write_entry_at(&mut self, offset: u64, entry_type: EntryType, key: &[u8], value: &[u8]) -> EngineResult<u32> {
     let total_length = self.write_entry_at_nosync(offset, entry_type, key, value)?;
-    self.file.sync_all()?;
+    self.sync_all()?;
     Ok(total_length)
   }
 
@@ -323,14 +318,18 @@ impl AppendWriter {
 
   /// Sync WAL data to disk. Uses sync_data() (skips metadata fsync).
   pub fn sync(&mut self) -> EngineResult<()> {
-    self.file.sync_data()?;
-    Ok(())
+    self
+      .durability_coordinator
+      .execute_recoverable_file_barrier(&self.file, NativeFileBarrierKind::Data, 0)
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))
   }
 
   /// Full sync including metadata. Use for shutdown.
   pub fn sync_all(&mut self) -> EngineResult<()> {
-    self.file.sync_all()?;
-    Ok(())
+    self
+      .durability_coordinator
+      .execute_recoverable_file_barrier(&self.file, NativeFileBarrierKind::Full, 0)
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))
   }
 
   /// Copy a region of the file from one offset to another.
@@ -398,8 +397,7 @@ impl AppendWriter {
   /// The void fills exactly `size` bytes starting at `offset`.
   pub fn write_void_at(&mut self, offset: u64, size: u32) -> EngineResult<()> {
     self.write_void_at_nosync(offset, size)?;
-    self.file.sync_all()?;
-    Ok(())
+    self.sync_all()
   }
 
   /// Write a void at a specific offset WITHOUT syncing.

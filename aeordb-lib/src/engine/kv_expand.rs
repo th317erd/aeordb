@@ -12,8 +12,10 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
+use crate::engine::errors::EngineError;
 use crate::engine::errors::EngineResult;
-use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot};
+use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot_coordinated};
 use crate::engine::kv_pages::page_size;
 use crate::engine::kv_stages::stage_params;
 
@@ -30,6 +32,7 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
 
   // Read the active header slot (v3 A/B layout).
   let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
+  let coordinator = DurabilityCoordinator::new();
   let (mut header, active_slot) = read_active_header(&mut file)?;
 
   let old_kv_offset = header.kv_block_offset;
@@ -89,7 +92,9 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
   // CRITICAL: fsync after WAL relocation, BEFORE the header rewrite.
   // Otherwise a reordered durability would expose new-layout header
   // with old-position WAL data.
-  file.sync_all()?;
+  coordinator
+    .execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Full, wal_size)
+    .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
   // Zero-fill the new KV block area (old KV area + expansion gap)
   let zero_buf = vec![0u8; 65536.min(new_block_size as usize)];
@@ -103,7 +108,9 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
 
   // Fsync the zero-fill before the header update so the rebuilt KV doesn't
   // see stale old-KV bytes in the "new" block.
-  file.sync_all()?;
+  coordinator
+    .execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Full, new_block_size)
+    .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
   // Update header — write to the inactive slot. The old slot remains the
   // rollback point if the write crashes mid-flight.
@@ -111,8 +118,7 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
   header.kv_block_stage = target_stage as u8;
   header.resize_target_stage = 0; // Clear pending resize flag
   header.hot_tail_offset = new_hot_tail;
-  write_header_to_inactive_slot(&mut file, &mut header, active_slot)?;
-  file.sync_all()?;
+  write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
 
   tracing::info!(new_block_size, new_hot_tail, target_stage, "KV block expansion complete");
 

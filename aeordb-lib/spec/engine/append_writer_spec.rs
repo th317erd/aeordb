@@ -31,6 +31,10 @@ fn test_create_new_file_writes_header() {
   assert_eq!(metadata.len(), HEADER_REGION_SIZE as u64);
   // FILE_HEADER_SIZE is the slot size; verify it's half the region.
   assert_eq!(FILE_HEADER_SIZE * 2, HEADER_REGION_SIZE);
+
+  let durability = writer.durability_snapshot().unwrap();
+  assert_eq!(durability.hard_frontier, 1);
+  assert_eq!(durability.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
 }
 
 #[test]
@@ -232,7 +236,7 @@ fn coordinated_header_publication_preserves_v3_bytes_and_records_readback() {
 
   writer.update_header(&updated).unwrap();
   let snapshot = writer.durability_snapshot().unwrap();
-  assert_eq!(snapshot.hard_frontier, 1);
+  assert_eq!(snapshot.hard_frontier, 2, "initial creation and the update must each publish hard authority");
   assert_eq!(snapshot.failed, 0);
   assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
   assert!(snapshot.ledger.last().unwrap().succeeded);

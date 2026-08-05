@@ -1,11 +1,13 @@
 use aeordb::engine::disk_kv_store::DiskKVStore;
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::durability_coordinator::{DurabilityCoordinator, DurabilityOperation};
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::kv_pages::*;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED, KV_FLAG_PENDING};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 use std::fs::OpenOptions;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 // ============================================================================
@@ -71,6 +73,27 @@ fn open_test_kv_at_stage(dir: &std::path::Path, stage: usize) -> DiskKVStore {
   let hot_tail_offset = kv_block_offset + block_size;
   DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, stage, vec![], vec![], DiskKVStore::CURRENT_KV_BLOCK_VERSION)
     .unwrap()
+}
+
+#[test]
+fn disk_kv_barriers_use_the_supplied_database_coordinator() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("coordinated-kv.aeordb");
+  let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
+  let coordinator = Arc::new(DurabilityCoordinator::new());
+  let kv_block_offset = 256u64;
+  let hot_tail_offset = kv_block_offset + aeordb::engine::kv_stages::initial_block_size();
+
+  let _store =
+    DiskKVStore::create_with_coordinator(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 0, Arc::clone(&coordinator))
+      .unwrap();
+
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.hard_frontier, 0);
+  assert_eq!(snapshot.proven, 0);
+  assert_eq!(snapshot.ledger.len(), 2);
+  assert_eq!(snapshot.ledger[0].operation, DurabilityOperation::DependencyAppend);
+  assert_eq!(snapshot.ledger[1].operation, DurabilityOperation::DataBarrier);
 }
 
 // ============================================================================
