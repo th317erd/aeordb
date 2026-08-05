@@ -61,7 +61,7 @@
     - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.
       - [x] Decode the common AGCA envelope, active controls, and physical-incarnation identity.
       - [x] Decode quarantine, root lifecycle, expiry, physical inventory, and retirement artifacts.
-      - [ ] Decode bounded mark checkpoints, mutation journals, and external workspace files.
+      - [x] Decode bounded mark checkpoints, mutation journals, and external workspace files.
       - [ ] Decode sweep proposals/receipts and receipt-backed Void catalogs/claims.
       - [ ] Decode audit catalogs, detail/summary pages, run summaries, evidence, and pins.
       - [ ] Decode all SystemControlV1 kinds and the external cutover journal.

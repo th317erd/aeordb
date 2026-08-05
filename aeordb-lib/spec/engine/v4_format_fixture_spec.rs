@@ -10,6 +10,10 @@ use aeordb::engine::v4::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_active_control, decode_gc_artifact_envelope, decode_physical_incarnation,
   select_gc_active_control,
 };
+use aeordb::engine::v4::gc_mark::{
+  GcMarkArtifactV1, decode_gc_mark_artifact, decode_mark_workspace_manifest, decode_mark_workspace_object,
+  validate_mark_checkpoint_workspace, validate_mark_mutation_journal_chain, validate_mark_workspace_object,
+};
 use aeordb::engine::v4::gc_state::{GcStateArtifactV1, decode_gc_state_artifact, validate_gc_directory_page};
 use aeordb::engine::v4::index_artifact::{
   IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
@@ -1567,6 +1571,213 @@ fn gc_lifecycle_pages_manifests_and_retirement_reject_semantic_corruption() {
   repair_trailing_crc(&mut zero_incarnations);
   assert_eq!(
     decode_gc_state_artifact(&zero_incarnations, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn every_gc_mark_and_workspace_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| {
+      row.format_id.starts_with("gc-mark-workspace")
+        || row.format_id == "gc-artifact-v1"
+          && (row.expected.starts_with("gc:checkpoint:mark-run:") || row.expected.starts_with("gc:journal:mark-mutation:"))
+    })
+    .collect();
+  assert_eq!(rows.len(), 22);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    let (observed, key) = match row.format_id.as_str() {
+      "gc-artifact-v1" => {
+        let artifact = decode_gc_mark_artifact(&bytes, algorithm).unwrap();
+        (artifact.summary(), Some(hex::encode(artifact.key())))
+      }
+      "gc-mark-workspace-manifest-v1" => (decode_mark_workspace_manifest(&bytes, algorithm).unwrap().summary(), None),
+      "gc-mark-workspace-object-v1" => (decode_mark_workspace_object(&bytes, algorithm).unwrap().summary(), None),
+      other => panic!("unexpected mark fixture format {other}"),
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(key, row.canonical_key, "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn every_gc_mark_fixture_byte_is_integrity_protected() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| {
+      row.format_id.starts_with("gc-mark-workspace")
+        || row.format_id == "gc-artifact-v1"
+          && (row.expected.starts_with("gc:checkpoint:mark-run:") || row.expected.starts_with("gc:journal:mark-mutation:"))
+    })
+    .collect();
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    for offset in 0..bytes.len() {
+      let mut changed = bytes.clone();
+      changed[offset] ^= 1;
+      let result = match row.format_id.as_str() {
+        "gc-artifact-v1" => decode_gc_mark_artifact(&changed, algorithm).map(|_| ()),
+        "gc-mark-workspace-manifest-v1" => decode_mark_workspace_manifest(&changed, algorithm).map(|_| ()),
+        "gc-mark-workspace-object-v1" => decode_mark_workspace_object(&changed, algorithm).map(|_| ()),
+        other => panic!("unexpected mark fixture format {other}"),
+      };
+      assert!(result.is_err(), "fixture {} accepted mutation at byte {offset}", row.id);
+    }
+  }
+}
+
+#[test]
+fn gc_mark_workspace_rejects_semantic_corruption_and_wrong_closure() {
+  let root = fixture_root();
+  let checkpoint = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-run-checkpoint-embedded.bin")).unwrap();
+  let body = 32 + test_u16(&checkpoint, 16) as usize;
+  let mut bad_state = checkpoint;
+  bad_state[body + 6..body + 8].fill(0);
+  repair_trailing_crc(&mut bad_state);
+  assert_eq!(
+    decode_gc_mark_artifact(&bad_state, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let journal = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-mutation-journal-reset.bin")).unwrap();
+  let body = 32 + test_u16(&journal, 16) as usize;
+  let operation = body + 32 + 32 + 4 + 32 + 6 * 32;
+  let mut bad_operation = journal;
+  bad_operation[operation..operation + 2].copy_from_slice(&11u16.to_le_bytes());
+  repair_trailing_crc(&mut bad_operation);
+  assert_eq!(
+    decode_gc_mark_artifact(&bad_operation, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let manifest = fs::read(root.join("gc-mark-workspace-manifest-v1/agcw-blake3-256-mark-workspace-manifest.bin")).unwrap();
+  let mut bad_manifest_flags = manifest.clone();
+  bad_manifest_flags[84] = 1;
+  repair_trailing_crc(&mut bad_manifest_flags);
+  assert_eq!(
+    decode_mark_workspace_manifest(&bad_manifest_flags, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut unsafe_name = manifest.clone();
+  let descriptor_name = 120 + 2 * 32 + 68;
+  let slash = unsafe_name[descriptor_name..].iter().position(|byte| *byte == b'/').map(|offset| descriptor_name + offset).unwrap();
+  unsafe_name[slash] = b'\\';
+  repair_trailing_crc(&mut unsafe_name);
+  assert_eq!(
+    decode_mark_workspace_manifest(&unsafe_name, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let object = fs::read(root.join("gc-mark-workspace-object-v1/agwo-blake3-256-bitmap-valid.bin")).unwrap();
+  let mut bad_unused_bits = object.clone();
+  *bad_unused_bits.get_mut(114).unwrap() |= 0x80;
+  repair_trailing_crc(&mut bad_unused_bits);
+  assert_eq!(
+    decode_mark_workspace_object(&bad_unused_bits, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let manifest = decode_mark_workspace_manifest(&manifest, HashAlgorithm::Blake3_256).unwrap();
+  let object = decode_mark_workspace_object(&object, HashAlgorithm::Blake3_256).unwrap();
+  validate_mark_workspace_object(
+    &manifest,
+    &manifest.descriptors[0],
+    &object,
+    &fs::read(root.join("gc-mark-workspace-object-v1/agwo-blake3-256-bitmap-valid.bin")).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    validate_mark_workspace_object(&manifest, &manifest.descriptors[1], &object, &[]).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  assert_eq!(
+    decode_mark_workspace_manifest(&vec![0; 8 * 1024 * 1024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  assert_eq!(
+    decode_mark_workspace_object(&vec![0; 64 * 1024 * 1024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let external_checkpoint = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-run-checkpoint-external-canceled.bin")).unwrap();
+  let GcMarkArtifactV1::Checkpoint(checkpoint) = decode_gc_mark_artifact(&external_checkpoint, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected mark checkpoint");
+  };
+  assert_eq!(checkpoint.workspace_path, "C:/AeorDB/gc/31323334/51525354");
+  assert!(checkpoint.canceled);
+
+  let mut relative_checkpoint = external_checkpoint;
+  let body = 72;
+  let path = body + 236 + 4 * 32;
+  relative_checkpoint[path] = b'x';
+  repair_trailing_crc(&mut relative_checkpoint);
+  assert_eq!(
+    decode_gc_mark_artifact(&relative_checkpoint, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let embedded_checkpoint_bytes = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-run-checkpoint-embedded.bin")).unwrap();
+  let GcMarkArtifactV1::Checkpoint(embedded_checkpoint) =
+    decode_gc_mark_artifact(&embedded_checkpoint_bytes, HashAlgorithm::Blake3_256).unwrap()
+  else {
+    panic!("expected mark checkpoint");
+  };
+  let manifest_bytes = fs::read(root.join("gc-mark-workspace-manifest-v1/agcw-blake3-256-mark-workspace-manifest.bin")).unwrap();
+  let embedded_manifest = decode_mark_workspace_manifest(&manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  validate_mark_checkpoint_workspace(&embedded_checkpoint, &embedded_manifest, &manifest_bytes).unwrap();
+
+  let mut detached_manifest_bytes = manifest_bytes;
+  detached_manifest_bytes[32] ^= 1;
+  repair_trailing_crc(&mut detached_manifest_bytes);
+  let detached_manifest = decode_mark_workspace_manifest(&detached_manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_mark_checkpoint_workspace(&embedded_checkpoint, &detached_manifest, &detached_manifest_bytes).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let previous_bytes = fs::read(root.join("gc-artifact-v1/agca-blake3-256-mark-mutation-journal-reset.bin")).unwrap();
+  let GcMarkArtifactV1::MutationJournal(previous) = decode_gc_mark_artifact(&previous_bytes, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected mark mutation journal");
+  };
+  let mut current_bytes = previous_bytes.clone();
+  current_bytes[64..72].copy_from_slice(&2u64.to_le_bytes());
+  let body = 72;
+  current_bytes[body..body + 4].fill(0);
+  current_bytes[body + 8..body + 16].copy_from_slice(&802u64.to_le_bytes());
+  current_bytes[body + 16..body + 24].copy_from_slice(&803u64.to_le_bytes());
+  current_bytes[body + 32..body + 64].copy_from_slice(&previous.key);
+  let first_record = body + 64 + 4;
+  current_bytes[first_record..first_record + 8].copy_from_slice(&802u64.to_le_bytes());
+  let second_record = first_record + 36 + 6 * 32 + 4;
+  current_bytes[second_record..second_record + 8].copy_from_slice(&803u64.to_le_bytes());
+  repair_trailing_crc(&mut current_bytes);
+  let GcMarkArtifactV1::MutationJournal(current) = decode_gc_mark_artifact(&current_bytes, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected mark mutation journal");
+  };
+  validate_mark_mutation_journal_chain(&previous, &current).unwrap();
+
+  let mut wrong_predecessor_bytes = current_bytes;
+  wrong_predecessor_bytes[body + 32] ^= 1;
+  repair_trailing_crc(&mut wrong_predecessor_bytes);
+  let GcMarkArtifactV1::MutationJournal(wrong_predecessor) =
+    decode_gc_mark_artifact(&wrong_predecessor_bytes, HashAlgorithm::Blake3_256).unwrap()
+  else {
+    panic!("expected mark mutation journal");
+  };
+  assert_eq!(
+    validate_mark_mutation_journal_chain(&previous, &wrong_predecessor).unwrap_err().class(),
     MalformedInputClass::CrossRecordClosureMismatch
   );
 }
