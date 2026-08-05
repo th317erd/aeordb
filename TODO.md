@@ -93,6 +93,7 @@
       - [x] Implement the non-activating coordinator shell and platform-adapter contract.
       - [x] Run focused and adjacent regressions and record evidence; commit/push is the landing action.
     - [ ] P2a-2: implement grouped hard-frontier commit and the complete platform failure matrix.
+      - [x] Make every successful namespace mutation explicitly await fallible transaction completion; `Drop` may clean up failed paths but may never be the acknowledgement owner.
       - [x] Add red tests for compatible-group execution, one barrier per group, mixed-plan refusal, and all-waiter failure.
       - [x] Freeze typed OS error/retry dispositions and bounded retry behavior, including uncertain-completion no-replay.
       - [x] Route v3 A/B header publication and read-back through the coordinator/platform adapter.

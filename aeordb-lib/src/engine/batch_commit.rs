@@ -249,7 +249,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
 
   let (result, finish_timings) = finish_batch_commit(engine, ctx, file_infos, event_entries)?;
   let transaction_commit_start = std::time::Instant::now();
-  drop(txn);
+  txn.commit()?;
   let transaction_commit_ms = transaction_commit_start.elapsed().as_millis();
 
   tracing::info!(
@@ -313,7 +313,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
   }
 
   let _namespace = engine.namespace_write_guard()?;
-  let _txn = crate::engine::storage_engine::TransactionGuard::new(engine);
+  let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
 
   let algo = engine.hash_algo();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
@@ -357,7 +357,8 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     });
   }
 
-  finish_batch_commit(engine, ctx, file_infos, event_entries).map(|(result, _timings)| result)
+  let result = finish_batch_commit(engine, ctx, file_infos, event_entries).map(|(result, _timings)| result);
+  txn.finish(result)
 }
 
 fn finish_batch_commit(

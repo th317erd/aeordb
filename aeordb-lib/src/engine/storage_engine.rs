@@ -3545,6 +3545,22 @@ mod tests {
     let rejected = engine.store_entry(EntryType::Chunk, b"chunk-2", b"blocked");
     assert!(matches!(rejected, Err(EngineError::DurabilityFailure(_))));
   }
+
+  #[test]
+  fn transaction_guard_commit_surfaces_completion_failure() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("transaction-completion-error.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let transaction = TransactionGuard::new(&engine);
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = engine.kv_writer.lock().unwrap();
+      panic!("poison transaction state");
+    }));
+
+    let error = transaction.commit().expect_err("transaction completion failure must reach the caller");
+    assert!(error.to_string().contains("Failed to end transaction"));
+  }
 }
 
 thread_local! {
@@ -3575,27 +3591,46 @@ impl Drop for NamespaceWriteGuard<'_> {
   }
 }
 
-/// RAII guard that begins a transaction on creation and ends it on drop.
+/// Guard that begins a transaction and requires explicit fallible completion
+/// before a successful mutation may be acknowledged.
 ///
 /// While this guard is alive, `DiskKVStore::flush()` will skip truncating the
 /// hot file, ensuring crash recovery can replay all entries written during
-/// the transaction. When the guard is dropped, `end_transaction()` is called,
-/// which decrements the depth and truncates the hot file if depth reaches 0.
+/// the transaction. [`commit`](Self::commit) surfaces the hard-commit result to
+/// the caller. `Drop` remains a best-effort cleanup for early error paths, where
+/// there is no successful acknowledgement to protect.
 pub struct TransactionGuard<'a> {
   engine: &'a StorageEngine,
+  completed: bool,
 }
 
 impl<'a> TransactionGuard<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
     engine.begin_transaction();
-    TransactionGuard { engine }
+    TransactionGuard { engine, completed: false }
+  }
+
+  pub fn commit(mut self) -> EngineResult<()> {
+    self.completed = true;
+    self.engine.end_transaction()
+  }
+
+  pub fn finish<T>(self, result: EngineResult<T>) -> EngineResult<T> {
+    let completion = self.commit();
+    match (result, completion) {
+      (_, Err(error)) => Err(error),
+      (result, Ok(())) => result,
+    }
   }
 }
 
 impl<'a> Drop for TransactionGuard<'a> {
   fn drop(&mut self) {
+    if self.completed {
+      return;
+    }
     if let Err(error) = self.engine.end_transaction() {
-      tracing::error!("Transaction guard failed to complete cleanly: {}", error);
+      tracing::error!("Transaction guard failed to clean up an incomplete operation: {}", error);
     }
   }
 }

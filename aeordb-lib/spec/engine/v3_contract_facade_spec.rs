@@ -591,6 +591,37 @@ fn production_code_cannot_call_raw_file_barriers_outside_the_native_adapter() {
 }
 
 #[test]
+fn production_transaction_guards_require_explicit_fallible_completion() {
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let sources = [package.join("src/engine/directory_ops.rs"), package.join("src/engine/batch_commit.rs")];
+  let mut guard_count = 0usize;
+  let mut completion_count = 0usize;
+  let mut violations = Vec::new();
+
+  for path in sources {
+    let source = std::fs::read_to_string(&path).unwrap();
+    guard_count += source.matches("TransactionGuard::new(").count();
+    completion_count += source.matches("txn.commit()").count();
+    completion_count += source.matches("txn.finish(").count();
+
+    for (line_number, line) in source.lines().enumerate() {
+      if line.contains("TransactionGuard::new(") && line.contains("let _") {
+        violations.push(format!("{}:{}:{line}", path.display(), line_number + 1));
+      }
+      if line.contains("drop(txn)") {
+        violations.push(format!("{}:{}:{line}", path.display(), line_number + 1));
+      }
+    }
+  }
+
+  assert!(violations.is_empty(), "transaction guards may not rely on infallible Drop completion:\n{}", violations.join("\n"));
+  assert!(
+    completion_count >= guard_count,
+    "every production transaction guard needs an explicit commit/finish: {guard_count} guards, {completion_count} completions"
+  );
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

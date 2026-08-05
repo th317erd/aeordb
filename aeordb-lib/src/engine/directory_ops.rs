@@ -717,7 +717,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
@@ -737,6 +737,7 @@ impl<'a> DirectoryOps<'a> {
     )?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    txn.commit()?;
     self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -852,7 +853,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let total_size = data.len() as u64;
     let published = publish_file_record_entries(
@@ -870,6 +871,7 @@ impl<'a> DirectoryOps<'a> {
     )?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    txn.commit()?;
     self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -882,7 +884,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn restore_file_from_record(&self, ctx: &RequestContext, path: &str, source_record: &FileRecord) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let content_type = source_record.content_type.as_deref().unwrap_or("application/octet-stream");
     let published = publish_file_record_entries(
@@ -901,6 +903,7 @@ impl<'a> DirectoryOps<'a> {
     let published = published?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
+    txn.commit()?;
     self.engine.counters().record_file_write(published.existing_total_size, source_record.total_size, 0);
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
@@ -947,7 +950,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
 
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -985,23 +988,22 @@ impl<'a> DirectoryOps<'a> {
     // Remove child from parent directory
     self.remove_from_parent_directory(&normalized)?;
 
-    // Update counters
-    if let Some(ref record) = file_record_opt {
-      self.engine.counters().record_file_delete(record.total_size);
-    }
+    let deleted_entry = file_record_opt.map(|record| EntryEventData {
+      path: normalized,
+      entry_type: "file".to_string(),
+      content_type: record.content_type.clone(),
+      size: record.total_size,
+      hash: record.content_hash_hex(),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      previous_hash: None,
+    });
 
-    // Emit deletion event with captured metadata
-    if let Some(record) = file_record_opt {
-      let entry_data = EntryEventData {
-        path: normalized,
-        entry_type: "file".to_string(),
-        content_type: record.content_type.clone(),
-        size: record.total_size,
-        hash: record.content_hash_hex(),
-        created_at: record.created_at,
-        updated_at: record.updated_at,
-        previous_hash: None,
-      };
+    txn.commit()?;
+
+    // Publish process-local side effects only after the hard commit succeeds.
+    if let Some(entry_data) = deleted_entry {
+      self.engine.counters().record_file_delete(entry_data.size);
       ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
     }
 
@@ -1019,7 +1021,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
@@ -1076,7 +1078,9 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    // Update counters
+    txn.commit()?;
+
+    // Update process-local state only after the hard commit succeeds.
     self.engine.counters().record_directory_delete();
 
     ctx.emit(
@@ -1242,7 +1246,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
@@ -1271,7 +1275,6 @@ impl<'a> DirectoryOps<'a> {
       self.update_parent_directories(&normalized, child)?;
     }
 
-    // Emit directory creation event
     let entry_data = EntryEventData {
       path: normalized,
       entry_type: "directory".to_string(),
@@ -1282,9 +1285,9 @@ impl<'a> DirectoryOps<'a> {
       updated_at: now,
       previous_hash: None,
     };
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
-
+    txn.commit()?;
     self.engine.counters().record_directory_create();
+    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
     Ok(())
   }
@@ -1479,7 +1482,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
 
@@ -1513,17 +1516,16 @@ impl<'a> DirectoryOps<'a> {
     };
     self.update_parent_directories(&normalized, child)?;
 
-    self.engine.counters().record_file_restore(file_record.total_size);
+    let event = serde_json::json!({"entries": [{
+      "path": normalized,
+      "entry_type": "file",
+      "content_type": file_record.content_type,
+      "size": file_record.total_size,
+    }]});
 
-    ctx.emit(
-      crate::engine::engine_event::EVENT_ENTRIES_CREATED,
-      serde_json::json!({"entries": [{
-        "path": normalized,
-        "entry_type": "file",
-        "content_type": file_record.content_type,
-        "size": file_record.total_size,
-      }]}),
-    );
+    txn.commit()?;
+    self.engine.counters().record_file_restore(file_record.total_size);
+    ctx.emit(crate::engine::engine_event::EVENT_ENTRIES_CREATED, event);
 
     Ok(())
   }
@@ -2262,11 +2264,12 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
 
     // Now delete the file itself
-    self.delete_file(ctx, path)
+    let result = self.delete_file(ctx, path);
+    txn.finish(result)
   }
 
   /// Read directory data by path key, following hard links and checking the
@@ -2809,7 +2812,7 @@ impl<'a> DirectoryOps<'a> {
 
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let normalized_target = normalize_path(target);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -2882,9 +2885,6 @@ impl<'a> DirectoryOps<'a> {
 
     self.update_parent_directories(&normalized, child)?;
 
-    self.engine.counters().record_symlink_write(existing_created_at.is_some());
-
-    // Emit event
     let entry_data = EntryEventData {
       path: normalized,
       entry_type: "symlink".to_string(),
@@ -2895,6 +2895,8 @@ impl<'a> DirectoryOps<'a> {
       updated_at: record.updated_at,
       previous_hash: None,
     };
+    txn.commit()?;
+    self.engine.counters().record_symlink_write(existing_created_at.is_some());
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
 
     Ok(record)
@@ -2918,7 +2920,7 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
@@ -2947,9 +2949,6 @@ impl<'a> DirectoryOps<'a> {
     // Remove from parent directory
     self.remove_from_parent_directory(&normalized)?;
 
-    self.engine.counters().record_symlink_delete();
-
-    // Emit deletion event
     let entry_data = EntryEventData {
       path: normalized,
       entry_type: "symlink".to_string(),
@@ -2960,6 +2959,8 @@ impl<'a> DirectoryOps<'a> {
       updated_at: record.updated_at,
       previous_hash: None,
     };
+    txn.commit()?;
+    self.engine.counters().record_symlink_delete();
     ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
 
     Ok(())
@@ -2972,7 +2973,7 @@ impl<'a> DirectoryOps<'a> {
   /// created_at are preserved. Only the path and updated_at change.
   pub fn rename_file(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<FileRecord> {
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let old_normalized = normalize_path(old_path);
     let new_normalized = normalize_path(new_path);
@@ -3049,9 +3050,6 @@ impl<'a> DirectoryOps<'a> {
     self.engine.mark_entry_deleted(&old_file_key)?;
     self.remove_from_parent_directory(&old_normalized)?;
 
-    self.engine.counters().record_write(0);
-
-    // Emit events: deleted from old path, created at new path
     let deleted_event = EntryEventData {
       path: old_normalized,
       entry_type: "file".to_string(),
@@ -3062,8 +3060,6 @@ impl<'a> DirectoryOps<'a> {
       updated_at: old_record.updated_at,
       previous_hash: None,
     };
-    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
-
     let created_event = EntryEventData {
       path: new_normalized,
       entry_type: "file".to_string(),
@@ -3074,6 +3070,9 @@ impl<'a> DirectoryOps<'a> {
       updated_at: new_record.updated_at,
       previous_hash: None,
     };
+    txn.commit()?;
+    self.engine.counters().record_write(0);
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
 
     Ok(new_record)
@@ -3082,7 +3081,7 @@ impl<'a> DirectoryOps<'a> {
   /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
   pub fn copy_file(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<FileRecord> {
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
@@ -3112,16 +3111,17 @@ impl<'a> DirectoryOps<'a> {
 
     // Read back the new record
     let to_key = file_path_hash(&to_normalized, &algo)?;
-    match self.engine.get_entry(&to_key)? {
+    let result = match self.engine.get_entry(&to_key)? {
       Some((header, _key, value)) => Ok(FileRecord::deserialize(&value, hash_length, header.entry_version)?),
       None => Err(EngineError::NotFound(to_normalized)),
-    }
+    };
+    txn.finish(result)
   }
 
   /// Recursively copy a path (file or directory) to a new location.
   pub fn copy_path(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<Vec<String>> {
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
@@ -3140,12 +3140,14 @@ impl<'a> DirectoryOps<'a> {
         let sub_copied = self.copy_path(ctx, &child_from, &child_to)?;
         copied.extend(sub_copied);
       }
+      txn.commit()?;
       return Ok(copied);
     }
 
     // File
     self.copy_file(ctx, &from_normalized, &to_normalized)?;
     copied.push(to_normalized);
+    txn.commit()?;
     Ok(copied)
   }
 
@@ -3156,7 +3158,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn rename_symlink(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
     let _namespace = self.engine.namespace_write_guard()?;
-    let _txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
     let new_normalized = normalize_path(new_path);
 
     // Reject root paths
@@ -3252,9 +3254,6 @@ impl<'a> DirectoryOps<'a> {
     self.engine.mark_entry_deleted(&old_symlink_key)?;
     self.remove_from_parent_directory(&old_normalized)?;
 
-    self.engine.counters().record_write(0);
-
-    // Emit events
     let deleted_event = EntryEventData {
       path: old_normalized,
       entry_type: "symlink".to_string(),
@@ -3265,8 +3264,6 @@ impl<'a> DirectoryOps<'a> {
       updated_at: old_record.updated_at,
       previous_hash: None,
     };
-    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
-
     let created_event = EntryEventData {
       path: new_normalized,
       entry_type: "symlink".to_string(),
@@ -3277,6 +3274,9 @@ impl<'a> DirectoryOps<'a> {
       updated_at: new_record.updated_at,
       previous_hash: None,
     };
+    txn.commit()?;
+    self.engine.counters().record_write(0);
+    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
     ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
 
     Ok(new_record)
