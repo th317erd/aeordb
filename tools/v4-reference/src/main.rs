@@ -4,6 +4,7 @@ mod definitions;
 mod dependency;
 mod field_index;
 mod gc;
+mod gc_mark;
 mod gc_state;
 mod index;
 mod index_nvt;
@@ -40,7 +41,8 @@ use selector::SelectorFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-gc-state-v1";
+const TOOL_REVISION: &str = "p0b2-gc-mark-v1";
+const FIXTURE_STAGE: &str = "p0b-2-gc-mark";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -261,7 +263,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-gc-state".to_string(),
+    stage: FIXTURE_STAGE.to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -285,7 +287,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
   semantics::verify(spec_root)?;
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-gc-state" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != FIXTURE_STAGE {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -706,7 +708,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Dependency(_) => dependency::observe(case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
     FixtureFormat::FieldIndex(format) => field_index::observe(format, case.profile, bytes),
-    FixtureFormat::Gc(_) => gc::observe(case.profile, bytes),
+    FixtureFormat::Gc(format) => gc::observe(format, case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
@@ -782,9 +784,9 @@ fn annotated_hex(case: &FixtureCase) -> String {
         output.push_str(&format!("# {line}\n"));
       }
     }
-    FixtureFormat::Gc(_) => {
+    FixtureFormat::Gc(format) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
-      for line in gc::annotation_lines(case.profile, &case.bytes) {
+      for line in gc::annotation_lines(format, case.profile, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

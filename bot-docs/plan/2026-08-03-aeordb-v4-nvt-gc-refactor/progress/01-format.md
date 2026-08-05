@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2d-2 quarantine, expiry, retirement, and physical inventory
+- **Current landing unit:** P0b-2d-3 bounded mark checkpoints, workspace files, and mutation journals
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2d-1 GC controls and identities `bb704754d2f4879542ff59e159efc4dc37f8e52b`
+- **Last green commit:** P0b-2d-2 corrected GC lifecycle state `7dd14edb3af07d32b8c155dda81a185b2ecc3a21`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze quarantine candidate state/pages/deltas/manifests, root-expiry catalogs, retirement journals, physical inventory, and all seven GC directory roles at both hash widths
+- **Next action:** make the mark/workspace contract gate fail, freeze the exact in-DB checkpoint and journal plus external AGCW/AGWO formats at both hash widths, and prove malformed/closure rejection independently
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -179,3 +179,16 @@
 - **Independent corpus:** 44 new fixtures, including the four Round 15 control fixtures and forty GC/lifecycle state fixtures across both hash profiles, bring the corpus from 280 to 324 cases.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 110 tests in 5.33 seconds with 53,248 KiB maximum RSS and no swap; strict standalone Clippy passed; fresh generation/verification passed all 324 fixtures; and the campaign gate passed with 93 routes and 36 docs using the home-volume target override because `/tmp` remained full.
 - **Boundary:** all bytes remain independent reference fixtures and validation oracles. No production format reader/writer, lifecycle authority, GC runtime, allocator, startup, repair, route, or database changed. Bounded mark/workspace/mutation formats are next.
+
+## P0b-2d-3 Bounded Mark and External Workspace
+
+- **Entry:** `7dd14edb3af07d32b8c155dda81a185b2ecc3a21`; `development` matched `origin/development`, and only the pre-existing untracked `.codex/DETAILS.md`, `.codex/wip.md`, and `downloads/` paths were present.
+- **Territory:** fixture producers are `gc.rs`, `gc_state.rs`, and the mark/workspace reference module; consumers are the fixture aggregator, independent observer/annotator, static registry, manifest verifier, and campaign gate. Production readers/writers remain forbidden.
+- **Contract gap resolved by this landing:** Round 13 names exact typed frontier/path/candidate workspace records but omits their byte layouts. This landing must freeze bounded, length-prefixed, identity-bound records with strict kind-specific ordering and fail-closed malformed behavior before any writer exists.
+- **Test plan:** red campaign prefixes first; fixed-width/formula and cross-object closure tests; byte-flip CRC/integrity tests; repaired-checksum semantic mutation tests; invalid path/order/count/unused-bit/cap tests; standalone tests and strict Clippy; fresh fixture generation/verification; campaign gate; clean-clone replay.
+- **Red proof:** the expanded campaign gate failed first on absent `gc-mark-workspace-manifest-v1`, before either external format, any bounded-mark fixture, or the reference module existed.
+- **Frozen contracts:** exact `MarkRunCheckpoint` and length-framed `MarkMutationJournalSegment`; separate external `AGCW` manifest and `AGWO` object envelopes; all six workspace object kinds; checked portable workspace paths; exact frontier/path/mutation/candidate/diagnostic records; strict descriptor/record order; object BLAKE3 closure; and publication/resume failure direction. The previously prose-only “exact typed” workspace records are now byte-level registry contracts.
+- **Independent corpus:** 22 new fixtures cover embedded and Windows-style external/canceled checkpoints, reset mutation journals, populated and empty workspace manifests, and every AGWO kind under both hash widths. The corpus now has 346 cases across 18 format families.
+- **Failure proof:** all bytes are CRC/structure protected; repaired CRC tests reject invalid checkpoint state, mutation operation, manifest flags, and bitmap padding; closure tests reject altered objects; path/name traversal, descriptor order, formula, fixed-width, and unused-bit tests fail closed. Empty initial workspace closure is accepted without weakening populated closure checks.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 116 tests; strict standalone Clippy passed; fresh generation and verification passed all 346 fixtures; and the campaign gate passed with 93 routes and 36 docs. A fresh Git clone with the landing applied passed the same gate; its timed test run finished in 5.32 seconds with 390,848 KiB maximum process-tree RSS and zero swaps.
+- **Boundary:** no production crate, reader, writer, GC runtime, workspace, database, allocator, startup, route, or repair behavior changed. Sweep/Void/settlement formats are next.

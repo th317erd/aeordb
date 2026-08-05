@@ -3,18 +3,28 @@ use crate::core::HashProfile;
 const AGCA_HEADER_LENGTH: usize = 32;
 const MAX_GC_ARTIFACT_LENGTH: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcFormat {
   GcArtifactV1,
+  MarkWorkspaceManifestV1,
+  MarkWorkspaceObjectV1,
 }
 
 impl GcFormat {
   pub fn id(self) -> &'static str {
-    "gc-artifact-v1"
+    match self {
+      Self::GcArtifactV1 => "gc-artifact-v1",
+      Self::MarkWorkspaceManifestV1 => "gc-mark-workspace-manifest-v1",
+      Self::MarkWorkspaceObjectV1 => "gc-mark-workspace-object-v1",
+    }
   }
 
   pub fn family(self) -> &'static str {
-    "GcArtifactV1"
+    match self {
+      Self::GcArtifactV1 => "GcArtifactV1",
+      Self::MarkWorkspaceManifestV1 => "GcMarkWorkspaceManifestV1",
+      Self::MarkWorkspaceObjectV1 => "GcMarkWorkspaceObjectV1",
+    }
   }
 }
 
@@ -212,6 +222,7 @@ pub(crate) struct PhysicalIncarnationId {
 pub fn fixture_cases() -> Vec<GcFixtureCase> {
   let mut cases = control_fixture_cases();
   cases.extend(crate::gc_state::fixture_cases());
+  cases.extend(crate::gc_mark::fixture_cases());
   cases
 }
 
@@ -250,7 +261,13 @@ fn control_fixture_cases() -> Vec<GcFixtureCase> {
   cases
 }
 
-pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
+pub fn observe(format: GcFormat, profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
+  if format != GcFormat::GcArtifactV1 {
+    return crate::gc_mark::observe(format, profile, bytes);
+  }
+  if matches!(read_u16(bytes, 6).ok().and_then(GcKind::from_id), Some(GcKind::MarkRunCheckpoint | GcKind::MarkMutationJournalSegment)) {
+    return crate::gc_mark::observe(format, profile, bytes);
+  }
   if read_u16(bytes, 6).ok().and_then(GcKind::from_id).is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::observe(profile, bytes);
   }
@@ -269,9 +286,15 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
   }
 }
 
-pub fn annotation_lines(profile: HashProfile, bytes: &[u8]) -> Vec<String> {
+pub fn annotation_lines(format: GcFormat, profile: HashProfile, bytes: &[u8]) -> Vec<String> {
+  if format != GcFormat::GcArtifactV1 {
+    return crate::gc_mark::annotation_lines(format, profile, bytes);
+  }
   let h = profile.width();
   let kind = read_u16(bytes, 6).ok().and_then(GcKind::from_id);
+  if matches!(kind, Some(GcKind::MarkRunCheckpoint | GcKind::MarkMutationJournalSegment)) {
+    return crate::gc_mark::annotation_lines(format, profile, bytes);
+  }
   if kind.is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::annotation_lines(profile, bytes);
   }
@@ -544,7 +567,7 @@ mod tests {
     let cases = control_fixture_cases();
     assert_eq!(cases.len(), 24);
     for case in cases {
-      let (observed, key) = observe(case.profile, &case.bytes);
+      let (observed, key) = observe(case.format, case.profile, &case.bytes);
       assert_eq!(observed, case.expected, "fixture {}", case.id);
       assert_eq!(key, case.canonical_key, "fixture {} key", case.id);
       let decoded = decode_control(case.profile, &case.bytes).unwrap();
@@ -558,7 +581,7 @@ mod tests {
       for index in 0..case.bytes.len() {
         let mut changed = case.bytes.clone();
         changed[index] ^= 1;
-        assert!(observe(case.profile, &changed).0.starts_with("error:"), "fixture {} byte {index}", case.id);
+        assert!(observe(case.format, case.profile, &changed).0.starts_with("error:"), "fixture {} byte {index}", case.id);
       }
     }
   }

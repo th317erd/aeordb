@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-gc-state" and
+  .coverage_stage == "p0b-2-gc-mark" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-gc-state" and
+  .stage == "p0b-2-gc-mark" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -337,7 +337,11 @@ jq -e '
   .root_lifecycle_state.retirement_body_formula == "72 + 4H" and
   .root_lifecycle_state.reclaim_proof_body_formula == "40 + 6H" and
   .physical_inventory_state.manifest_body_formula == "132 + 2H" and
-  .physical_inventory_state.retirement_record_length == "72 + 4H"
+  .physical_inventory_state.retirement_record_length == "72 + 4H" and
+  .bounded_mark_state.checkpoint_body_formula == "236 + 4H + P" and
+  .bounded_mark_state.checkpoint_body_cap == 262144 and
+  .bounded_mark_state.journal_payload_length == "36 + 6H" and
+  .bounded_mark_state.journal_framed_record_length == "40 + 6H"
 ' "$contract_registry" >/dev/null \
   || fail "P0b-2 corrected GC registry/state contract is incomplete"
 required_p0b2_gc_control_results=(
@@ -383,6 +387,62 @@ for result_prefix in "${required_p0b2_gc_state_results[@]}"; do
     any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
   ' "$fixture_manifest" >/dev/null \
     || fail "P0b-2 GC state artifact lacks both hash-width fixtures: $result_prefix"
+done
+
+required_p0b2_mark_formats=(
+  gc-mark-workspace-manifest-v1
+  gc-mark-workspace-object-v1
+)
+for format_id in "${required_p0b2_mark_formats[@]}"; do
+  jq -e --arg format_id "$format_id" 'any(.formats[]; .id == $format_id)' \
+    "$contract_registry" >/dev/null \
+    || fail "P0b-2 mark workspace format is absent from the contract registry: $format_id"
+  jq -e --arg format_id "$format_id" \
+    'any(.fixtures[]; .format_id == $format_id and .hash_width == 32) and
+     any(.fixtures[]; .format_id == $format_id and .hash_width == 64)' \
+    "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 mark workspace format lacks both hash-width fixtures: $format_id"
+done
+jq -e '
+  (.formats[] | select(.id == "gc-mark-workspace-manifest-v1") |
+    .magic_ascii == "AGCW" and .version == 1 and
+    .fixed_length_formula == "120 + 2H before descriptors; complete length is 124 + 2H + sum(68 + name_length)" and
+    .descriptor_fixed_length == 68 and .object_count_cap == 65535 and .hard_cap == 8388608) and
+  (.formats[] | select(.id == "gc-mark-workspace-object-v1") |
+    .magic_ascii == "AGWO" and .version == 1 and .fixed_header_length == 80 and
+    .bitmap_body_formula == "32 + ceil(logical_bit_count/8)" and
+    .record_cap == 1048576 and .hard_cap == 67108864 and
+    (.kind_registry | length) == 6)
+' "$contract_registry" >/dev/null \
+  || fail "P0b-2 bounded mark workspace formulas are incomplete"
+
+required_p0b2_mark_gc_results=(
+  'gc:checkpoint:mark-run:'
+  'gc:journal:mark-mutation:'
+)
+for result_prefix in "${required_p0b2_mark_gc_results[@]}"; do
+  jq -e --arg result_prefix "$result_prefix" '
+    any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 32 and (.expected | startswith($result_prefix))) and
+    any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 bounded-mark GC artifact lacks both hash-width fixtures: $result_prefix"
+done
+
+required_p0b2_workspace_results=(
+  'gc:workspace-manifest:'
+  'gc:workspace-object:bitmap:'
+  'gc:workspace-object:frontier:'
+  'gc:workspace-object:path-visit:'
+  'gc:workspace-object:mutation:'
+  'gc:workspace-object:candidate:'
+  'gc:workspace-object:diagnostic:'
+)
+for result_prefix in "${required_p0b2_workspace_results[@]}"; do
+  jq -e --arg result_prefix "$result_prefix" '
+    any(.fixtures[]; (.format_id | startswith("gc-mark-workspace-")) and .hash_width == 32 and (.expected | startswith($result_prefix))) and
+    any(.fixtures[]; (.format_id | startswith("gc-mark-workspace-")) and .hash_width == 64 and (.expected | startswith($result_prefix)))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 mark workspace artifact lacks both hash-width fixtures: $result_prefix"
 done
 
 required_p0b2_definition_formats=(

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-gc-state-v1",
+  "tool_revision": "p0b2-gc-mark-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1633,6 +1633,138 @@
       "fixture_id": "agca-sha512-retirement-journal-segment-valid",
       "expected": "gc:journal:retirement:records=1",
       "observed": "gc:journal:retirement:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-mark-run-checkpoint-embedded",
+      "expected": "gc:checkpoint:mark-run:embedded:state=1:phase=1",
+      "observed": "gc:checkpoint:mark-run:embedded:state=1:phase=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-mark-run-checkpoint-external-canceled",
+      "expected": "gc:checkpoint:mark-run:external-canceled:state=4:phase=6",
+      "observed": "gc:checkpoint:mark-run:external-canceled:state=4:phase=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-mark-mutation-journal-reset",
+      "expected": "gc:journal:mark-mutation:reset:records=2:first=800:last=801",
+      "observed": "gc:journal:mark-mutation:reset:records=2:first=800:last=801",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agcw-blake3-256-mark-workspace-manifest",
+      "expected": "gc:workspace-manifest:state=1:objects=6:records=24:bytes=1317:closure=10f26873ee3918f6",
+      "observed": "gc:workspace-manifest:state=1:objects=6:records=24:bytes=1317:closure=10f26873ee3918f6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agcw-blake3-256-mark-workspace-manifest-empty",
+      "expected": "gc:workspace-manifest:state=1:objects=0:records=0:bytes=0:closure=af1349b9f5f9a1a6",
+      "observed": "gc:workspace-manifest:state=1:objects=0:records=0:bytes=0:closure=af1349b9f5f9a1a6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-bitmap-valid",
+      "expected": "gc:workspace-object:bitmap:ordinal=1:records=19",
+      "observed": "gc:workspace-object:bitmap:ordinal=1:records=19",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-frontier-valid",
+      "expected": "gc:workspace-object:frontier:ordinal=2:records=1",
+      "observed": "gc:workspace-object:frontier:ordinal=2:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-path-visit-valid",
+      "expected": "gc:workspace-object:path-visit:ordinal=3:records=1",
+      "observed": "gc:workspace-object:path-visit:ordinal=3:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-mutation-valid",
+      "expected": "gc:workspace-object:mutation:ordinal=4:records=1",
+      "observed": "gc:workspace-object:mutation:ordinal=4:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-candidate-valid",
+      "expected": "gc:workspace-object:candidate:ordinal=5:records=1",
+      "observed": "gc:workspace-object:candidate:ordinal=5:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-blake3-256-diagnostic-valid",
+      "expected": "gc:workspace-object:diagnostic:ordinal=6:records=1",
+      "observed": "gc:workspace-object:diagnostic:ordinal=6:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-mark-run-checkpoint-embedded",
+      "expected": "gc:checkpoint:mark-run:embedded:state=1:phase=1",
+      "observed": "gc:checkpoint:mark-run:embedded:state=1:phase=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-mark-run-checkpoint-external-canceled",
+      "expected": "gc:checkpoint:mark-run:external-canceled:state=4:phase=6",
+      "observed": "gc:checkpoint:mark-run:external-canceled:state=4:phase=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-mark-mutation-journal-reset",
+      "expected": "gc:journal:mark-mutation:reset:records=2:first=800:last=801",
+      "observed": "gc:journal:mark-mutation:reset:records=2:first=800:last=801",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agcw-sha512-mark-workspace-manifest",
+      "expected": "gc:workspace-manifest:state=1:objects=6:records=24:bytes=1797:closure=e3ce44ae5c2123bf",
+      "observed": "gc:workspace-manifest:state=1:objects=6:records=24:bytes=1797:closure=e3ce44ae5c2123bf",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agcw-sha512-mark-workspace-manifest-empty",
+      "expected": "gc:workspace-manifest:state=1:objects=0:records=0:bytes=0:closure=af1349b9f5f9a1a6",
+      "observed": "gc:workspace-manifest:state=1:objects=0:records=0:bytes=0:closure=af1349b9f5f9a1a6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-bitmap-valid",
+      "expected": "gc:workspace-object:bitmap:ordinal=1:records=19",
+      "observed": "gc:workspace-object:bitmap:ordinal=1:records=19",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-frontier-valid",
+      "expected": "gc:workspace-object:frontier:ordinal=2:records=1",
+      "observed": "gc:workspace-object:frontier:ordinal=2:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-path-visit-valid",
+      "expected": "gc:workspace-object:path-visit:ordinal=3:records=1",
+      "observed": "gc:workspace-object:path-visit:ordinal=3:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-mutation-valid",
+      "expected": "gc:workspace-object:mutation:ordinal=4:records=1",
+      "observed": "gc:workspace-object:mutation:ordinal=4:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-candidate-valid",
+      "expected": "gc:workspace-object:candidate:ordinal=5:records=1",
+      "observed": "gc:workspace-object:candidate:ordinal=5:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agwo-sha512-diagnostic-valid",
+      "expected": "gc:workspace-object:diagnostic:ordinal=6:records=1",
+      "observed": "gc:workspace-object:diagnostic:ordinal=6:records=1",
       "result": "pass"
     },
     {

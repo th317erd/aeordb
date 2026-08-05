@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-gc-state",
+  "coverage_stage": "p0b-2-gc-mark",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2629,13 +2629,13 @@
       },
       "frozen_body_kinds": [
         "0x0001", "0x0002", "0x0003", "0x0004", "0x0005", "0x0006",
-        "0x0010", "0x0011", "0x0012", "0x0017", "0x001f",
+        "0x0010", "0x0011", "0x0012", "0x0013", "0x0017", "0x001f",
         "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0028",
-        "0x0037", "0x0039"
+        "0x0025", "0x0037", "0x0039"
       ],
       "pending_body_fixture_kinds": [
-        "0x0013", "0x0014", "0x0015", "0x0016",
-        "0x0025", "0x0026", "0x0027",
+        "0x0014", "0x0015", "0x0016",
+        "0x0026", "0x0027",
         "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036", "0x0038"
       ],
       "layout": [
@@ -2728,6 +2728,22 @@
         "ordering": "inventory by WAL offset then complete identity; retirement records by publication sequence then old identity",
         "authority": "inventory and journal are evidence; they never free space without complete quarantine and durable receipts"
       },
+      "bounded_mark_state": {
+        "checkpoint_identity": "database_id[16] || run_id[16] || checkpoint_sequence u64 LE",
+        "checkpoint_generation": "envelope generation equals nonzero run_generation",
+        "checkpoint_body": "flags u32 || checkpoint_codec=1 u16 || state u16 || phase u16 || zero u16 || capabilities[32] || started_at_ms u64 || updated_at_ms u64 || authority_root_set_digest H || semantic_state_digest H || KV_layout_fingerprint H || effective_policy_fingerprint[32] || SystemFamilyRegistry_fingerprint[32] || captured_header_sequence u64 || captured_write_high_water u64 || reconciled_through_sequence u64 || active_bitmap_bit_count u64 || KV_bucket_count u64 || KV_slots_per_bucket u32 || workspace_path_length u32 || workspace_id[16] || workspace_manifest_blake3[32] || mark_mutation_journal_head H-or-zero || checkpoint_logical_work u64 || total_logical_work_hint u64 || canonical_workspace_path",
+        "checkpoint_body_formula": "236 + 4H + P",
+        "checkpoint_body_cap": 262144,
+        "checkpoint_states": { "1": "marking", "2": "reconciling", "3": "complete-unpublished", "4": "canceled", "5": "failed" },
+        "checkpoint_phases": { "1": "roots", "2": "bitmap", "3": "frontier", "4": "paths", "5": "inventory", "6": "candidates", "7": "reconcile", "8": "validate" },
+        "journal_identity": "database_id[16] || run_id[16] || segment_ordinal u64 LE",
+        "journal_body": "reset flag u32 || codec=1 u16 || zero u16 || first_sequence u64 || last_sequence u64 || record_count u32 || records_length u32 || previous_segment_hash H-or-zero || length-framed records",
+        "journal_payload": "publication_sequence u64 || MutationId H || root_before H || root_after H || published_logical_key H || new PhysicalIncarnationIdV1 || MutationOperationV1 u16 || zero u16",
+        "journal_payload_length": "36 + 6H",
+        "journal_framed_record_length": "40 + 6H",
+        "ordering": "unique ascending publication_sequence then MutationId; gaps require durable sequence/inventory reconciliation",
+        "completion": "verified checkpoint/workspace, complete authority walk, reconciled inventory, final guarded empty mutation drain, and validated candidate output are all required before quarantine publication"
+      },
       "identity": "controls: database_id and slot; immutable kinds: complete kind-specific identity, generation, and body",
       "key_domain": "controls: H('aeordb.gc-artifact.control.v1\\0' || kind u16 LE || database_id[16] || slot u8); immutable: H('aeordb.gc-artifact.immutable.v1\\0' || kind u16 LE || complete AGCA value)",
       "checksum": "CRC-32/ISO-HDLC over the complete artifact value except its final 4 bytes",
@@ -2762,7 +2778,9 @@
         { "field": "root-expiry retirement commit and reclaim proof", "role": "graph-edge-evidence" },
         { "field": "retirement body prior lifecycle, authority, and admission hashes", "role": "non-traversed-evidence" },
         { "field": "reclaim-proof inventory/incarnation/receipt/absence hashes", "role": "non-traversed-evidence" },
-        { "field": "inventory replacement and receipt hashes", "role": "identity-or-evidence" }
+        { "field": "inventory replacement and receipt hashes", "role": "identity-or-evidence" },
+        { "field": "mark checkpoint authority, semantic, layout, workspace, and journal hashes", "role": "graph-edge-basis" },
+        { "field": "mark mutation IDs, roots, logical keys, and physical incarnation hashes", "role": "identity-or-reconciliation-evidence" }
       ],
       "fixture_ids_32": [
         "agca-blake3-256-quarantine-control-a",
@@ -2796,7 +2814,10 @@
         "agca-blake3-256-physical-inventory-manifest-populated",
         "agca-blake3-256-quarantine-manifest-empty",
         "agca-blake3-256-quarantine-manifest-populated",
-        "agca-blake3-256-retirement-journal-segment-valid"
+        "agca-blake3-256-retirement-journal-segment-valid",
+        "agca-blake3-256-mark-run-checkpoint-embedded",
+        "agca-blake3-256-mark-run-checkpoint-external-canceled",
+        "agca-blake3-256-mark-mutation-journal-reset"
       ],
       "fixture_ids_64": [
         "agca-sha512-quarantine-control-a",
@@ -2830,7 +2851,88 @@
         "agca-sha512-physical-inventory-manifest-populated",
         "agca-sha512-quarantine-manifest-empty",
         "agca-sha512-quarantine-manifest-populated",
-        "agca-sha512-retirement-journal-segment-valid"
+        "agca-sha512-retirement-journal-segment-valid",
+        "agca-sha512-mark-run-checkpoint-embedded",
+        "agca-sha512-mark-run-checkpoint-external-canceled",
+        "agca-sha512-mark-mutation-journal-reset"
+      ]
+    },
+    {
+      "id": "gc-mark-workspace-manifest-v1",
+      "family": "bounded-gc-mark-workspace",
+      "magic_ascii": "AGCW",
+      "version": 1,
+      "identity": "database_id[16], run_id[16], run_generation u64, checkpoint_sequence u64, and exact sorted object closure",
+      "generation": "nonzero run_generation at byte 48",
+      "layout": "magic[4] || schema u16 || checkpoint_state u16 || complete_length u64 || database_id[16] || run_id[16] || run_generation u64 || checkpoint_sequence u64 || created_at_ms u64 || updated_at_ms u64 || hash_algorithm_id u16 || object_count u16 || zero_flags u32 || KV_layout_fingerprint H || authority_root_set_digest H || effective_policy_fingerprint[32] || descriptors || CRC32",
+      "fixed_length_formula": "120 + 2H before descriptors; complete length is 124 + 2H + sum(68 + name_length)",
+      "body_formula": "120 + 2H + sum(68 + name_length) + 4-byte CRC",
+      "descriptor": "kind u16 || zero_flags u16 || ordinal u64 || stored_length u64 || logical_record_count u64 || BLAKE3_complete_object[32] || name_length u32 || zero u32 || canonical_relative_name",
+      "descriptor_fixed_length": 68,
+      "descriptor_name_cap": 4096,
+      "object_count_cap": 65535,
+      "hard_cap": 8388608,
+      "checksum": "CRC-32/ISO-HDLC over all prior bytes",
+      "canonical_order": "strict ascending object_kind, object_ordinal, canonical_relative_name; names are unique slash-normalized UTF-8 relative paths without empty/dot/dot-dot/backslash/NUL components",
+      "reserve_zero_ranges": ["header flags at 84..88", "descriptor flags at +2..+4", "descriptor reserved at +64..+68"],
+      "malformed_behavior": "abandon resume and preserve prior quarantine; reject wrong identity/state/hash algorithm, overflow, cap/count/length mismatch, duplicate or unordered descriptors, unsafe names, zero digest/count/ordinal, CRC, trailing bytes, or any AGWO closure mismatch",
+      "trailing_behavior": "exact descriptor count consumes every byte before CRC",
+      "bounded_decode": "validate complete length and 8 MiB cap before descriptor allocation; validate each fixed descriptor and <=4096-byte name before slicing; object count bounds capacity",
+      "producer_owner": "Child 04 bounded mark workspace through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/reader", "Child 04 mark resume/startup/verify/repair"],
+      "capability": "DurableMarkWorkspaceV1 bit 14",
+      "typed_hash_roles": [
+        { "field": "KV layout and authority root-set digests", "role": "identity-and-resume-basis" },
+        { "field": "effective policy fingerprint", "role": "fingerprint" },
+        { "field": "descriptor BLAKE3 digest", "role": "external-object-integrity-edge" }
+      ],
+      "fixture_ids_32": ["agcw-blake3-256-mark-workspace-manifest", "agcw-blake3-256-mark-workspace-manifest-empty"],
+      "fixture_ids_64": ["agcw-sha512-mark-workspace-manifest", "agcw-sha512-mark-workspace-manifest-empty"]
+    },
+    {
+      "id": "gc-mark-workspace-object-v1",
+      "family": "bounded-gc-mark-workspace",
+      "magic_ascii": "AGWO",
+      "version": 1,
+      "identity": "database_id[16], run_id[16], run_generation u64, checkpoint_sequence u64, object kind u16, and object_ordinal u64",
+      "generation": "nonzero run_generation at byte 48",
+      "kind_registry": { "1": "bitmap_segment", "2": "frontier_run", "3": "path_visit_run", "4": "mutation_run", "5": "candidate_run", "6": "diagnostic_run" },
+      "layout": "magic[4] || schema u16 || kind u16 || complete_length u64 || database_id[16] || run_id[16] || run_generation u64 || checkpoint_sequence u64 || object_ordinal u64 || body_length u64 || exact body || CRC32",
+      "fixed_header_length": 80,
+      "body_formula": "80 + kind-specific body B + 4-byte CRC",
+      "bitmap_body": "zero_flags u32 || codec=1 u16 || zero u16 || start_bit u64 || logical_bit_count u64 || byte_count u64 || raw bits with unused high bits zero",
+      "bitmap_body_formula": "32 + ceil(logical_bit_count/8)",
+      "run_body": "zero_flags u32 || kind-specific codec u16 || zero u16 || record_count u32 || records_length u32 || run_generation u64 || strict length-framed records",
+      "frontier_record": "record_length u32 || record_kind u16 || path/physical flags u16 || family_id-or-zero u16 || zero u16 || object_hash H || path_identity H-or-zero || PhysicalIncarnationIdV1-or-zero; length 36 + 4H",
+      "path_visit_record": "record_length u32 || zero u32 || directory_identity H || logical_path_identity H; length 8 + 2H",
+      "mutation_record": "payload_length u32 || exact MarkMutationJournal payload; framed length 40 + 6H",
+      "candidate_record": "record_length u32 || zero u16 || candidate_class u16 || PhysicalIncarnationIdV1; length 32 + 2H",
+      "diagnostic_record": "record_length u32 || GcErrorClassV1 u16 || severity u8 || zero u8 || observed_at_ms i64 || logical_key H-or-zero || physical_offset u64 || context_length u32 || zero u32 || redacted UTF-8 context",
+      "record_cap": 1048576,
+      "hard_cap": 67108864,
+      "checksum": "CRC-32/ISO-HDLC over all prior bytes; AGCW additionally binds complete-object BLAKE3 including this CRC",
+      "canonical_order": "strict kind-specific record key order; duplicate work records are rejected rather than silently collapsed",
+      "reserve_zero_ranges": ["all named flags/reserved fields in the exact body/record layouts"],
+      "malformed_behavior": "abandon resume and preserve prior quarantine; reject unknown kind/codec/enum, wrong identity/generation/sequence/ordinal, overflow, cap/count/length/trailing/order errors, invalid incarnation, invalid UTF-8, nonzero reserve, unused bitmap bits, CRC, or AGCW mismatch",
+      "trailing_behavior": "body_length and exact record count consume every byte before CRC",
+      "bounded_decode": "validate 80-byte header, complete length, 64 MiB object cap, body length, 1 MiB record cap, and checked record boundaries before slicing or allocation",
+      "producer_owner": "Child 04 bounded mark workspace through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/reader", "Child 04 mark resume/startup/verify/repair"],
+      "capability": "DurableMarkWorkspaceV1 bit 14",
+      "typed_hash_roles": [
+        { "field": "frontier object/path/physical hashes", "role": "typed-work-identity" },
+        { "field": "path-visit directory/path hashes", "role": "exact-visit-identity" },
+        { "field": "mutation IDs/roots/keys/incarnation", "role": "reconciliation-evidence" },
+        { "field": "candidate incarnation", "role": "candidate-evidence-only" },
+        { "field": "diagnostic logical key", "role": "non-authoritative-evidence" }
+      ],
+      "fixture_ids_32": [
+        "agwo-blake3-256-bitmap-valid", "agwo-blake3-256-frontier-valid", "agwo-blake3-256-path-visit-valid",
+        "agwo-blake3-256-mutation-valid", "agwo-blake3-256-candidate-valid", "agwo-blake3-256-diagnostic-valid"
+      ],
+      "fixture_ids_64": [
+        "agwo-sha512-bitmap-valid", "agwo-sha512-frontier-valid", "agwo-sha512-path-visit-valid",
+        "agwo-sha512-mutation-valid", "agwo-sha512-candidate-valid", "agwo-sha512-diagnostic-valid"
       ]
     },
     {
@@ -2935,10 +3037,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 16,
-    "fixture_count": 324,
+    "fixture_family_count": 18,
+    "fixture_count": 346,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, and the separate logical-root lifecycle authority/evidence graph",
-    "remaining_p0b_2_scope": "bounded mark/workspace/mutation, sweep/Void/settlement, audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, the separate logical-root lifecycle authority/evidence graph, and bounded mark checkpoints/mutation journals plus AGCW/AGWO workspace closure",
+    "remaining_p0b_2_scope": "sweep/Void/settlement, audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }
