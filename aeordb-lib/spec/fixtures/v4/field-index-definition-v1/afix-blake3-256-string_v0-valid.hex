@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: blake3-256 (32 bytes)
 # expected: field-index:ordered_v0:converter=string_v0:operations=0xc1f
-# canonical key: 4cba2abc604b1089ab9179195d6545bad0b5797fa91da8fe825969f4d53703f8
+# canonical key: e9ee5906f9bc99b07af13f1b64ecf0d171ecabc437b58282dcdb01aa78388d11
 # relation: strategy-family:migration-v0
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope

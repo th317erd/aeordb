@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: sha512 (64 bytes)
 # expected: field-index:dmetaphone_v0_strategy:converter=dmetaphone_primary_v0:operations=0x280
-# canonical key: 6dba450eb9ab9bd6225791c9987b6a27da76e6fca761549dabd5f1cd203a61f14a695fefb01a5b7924521252a6d6d39f7fd686a8391b9326d312ab520360ae36
+# canonical key: 3a3c31d66231eea1f5325d12879478f9685c89213dccac10d71aa01389dd050aa254dbdebc207fceb96105380d347e7f4bd79a91efa7cad04d2188eab23481bf
 # relation: strategy-family:migration-v0
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope

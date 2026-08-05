@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: sha512 (64 bytes)
 # expected: field-index:soundex_v0_strategy:converter=soundex_v0:operations=0x280
-# canonical key: 6ae98202d6df51c0c9c8194b8e73a4bdfd48cfa0b60515d9c2702fab4926c44fff14ebb6081184a68a2db9959354a1119287d1debd5000b35c302c970414502b
+# canonical key: ea56442145520d8a248105b9594a86f9a7fb55043fd5bb3e79c4be18d3dbcb6b156f8f839222b42cfe2a8244fa9fb713a4016ce00e406a4ff58056de72a5cc30
 # relation: strategy-family:migration-v0
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope

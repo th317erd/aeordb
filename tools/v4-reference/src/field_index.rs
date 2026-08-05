@@ -479,7 +479,7 @@ fn converter_fingerprint(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
 
 fn index_id(profile: HashProfile, bytes: &[u8]) -> Vec<u8> {
   let mut input = Vec::with_capacity(40 + bytes.len());
-  input.extend_from_slice(b"aeordb.index.field-index-definition.v1\0");
+  input.extend_from_slice(b"aeordb.index.field-definition.v1\0");
   input.extend_from_slice(bytes);
   profile.digest(&input)
 }
@@ -610,5 +610,15 @@ mod tests {
         assert!(observed.starts_with("error:") || key != case.canonical_key, "{} byte {offset} was semantically invisible", case.id);
       }
     }
+  }
+
+  #[test]
+  fn index_id_uses_the_approved_field_definition_domain() {
+    let profile = HashProfile::Blake3_256;
+    let converter = build_converter(converter_row(1).unwrap()).unwrap();
+    let bytes = build_field_index(profile, strategy_for_converter(converter_row(1).unwrap()), &converter).unwrap();
+    let mut approved = b"aeordb.index.field-definition.v1\0".to_vec();
+    approved.extend_from_slice(&bytes);
+    assert_eq!(index_id(profile, &bytes), profile.digest(&approved));
   }
 }

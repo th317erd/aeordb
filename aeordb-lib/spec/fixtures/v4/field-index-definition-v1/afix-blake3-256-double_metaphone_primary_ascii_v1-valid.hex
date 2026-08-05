@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: blake3-256 (32 bytes)
 # expected: field-index:dmetaphone:converter=double_metaphone_primary_ascii_v1:operations=0x280
-# canonical key: 3ddb9511fe581e8649f862160467d49170a801b2356ffd49259215897ea2277b
+# canonical key: f3f952ecdd22d5a5c56f53a88337723a0b212eaa87e5977fbf58ee604ba30367
 # relation: strategy-family:corrected
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope

@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: blake3-256 (32 bytes)
 # expected: field-index:soundex:converter=soundex_ascii_v1:operations=0x280
-# canonical key: ce6373b51510d1cf94f361f34bcf868e5f3d42e22f1333719d0ce63f0d35cddc
+# canonical key: affa8bfb3fce8a825c848626890b220b9fbfc0cb33451f77a75d90038abbdee6
 # relation: strategy-family:corrected
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope

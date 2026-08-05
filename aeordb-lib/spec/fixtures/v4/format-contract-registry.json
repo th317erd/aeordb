@@ -2242,7 +2242,7 @@
       "identity": [
         "complete canonical AFIX bytes"
       ],
-      "key_domain": "H(\"aeordb.index.field-index-definition.v1\\0\" || complete AFIX bytes)",
+      "key_domain": "H(\"aeordb.index.field-definition.v1\\0\" || complete AFIX bytes)",
       "checksum": "covered by enclosing immutable IndexArtifact CRC and artifact hash",
       "body_formula": "136 + H + N + C",
       "hard_cap": 262144,

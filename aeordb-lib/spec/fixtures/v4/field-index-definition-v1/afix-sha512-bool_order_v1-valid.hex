@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: sha512 (64 bytes)
 # expected: field-index:ordered:converter=bool_order_v1:operations=0xc1f
-# canonical key: 07cff25e3e41d5039b1ca78ede684c121e7725d7ca479cea46249d6a0add203f8c3e25e785d0e650b7fc62eeef628f8506eb6682e0af07c07154fe8a64c1e304
+# canonical key: 07a9955a43a42be07e70d0708391a78d7f6c1df6de737b018be6ebd9b16113d60dc4be76e849c7a74aea23ed4dc7f70c3bf10e04e4dbd6b9ee9a29d19d5f33b4
 # relation: strategy-family:corrected
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope
