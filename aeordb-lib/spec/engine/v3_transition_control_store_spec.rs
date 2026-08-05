@@ -3,11 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
 use aeordb::engine::directory_ops::{DirectoryOps, file_path_hash};
+use aeordb::engine::durability_coordinator::{DurabilityOperation, OsErrorClass};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::v4::control_store::V3TransitionControlStore;
 use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, read_database_header_read_only};
-use aeordb::engine::v4::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_system_control, system_control_path};
+use aeordb::engine::v4::hash::digest_parts;
+use aeordb::engine::v4::system_control::{
+  DurabilityLatchBodyV1, EmergencySpillCatalogBodyV1, EmergencySpillCatalogRowV1, SystemControlKindV1, SystemControlSlotV1,
+  decode_system_control, encode_durability_latch_control, encode_emergency_spill_catalog_control, system_control_path,
+};
 use aeordb::engine::{EntryType, HashAlgorithm, RequestContext, StorageEngine};
 
 fn fixture_root() -> PathBuf {
@@ -24,6 +29,133 @@ fn with_sequence(mut bytes: Vec<u8>, sequence: u64) -> Vec<u8> {
   let crc = crc32fast::hash(&bytes[..crc_offset]);
   bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
   bytes
+}
+
+fn canonical_utf8(value: &str) -> Vec<u8> {
+  let mut encoded = Vec::with_capacity(5 + value.len());
+  encoded.push(0x07);
+  encoded.extend_from_slice(&(value.len() as u32).to_le_bytes());
+  encoded.extend_from_slice(value.as_bytes());
+  encoded
+}
+
+fn recovery_controls(database_id: [u8; 16], active: bool) -> (Vec<u8>, Vec<u8>) {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let catalog = EmergencySpillCatalogBodyV1 {
+    database_id,
+    catalog_generation: 1,
+    discovered_at_ms: 1_725_000_000_000,
+    state: if active { 1 } else { 3 },
+    flags: 0,
+    repair_receipt_hash: if active { vec![0; 32] } else { vec![0x51; 32] },
+    rows: vec![EmergencySpillCatalogRowV1 {
+      source_location_class: 1,
+      replay_state: if active { 1 } else { 2 },
+      path_encoding: 1,
+      flags: 0,
+      created_at_ms: 1_725_000_000_000,
+      creation_sequence: 9,
+      file_length: 4_096,
+      complete_file_digest: vec![0x31; 32],
+      native_path: b"/var/lib/aeordb/spill/incident/manifest.json".to_vec(),
+    }],
+  };
+  let catalog_bytes = encode_emergency_spill_catalog_control(1, &catalog, algorithm).unwrap();
+  let catalog_body = decode_system_control(&catalog_bytes, algorithm).unwrap().body;
+  let catalog_payload_hash = digest_parts(algorithm, &[b"aeordb.emergency-spill-catalog-payload.v1\0", catalog_body]);
+  let evidence_digest = digest_parts(algorithm, &[b"aeordb.durability-latch-evidence.v1\0", &database_id, catalog_body]);
+  let latch = DurabilityLatchBodyV1 {
+    database_id,
+    latch_generation: 1,
+    first_failure_at_ms: 1_725_000_000_000,
+    latest_failure_at_ms: 1_725_000_000_001,
+    severity: 1,
+    state: if active { 1 } else { 3 },
+    failed_operation: DurabilityOperation::AuthorityBarrier.stable_id(),
+    os_error_class: OsErrorClass::MediaIo.stable_id(),
+    os_error_code: 5,
+    flags: 1,
+    last_selected_header_sequence: 7,
+    last_durable_write_sequence: 8,
+    last_durable_publication_sequence: 8,
+    emergency_spill_catalog_payload_hash: catalog_payload_hash,
+    evidence_digest,
+    diagnostic: canonical_utf8("serious durability failure; details redacted"),
+  };
+  let latch_bytes = encode_durability_latch_control(1, &latch, algorithm).unwrap();
+  (catalog_bytes, latch_bytes)
+}
+
+fn publish_recovery_controls(engine: &StorageEngine, database_id: [u8; 16], active: bool) {
+  let (catalog, latch) = recovery_controls(database_id, active);
+  let store = V3TransitionControlStore::new(engine);
+  store.publish_mutable(SystemControlKindV1::EmergencySpillCatalog, database_id, &[], &catalog).unwrap();
+  store.publish_mutable(SystemControlKindV1::DurabilityLatch, database_id, &[], &latch).unwrap();
+}
+
+#[test]
+fn active_persistent_recovery_controls_restore_read_only_admission_after_reopen() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-active.aeordb");
+  let database_id = [0x42; 16];
+
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/survives.txt", b"readable", Some("text/plain")).unwrap();
+    publish_recovery_controls(&engine, database_id, true);
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let recovery = reopened.persistent_durability_recovery().expect("active recovery authority restored");
+  assert_eq!(recovery.database_id, database_id);
+  assert!(recovery.blocks_writes);
+  assert!(reopened.durability_failure().is_some(), "health/status must surface the persistent write block");
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered("/survives.txt").unwrap(), b"readable");
+  let error = DirectoryOps::new(&reopened)
+    .store_file_buffered(&RequestContext::system(), "/rejected.txt", b"must fail", Some("text/plain"))
+    .unwrap_err();
+  assert!(error.to_string().contains("explicit repair"), "{error}");
+}
+
+#[test]
+fn completed_persistent_recovery_controls_preserve_identity_without_blocking_writes() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-complete.aeordb");
+  let database_id = [0x43; 16];
+
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    publish_recovery_controls(&engine, database_id, false);
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let recovery = reopened.persistent_durability_recovery().expect("completed recovery identity retained");
+  assert_eq!(recovery.database_id, database_id);
+  assert!(!recovery.blocks_writes);
+  DirectoryOps::new(&reopened).store_file_buffered(&RequestContext::system(), "/accepted.txt", b"accepted", Some("text/plain")).unwrap();
+}
+
+#[test]
+fn contradictory_persistent_recovery_database_identities_fail_closed_before_writes() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-mismatched.aeordb");
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    let (catalog, _) = recovery_controls([0x44; 16], true);
+    let (_, latch) = recovery_controls([0x45; 16], true);
+    let store = V3TransitionControlStore::new(&engine);
+    store.publish_mutable(SystemControlKindV1::EmergencySpillCatalog, [0x44; 16], &[], &catalog).unwrap();
+    store.publish_mutable(SystemControlKindV1::DurabilityLatch, [0x45; 16], &[], &latch).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let error = match StorageEngine::open(db_path.to_str().unwrap()) {
+    Ok(_) => panic!("contradictory persistent recovery controls must fail closed"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("different database identities"), "{error}");
 }
 
 #[test]
@@ -68,6 +200,7 @@ fn transition_control_store_publishes_v0_system_slots_and_selects_them_after_reo
     V3TransitionControlStore::new(&reopened).load_mutable(SystemControlKindV1::DurabilityLatch, database_id, &[]).unwrap().unwrap();
   assert_eq!(selected.selected_slot, SystemControlSlotV1::B);
   assert_eq!(selected.sequence, 8);
+  assert!(reopened.persistent_durability_recovery().unwrap().blocks_writes);
 }
 
 #[test]

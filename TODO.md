@@ -108,6 +108,7 @@
       - [x] Add production SystemControlV1 encoders for durability latches and spill catalogs that byte-match the independent fixtures.
       - [x] Add the v3-compatible ControlStore A/B FileRecord reader/writer with dependency-first hard publication.
       - [x] Upgrade external spill evidence with stable incident/database identity, complete digests, ordering, and no-follow validation.
+      - [x] Restore selected persistent latch/catalog authority on open and reject ordinary writes while preserving reads and health visibility.
       - [ ] Preserve first/latest serious-failure evidence and reject every later write while keeping reads/status/repair available.
       - [ ] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
       - [ ] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.

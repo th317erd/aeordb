@@ -442,6 +442,7 @@ pub struct StorageEngine {
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
   durability_failure: Mutex<Option<DurabilityFailureState>>,
+  persistent_durability_recovery: Mutex<Option<crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState>>,
   emergency_spill: Mutex<Option<EmergencySpillReport>>,
   last_published_hot_tail_offset: AtomicU64,
   durability_coordinator: Arc<DurabilityCoordinator>,
@@ -508,11 +509,22 @@ impl StorageEngine {
   }
 
   pub fn durability_failure(&self) -> Option<String> {
-    self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().map(|failure| failure.latest_failure.clone())
+    let runtime_failure = self
+      .durability_failure
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .as_ref()
+      .map(|failure| failure.latest_failure.clone());
+    runtime_failure
+      .or_else(|| self.persistent_durability_recovery().filter(|recovery| recovery.blocks_writes).map(|recovery| recovery.reason))
   }
 
   pub fn durability_failure_state(&self) -> Option<DurabilityFailureState> {
     self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+  }
+
+  pub fn persistent_durability_recovery(&self) -> Option<crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState> {
+    self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
   }
 
   pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
@@ -524,6 +536,11 @@ impl StorageEngine {
   }
 
   pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
+    if let Some(recovery) = self.persistent_durability_recovery() {
+      if recovery.blocks_writes {
+        return Err(EngineError::DurabilityFailure(format!("database is read-only until explicit repair completes: {}", recovery.reason)));
+      }
+    }
     if let Some(failure) = self.durability_failure() {
       return Err(EngineError::DurabilityFailure(format!("database is read-only after serious durability failure: {}", failure)));
     }
@@ -1220,6 +1237,7 @@ impl StorageEngine {
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
+      persistent_durability_recovery: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(hot_tail_offset),
       durability_coordinator,
@@ -1457,6 +1475,7 @@ impl StorageEngine {
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
+      persistent_durability_recovery: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(file_header.hot_tail_offset),
       durability_coordinator,
@@ -1518,6 +1537,8 @@ impl StorageEngine {
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer();
+    let persistent_recovery = crate::engine::v4::durability_recovery::inspect_persistent_durability_recovery(&engine)?;
+    *engine.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = persistent_recovery;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {

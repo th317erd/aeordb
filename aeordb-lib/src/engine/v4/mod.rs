@@ -10,6 +10,7 @@ pub mod config_value;
 pub mod control_store;
 pub mod database_header;
 pub mod dependency;
+pub mod durability_recovery;
 pub mod entity;
 pub mod field_definition;
 pub mod gc;
