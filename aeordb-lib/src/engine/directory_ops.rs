@@ -751,7 +751,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
@@ -889,7 +889,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let total_size = data.len() as u64;
     let published = publish_file_record_entries_at_version(
@@ -923,7 +923,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn restore_file_from_record(&self, ctx: &RequestContext, path: &str, source_record: &FileRecord) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let content_type = source_record.content_type.as_deref().unwrap_or("application/octet-stream");
     let published = publish_file_record_entries(
@@ -989,7 +989,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
 
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
@@ -1060,7 +1060,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
     let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
 
@@ -1285,7 +1285,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
 
     let dir_key = directory_path_hash(&normalized, &algo)?;
@@ -1521,7 +1521,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn restore_deleted_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
 
@@ -2303,7 +2303,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
 
     // Now delete the file itself
@@ -2851,7 +2851,7 @@ impl<'a> DirectoryOps<'a> {
 
     let normalized = normalize_path(path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let normalized_target = normalize_path(target);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -2959,7 +2959,7 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
@@ -3012,7 +3012,7 @@ impl<'a> DirectoryOps<'a> {
   /// created_at are preserved. Only the path and updated_at change.
   pub fn rename_file(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<FileRecord> {
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let old_normalized = normalize_path(old_path);
     let new_normalized = normalize_path(new_path);
@@ -3120,7 +3120,7 @@ impl<'a> DirectoryOps<'a> {
   /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
   pub fn copy_file(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<FileRecord> {
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
@@ -3160,7 +3160,7 @@ impl<'a> DirectoryOps<'a> {
   /// Recursively copy a path (file or directory) to a new location.
   pub fn copy_path(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<Vec<String>> {
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
@@ -3197,7 +3197,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn rename_symlink(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
     let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
+    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let new_normalized = normalize_path(new_path);
 
     // Reject root paths

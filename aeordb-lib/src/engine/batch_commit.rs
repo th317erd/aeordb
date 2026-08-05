@@ -208,7 +208,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   let namespace_wait_start = std::time::Instant::now();
   let namespace = engine.namespace_write_guard()?;
   let namespace_wait_ms = namespace_wait_start.elapsed().as_millis();
-  let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
+  let txn = crate::engine::storage_engine::TransactionGuard::new(engine)?;
 
   // --- Phase 2: Create FileRecords ---
   let publish_start = std::time::Instant::now();
@@ -335,7 +335,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
   }
 
   let namespace = engine.namespace_write_guard()?;
-  let txn = crate::engine::storage_engine::TransactionGuard::new(engine);
+  let txn = crate::engine::storage_engine::TransactionGuard::new(engine)?;
 
   let algo = engine.hash_algo();
   let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());

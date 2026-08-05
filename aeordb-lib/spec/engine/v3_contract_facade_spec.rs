@@ -471,6 +471,49 @@ fn bounded_group_failure_halts_and_retires_every_pending_hard_waiter() {
 }
 
 #[test]
+fn coordinator_idle_wait_distinguishes_nonterminal_work_from_retained_receipts() {
+  let coordinator = DurabilityCoordinator::new();
+  let ticket = coordinator.admit(header_commit_plan()).unwrap();
+
+  let pending = coordinator.wait_until_idle(std::time::Duration::ZERO).unwrap();
+  assert_eq!(pending.admitted, 1);
+  assert_eq!(pending.pending_hard, 1);
+
+  let mut executor = RecordingExecutor { operations: Vec::new(), fail_at: None };
+  coordinator.execute(ticket, &mut executor).unwrap();
+  let idle = coordinator.wait_until_idle(std::time::Duration::ZERO).unwrap();
+  assert_eq!(idle.admitted, 0);
+  assert_eq!(idle.executing, 0);
+  assert_eq!(idle.pending_hard, 0);
+  assert_eq!(idle.proven, 1, "terminal receipts do not block shutdown draining");
+}
+
+#[test]
+fn coordinator_idle_wait_wakes_on_completion_and_reports_timeout_age() {
+  let coordinator = std::sync::Arc::new(DurabilityCoordinator::new());
+  let ticket = coordinator.admit(header_commit_plan()).unwrap();
+  std::thread::sleep(std::time::Duration::from_millis(2));
+  let timed_out = coordinator.wait_until_idle(std::time::Duration::ZERO).unwrap();
+  assert_eq!(timed_out.admitted, 1);
+  assert!(timed_out.oldest_pending_age_ms.is_some_and(|age| age >= 1));
+
+  let worker_coordinator = std::sync::Arc::clone(&coordinator);
+  let worker = std::thread::spawn(move || {
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mut executor = RecordingExecutor { operations: Vec::new(), fail_at: None };
+    worker_coordinator.execute(ticket, &mut executor).unwrap();
+  });
+  let idle = coordinator.wait_until_idle(std::time::Duration::from_secs(1)).unwrap();
+  worker.join().unwrap();
+
+  assert_eq!(idle.admitted, 0);
+  assert_eq!(idle.executing, 0);
+  assert_eq!(idle.pending_hard, 0);
+  assert!(!idle.driver_active);
+  assert_eq!(idle.oldest_pending_age_ms, None);
+}
+
+#[test]
 fn driver_setup_failure_can_halt_all_pending_hard_waiters_before_execution() {
   let coordinator = DurabilityCoordinator::new();
   let tickets: Vec<_> = (0..2).map(|_| coordinator.admit(header_commit_plan()).unwrap()).collect();

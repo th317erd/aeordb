@@ -27,7 +27,7 @@ fn transaction_guard_increments_and_decrements_depth() {
 
   // Depth starts at 0
   {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     // Inside transaction -- depth is 1
     // Store a file -- flush should NOT truncate hot file
     let ops = DirectoryOps::new(&engine);
@@ -47,7 +47,7 @@ fn transaction_guard_fires_on_error() {
   let (engine, _temp) = create_test_db_with_hot_dir();
 
   let result: Result<(), String> = {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     // Simulate an error mid-transaction
     Err("simulated error".to_string())
   };
@@ -55,7 +55,7 @@ fn transaction_guard_fires_on_error() {
   assert!(result.is_err());
   // Guard should have dropped -- verify we can start a new transaction
   // without deadlocking
-  let _guard2 = TransactionGuard::new(&engine);
+  let _guard2 = TransactionGuard::new(&engine).unwrap();
   // If this doesn't deadlock, depth management is correct
 
   // Also verify we can do real work in the new transaction
@@ -69,14 +69,14 @@ fn transaction_guard_fires_on_panic() {
   let (engine, _temp) = create_test_db_with_hot_dir();
 
   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     panic!("simulated panic inside transaction");
   }));
 
   assert!(result.is_err());
   // Guard should have dropped despite panic
   // Verify depth is back to 0 by successfully starting a new transaction
-  let _guard2 = TransactionGuard::new(&engine);
+  let _guard2 = TransactionGuard::new(&engine).unwrap();
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   // This should work -- depth is 0, hot file can truncate
@@ -93,7 +93,7 @@ fn transaction_depth_always_returns_to_zero() {
 
   // Multiple sequential transactions
   for i in 0..10 {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     let path = format!("/file_{}.txt", i);
@@ -121,9 +121,9 @@ fn nested_guards_increment_depth_correctly() {
   let (engine, _temp) = create_test_db_with_hot_dir();
 
   {
-    let _guard1 = TransactionGuard::new(&engine);
+    let _guard1 = TransactionGuard::new(&engine).unwrap();
     {
-      let _guard2 = TransactionGuard::new(&engine);
+      let _guard2 = TransactionGuard::new(&engine).unwrap();
       // Depth is 2 here -- storing a file should work
       let ops = DirectoryOps::new(&engine);
       let ctx = RequestContext::system();
@@ -134,7 +134,7 @@ fn nested_guards_increment_depth_correctly() {
   // Depth is 0 here -- outer guard dropped
 
   // Verify we can start fresh transactions
-  let _guard3 = TransactionGuard::new(&engine);
+  let _guard3 = TransactionGuard::new(&engine).unwrap();
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/after-nested.txt", b"ok", Some("text/plain")).unwrap();
@@ -146,7 +146,7 @@ fn mixed_success_and_error_transactions() {
 
   // Successful transaction
   {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     ops.store_file_buffered(&ctx, "/success1.txt", b"ok", Some("text/plain")).unwrap();
@@ -154,13 +154,13 @@ fn mixed_success_and_error_transactions() {
 
   // Failed transaction (error)
   let _: Result<(), String> = {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     Err("fail".to_string())
   };
 
   // Another successful transaction
   {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     let ops = DirectoryOps::new(&engine);
     let ctx = RequestContext::system();
     ops.store_file_buffered(&ctx, "/success2.txt", b"ok2", Some("text/plain")).unwrap();
@@ -168,7 +168,7 @@ fn mixed_success_and_error_transactions() {
 
   // Panicked transaction
   let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     panic!("boom");
   }));
 
@@ -423,7 +423,7 @@ fn empty_file_with_transaction() {
 
   // Store an empty file inside an explicit transaction
   {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
   }
 
@@ -441,7 +441,7 @@ fn large_file_with_transaction() {
   // Store a file larger than one chunk (>256KB) inside a transaction
   let large_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
   {
-    let _guard = TransactionGuard::new(&engine);
+    let _guard = TransactionGuard::new(&engine).unwrap();
     ops.store_file_buffered(&ctx, "/large.bin", &large_data, Some("application/octet-stream")).unwrap();
   }
 

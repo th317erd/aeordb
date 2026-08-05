@@ -185,7 +185,7 @@ fn store_file_buffered_defers_durable_head_until_outer_transaction_commits() {
   let initial_disk_head = disk_head_hash(&dir);
 
   {
-    let _outer = TransactionGuard::new(&engine);
+    let _outer = TransactionGuard::new(&engine).unwrap();
     ops.store_file_buffered(&ctx, "/txn/a.json", br#"{"a":1}"#, Some("application/json")).unwrap();
 
     let in_memory_head = engine.head_hash().unwrap();
@@ -208,7 +208,7 @@ fn store_files_buffered_batch_defers_durable_head_until_outer_transaction_commit
   let initial_disk_head = disk_head_hash(&dir);
 
   {
-    let _outer = TransactionGuard::new(&engine);
+    let _outer = TransactionGuard::new(&engine).unwrap();
     ops
       .store_files_buffered_batch(
         &ctx,

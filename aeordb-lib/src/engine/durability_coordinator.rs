@@ -514,6 +514,8 @@ pub struct DurabilityCoordinatorSnapshot {
   pub proven: usize,
   pub failed: usize,
   pub pending_hard: usize,
+  pub driver_active: bool,
+  pub oldest_pending_age_ms: Option<u64>,
   pub ledger: Vec<DurabilityLedgerEntry>,
 }
 
@@ -893,28 +895,26 @@ impl DurabilityCoordinator {
 
   pub fn snapshot(&self) -> Result<DurabilityCoordinatorSnapshot, DurabilityCoordinatorError> {
     let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-    let mut admitted = 0;
-    let mut executing = 0;
-    let mut proven = 0;
-    let mut failed = 0;
-    for record in state.records.values() {
-      match record.status {
-        CommitStatus::Admitted => admitted += 1,
-        CommitStatus::Executing => executing += 1,
-        CommitStatus::Proven => proven += 1,
-        CommitStatus::Failed(_) => failed += 1,
+    Ok(snapshot_locked(&state))
+  }
+
+  pub fn wait_until_idle(&self, timeout: Duration) -> Result<DurabilityCoordinatorSnapshot, DurabilityCoordinatorError> {
+    let deadline = Instant::now() + timeout;
+    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    while coordinator_has_nonterminal_work(&state) {
+      let now = Instant::now();
+      if now >= deadline {
+        break;
+      }
+      let remaining = deadline.saturating_duration_since(now);
+      let (next_state, wait_result) =
+        self.changed.wait_timeout(state, remaining).map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+      state = next_state;
+      if wait_result.timed_out() {
+        break;
       }
     }
-    Ok(DurabilityCoordinatorSnapshot {
-      hard_frontier: state.hard_frontier,
-      next_sequence: state.next_sequence,
-      admitted,
-      executing,
-      proven,
-      failed,
-      pending_hard: state.pending_hard.len(),
-      ledger: state.ledger.iter().cloned().collect(),
-    })
+    Ok(snapshot_locked(&state))
   }
 
   pub fn hard_failure(&self) -> Result<Option<DurabilityFailure>, DurabilityCoordinatorError> {
@@ -1014,6 +1014,46 @@ impl DurabilityCoordinator {
       failures.push(failure);
     }
     Ok(failures)
+  }
+}
+
+fn coordinator_has_nonterminal_work(state: &CoordinatorState) -> bool {
+  state.driver_active
+    || state.records.values().any(|record| matches!(record.status, CommitStatus::Admitted | CommitStatus::Executing))
+    || !state.pending_hard.is_empty()
+}
+
+fn snapshot_locked(state: &CoordinatorState) -> DurabilityCoordinatorSnapshot {
+  let mut admitted = 0;
+  let mut executing = 0;
+  let mut proven = 0;
+  let mut failed = 0;
+  for record in state.records.values() {
+    match record.status {
+      CommitStatus::Admitted => admitted += 1,
+      CommitStatus::Executing => executing += 1,
+      CommitStatus::Proven => proven += 1,
+      CommitStatus::Failed(_) => failed += 1,
+    }
+  }
+  let now = Instant::now();
+  let oldest_pending_age_ms = state
+    .records
+    .values()
+    .filter(|record| matches!(record.status, CommitStatus::Admitted | CommitStatus::Executing))
+    .map(|record| now.saturating_duration_since(record.admitted_at).as_millis().min(u64::MAX as u128) as u64)
+    .max();
+  DurabilityCoordinatorSnapshot {
+    hard_frontier: state.hard_frontier,
+    next_sequence: state.next_sequence,
+    admitted,
+    executing,
+    proven,
+    failed,
+    pending_hard: state.pending_hard.len(),
+    driver_active: state.driver_active,
+    oldest_pending_age_ms,
+    ledger: state.ledger.iter().cloned().collect(),
   }
 }
 

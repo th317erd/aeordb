@@ -1,8 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::durability_coordinator::DurabilityOperation;
-use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::storage_engine::{StorageEngine, TransactionGuard};
+use aeordb::engine::EntryType;
 use aeordb::engine::RequestContext;
 use aeordb::engine::EventBus;
 use aeordb::engine::heartbeat::spawn_heartbeat;
@@ -76,6 +79,78 @@ fn shutdown_finishes_on_hard_authority_readback_without_a_trailing_soft_barrier(
   assert_eq!(snapshot.admitted, 0);
   assert_eq!(snapshot.executing, 0);
   assert_eq!(snapshot.pending_hard, 0);
+}
+
+#[test]
+fn shutdown_rejects_new_transactions_but_keeps_status_available_for_an_admitted_transaction() {
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&temp_dir));
+  let transaction = TransactionGuard::new(&engine).unwrap();
+
+  engine.begin_shutdown();
+
+  let operations = engine.active_operations_snapshot();
+  assert!(operations.shutting_down);
+  assert_eq!(operations.active_operations, 1);
+  assert_eq!(operations.operations, vec![("namespace_transaction".to_string(), 1)]);
+  let durability = engine.durability_snapshot().unwrap();
+  assert_eq!(durability.pending_hard, 0);
+  let rejected_engine = Arc::clone(&engine);
+  let rejected =
+    thread::spawn(move || matches!(TransactionGuard::new(&rejected_engine), Err(aeordb::engine::errors::EngineError::ShuttingDown)));
+  assert!(rejected.join().unwrap());
+
+  transaction.commit().unwrap();
+  assert_eq!(engine.active_operations_snapshot().active_operations, 0);
+  engine.shutdown().unwrap();
+}
+
+#[test]
+fn shutdown_waits_for_an_admitted_transaction_to_reach_its_hard_frontier() {
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&temp_dir));
+  let (transaction_ready_sender, transaction_ready_receiver) = mpsc::channel();
+  let (complete_transaction_sender, complete_transaction_receiver) = mpsc::channel();
+  let worker_engine = Arc::clone(&engine);
+  let worker = thread::spawn(move || {
+    let transaction = TransactionGuard::new(&worker_engine).unwrap();
+    transaction_ready_sender.send(()).unwrap();
+    complete_transaction_receiver.recv().unwrap();
+    let key = worker_engine.hash_algo().compute_hash(b"shutdown-race").unwrap();
+    worker_engine.store_entry(EntryType::Chunk, &key, b"durable").unwrap();
+    transaction.commit()
+  });
+  transaction_ready_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+
+  let shutdown_engine = Arc::clone(&engine);
+  let (shutdown_done_sender, shutdown_done_receiver) = mpsc::channel();
+  let shutdown = thread::spawn(move || {
+    let result = shutdown_engine.shutdown();
+    shutdown_done_sender.send(result).unwrap();
+  });
+  let deadline = Instant::now() + Duration::from_secs(2);
+  while !engine.active_operations_snapshot().shutting_down && Instant::now() < deadline {
+    thread::sleep(Duration::from_millis(1));
+  }
+
+  let blocked = engine.active_operations_snapshot();
+  assert!(blocked.shutting_down);
+  assert_eq!(blocked.active_operations, 1);
+  assert!(shutdown_done_receiver.try_recv().is_err(), "shutdown returned before the admitted transaction completed");
+
+  complete_transaction_sender.send(()).unwrap();
+  worker.join().unwrap().unwrap();
+  shutdown_done_receiver.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+  shutdown.join().unwrap();
+  let durability = engine.durability_snapshot().unwrap();
+  assert_eq!(durability.admitted, 0);
+  assert_eq!(durability.executing, 0);
+  assert_eq!(durability.pending_hard, 0);
+
+  drop(engine);
+  let reopened = reopen_engine(&temp_dir);
+  let key = reopened.hash_algo().compute_hash(b"shutdown-race").unwrap();
+  assert_eq!(reopened.get_entry(&key).unwrap().unwrap().2, b"durable");
 }
 
 #[test]

@@ -232,6 +232,7 @@ struct EngineOperationGuard<'a> {
   operation: &'static str,
   engine_id: usize,
   counted: bool,
+  _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl EngineOperationTracker {
@@ -239,7 +240,7 @@ impl EngineOperationTracker {
     let nested = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
     ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
     if nested {
-      return Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: false });
+      return Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: false, _thread_bound: std::marker::PhantomData });
     }
 
     let mut state = match self.state.lock() {
@@ -263,7 +264,7 @@ impl EngineOperationTracker {
     }
     state.active_operations += 1;
     *state.operations.entry(operation).or_insert(0) += 1;
-    Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: true })
+    Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: true, _thread_bound: std::marker::PhantomData })
   }
 
   fn begin_shutdown(&self) {
@@ -511,7 +512,7 @@ impl StorageEngine {
   fn internal_operation_scope(&self, operation: &'static str) -> EngineOperationGuard<'_> {
     let engine_id = self as *const StorageEngine as usize;
     ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
-    EngineOperationGuard { tracker: &self.operation_tracker, operation, engine_id, counted: false }
+    EngineOperationGuard { tracker: &self.operation_tracker, operation, engine_id, counted: false, _thread_bound: std::marker::PhantomData }
   }
 
   /// Stop accepting new top-level engine operations. Existing operations are
@@ -3581,10 +3582,13 @@ impl StorageEngine {
 
   /// Begin a transaction: increment the KV store's transaction depth so that
   /// `flush()` skips hot-file truncation until the transaction ends.
-  pub fn begin_transaction(&self) {
-    if let Ok(mut kv) = self.kv_writer.lock() {
-      kv.transaction_depth += 1;
-    }
+  fn begin_transaction(&self) -> EngineResult<()> {
+    let mut kv = self
+      .kv_writer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to begin transaction: {error}"))))?;
+    kv.transaction_depth += 1;
+    Ok(())
   }
 
   fn prepare_transaction_completion(&self) -> EngineResult<Option<DurabilityTicket>> {
@@ -3799,6 +3803,7 @@ impl StorageEngine {
     let _shutdown_operation = self.internal_operation_scope("shutdown");
 
     let drain_timeout = if previous_attempt { std::time::Duration::ZERO } else { initial_drain_timeout };
+    let drain_deadline = std::time::Instant::now() + drain_timeout;
     let snapshot = self.wait_for_active_operations(drain_timeout);
     if snapshot.active_operations > 0 {
       tracing::error!(
@@ -3807,6 +3812,23 @@ impl StorageEngine {
         wait_seconds = drain_timeout.as_secs(),
         repeated_attempt = previous_attempt,
         "Storage engine shutdown blocked by active operations"
+      );
+      return Err(EngineError::ShuttingDown);
+    }
+
+    let durability_wait = drain_deadline.saturating_duration_since(std::time::Instant::now());
+    let durability =
+      self.durability_coordinator.wait_until_idle(durability_wait).map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    if durability.admitted > 0 || durability.executing > 0 || durability.pending_hard > 0 || durability.driver_active {
+      tracing::error!(
+        admitted = durability.admitted,
+        executing = durability.executing,
+        pending_hard = durability.pending_hard,
+        driver_active = durability.driver_active,
+        oldest_pending_age_ms = durability.oldest_pending_age_ms,
+        wait_milliseconds = durability_wait.as_millis(),
+        repeated_attempt = previous_attempt,
+        "Storage engine shutdown blocked by durability work"
       );
       return Err(EngineError::ShuttingDown);
     }
@@ -3968,6 +3990,35 @@ mod tests {
     let second = engine.shutdown_with_drain_timeout(Duration::from_secs(60));
     assert!(matches!(second, Err(EngineError::ShuttingDown)));
     assert!(started.elapsed() < Duration::from_millis(100), "repeated blocked shutdown waited too long");
+  }
+
+  #[test]
+  fn shutdown_refuses_pending_durability_work_without_active_operations() {
+    struct NoopExecutor;
+
+    impl crate::engine::durability_coordinator::DurabilityExecutor for NoopExecutor {
+      type Error = std::convert::Infallible;
+
+      fn execute(&mut self, _sequence: u64, _operation: DurabilityOperation) -> Result<(), Self::Error> {
+        Ok(())
+      }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("shutdown-pending-durability.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let ticket = engine.durability_coordinator.admit(v3_header_commit_plan().unwrap()).unwrap();
+    assert_eq!(engine.active_operations_snapshot().active_operations, 0);
+
+    let blocked = engine.shutdown_with_drain_timeout(Duration::ZERO);
+    assert!(matches!(blocked, Err(EngineError::ShuttingDown)));
+    let pending = engine.durability_snapshot().unwrap();
+    assert_eq!(pending.admitted, 1);
+    assert_eq!(pending.pending_hard, 1);
+
+    engine.durability_coordinator.execute(ticket, &mut NoopExecutor).unwrap();
+    assert!(matches!(engine.durability_coordinator.take_waiter_state(ticket).unwrap(), DurabilityWaiterState::Succeeded(_)));
+    engine.shutdown_with_drain_timeout(Duration::ZERO).unwrap();
   }
 
   #[test]
@@ -4154,7 +4205,7 @@ mod tests {
     let temp_dir = tempfile::tempdir().unwrap();
     let engine_path = temp_dir.path().join("transaction-completion-error.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    let transaction = TransactionGuard::new(&engine);
+    let transaction = TransactionGuard::new(&engine).unwrap();
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let _guard = engine.kv_writer.lock().unwrap();
@@ -4172,7 +4223,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = engine.writer.read().unwrap().durability_coordinator();
 
-    engine.begin_transaction();
+    engine.begin_transaction().unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let _guard = engine.writer.write().unwrap();
@@ -4192,7 +4243,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = Arc::clone(&engine.durability_coordinator);
 
-    engine.begin_transaction();
+    engine.begin_transaction().unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let _guard = engine.namespace_write_lock.lock().unwrap();
@@ -4254,17 +4305,22 @@ impl Drop for NamespaceWriteGuard<'_> {
 /// While this guard is alive, `DiskKVStore::flush()` will skip truncating the
 /// hot file, ensuring crash recovery can replay all entries written during
 /// the transaction. [`commit`](Self::commit) surfaces the hard-commit result to
-/// the caller. `Drop` remains a best-effort cleanup for early error paths, where
-/// there is no successful acknowledgement to protect.
+/// the caller. Construction is fallible because shutdown rejects new top-level
+/// transactions. The guard also keeps the transaction visible to shutdown until
+/// its hard durability ticket reaches a terminal state. `Drop` remains a
+/// best-effort cleanup for early error paths, where there is no successful
+/// acknowledgement to protect.
 pub struct TransactionGuard<'a> {
   engine: &'a StorageEngine,
+  _operation: EngineOperationGuard<'a>,
   completed: bool,
 }
 
 impl<'a> TransactionGuard<'a> {
-  pub fn new(engine: &'a StorageEngine) -> Self {
-    engine.begin_transaction();
-    TransactionGuard { engine, completed: false }
+  pub fn new(engine: &'a StorageEngine) -> EngineResult<Self> {
+    let operation = engine.operation_guard("namespace_transaction")?;
+    engine.begin_transaction()?;
+    Ok(TransactionGuard { engine, _operation: operation, completed: false })
   }
 
   pub fn commit(mut self) -> EngineResult<()> {

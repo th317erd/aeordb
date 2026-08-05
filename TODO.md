@@ -113,7 +113,7 @@
       - [x] Preserve first/latest serious-failure evidence and reject every later write while keeping reads/status/repair available.
       - [x] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
       - [x] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.
-      - [ ] Drain durability waiters during shutdown and keep status available while shutdown or repair is blocked.
+      - [x] Drain durability waiters during shutdown and keep status available while shutdown or repair is blocked.
       - [ ] Add checked install/deploy downgrade refusal while latch/spill/repair state is active.
       - [ ] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
