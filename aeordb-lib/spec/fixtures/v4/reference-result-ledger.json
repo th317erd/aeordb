@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-apos-v1",
+  "tool_revision": "p0b2-gc-controls-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1249,6 +1249,126 @@
       "fixture_id": "afix-sha512-dmetaphone_alt_v0-valid",
       "expected": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
       "observed": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-quarantine-control-a",
+      "expected": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
+      "observed": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-quarantine-control-b",
+      "expected": "gc:control:quarantine:slot-b:sequence=18446744073709551615:generation=10001",
+      "observed": "gc:control:quarantine:slot-b:sequence=18446744073709551615:generation=10001",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-mark-run-control-a",
+      "expected": "gc:control:mark-run:slot-a:sequence=1:generation=10002",
+      "observed": "gc:control:mark-run:slot-a:sequence=1:generation=10002",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-mark-run-control-b",
+      "expected": "gc:control:mark-run:slot-b:sequence=18446744073709551615:generation=10002",
+      "observed": "gc:control:mark-run:slot-b:sequence=18446744073709551615:generation=10002",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-control-a",
+      "expected": "gc:control:physical-inventory:slot-a:sequence=1:generation=10003",
+      "observed": "gc:control:physical-inventory:slot-a:sequence=1:generation=10003",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-control-b",
+      "expected": "gc:control:physical-inventory:slot-b:sequence=18446744073709551615:generation=10003",
+      "observed": "gc:control:physical-inventory:slot-b:sequence=18446744073709551615:generation=10003",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-catalog-control-a",
+      "expected": "gc:control:audit-catalog:slot-a:sequence=1:generation=10004",
+      "observed": "gc:control:audit-catalog:slot-a:sequence=1:generation=10004",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-catalog-control-b",
+      "expected": "gc:control:audit-catalog:slot-b:sequence=18446744073709551615:generation=10004",
+      "observed": "gc:control:audit-catalog:slot-b:sequence=18446744073709551615:generation=10004",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-control-a",
+      "expected": "gc:control:void-catalog:slot-a:sequence=1:generation=10005",
+      "observed": "gc:control:void-catalog:slot-a:sequence=1:generation=10005",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-control-b",
+      "expected": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
+      "observed": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-quarantine-control-a",
+      "expected": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
+      "observed": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-quarantine-control-b",
+      "expected": "gc:control:quarantine:slot-b:sequence=18446744073709551615:generation=10001",
+      "observed": "gc:control:quarantine:slot-b:sequence=18446744073709551615:generation=10001",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-mark-run-control-a",
+      "expected": "gc:control:mark-run:slot-a:sequence=1:generation=10002",
+      "observed": "gc:control:mark-run:slot-a:sequence=1:generation=10002",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-mark-run-control-b",
+      "expected": "gc:control:mark-run:slot-b:sequence=18446744073709551615:generation=10002",
+      "observed": "gc:control:mark-run:slot-b:sequence=18446744073709551615:generation=10002",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-control-a",
+      "expected": "gc:control:physical-inventory:slot-a:sequence=1:generation=10003",
+      "observed": "gc:control:physical-inventory:slot-a:sequence=1:generation=10003",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-control-b",
+      "expected": "gc:control:physical-inventory:slot-b:sequence=18446744073709551615:generation=10003",
+      "observed": "gc:control:physical-inventory:slot-b:sequence=18446744073709551615:generation=10003",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-catalog-control-a",
+      "expected": "gc:control:audit-catalog:slot-a:sequence=1:generation=10004",
+      "observed": "gc:control:audit-catalog:slot-a:sequence=1:generation=10004",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-catalog-control-b",
+      "expected": "gc:control:audit-catalog:slot-b:sequence=18446744073709551615:generation=10004",
+      "observed": "gc:control:audit-catalog:slot-b:sequence=18446744073709551615:generation=10004",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-control-a",
+      "expected": "gc:control:void-catalog:slot-a:sequence=1:generation=10005",
+      "observed": "gc:control:void-catalog:slot-a:sequence=1:generation=10005",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-control-b",
+      "expected": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
+      "observed": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
       "result": "pass"
     },
     {

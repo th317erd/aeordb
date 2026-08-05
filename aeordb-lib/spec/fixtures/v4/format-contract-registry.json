@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-apos",
+  "coverage_stage": "p0b-2-gc-controls",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2585,6 +2585,136 @@
       ]
     },
     {
+      "id": "gc-artifact-v1",
+      "family": "garbage-collection-and-physical-retirement",
+      "magic_ascii": "AGCA",
+      "version": 1,
+      "entry_type": "0x0a",
+      "kv_type": "0x0b",
+      "kind_registry": {
+        "0x0001": "QuarantineActiveControl",
+        "0x0002": "MarkRunActiveControl",
+        "0x0003": "PhysicalInventoryActiveControl",
+        "0x0004": "AuditCatalogActiveControl",
+        "0x0005": "VoidCatalogActiveControl",
+        "0x0010": "QuarantineManifest",
+        "0x0011": "RootExpiryCatalogManifest",
+        "0x0012": "PhysicalInventoryManifest",
+        "0x0013": "MarkRunCheckpoint",
+        "0x0014": "AuditCatalogManifest",
+        "0x0015": "GcRunSummary",
+        "0x0016": "VoidCatalogManifest",
+        "0x001f": "GcArtifactDirectoryNode",
+        "0x0020": "CandidatePage",
+        "0x0021": "CandidateDelta",
+        "0x0022": "RootExpiryPage",
+        "0x0023": "RetirementJournalSegment",
+        "0x0024": "PhysicalInventoryPage",
+        "0x0025": "MarkMutationJournalSegment",
+        "0x0026": "VoidExtentPage",
+        "0x0027": "VoidClaim",
+        "0x0030": "SweepProposal",
+        "0x0031": "SweepCommitReceipt",
+        "0x0032": "RecoveredSweepReceipt",
+        "0x0033": "CorruptGcEvidence",
+        "0x0034": "AuditDetailPage",
+        "0x0035": "AuditSummaryPage",
+        "0x0036": "AuditPin"
+      },
+      "frozen_body_kinds": ["0x0001", "0x0002", "0x0003", "0x0004", "0x0005"],
+      "pending_body_fixture_kinds": [
+        "0x0010", "0x0011", "0x0012", "0x0013", "0x0014", "0x0015", "0x0016", "0x001f",
+        "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0025", "0x0026", "0x0027",
+        "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036"
+      ],
+      "layout": [
+        { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AGCA" },
+        { "offset": 4, "length": 2, "field": "artifact_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "artifact_kind", "rule": "permanent kind ID" },
+        { "offset": 8, "length": 2, "field": "envelope_header_length", "rule": "exactly 32" },
+        { "offset": 10, "length": 2, "field": "artifact_flags", "rule": "zero in v1" },
+        { "offset": 12, "length": 4, "field": "artifact_value_length", "rule": "32 + identity + body + 4" },
+        { "offset": 16, "length": 2, "field": "identity_length", "rule": "exact kind identity" },
+        { "offset": 18, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 20, "length": 4, "field": "body_length", "rule": "exact kind body" },
+        { "offset": 24, "length": 8, "field": "generation", "rule": "nonzero family/run generation" },
+        { "offset": 32, "length_formula": "I", "field": "identity", "rule": "canonical kind identity" },
+        { "offset_formula": "32 + I", "length_formula": "B", "field": "body", "rule": "canonical kind body" },
+        { "offset_formula": "32 + I + B", "length": 4, "field": "artifact_crc32", "rule": "CRC-32/ISO-HDLC over prior bytes" }
+      ],
+      "active_control": {
+        "identity": "database_id[16] || slot u8",
+        "body": "control_sequence u64 LE || target_manifest_hash H",
+        "complete_formula": "61 + H",
+        "target_kinds": {
+          "0x0001": "0x0010",
+          "0x0002": "0x0013",
+          "0x0003": "0x0012",
+          "0x0004": "0x0014",
+          "0x0005": "0x0016"
+        },
+        "selection": "greatest closure-valid sequence; equal sequence and identical target chooses A; equal sequence with different target is ambiguous"
+      },
+      "physical_incarnation_id_v1": {
+        "formula": "logical key H || integrity/legacy digest H || WAL offset u64 || write sequence u64 || total entity length u32 || EntryType u8 || entity version u8 || zero[2]",
+        "length_formula": "24 + 2H",
+        "legacy_digest_domain": "H('aeordb.legacy-physical-incarnation.v1\\0' || exact complete v0 entity bytes)",
+        "rules": "all fields identify one exact incarnation; write sequence is zero only for v0; range is nonzero, in-bounds, overflow checked, and never chronological by offset"
+      },
+      "identity": "controls: database_id and slot; immutable kinds: complete kind-specific identity, generation, and body",
+      "key_domain": "controls: H('aeordb.gc-artifact.control.v1\\0' || kind u16 LE || database_id[16] || slot u8); immutable: H('aeordb.gc-artifact.immutable.v1\\0' || kind u16 LE || complete AGCA value)",
+      "checksum": "CRC-32/ISO-HDLC over the complete artifact value except its final 4 bytes",
+      "body_formula": "32 + I + B + 4; active controls are 61 + H",
+      "hard_cap": 67108864,
+      "canonical_order": "32-byte AGCA envelope, canonical identity, exact kind body, trailing CRC; control pair selection uses greatest closure-valid control_sequence",
+      "reserve_zero_ranges": [
+        { "start": 10, "length": 2 },
+        { "start": 18, "length": 2 },
+        { "physical_incarnation_offset_formula": "2H + 22", "length": 2 }
+      ],
+      "malformed_behavior": "protect or delay reclamation; reject unknown kind/version, flags/reserve, zero generation/sequence/identity/target, invalid slot, formula/cap/trailing/CRC/key mismatch, invalid physical incarnation or range, and equal-sequence controls with different targets",
+      "trailing_behavior": "artifact_value_length and exact kind body consume all bytes before the final CRC",
+      "bounded_decode": "reject below-envelope or above-64-MiB values before allocation; validate checked envelope formula before slicing; active controls require exactly 61 + H bytes",
+      "producer_owner": "Child 04 GC/retirement coordinators through Child 01 codec",
+      "consumer_owners": [
+        "Child 01 fixture/reader and ControlStore",
+        "Child 04 mark/inventory/sweep/Void runtime",
+        "startup/recovery/verify/repair/diagnostics",
+        "Child 07 compatible physical transfer"
+      ],
+      "capability": "GcArtifactV1 bit 12; later body kinds add their assigned GC capability",
+      "typed_hash_roles": [
+        { "field": "logical KV/entity key in PhysicalIncarnationIdV1", "role": "identity" },
+        { "field": "integrity hash or legacy full-entity digest", "role": "identity" },
+        { "field": "target_manifest_hash", "role": "graph-edge-authority" },
+        { "field": "immutable artifact key", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "agca-blake3-256-quarantine-control-a",
+        "agca-blake3-256-quarantine-control-b",
+        "agca-blake3-256-mark-run-control-a",
+        "agca-blake3-256-mark-run-control-b",
+        "agca-blake3-256-physical-inventory-control-a",
+        "agca-blake3-256-physical-inventory-control-b",
+        "agca-blake3-256-audit-catalog-control-a",
+        "agca-blake3-256-audit-catalog-control-b",
+        "agca-blake3-256-void-catalog-control-a",
+        "agca-blake3-256-void-catalog-control-b"
+      ],
+      "fixture_ids_64": [
+        "agca-sha512-quarantine-control-a",
+        "agca-sha512-quarantine-control-b",
+        "agca-sha512-mark-run-control-a",
+        "agca-sha512-mark-run-control-b",
+        "agca-sha512-physical-inventory-control-a",
+        "agca-sha512-physical-inventory-control-b",
+        "agca-sha512-audit-catalog-control-a",
+        "agca-sha512-audit-catalog-control-b",
+        "agca-sha512-void-catalog-control-a",
+        "agca-sha512-void-catalog-control-b"
+      ]
+    },
+    {
       "id": "logical-position-v1",
       "family": "public-wire-position",
       "magic_ascii": "APOS",
@@ -2686,10 +2816,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 15,
-    "fixture_count": 260,
+    "fixture_family_count": 16,
+    "fixture_count": 280,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, and LogicalPositionTokenV1",
-    "remaining_p0b_2_scope": "GcArtifact, controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope/kind registry, all five GC A/B controls, and PhysicalIncarnationIdV1",
+    "remaining_p0b_2_scope": "remaining GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

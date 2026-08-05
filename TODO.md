@@ -23,6 +23,12 @@
       - [x] Freeze NvtTileV1 sparse-hint semantics and corruption fallback contract.
       - [x] Freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1.
       - [x] Freeze APOS v1 canonical position tokens and malformed-input behavior.
+      - [ ] Freeze the complete Round 13 `GcArtifactV1` family.
+        - [x] Freeze the AGCA envelope, permanent kind registry, five A/B controls, and physical-incarnation identity.
+        - [ ] Freeze quarantine, root-expiry, physical-inventory, and retirement artifacts.
+        - [ ] Freeze bounded mark checkpoints, workspace files, and mutation journals.
+        - [ ] Freeze sweep proposals/receipts and receipt-backed Void catalogs/claims.
+        - [ ] Freeze audit catalogs/details/summaries, run summaries, corruption evidence, and pins.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

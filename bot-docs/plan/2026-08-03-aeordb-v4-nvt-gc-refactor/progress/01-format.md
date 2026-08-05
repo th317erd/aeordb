@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2c-4 APOS logical position tokens
+- **Current landing unit:** P0b-2d-1 GC envelope, controls, and physical-incarnation identity
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2c-3 index task artifacts `7096489c63128a95760848e76ec6a63357e795ed`
+- **Last green commit:** P0b-2c-4 APOS logical position tokens `675d292af972a49b0a45d00425a068e6e8bc4952`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze the common `GcArtifactV1` envelope and every bounded-mark, quarantine, sweep, reclaim, lifecycle, and audit body from Round 13 at both hash widths
+- **Next action:** freeze quarantine candidate state/pages/deltas/manifests, root-expiry catalogs, retirement journals, physical inventory, and all seven GC directory roles at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -159,3 +159,13 @@
 - **Failure proof:** tests reject malformed, padded, noncanonical, or overlong base64url; wrong magic/version/route/hash profile/length/count/flags; zero root/order/ties; CRC failures; malformed tuple lengths; unknown/reserved states/tags; invalid UTF-8, numeric, finite-f64, signed-zero, and bool payloads; and one byte beyond the hard cap. Unsigned-token context tests require exact route, root, order, resolved FileKey/revision, and recomputed tuple, returning the approved mismatch classes.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 94 tests in 5.34 seconds (246,696 KiB maximum RSS); strict standalone Clippy passed; fresh generation/verification passed all 260 fixtures; and the campaign gate passed with 93 routes and 36 docs using the documented home-volume target override because `/tmp` was full. The final oracle review also added exact nine-key order-definition validation, including route, tie, policy, sort-row, fingerprint, unknown-key, and duplicate-key rejection without changing the valid fixture bytes.
 - **Boundary:** this freezes only the independent public wire oracle. No production cursor decoder/encoder, route ordering, pagination, API schema, SDK, UI, authorization, query planner, or database changed. GcArtifact is next.
+
+## P0b-2d-1 GC Envelope, Controls, and Physical Identity
+
+- **Red proof:** after the 260-case APOS gate passed, the campaign gate failed with `P0b-2 GC format is absent from the contract registry: gc-artifact-v1` before the AGCA module or fixtures existed.
+- **Territory:** stable-locator replacement and WAL inventory produce exact physical incarnations; mark, quarantine, sweep, allocator, startup, recovery, verify, repair, diagnostics, backup, and compatible physical transfer consume them. The entire permanent 28-kind registry is recognized now, while only the five active-control bodies are writer-fixtured in this landing unit.
+- **Frozen contracts:** exact 32-byte `AGCA` envelope, EntryType `0x0a`, KV tag `0x0b`, 64 MiB family cap, immutable/stable key domains, all five control-to-manifest target kinds, A/B identity/body/selection rules, and exact `PhysicalIncarnationIdV1` framing including legacy digest domain and v0/v1 sequence rules.
+- **Independent corpus:** A and B controls for quarantine, mark-run, physical-inventory, audit-catalog, and Void-catalog under both hash profiles add 20 fixtures, bringing the corpus to 280.
+- **Failure proof:** every control byte is CRC or structure protected; repaired-CRC tests cover envelope lengths, kinds, reserves, slots, zero identities/sequences/targets, and exact body size. Pair selection rejects equal-sequence disagreement before closure choice, falls back from a higher closure-invalid target, and yields no authority when neither closure verifies. Physical-incarnation tests cover both hash widths, v0/v1 sequences, exact legacy digest sensitivity, zero identities/ranges, unknown entry types, reserves, and overflow.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 100 tests in 5.29 seconds (51,724 KiB maximum RSS); strict standalone Clippy passed; fresh generation/verification passed all 280 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** no production `EntryType`, KV tag, reader, writer, GC traversal, quarantine, sweep, allocator, startup, repair, or database changed. The remaining 23 AGCA bodies stay explicitly pending and writer-disabled.

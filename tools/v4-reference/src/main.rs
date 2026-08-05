@@ -3,6 +3,7 @@ mod core;
 mod definitions;
 mod dependency;
 mod field_index;
+mod gc;
 mod index;
 mod index_nvt;
 mod index_pages;
@@ -28,6 +29,7 @@ use config::ConfigFormat;
 use core::{CoreFormat, HashProfile};
 use dependency::DependencyFormat;
 use field_index::FieldIndexFormat;
+use gc::GcFormat;
 use definitions::DefinitionFormat;
 use index::IndexFormat;
 use parser::ParserFormat;
@@ -37,7 +39,7 @@ use selector::SelectorFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-apos-v1";
+const TOOL_REVISION: &str = "p0b2-gc-controls-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -56,6 +58,7 @@ enum FixtureFormat {
   Dependency(DependencyFormat),
   Definition(DefinitionFormat),
   FieldIndex(FieldIndexFormat),
+  Gc(GcFormat),
   Index(IndexFormat),
   Parser(ParserFormat),
   Policy(PolicyFormat),
@@ -73,6 +76,7 @@ impl FixtureFormat {
       Self::Dependency(format) => format.id(),
       Self::Definition(format) => format.id(),
       Self::FieldIndex(format) => format.id(),
+      Self::Gc(format) => format.id(),
       Self::Index(format) => format.id(),
       Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
@@ -90,6 +94,7 @@ impl FixtureFormat {
       Self::Dependency(format) => format.family(),
       Self::Definition(format) => format.family(),
       Self::FieldIndex(format) => format.family(),
+      Self::Gc(format) => format.family(),
       Self::Index(format) => format.family(),
       Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
@@ -255,7 +260,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-apos".to_string(),
+    stage: "p0b-2-gc-controls".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -279,7 +284,7 @@ fn verify(fixture_root: &Path) -> DynResult<()> {
   semantics::verify(spec_root)?;
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-apos" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-gc-controls" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -481,6 +486,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
   cases.extend(field_index::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::FieldIndex(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
+  cases.extend(gc::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Gc(case.format),
     profile: case.profile,
     expected: case.expected,
     relation: case.relation,
@@ -691,6 +705,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Dependency(_) => dependency::observe(case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
     FixtureFormat::FieldIndex(format) => field_index::observe(format, case.profile, bytes),
+    FixtureFormat::Gc(_) => gc::observe(case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
@@ -710,6 +725,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Dependency(_)
     | FixtureFormat::Definition(_)
     | FixtureFormat::FieldIndex(_)
+    | FixtureFormat::Gc(_)
     | FixtureFormat::Index(_)
     | FixtureFormat::Parser(_)
     | FixtureFormat::Policy(_)
@@ -762,6 +778,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Dependency(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in dependency::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Gc(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in gc::annotation_lines(case.profile, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

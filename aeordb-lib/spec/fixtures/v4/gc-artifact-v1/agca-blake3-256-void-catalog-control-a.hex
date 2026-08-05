@@ -1,0 +1,20 @@
+# fixture: agca-blake3-256-void-catalog-control-a
+# contract: GcArtifactV1
+# hash: blake3-256 (32 bytes)
+# expected: gc:control:void-catalog:slot-a:sequence=1:generation=10005
+# canonical key: 2a540a1589dadc47e59893e4205b60fff6102ff61bc56f486c47e02cd7a26d65
+# relation: targets:void-catalog-manifest
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AGCA common envelope
+# envelope artifact_kind: void-catalog
+# identity +0x000 len 16: database_id
+# identity +0x010 len 1: A/B slot
+# body +0x000 len 8: control_sequence
+# body +0x008 len 32: target_manifest_hash
+# value +0x059 len 4: artifact_crc32
+00000000: 4147434101000500200000005d000000
+00000010: 11000000280000001527000000000000
+00000020: 3132333435363738393a3b3c3d3e3f40
+00000030: 00010000000000000085868788898a8b
+00000040: 8c8d8e8f909192939495969798999a9b
+00000050: 9c9d9e9fa0a1a2a3a4c2b0f231

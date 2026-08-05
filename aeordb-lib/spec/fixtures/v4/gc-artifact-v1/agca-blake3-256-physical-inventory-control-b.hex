@@ -1,0 +1,20 @@
+# fixture: agca-blake3-256-physical-inventory-control-b
+# contract: GcArtifactV1
+# hash: blake3-256 (32 bytes)
+# expected: gc:control:physical-inventory:slot-b:sequence=18446744073709551615:generation=10003
+# canonical key: e8bce55f1cf01eed2710260c288e303540dfb02c27e966d0a0dff1f4919f213d
+# relation: targets:physical-inventory-manifest
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AGCA common envelope
+# envelope artifact_kind: physical-inventory
+# identity +0x000 len 16: database_id
+# identity +0x010 len 1: A/B slot
+# body +0x000 len 8: control_sequence
+# body +0x008 len 32: target_manifest_hash
+# value +0x059 len 4: artifact_crc32
+00000000: 4147434101000300200000005d000000
+00000010: 11000000280000001327000000000000
+00000020: 3132333435363738393a3b3c3d3e3f40
+00000030: 01ffffffffffffffff83848586878889
+00000040: 8a8b8c8d8e8f90919293949596979899
+00000050: 9a9b9c9d9e9fa0a1a29d5b99c4
