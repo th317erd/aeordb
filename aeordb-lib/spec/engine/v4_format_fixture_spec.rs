@@ -10,6 +10,7 @@ use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, d
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
+use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_selector};
 use aeordb::engine::HashAlgorithm;
 use serde::Deserialize;
 
@@ -169,6 +170,63 @@ fn every_parser_resolution_plan_fixture_matches_the_independent_oracle() {
     };
     assert_eq!(format!("parser-plan:{kind}:candidates={}", plan.candidates.len()), row.expected, "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_source_selector_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "source-selector-v1").collect();
+  assert_eq!(rows.len(), 14);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let selector = decode_source_selector(&bytes).unwrap();
+    let kind = match selector.kind {
+      SourceSelectorKind::Metadata => "metadata",
+      SourceSelectorKind::JsonPath => "json-path",
+      SourceSelectorKind::PluginMapper => "plugin-mapper",
+      SourceSelectorKind::AlwaysMissingV0 => "always-missing-v0",
+    };
+    assert_eq!(format!("selector:{kind}:items={}", selector.item_count), row.expected, "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn source_selector_rejects_amplification_regex_and_mapper_corruption() {
+  let root = fixture_root();
+  let json_root = fs::read(root.join("source-selector-v1/asel-blake3-256-json-root-valid.bin")).unwrap();
+  let mut amplified = json_root;
+  amplified[12..16].copy_from_slice(&1_025u32.to_le_bytes());
+  assert_eq!(decode_source_selector(&amplified).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+
+  let metadata = fs::read(root.join("source-selector-v1/asel-blake3-256-metadata-hash-valid.bin")).unwrap();
+  let mut unknown_metadata = metadata;
+  unknown_metadata[32..34].copy_from_slice(&9u16.to_le_bytes());
+  assert_eq!(decode_source_selector(&unknown_metadata).unwrap_err().class(), MalformedInputClass::UnknownTypeKindOrEnum);
+
+  let mixed = fs::read(root.join("source-selector-v1/asel-blake3-256-json-mixed-valid.bin")).unwrap();
+  let mut invalid_regex = mixed.clone();
+  invalid_regex[80] = b'[';
+  assert_eq!(decode_source_selector(&invalid_regex).unwrap_err().class(), MalformedInputClass::InvalidUtf8PathGlobOrNativePath);
+
+  let mut count_mismatch = mixed;
+  count_mismatch[12..16].copy_from_slice(&3u32.to_le_bytes());
+  assert_eq!(decode_source_selector(&count_mismatch).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mapper = fs::read(root.join("source-selector-v1/asel-blake3-256-mapper-corrected-valid.bin")).unwrap();
+  let mut zero_ordinal = mapper.clone();
+  zero_ordinal[32..36].fill(0);
+  assert_eq!(decode_source_selector(&zero_ordinal).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mut mismatched_policy = mapper.clone();
+  mismatched_policy[71..73].copy_from_slice(&2u16.to_le_bytes());
+  assert_eq!(decode_source_selector(&mismatched_policy).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mut invalid_arguments = mapper;
+  invalid_arguments[48] = 0xff;
+  assert_eq!(decode_source_selector(&invalid_arguments).unwrap_err().class(), MalformedInputClass::UnknownTypeKindOrEnum);
+
+  assert_eq!(decode_source_selector(&vec![0; 4_097]).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
 }
 
 #[test]

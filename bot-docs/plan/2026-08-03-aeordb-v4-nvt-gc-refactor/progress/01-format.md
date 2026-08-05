@@ -326,3 +326,13 @@
 - **Malformed proof:** focused mutations reject 515 candidates before allocation, unsorted registry MIME matches, uppercase corrected MIME, zero dependency ordinals, mixed corrected/legacy semantic families, and trailing bytes with their frozen malformed classes.
 - **Green proof:** all eight independent plan fixtures pass; the complete v4 target passes 18 tests, locked library `cargo check` passes, and `git diff --check` is clean.
 - **Boundary:** the parser plan remains passive data. No plugin/native execution, dependency resolution, writer, migration, route, or database behavior changed.
+
+## P1a-7 Source Selector Reader
+
+- **Entry:** `28cbbc1`; branch and remote matched, with unrelated user paths excluded.
+- **Territory:** fourteen independent selector fixtures produce metadata, JSON-path, mapper, always-missing, and exact-cap forms. Value-store definitions and later selector/mapper execution, fallback, migration, and query paths consume these passive records.
+- **Red proof:** the focused fixture target failed to compile on the absent `engine::v4::source_selector` module before production behavior existed.
+- **Implementation:** added a borrowed 4 KiB-bounded decoder with a 1,024-item pre-allocation cap; all metadata IDs; all four ordered JSON segment kinds; exact AeorRegexV1 validation using locked `regex 1.12.3` with 1 MiB compiled-program and DFA caps; and corrected/legacy mapper forms with nested canonical arguments and invocation policies.
+- **Malformed proof:** focused mutations reject count amplification, unknown metadata IDs, malformed regex, item-count disagreement, zero mapper ordinals, mapper-policy host mismatch, malformed canonical arguments, and one-byte-over-cap input with frozen classes.
+- **Green proof:** all fourteen independent selector fixtures pass; the complete v4 target passes 20 tests, the locked library check passes, and `git diff --check` is clean.
+- **Boundary:** no selector evaluation, regex search, plugin invocation, writer, migration, route, or database behavior changed.
