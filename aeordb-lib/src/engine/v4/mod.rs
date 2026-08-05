@@ -12,6 +12,7 @@ pub mod entity;
 pub mod field_definition;
 pub mod hash;
 pub mod index_artifact;
+pub mod index_page;
 pub mod namespace;
 pub mod parser_plan;
 pub mod reader;

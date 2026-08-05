@@ -9,6 +9,9 @@ use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_f
 use aeordb::engine::v4::index_artifact::{
   IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
 };
+use aeordb::engine::v4::index_page::{
+  OrderedIndexArtifactV1, OrderedIndexRoleV1, compare_order_keys, decode_ordered_index_artifact, validate_scope_catalog_pair,
+};
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
@@ -514,6 +517,191 @@ fn index_pointer_pair_selection_is_deterministic_and_fails_ambiguous() {
   let ambiguous = decode_active_pointer(&ambiguous_bytes, HashAlgorithm::Blake3_256).unwrap();
   assert_eq!(select_active_pointer(&a, &ambiguous).unwrap_err().class(), MalformedInputClass::AmbiguousEqualSequenceSelector);
   assert_eq!(select_active_pointer(&a, &a).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+}
+
+#[test]
+fn every_ordered_page_and_directory_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| {
+      row.format_id == "index-artifact-v1" && (row.expected.starts_with("index:page:") || row.expected.starts_with("index:directory:"))
+    })
+    .collect();
+  assert_eq!(rows.len(), 28);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let decoded = decode_ordered_index_artifact(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let (observed, key) = match decoded {
+      OrderedIndexArtifactV1::Directory(directory) => (
+        format!(
+          "index:directory:{}:level={}:entries={}:live={}:pages={}:fences={}/{}",
+          directory.role.name(),
+          directory.level,
+          directory.entries.len(),
+          directory.live_count,
+          directory.page_count,
+          directory.lower_fence.len(),
+          directory.upper_fence.len()
+        ),
+        directory.key,
+      ),
+      OrderedIndexArtifactV1::Page(page) => {
+        assert_eq!(page.records.iter().map(|record| record.unwrap()).count(), page.records.len(), "fixture {} record iterator", row.id);
+        let observed = match page.role {
+          OrderedIndexRoleV1::ScopeOrdinal => format!("index:page:scope-catalog:ordinal:records={}", page.records.len()),
+          OrderedIndexRoleV1::ScopeReverse => format!("index:page:scope-catalog:reverse:records={}", page.records.len()),
+          OrderedIndexRoleV1::Value => format!("index:page:value:page-id={}:records={}", page.page_id, page.records.len()),
+          OrderedIndexRoleV1::ValueDocumentState => {
+            format!("index:page:document-state:value-store:page-id={}:records={}", page.page_id, page.records.len())
+          }
+          OrderedIndexRoleV1::Posting => format!("index:page:posting:page-id={}:records={}", page.page_id, page.records.len()),
+          OrderedIndexRoleV1::IndexDocumentState => {
+            format!("index:page:document-state:index:page-id={}:records={}", page.page_id, page.records.len())
+          }
+          OrderedIndexRoleV1::NvtTile => panic!("NVT tiles are not ordered pages"),
+        };
+        (observed, page.key)
+      }
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(key), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn ordered_pages_reject_corrupt_aggregates_records_order_and_catalog_bijection() {
+  let root = fixture_root();
+  let posting_directory = fs::read(root.join("index-artifact-v1/aidx-blake3-256-posting-directory-leaf-valid.bin")).unwrap();
+  let directory_body = 32 + 32 + 2;
+
+  let mut wrong_codec = posting_directory.clone();
+  wrong_codec[directory_body + 2] ^= 1;
+  repair_trailing_crc(&mut wrong_codec);
+  assert_eq!(
+    decode_ordered_index_artifact(&wrong_codec, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut wrong_aggregate = posting_directory;
+  wrong_aggregate[directory_body + 24] ^= 1;
+  repair_trailing_crc(&mut wrong_aggregate);
+  assert_eq!(
+    decode_ordered_index_artifact(&wrong_aggregate, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let posting_directory = fs::read(root.join("index-artifact-v1/aidx-blake3-256-posting-directory-leaf-valid.bin")).unwrap();
+  let mut excessive_entries = posting_directory.clone();
+  excessive_entries[directory_body + 4..directory_body + 8].copy_from_slice(&65_537u32.to_le_bytes());
+  repair_trailing_crc(&mut excessive_entries);
+  assert_eq!(
+    decode_ordered_index_artifact(&excessive_entries, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut unknown_role = posting_directory;
+  unknown_role[32 + 32 + 1] = 0xff;
+  repair_trailing_crc(&mut unknown_role);
+  assert_eq!(
+    decode_ordered_index_artifact(&unknown_role, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let posting_page = fs::read(root.join("index-artifact-v1/aidx-blake3-256-posting-page-valid.bin")).unwrap();
+  let mut wrong_live_count = posting_page;
+  wrong_live_count[32 + 32 + 8 + 36] ^= 1;
+  repair_trailing_crc(&mut wrong_live_count);
+  assert_eq!(
+    decode_ordered_index_artifact(&wrong_live_count, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let ordinal = fs::read(root.join("index-artifact-v1/aidx-blake3-256-scope-ordinal-page-valid.bin")).unwrap();
+  let mut wrong_scope_identity = ordinal.clone();
+  let ordinal_body = 32 + 32 + 9;
+  let ordinal_lower = test_u32(&wrong_scope_identity, ordinal_body + 24) as usize;
+  let ordinal_upper = test_u32(&wrong_scope_identity, ordinal_body + 28) as usize;
+  let ordinal_record = ordinal_body + 96 + ordinal_lower + ordinal_upper;
+  wrong_scope_identity[ordinal_record + 16] ^= 1;
+  repair_trailing_crc(&mut wrong_scope_identity);
+  assert_eq!(
+    decode_ordered_index_artifact(&wrong_scope_identity, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut wrong_state = fs::read(root.join("index-artifact-v1/aidx-blake3-256-value-document-state-page-valid.bin")).unwrap();
+  let state_body = 32 + 32 + 16;
+  let state_lower = test_u32(&wrong_state, state_body + 24) as usize;
+  let state_upper = test_u32(&wrong_state, state_body + 28) as usize;
+  let state_record = state_body + 96 + state_lower + state_upper;
+  wrong_state[state_record + 1] = 5;
+  repair_trailing_crc(&mut wrong_state);
+  assert_eq!(
+    decode_ordered_index_artifact(&wrong_state, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let reverse = fs::read(root.join("index-artifact-v1/aidx-blake3-256-scope-reverse-page-valid.bin")).unwrap();
+  validate_scope_catalog_pair(&ordinal, &reverse, HashAlgorithm::Blake3_256).unwrap();
+  let mut changed_reverse = reverse;
+  let reverse_body = 32 + 1 + 2 * 32;
+  let lower_length = test_u32(&changed_reverse, reverse_body + 24) as usize;
+  let upper_length = test_u32(&changed_reverse, reverse_body + 28) as usize;
+  let first_record = reverse_body + 96 + lower_length + upper_length;
+  changed_reverse[first_record + 4..first_record + 12].copy_from_slice(&99u64.to_le_bytes());
+  repair_trailing_crc(&mut changed_reverse);
+  assert_eq!(
+    validate_scope_catalog_pair(&ordinal, &changed_reverse, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let low = 255u64.to_le_bytes();
+  let high = 256u64.to_le_bytes();
+  assert!(low.as_slice() > high.as_slice());
+  assert_eq!(
+    compare_order_keys(HashAlgorithm::Blake3_256, OrderedIndexRoleV1::ScopeOrdinal, &low, &high).unwrap(),
+    std::cmp::Ordering::Less
+  );
+
+  assert_eq!(
+    decode_ordered_index_artifact(&vec![0; 4 * 1_024 * 1_024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
+fn directory_physical_hints_are_optional_and_never_correctness_authority() {
+  let root = fixture_root();
+  let mut bytes = fs::read(root.join("index-artifact-v1/aidx-blake3-256-posting-directory-leaf-valid.bin")).unwrap();
+  let body = 32 + 32 + 2;
+  let descriptor = body + 80 + 57 + 57;
+  let hint = descriptor + 16 + 32 + 32;
+  bytes[hint..hint + 8].copy_from_slice(&1_234u64.to_le_bytes());
+  repair_trailing_crc(&mut bytes);
+  let OrderedIndexArtifactV1::Directory(directory) = decode_ordered_index_artifact(&bytes, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected directory");
+  };
+  assert!(!directory.entries[0].physical_hint.is_complete());
+
+  bytes[hint + 8..hint + 12].copy_from_slice(&4_096u32.to_le_bytes());
+  bytes[hint + 16..hint + 24].copy_from_slice(&77u64.to_le_bytes());
+  repair_trailing_crc(&mut bytes);
+  let OrderedIndexArtifactV1::Directory(directory) = decode_ordered_index_artifact(&bytes, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected directory");
+  };
+  assert!(directory.entries[0].physical_hint.is_complete());
+  assert!(directory.entries[0].physical_hint.matches(1_234, 4_096, 77));
+  assert!(!directory.entries[0].physical_hint.matches(1_235, 4_096, 77));
+
+  bytes[hint + 12] = 1;
+  repair_trailing_crc(&mut bytes);
+  assert_eq!(
+    decode_ordered_index_artifact(&bytes, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
 }
 
 #[test]

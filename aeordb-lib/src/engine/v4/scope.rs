@@ -102,7 +102,7 @@ pub fn decode_scope_definition(value: &[u8], hash_algorithm: HashAlgorithm) -> F
   Ok(ScopeDefinitionV1 { scope_id, mode, owner_path, glob })
 }
 
-fn validate_canonical_absolute_path(path: &str) -> FormatResult<()> {
+pub(crate) fn validate_canonical_absolute_path(path: &str) -> FormatResult<()> {
   if path == "/" {
     return Ok(());
   }
