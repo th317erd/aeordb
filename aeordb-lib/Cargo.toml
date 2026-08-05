@@ -767,6 +767,10 @@ name = "v3_transition_control_store_spec"
 path = "spec/engine/v3_transition_control_store_spec.rs"
 
 [[test]]
+name = "emergency_spill_hardening_spec"
+path = "spec/engine/emergency_spill_hardening_spec.rs"
+
+[[test]]
 name = "v3_contract_facade_spec"
 path = "spec/engine/v3_contract_facade_spec.rs"
 

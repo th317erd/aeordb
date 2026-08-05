@@ -102,6 +102,12 @@ impl AppendWriter {
     Ok(File::open(&self.file_path)?)
   }
 
+  /// Clone the already-open database reader for emergency preservation. This
+  /// pins the physical file even if the pathname is replaced after failure.
+  pub(crate) fn clone_emergency_reader(&self) -> std::io::Result<File> {
+    self.reader.try_clone()
+  }
+
   /// Set the current write offset. Used after KV block creation to skip
   /// past the reserved space at the head of the file.
   pub fn set_offset(&mut self, offset: u64) {

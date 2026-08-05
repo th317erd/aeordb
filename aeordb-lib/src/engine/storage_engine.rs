@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
@@ -74,6 +74,12 @@ pub type EngineStartupProgressCallback = Arc<dyn Fn(EngineStartupProgress) + Sen
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EmergencySpillReport {
+  pub database_id: String,
+  pub incident_id: String,
+  pub source_location_class: Option<u16>,
+  pub creation_sequence: u64,
+  pub first_failure_at_ms: i64,
+  pub latest_failure_at_ms: i64,
   pub attempted_at: String,
   pub context: String,
   pub failure: String,
@@ -95,6 +101,18 @@ pub struct EmergencySpillReport {
   pub wal_tail_bytes: u64,
   pub wal_tail_truncated: bool,
   pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DurabilityFailureState {
+  pub database_id: [u8; 16],
+  pub incident_id: [u8; 16],
+  pub creation_sequence: u64,
+  pub first_failure_at_ms: i64,
+  pub latest_failure_at_ms: i64,
+  pub first_failure: String,
+  pub latest_failure: String,
+  pub occurrence_count: u64,
 }
 
 struct BatchEntry {
@@ -418,11 +436,12 @@ pub struct EngineCacheMemoryStats {
 /// Lock-free snapshot reads allow concurrent readers while a single writer
 /// appends new entries.
 pub struct StorageEngine {
+  database_path: PathBuf,
   operation_tracker: EngineOperationTracker,
   shutdown_started: AtomicBool,
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
-  durability_failure: Mutex<Option<String>>,
+  durability_failure: Mutex<Option<DurabilityFailureState>>,
   emergency_spill: Mutex<Option<EmergencySpillReport>>,
   last_published_hot_tail_offset: AtomicU64,
   durability_coordinator: Arc<DurabilityCoordinator>,
@@ -489,7 +508,11 @@ impl StorageEngine {
   }
 
   pub fn durability_failure(&self) -> Option<String> {
-    self.durability_failure.lock().ok().and_then(|failure| failure.clone())
+    self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().map(|failure| failure.latest_failure.clone())
+  }
+
+  pub fn durability_failure_state(&self) -> Option<DurabilityFailureState> {
+    self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
   }
 
   pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
@@ -497,7 +520,7 @@ impl StorageEngine {
   }
 
   pub fn emergency_spill_report(&self) -> Option<EmergencySpillReport> {
-    self.emergency_spill.lock().ok().and_then(|spill| spill.clone())
+    self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
   }
 
   pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
@@ -509,18 +532,46 @@ impl StorageEngine {
 
   fn record_durability_failure(&self, context: &str, error: impl std::fmt::Display) -> EngineError {
     let message = format!("{}: {}", context, error);
-    let mut first_failure = false;
-    if let Ok(mut failure) = self.durability_failure.lock() {
-      if failure.is_none() {
-        *failure = Some(message.clone());
-        first_failure = true;
+    let failure_at_ms = chrono::Utc::now().timestamp_millis();
+    let creation_sequence = self.durability_coordinator.snapshot().map(|snapshot| snapshot.next_sequence.max(1)).unwrap_or(1);
+    let candidate_database_id = uuid::Uuid::new_v4().into_bytes();
+    let candidate_incident_id = uuid::Uuid::new_v4().into_bytes();
+    let (first_failure, failure_state) = {
+      let mut failure = self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+      match failure.as_mut() {
+        Some(state) => {
+          state.latest_failure_at_ms = state.latest_failure_at_ms.max(failure_at_ms);
+          state.latest_failure = message.clone();
+          state.occurrence_count = state.occurrence_count.saturating_add(1);
+          (false, state.clone())
+        }
+        None => {
+          let state = DurabilityFailureState {
+            database_id: candidate_database_id,
+            incident_id: candidate_incident_id,
+            creation_sequence,
+            first_failure_at_ms: failure_at_ms,
+            latest_failure_at_ms: failure_at_ms,
+            first_failure: message.clone(),
+            latest_failure: message.clone(),
+            occurrence_count: 1,
+          };
+          *failure = Some(state.clone());
+          (true, state)
+        }
       }
-    }
+    };
     if first_failure {
-      let spill = self.attempt_emergency_spill(context, &message);
-      if let Ok(mut slot) = self.emergency_spill.lock() {
-        *slot = Some(spill.clone());
-      }
+      let spill = self.attempt_emergency_spill(
+        context,
+        &message,
+        failure_state.database_id,
+        failure_state.incident_id,
+        failure_state.creation_sequence,
+        failure_state.first_failure_at_ms,
+        failure_state.latest_failure_at_ms,
+      );
+      *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spill.clone());
       if spill.succeeded {
         tracing::error!(
           context,
@@ -540,27 +591,76 @@ impl StorageEngine {
         );
       }
     } else {
+      let manifest_path = self
+        .emergency_spill
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .and_then(|report| report.manifest_path.clone());
+      if let Some(manifest_path) = manifest_path {
+        let update = crate::engine::emergency_spill::update_v2_manifest_latest(
+          Path::new(&manifest_path),
+          failure_state.database_id,
+          failure_state.incident_id,
+          failure_state.latest_failure_at_ms,
+          &failure_state.latest_failure,
+        );
+        let mut spill = self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(report) = spill.as_mut() {
+          match update {
+            Ok(()) => {
+              report.latest_failure_at_ms = failure_state.latest_failure_at_ms;
+              report.failure = failure_state.latest_failure.clone();
+            }
+            Err(error) => report.errors.push(format!("failed to update latest durability evidence: {error}")),
+          }
+        }
+      } else {
+        let retry = self.attempt_emergency_spill(
+          context,
+          &failure_state.latest_failure,
+          failure_state.database_id,
+          failure_state.incident_id,
+          failure_state.creation_sequence,
+          failure_state.first_failure_at_ms,
+          failure_state.latest_failure_at_ms,
+        );
+        *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retry);
+      }
       tracing::error!(context, error = %message, "Critical durability failure");
     }
     EngineError::DurabilityFailure(message)
   }
 
-  fn attempt_emergency_spill(&self, context: &str, failure: &str) -> EmergencySpillReport {
+  fn attempt_emergency_spill(
+    &self,
+    context: &str,
+    failure: &str,
+    database_id: [u8; 16],
+    incident_id: [u8; 16],
+    creation_sequence: u64,
+    first_failure_at_ms: i64,
+    latest_failure_at_ms: i64,
+  ) -> EmergencySpillReport {
     let attempted_at = chrono::Utc::now().to_rfc3339();
     let mut errors = Vec::new();
-    let mut db_path: Option<PathBuf> = None;
+    let db_path = Some(self.database_path.clone());
     let mut wal_tail_original_start = None;
     let mut wal_tail_end = None;
+    let mut wal_source = None;
 
     let current_offset = match self.writer.try_read() {
       Ok(writer) => {
-        db_path = Some(writer.file_path().to_path_buf());
         let header = writer.file_header();
         let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
         let current_offset = writer.current_offset();
         let boundary = self.last_published_hot_tail_offset.load(Ordering::Acquire);
         wal_tail_original_start = Some(boundary.max(wal_start).min(current_offset));
         wal_tail_end = Some(current_offset);
+        match writer.clone_emergency_reader() {
+          Ok(reader) => wal_source = Some(reader),
+          Err(error) => errors.push(format!("failed to clone database handle for emergency WAL spill: {error}")),
+        }
         current_offset
       }
       Err(error) => {
@@ -606,6 +706,12 @@ impl StorageEngine {
       .unwrap_or(0);
 
     let mut report = EmergencySpillReport {
+      database_id: hex::encode(database_id),
+      incident_id: hex::encode(incident_id),
+      source_location_class: None,
+      creation_sequence,
+      first_failure_at_ms,
+      latest_failure_at_ms,
       attempted_at,
       context: context.to_string(),
       failure: failure.to_string(),
@@ -634,22 +740,41 @@ impl StorageEngine {
       .and_then(|path| path.file_name())
       .map(|name| name.to_string_lossy().to_string())
       .unwrap_or_else(|| "unknown-db".to_string());
-    let dir_name =
-      format!("{}-{}-{}", Self::sanitize_spill_component(&db_label), chrono::Utc::now().timestamp_millis(), std::process::id());
+    let dir_name = format!(
+      "{}-{}-{}-{}",
+      Self::sanitize_spill_component(&db_label),
+      first_failure_at_ms,
+      hex::encode(incident_id),
+      uuid::Uuid::new_v4().simple()
+    );
 
-    for base_dir in crate::engine::emergency_spill::emergency_spill_base_dirs() {
-      let spill_dir = base_dir.join(&dir_name);
-      if let Err(error) = std::fs::create_dir_all(&spill_dir) {
-        report.errors.push(format!("failed to create spill directory {}: {}", spill_dir.display(), error));
+    for location in crate::engine::emergency_spill::emergency_spill_locations() {
+      let spill_dir = location.path.join(&dir_name);
+      if let Err(error) = crate::engine::emergency_spill::create_private_dir_all(&location.path) {
+        report.errors.push(format!("failed to create spill base directory {}: {}", location.path.display(), error));
+        continue;
+      }
+      if let Err(error) = crate::engine::emergency_spill::create_private_dir(&spill_dir) {
+        report.errors.push(format!("failed to create new spill directory {}: {}", spill_dir.display(), error));
         continue;
       }
       if let Err(error) = crate::engine::durability::sync_parent_dir(&spill_dir) {
         report.errors.push(format!("failed to sync spill parent for {}: {}", spill_dir.display(), error));
+        continue;
       }
 
-      match self.write_emergency_spill_files(&spill_dir, db_path.as_deref(), current_offset, &payload, index_snapshot.as_ref(), &mut report)
-      {
+      match self.write_emergency_spill_files(
+        &spill_dir,
+        location.class,
+        db_path.as_deref(),
+        wal_source.as_ref(),
+        current_offset,
+        &payload,
+        index_snapshot.as_ref(),
+        &mut report,
+      ) {
         Ok(()) => {
+          report.source_location_class = Some(location.class as u16);
           report.succeeded = true;
           return report;
         }
@@ -665,15 +790,40 @@ impl StorageEngine {
   fn write_emergency_spill_files(
     &self,
     spill_dir: &Path,
+    source_location_class: crate::engine::emergency_spill::SpillLocationClass,
     db_path: Option<&Path>,
+    wal_source: Option<&std::fs::File>,
     current_offset: u64,
     payload: &crate::engine::hot_tail::HotTailPayload,
     index_snapshot: Option<&serde_json::Value>,
     report: &mut EmergencySpillReport,
   ) -> Result<(), String> {
+    let db_path = db_path.ok_or_else(|| "database path unavailable for emergency spill identity".to_string())?;
+    let pending_path = spill_dir.join("pending.json");
+    let pending = serde_json::json!({
+      "format": crate::engine::emergency_spill::EMERGENCY_SPILL_PENDING_FORMAT_V2,
+      "database_id": &report.database_id,
+      "incident_id": &report.incident_id,
+      "source_location_class": source_location_class as u16,
+      "path_encoding": crate::engine::emergency_spill::native_path_encoding(),
+      "creation_sequence": report.creation_sequence,
+      "first_failure_at_ms": report.first_failure_at_ms,
+      "db_path": db_path.display().to_string(),
+      "db_path_bytes": hex::encode(crate::engine::emergency_spill::native_path_bytes(db_path)),
+    });
+    let pending_bytes = serde_json::to_vec_pretty(&pending).map_err(|error| error.to_string())?;
+    Self::write_durable_file(&pending_path, &pending_bytes)?;
+
+    let mut components = Vec::new();
     let hot_tail_path = spill_dir.join("hot-tail.bin");
     let hot_tail_bytes = crate::engine::hot_tail::serialize_hot_tail(payload, self.hash_algo.hash_length());
     Self::write_durable_file(&hot_tail_path, &hot_tail_bytes)?;
+    components.push(serde_json::json!({
+      "kind": "hot_tail",
+      "file_name": "hot-tail.bin",
+      "length": hot_tail_bytes.len(),
+      "blake3": blake3::hash(&hot_tail_bytes).to_hex().to_string(),
+    }));
     report.hot_tail_path = Some(hot_tail_path.display().to_string());
 
     if let Some(snapshot) = index_snapshot {
@@ -681,22 +831,43 @@ impl StorageEngine {
         let index_buffer_path = spill_dir.join("index-buffer.json");
         let index_bytes = serde_json::to_vec_pretty(snapshot).map_err(|error| error.to_string())?;
         Self::write_durable_file(&index_buffer_path, &index_bytes)?;
+        components.push(serde_json::json!({
+          "kind": "index_buffer",
+          "file_name": "index-buffer.json",
+          "length": index_bytes.len(),
+          "blake3": blake3::hash(&index_bytes).to_hex().to_string(),
+        }));
         report.index_buffer_path = Some(index_buffer_path.display().to_string());
       }
     }
 
-    if let (Some(source), Some(original_start), Some(end)) = (db_path, report.wal_tail_original_start, report.wal_tail_end) {
+    if let (Some(original_start), Some(end)) = (report.wal_tail_original_start, report.wal_tail_end) {
       if end > original_start {
         let wal_tail_path = spill_dir.join("wal-tail.bin");
-        match Self::copy_wal_tail_to_file(source, &wal_tail_path, original_start, end) {
-          Ok((copy_start, copied, truncated)) => {
+        let Some(wal_source) = wal_source else {
+          report.errors.push(format!(
+            "failed to copy WAL tail from {} at {}..{}: pinned database handle unavailable",
+            db_path.display(),
+            original_start,
+            end
+          ));
+          return self.finish_emergency_spill_manifest(spill_dir, source_location_class, db_path, report, components, &pending_path);
+        };
+        match Self::copy_wal_tail_to_file(wal_source, &wal_tail_path, original_start, end) {
+          Ok((copy_start, copied, truncated, digest)) => {
+            components.push(serde_json::json!({
+              "kind": "wal_tail",
+              "file_name": "wal-tail.bin",
+              "length": copied,
+              "blake3": hex::encode(digest),
+            }));
             report.wal_tail_path = Some(wal_tail_path.display().to_string());
             report.wal_tail_copy_start = Some(copy_start);
             report.wal_tail_bytes = copied;
             report.wal_tail_truncated = truncated;
           }
           Err(error) => {
-            report.errors.push(format!("failed to copy WAL tail from {} at {}..{}: {}", source.display(), original_start, end, error));
+            report.errors.push(format!("failed to copy WAL tail from {} at {}..{}: {}", db_path.display(), original_start, end, error));
           }
         }
       } else {
@@ -704,16 +875,39 @@ impl StorageEngine {
       }
     }
 
+    self.finish_emergency_spill_manifest(spill_dir, source_location_class, db_path, report, components, &pending_path)
+  }
+
+  fn finish_emergency_spill_manifest(
+    &self,
+    spill_dir: &Path,
+    source_location_class: crate::engine::emergency_spill::SpillLocationClass,
+    db_path: &Path,
+    report: &mut EmergencySpillReport,
+    components: Vec<serde_json::Value>,
+    pending_path: &Path,
+  ) -> Result<(), String> {
     report.spill_directory = Some(spill_dir.display().to_string());
     let manifest_path = spill_dir.join("manifest.json");
     let manifest = serde_json::json!({
-      "format": "aeordb-emergency-spill-v1",
+      "format": crate::engine::emergency_spill::EMERGENCY_SPILL_FORMAT_V2,
+      "database_id": &report.database_id,
+      "incident_id": &report.incident_id,
+      "source_location_class": source_location_class as u16,
+      "path_encoding": if cfg!(windows) { 2 } else { 1 },
+      "creation_sequence": report.creation_sequence,
+      "first_failure_at_ms": report.first_failure_at_ms,
+      "latest_failure_at_ms": report.latest_failure_at_ms,
       "attempted_at": &report.attempted_at,
       "pid": std::process::id(),
       "context": &report.context,
       "failure": &report.failure,
+      "first_failure": &report.failure,
+      "latest_failure": &report.failure,
       "db_path": &report.db_path,
+      "db_path_bytes": hex::encode(crate::engine::emergency_spill::native_path_bytes(db_path)),
       "hash_algorithm": format!("{:?}", self.hash_algo),
+      "components": components,
       "hot_tail_path": &report.hot_tail_path,
       "hot_tail_writes": report.hot_tail_writes,
       "hot_tail_voids": report.hot_tail_voids,
@@ -737,43 +931,47 @@ impl StorageEngine {
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
     Self::write_durable_file(&manifest_path, &manifest_bytes)?;
     report.manifest_path = Some(manifest_path.display().to_string());
+    if let Err(error) = std::fs::remove_file(&pending_path) {
+      report.errors.push(format!("failed to remove completed emergency spill pending record {}: {}", pending_path.display(), error));
+    } else if let Err(error) = crate::engine::durability::sync_parent_dir(&pending_path) {
+      report.errors.push(format!("failed to sync pending-record removal for {}: {}", pending_path.display(), error));
+    }
     Ok(())
   }
 
   fn write_durable_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut file = crate::engine::emergency_spill::create_new_regular_file_no_follow(path).map_err(|error| error.to_string())?;
     file.write_all(bytes).map_err(|error| error.to_string())?;
     sync_file_all_native(&file).map_err(|error| error.to_string())?;
     crate::engine::durability::sync_parent_dir(path).map_err(|error| error.to_string())
   }
 
-  fn copy_wal_tail_to_file(source: &Path, destination: &Path, start: u64, end: u64) -> Result<(u64, u64, bool), String> {
+  fn copy_wal_tail_to_file(source: &std::fs::File, destination: &Path, start: u64, end: u64) -> Result<(u64, u64, bool, [u8; 32]), String> {
     if end <= start {
       Self::write_durable_file(destination, &[])?;
-      return Ok((start, 0, false));
+      return Ok((start, 0, false, *blake3::hash(&[]).as_bytes()));
     }
 
     let range = end - start;
     let max_bytes = Self::emergency_wal_spill_max_bytes();
     let (copy_start, truncated) = if max_bytes > 0 && range > max_bytes { (end - max_bytes, true) } else { (start, false) };
 
-    let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
-    let mut output = std::fs::File::create(destination).map_err(|error| error.to_string())?;
-    input.seek(SeekFrom::Start(copy_start)).map_err(|error| error.to_string())?;
+    let mut output = crate::engine::emergency_spill::create_new_regular_file_no_follow(destination).map_err(|error| error.to_string())?;
 
     let mut remaining = end - copy_start;
     let mut copied = 0u64;
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut hasher = blake3::Hasher::new();
     while remaining > 0 {
-      let read_len = remaining.min(buffer.len() as u64) as usize;
-      input.read_exact(&mut buffer[..read_len]).map_err(|error| error.to_string())?;
-      output.write_all(&buffer[..read_len]).map_err(|error| error.to_string())?;
+      let read_len = remaining.min(1024 * 1024) as usize;
+      let bytes = read_span_at(source, copy_start + copied, read_len).map_err(|error| error.to_string())?;
+      output.write_all(&bytes).map_err(|error| error.to_string())?;
+      hasher.update(&bytes);
       copied += read_len as u64;
       remaining -= read_len as u64;
     }
     sync_file_all_native(&output).map_err(|error| error.to_string())?;
     crate::engine::durability::sync_parent_dir(destination).map_err(|error| error.to_string())?;
-    Ok((copy_start, copied, truncated))
+    Ok((copy_start, copied, truncated, *hasher.finalize().as_bytes()))
   }
 
   fn emergency_wal_spill_max_bytes() -> u64 {
@@ -1016,6 +1214,7 @@ impl StorageEngine {
     let void_manager = VoidManager::new(hash_algo);
 
     let engine = StorageEngine {
+      database_path: PathBuf::from(path),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -1252,6 +1451,7 @@ impl StorageEngine {
     let kv_snapshot = Arc::clone(kv_store.snapshot_handle());
 
     let engine = StorageEngine {
+      database_path: PathBuf::from(path),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -3594,6 +3794,51 @@ mod tests {
   use serial_test::serial;
   use std::time::{Duration, Instant};
 
+  struct SpillTestEnv {
+    spill_dir: Option<std::ffi::OsString>,
+    spill_max: Option<std::ffi::OsString>,
+    config_only: Option<std::ffi::OsString>,
+  }
+
+  impl SpillTestEnv {
+    fn new(spill_dir: &Path) -> Self {
+      let state = Self {
+        spill_dir: std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR"),
+        spill_max: std::env::var_os("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
+        config_only: std::env::var_os("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY"),
+      };
+      state.set_spill_dir(spill_dir);
+      unsafe {
+        std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "1048576");
+        std::env::set_var("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY", "1");
+      }
+      state
+    }
+
+    fn set_spill_dir(&self, spill_dir: &Path) {
+      unsafe { std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", spill_dir) }
+    }
+  }
+
+  impl Drop for SpillTestEnv {
+    fn drop(&mut self) {
+      unsafe {
+        match &self.spill_dir {
+          Some(value) => std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", value),
+          None => std::env::remove_var("AEORDB_EMERGENCY_SPILL_DIR"),
+        }
+        match &self.spill_max {
+          Some(value) => std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", value),
+          None => std::env::remove_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
+        }
+        match &self.config_only {
+          Some(value) => std::env::set_var("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY", value),
+          None => std::env::remove_var("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY"),
+        }
+      }
+    }
+  }
+
   #[test]
   fn repeated_blocked_shutdown_attempt_does_not_wait_again() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -3615,32 +3860,7 @@ mod tests {
   fn durability_failure_latches_read_only_and_spills_volatile_state() {
     let temp_dir = tempfile::tempdir().unwrap();
     let spill_dir = temp_dir.path().join("spill");
-    let old_spill_dir = std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR");
-    let old_spill_max = std::env::var_os("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES");
-    unsafe {
-      std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", &spill_dir);
-      std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "1048576");
-    }
-
-    struct EnvRestore {
-      spill_dir: Option<std::ffi::OsString>,
-      spill_max: Option<std::ffi::OsString>,
-    }
-    impl Drop for EnvRestore {
-      fn drop(&mut self) {
-        unsafe {
-          match &self.spill_dir {
-            Some(value) => std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", value),
-            None => std::env::remove_var("AEORDB_EMERGENCY_SPILL_DIR"),
-          }
-          match &self.spill_max {
-            Some(value) => std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", value),
-            None => std::env::remove_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
-          }
-        }
-      }
-    }
-    let _restore = EnvRestore { spill_dir: old_spill_dir, spill_max: old_spill_max };
+    let _restore = SpillTestEnv::new(&spill_dir);
 
     let engine_path = temp_dir.path().join("durability-spill.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
@@ -3649,20 +3869,140 @@ mod tests {
     let error = engine.record_durability_failure("test forced durability failure", "synthetic EIO");
     assert!(matches!(error, EngineError::DurabilityFailure(_)));
     assert!(engine.durability_failure().is_some());
+    let first_state = engine.durability_failure_state().expect("failure state");
+    assert_eq!(first_state.occurrence_count, 1);
+
+    let later = engine.record_durability_failure("later durability failure", "synthetic ENOSPC");
+    assert!(matches!(later, EngineError::DurabilityFailure(_)));
+    let latest_state = engine.durability_failure_state().expect("updated failure state");
+    assert_eq!(latest_state.database_id, first_state.database_id);
+    assert_eq!(latest_state.incident_id, first_state.incident_id);
+    assert_eq!(latest_state.first_failure, first_state.first_failure);
+    assert!(latest_state.latest_failure.contains("later durability failure"));
+    assert!(latest_state.latest_failure_at_ms >= latest_state.first_failure_at_ms);
+    assert_eq!(latest_state.occurrence_count, 2);
 
     let spill = engine.emergency_spill_report().expect("spill report");
     assert!(spill.succeeded, "spill failed: {:?}", spill.errors);
     assert_eq!(spill.hot_tail_writes, 1);
     assert!(spill.hot_tail_path.as_ref().is_some_and(|path| std::fs::metadata(path).is_ok()));
     assert!(spill.manifest_path.as_ref().is_some_and(|path| std::fs::metadata(path).is_ok()));
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let spill_directory_mode = std::fs::metadata(spill.spill_directory.as_ref().unwrap()).unwrap().permissions().mode() & 0o777;
+      let component_mode = std::fs::metadata(spill.hot_tail_path.as_ref().unwrap()).unwrap().permissions().mode() & 0o777;
+      assert_eq!(spill_directory_mode, 0o700);
+      assert_eq!(component_mode, 0o600);
+    }
 
     let manifest_path = spill.manifest_path.as_ref().unwrap();
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest.get("format").and_then(|value| value.as_str()), Some("aeordb-emergency-spill-v1"));
+    assert_eq!(manifest.get("format").and_then(|value| value.as_str()), Some("aeordb-emergency-spill-v2"));
+    assert_eq!(manifest.get("database_id").and_then(|value| value.as_str()).map(str::len), Some(32));
+    assert_eq!(manifest.get("incident_id").and_then(|value| value.as_str()).map(str::len), Some(32));
+    assert_eq!(manifest.get("source_location_class").and_then(|value| value.as_u64()), Some(2));
+    assert!(manifest.get("creation_sequence").and_then(|value| value.as_u64()).is_some_and(|value| value > 0));
+    assert_eq!(manifest.get("first_failure_at_ms").and_then(|value| value.as_i64()), Some(latest_state.first_failure_at_ms));
+    assert_eq!(manifest.get("latest_failure_at_ms").and_then(|value| value.as_i64()), Some(latest_state.latest_failure_at_ms));
+    assert_eq!(manifest.get("latest_failure").and_then(|value| value.as_str()), Some(latest_state.latest_failure.as_str()));
+    assert!(manifest.get("components").and_then(|value| value.as_array()).is_some_and(|components| components
+      .iter()
+      .any(|component| component.get("kind").and_then(|value| value.as_str()) == Some("hot_tail"))));
+
+    let artifacts = crate::engine::emergency_spill::scan_unapplied_for_database(&engine_path).unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].database_id.map(hex::encode).as_deref(), Some(spill.database_id.as_str()));
+    assert_eq!(artifacts[0].incident_id.map(hex::encode).as_deref(), Some(spill.incident_id.as_str()));
+    assert_eq!(artifacts[0].creation_sequence, spill.creation_sequence);
 
     assert!(engine.get_entry(b"chunk-1").unwrap().is_some());
     let rejected = engine.store_entry(EntryType::Chunk, b"chunk-2", b"blocked");
     assert!(matches!(rejected, Err(EngineError::DurabilityFailure(_))));
+  }
+
+  #[test]
+  #[serial]
+  fn later_failure_retries_external_spill_with_the_original_incident_identity() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let blocked_root = temp_dir.path().join("blocked-root");
+    std::fs::write(&blocked_root, b"not a directory").unwrap();
+    let restore = SpillTestEnv::new(&blocked_root);
+    let engine_path = temp_dir.path().join("spill-retry.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
+
+    engine.record_durability_failure("first durability failure", "synthetic EIO");
+    let first_state = engine.durability_failure_state().unwrap();
+    assert!(!engine.emergency_spill_report().unwrap().succeeded);
+
+    let recovered_root = temp_dir.path().join("recovered-root");
+    restore.set_spill_dir(&recovered_root);
+    engine.record_durability_failure("second durability failure", "synthetic ENOSPC");
+    let latest_state = engine.durability_failure_state().unwrap();
+    let report = engine.emergency_spill_report().unwrap();
+    assert!(report.succeeded, "retry failed: {:?}", report.errors);
+    assert_eq!(latest_state.database_id, first_state.database_id);
+    assert_eq!(latest_state.incident_id, first_state.incident_id);
+    assert_eq!(report.database_id, hex::encode(first_state.database_id));
+    assert_eq!(report.incident_id, hex::encode(first_state.incident_id));
+    assert_eq!(report.latest_failure_at_ms, latest_state.latest_failure_at_ms);
+    assert_eq!(crate::engine::emergency_spill::scan_unapplied_for_database(&engine_path).unwrap().len(), 1);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn emergency_spill_writer_refuses_existing_or_symlinked_components() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let existing = temp_dir.path().join("existing.bin");
+    std::fs::write(&existing, b"original").unwrap();
+    assert!(StorageEngine::write_durable_file(&existing, b"replacement").is_err());
+    assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+
+    let outside = temp_dir.path().join("outside.bin");
+    std::fs::write(&outside, b"outside").unwrap();
+    let linked = temp_dir.path().join("linked.bin");
+    symlink(&outside, &linked).unwrap();
+    assert!(StorageEngine::write_durable_file(&linked, b"replacement").is_err());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+  }
+
+  #[test]
+  fn emergency_wal_copy_uses_the_pinned_database_handle_after_path_replacement() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let database = temp_dir.path().join("database.aeordb");
+    let original = temp_dir.path().join("original.aeordb");
+    let destination = temp_dir.path().join("wal-tail.bin");
+    std::fs::write(&database, b"abcdef").unwrap();
+    let pinned = std::fs::File::open(&database).unwrap();
+    std::fs::rename(&database, &original).unwrap();
+    std::fs::write(&database, b"BADBAD").unwrap();
+
+    let (_, copied, _, digest) = StorageEngine::copy_wal_tail_to_file(&pinned, &destination, 3, 6).unwrap();
+    assert_eq!(copied, 3);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"def");
+    assert_eq!(digest, *blake3::hash(b"def").as_bytes());
+  }
+
+  #[test]
+  #[serial]
+  fn emergency_spill_keeps_database_identity_when_the_writer_lock_is_unavailable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let spill_dir = temp_dir.path().join("spill");
+    let _restore = SpillTestEnv::new(&spill_dir);
+    let engine_path = temp_dir.path().join("writer-busy-spill.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+
+    let writer = engine.writer.write().unwrap();
+    engine.record_durability_failure("writer unavailable", "synthetic EIO");
+    drop(writer);
+
+    let report = engine.emergency_spill_report().unwrap();
+    assert!(report.succeeded, "spill failed: {:?}", report.errors);
+    assert_eq!(report.db_path.as_deref(), Some(engine_path.display().to_string().as_str()));
+    assert_eq!(crate::engine::emergency_spill::scan_unapplied_for_database(&engine_path).unwrap().len(), 1);
   }
 
   #[test]
