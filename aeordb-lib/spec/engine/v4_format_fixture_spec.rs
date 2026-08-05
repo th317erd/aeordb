@@ -10,6 +10,10 @@ use aeordb::engine::v4::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_active_control, decode_gc_artifact_envelope, decode_physical_incarnation,
   immutable_gc_artifact_key, select_gc_active_control,
 };
+use aeordb::engine::v4::gc_audit::{
+  AuditArtifactV1, decode_audit_artifact, validate_audit_directory_child, validate_audit_manifest_directory, validate_audit_manifest_pin,
+  validate_audit_pin_target, validate_run_summary_page_record,
+};
 use aeordb::engine::v4::gc_mark::{
   GcMarkArtifactV1, decode_gc_mark_artifact, decode_mark_workspace_manifest, decode_mark_workspace_object,
   validate_mark_checkpoint_workspace, validate_mark_mutation_journal_chain, validate_mark_workspace_object,
@@ -2115,6 +2119,393 @@ fn void_claim_and_settlement_closure_reconcile_generations_counts_and_bytes() {
 }
 
 #[test]
+fn every_gc_audit_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_gc_audit_fixture).collect();
+  assert_eq!(rows.len(), 18);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let artifact = decode_audit_artifact(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(artifact.summary(), row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(artifact.key()), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn gc_audit_closure_binds_catalog_pages_run_summary_and_pins() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+
+  let manifest_bytes = read("audit-catalog-populated");
+  let detail_page_bytes = read("audit-detail-page");
+  let detail_directory_bytes = read("audit-detail-directory");
+  let summary_page_bytes = read("audit-summary-page");
+  let summary_directory_bytes = read("audit-summary-directory");
+  let run_summary_bytes = read("gc-run-summary");
+  let corrupt_bytes = read("corrupt-gc-evidence");
+  let pin_bytes = read("audit-pin");
+
+  let manifest = decode_audit_artifact(&manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let detail_page = decode_audit_artifact(&detail_page_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let detail_directory = decode_audit_artifact(&detail_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let summary_page = decode_audit_artifact(&summary_page_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let summary_directory = decode_audit_artifact(&summary_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let run_summary = decode_audit_artifact(&run_summary_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let corrupt = decode_audit_artifact(&corrupt_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let pin = decode_audit_artifact(&pin_bytes, HashAlgorithm::Blake3_256).unwrap();
+
+  validate_audit_directory_child(&detail_directory, &detail_page).unwrap();
+  validate_audit_directory_child(&summary_directory, &summary_page).unwrap();
+  validate_audit_manifest_directory(&manifest, &detail_directory).unwrap();
+  validate_audit_manifest_directory(&manifest, &summary_directory).unwrap();
+  validate_run_summary_page_record(&run_summary, &summary_page).unwrap();
+  validate_audit_manifest_pin(&manifest, &pin).unwrap();
+  let database_id = match &pin {
+    AuditArtifactV1::Pin(pin) => pin.database_id,
+    _ => panic!("expected audit pin"),
+  };
+  validate_audit_pin_target(&pin, database_id, GcArtifactKindV1::GcRunSummary, run_summary.key()).unwrap();
+  validate_audit_pin_target(&pin, database_id, GcArtifactKindV1::CorruptGcEvidence, corrupt.key()).unwrap();
+
+  assert_eq!(
+    validate_audit_pin_target(&pin, database_id, GcArtifactKindV1::AuditCatalogActiveControl, corrupt.key()).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let AuditArtifactV1::Page(page) = summary_page else {
+    panic!("expected audit summary page");
+  };
+  assert_eq!(page.record_count, 2);
+}
+
+#[test]
+fn every_gc_audit_fixture_byte_is_integrity_protected() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_gc_audit_fixture).collect();
+  assert_eq!(rows.len(), 18);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    for offset in 0..bytes.len() {
+      let mut changed = bytes.clone();
+      changed[offset] ^= 1;
+      assert!(decode_audit_artifact(&changed, algorithm).is_err(), "fixture {} accepted mutation at byte {offset}", row.id);
+    }
+  }
+}
+
+#[test]
+fn gc_audit_readers_reject_semantic_corruption_and_amplification() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+  let hash_width = HashAlgorithm::Blake3_256.hash_length();
+
+  let detail_page = read("audit-detail-page");
+  let body = gc_artifact_body_offset(&detail_page);
+  let lower_length = test_u32(&detail_page, body + 8) as usize;
+  let upper_length = test_u32(&detail_page, body + 12) as usize;
+  let first_detail = body + 64 + lower_length + upper_length;
+
+  let mut unknown_event = detail_page.clone();
+  unknown_event[first_detail + hash_width..first_detail + hash_width + 2].copy_from_slice(&99u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_event);
+  assert_eq!(
+    decode_audit_artifact(&unknown_event, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut invalid_payload = detail_page.clone();
+  invalid_payload[first_detail + 52 + hash_width] = 0xff;
+  repair_trailing_crc(&mut invalid_payload);
+  assert_eq!(
+    decode_audit_artifact(&invalid_payload, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut invalid_batch = detail_page.clone();
+  invalid_batch[first_detail + hash_width + 28] ^= 1;
+  repair_trailing_crc(&mut invalid_batch);
+  assert_eq!(
+    decode_audit_artifact(&invalid_batch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut reserved_detail = detail_page.clone();
+  reserved_detail[first_detail + hash_width + 48] = 1;
+  repair_trailing_crc(&mut reserved_detail);
+  assert_eq!(
+    decode_audit_artifact(&reserved_detail, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut amplified_page = detail_page.clone();
+  amplified_page[body + 16..body + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+  amplified_page[body + 20..body + 24].copy_from_slice(&u32::MAX.to_le_bytes());
+  repair_trailing_crc(&mut amplified_page);
+  assert_eq!(
+    decode_audit_artifact(&amplified_page, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut reserved_page = detail_page;
+  reserved_page[body + 40] = 1;
+  repair_trailing_crc(&mut reserved_page);
+  assert_eq!(
+    decode_audit_artifact(&reserved_page, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let summary_page = read("audit-summary-page");
+  let body = gc_artifact_body_offset(&summary_page);
+  let lower_length = test_u32(&summary_page, body + 8) as usize;
+  let upper_length = test_u32(&summary_page, body + 12) as usize;
+  let first_summary = body + 64 + lower_length + upper_length;
+  let started_at = test_u64(&summary_page, first_summary + 16);
+  let mut reversed_time = summary_page;
+  reversed_time[first_summary + 24..first_summary + 32].copy_from_slice(&(started_at - 1).to_le_bytes());
+  repair_trailing_crc(&mut reversed_time);
+  assert_eq!(
+    decode_audit_artifact(&reversed_time, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let record_length = 76 + hash_width;
+  let mut duplicate_summary = read("audit-summary-page");
+  duplicate_summary.copy_within(first_summary..first_summary + record_length, first_summary + record_length);
+  repair_trailing_crc(&mut duplicate_summary);
+  assert_eq!(
+    decode_audit_artifact(&duplicate_summary, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let directory = read("audit-detail-directory");
+  let mut unknown_role = directory;
+  unknown_role[64..66].copy_from_slice(&99u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_role);
+  assert_eq!(
+    decode_audit_artifact(&unknown_role, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut reserved_directory = read("audit-detail-directory");
+  let body = gc_artifact_body_offset(&reserved_directory);
+  reserved_directory[body + 8] = 1;
+  repair_trailing_crc(&mut reserved_directory);
+  assert_eq!(
+    decode_audit_artifact(&reserved_directory, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let manifest = read("audit-catalog-populated");
+  let body = gc_artifact_body_offset(&manifest);
+  let mut unknown_capability = manifest.clone();
+  unknown_capability[body + 35] ^= 0x80;
+  repair_trailing_crc(&mut unknown_capability);
+  assert_eq!(
+    decode_audit_artifact(&unknown_capability, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownRequiredCapability
+  );
+
+  let mut amplified_pins = manifest;
+  amplified_pins[body + 140 + 2 * hash_width..body + 144 + 2 * hash_width].copy_from_slice(&4_097u32.to_le_bytes());
+  repair_trailing_crc(&mut amplified_pins);
+  assert_eq!(
+    decode_audit_artifact(&amplified_pins, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut mismatched_pin_length = read("audit-catalog-populated");
+  let body = gc_artifact_body_offset(&mismatched_pin_length);
+  mismatched_pin_length[body + 144 + 2 * hash_width..body + 148 + 2 * hash_width].fill(0);
+  repair_trailing_crc(&mut mismatched_pin_length);
+  assert_eq!(
+    decode_audit_artifact(&mismatched_pin_length, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+
+  let evidence = read("corrupt-gc-evidence");
+  let body = gc_artifact_body_offset(&evidence);
+  let mut invalid_optionals = evidence.clone();
+  invalid_optionals[body + 11] = 0;
+  repair_trailing_crc(&mut invalid_optionals);
+  assert_eq!(
+    decode_audit_artifact(&invalid_optionals, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unknown_observed_kind = evidence.clone();
+  unknown_observed_kind[body + 12..body + 14].copy_from_slice(&0xffffu16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_observed_kind);
+  assert_eq!(
+    decode_audit_artifact(&unknown_observed_kind, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut reserved_evidence = evidence.clone();
+  reserved_evidence[body + 14] = 1;
+  repair_trailing_crc(&mut reserved_evidence);
+  assert_eq!(
+    decode_audit_artifact(&reserved_evidence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut amplified_evidence = evidence.clone();
+  amplified_evidence[body + 64 + 3 * hash_width..body + 66 + 3 * hash_width].copy_from_slice(&65u16.to_le_bytes());
+  repair_trailing_crc(&mut amplified_evidence);
+  assert_eq!(
+    decode_audit_artifact(&amplified_evidence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let context_length = test_u32(&evidence, body + 60 + 3 * hash_width) as usize;
+  let context = body + 68 + 3 * hash_width;
+  let mut invalid_context = evidence.clone();
+  invalid_context[context] = 0xff;
+  repair_trailing_crc(&mut invalid_context);
+  assert_eq!(
+    decode_audit_artifact(&invalid_context, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let hashes = context + context_length;
+  let mut duplicate_evidence = evidence;
+  duplicate_evidence.copy_within(hashes..hashes + hash_width, hashes + hash_width);
+  repair_trailing_crc(&mut duplicate_evidence);
+  assert_eq!(
+    decode_audit_artifact(&duplicate_evidence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let pin = read("audit-pin");
+  let body = gc_artifact_body_offset(&pin);
+  let mut zero_pin_count = pin.clone();
+  zero_pin_count[body + 20 + hash_width..body + 24 + hash_width].fill(0);
+  repair_trailing_crc(&mut zero_pin_count);
+  assert_eq!(
+    decode_audit_artifact(&zero_pin_count, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unknown_reason = pin.clone();
+  unknown_reason[body + 16 + hash_width..body + 18 + hash_width].copy_from_slice(&99u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_reason);
+  assert_eq!(
+    decode_audit_artifact(&unknown_reason, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut reserved_pin = pin.clone();
+  reserved_pin[body + 18 + hash_width] = 1;
+  repair_trailing_crc(&mut reserved_pin);
+  assert_eq!(
+    decode_audit_artifact(&reserved_pin, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let hashes = body + 32 + hash_width;
+  let mut duplicate_pin = pin;
+  duplicate_pin.copy_within(hashes..hashes + hash_width, hashes + hash_width);
+  repair_trailing_crc(&mut duplicate_pin);
+  assert_eq!(
+    decode_audit_artifact(&duplicate_pin, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  for (kind, cap) in [
+    (GcArtifactKindV1::AuditCatalogManifest, 1024 * 1024),
+    (GcArtifactKindV1::GcArtifactDirectoryNode, 4 * 1024 * 1024),
+    (GcArtifactKindV1::AuditDetailPage, 16 * 1024 * 1024),
+  ] {
+    let mut over_cap = vec![0; cap + 1];
+    over_cap[6..8].copy_from_slice(&(kind as u16).to_le_bytes());
+    assert_eq!(
+      decode_audit_artifact(&over_cap, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::AllocationAmplification,
+      "kind {}",
+      kind.name()
+    );
+  }
+}
+
+#[test]
+fn gc_audit_closure_rejects_detached_and_cross_database_artifacts() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+  let hash_width = HashAlgorithm::Blake3_256.hash_length();
+
+  let manifest_bytes = read("audit-catalog-populated");
+  let detail_page_bytes = read("audit-detail-page");
+  let detail_directory_bytes = read("audit-detail-directory");
+  let summary_page_bytes = read("audit-summary-page");
+  let run_summary_bytes = read("gc-run-summary");
+  let pin_bytes = read("audit-pin");
+
+  let manifest = decode_audit_artifact(&manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let detail_page = decode_audit_artifact(&detail_page_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let detail_directory = decode_audit_artifact(&detail_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let summary_page = decode_audit_artifact(&summary_page_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let run_summary = decode_audit_artifact(&run_summary_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let pin = decode_audit_artifact(&pin_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let database_id = match &pin {
+    AuditArtifactV1::Pin(pin) => pin.database_id,
+    _ => panic!("expected audit pin"),
+  };
+
+  let mut detached_directory_bytes = detail_directory_bytes.clone();
+  let body = gc_artifact_body_offset(&detached_directory_bytes);
+  let lower_length = test_u32(&detached_directory_bytes, body + 16) as usize;
+  let upper_length = test_u32(&detached_directory_bytes, body + 20) as usize;
+  detached_directory_bytes[body + 80 + lower_length + upper_length + 16] ^= 1;
+  repair_trailing_crc(&mut detached_directory_bytes);
+  let detached_directory = decode_audit_artifact(&detached_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_audit_directory_child(&detached_directory, &detail_page).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut detached_manifest_bytes = manifest_bytes.clone();
+  let body = gc_artifact_body_offset(&detached_manifest_bytes);
+  detached_manifest_bytes[body + 44] ^= 1;
+  repair_trailing_crc(&mut detached_manifest_bytes);
+  let detached_manifest = decode_audit_artifact(&detached_manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_audit_manifest_directory(&detached_manifest, &detail_directory).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut detached_run_bytes = run_summary_bytes.clone();
+  let body = gc_artifact_body_offset(&detached_run_bytes);
+  let reclaimed_bytes = test_u64(&detached_run_bytes, body + 68);
+  detached_run_bytes[body + 68..body + 76].copy_from_slice(&(reclaimed_bytes + 1).to_le_bytes());
+  repair_trailing_crc(&mut detached_run_bytes);
+  let detached_run = decode_audit_artifact(&detached_run_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_run_summary_page_record(&detached_run, &summary_page).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unrooted_pin_bytes = pin_bytes.clone();
+  let body = gc_artifact_body_offset(&unrooted_pin_bytes);
+  unrooted_pin_bytes[body + 16] ^= 1;
+  repair_trailing_crc(&mut unrooted_pin_bytes);
+  let unrooted_pin = decode_audit_artifact(&unrooted_pin_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(validate_audit_manifest_pin(&manifest, &unrooted_pin).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mut wrong_database_id = database_id.to_vec();
+  wrong_database_id[0] ^= 1;
+  assert_eq!(
+    validate_audit_pin_target(&pin, &wrong_database_id, GcArtifactKindV1::GcRunSummary, run_summary.key()).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    validate_audit_pin_target(&pin, database_id, GcArtifactKindV1::GcRunSummary, &vec![0; hash_width]).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
 fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
   let root = fixture_root();
   let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
@@ -2488,6 +2879,16 @@ fn is_sweep_void_fixture(row: &FixtureRow) -> bool {
       || row.expected.starts_with("gc:manifest:void-catalog:")
       || row.expected.starts_with("gc:claim:void:")
       || row.expected.starts_with("gc:receipt:void-claim-settlement:"))
+}
+
+fn is_gc_audit_fixture(row: &FixtureRow) -> bool {
+  row.format_id == "gc-artifact-v1"
+    && (row.expected.starts_with("gc:manifest:audit-catalog:")
+      || row.expected.starts_with("gc:page:audit-")
+      || row.expected.starts_with("gc:directory:audit-")
+      || row.expected.starts_with("gc:summary:run:")
+      || row.expected.starts_with("gc:evidence:corrupt:")
+      || row.expected.starts_with("gc:pin:audit:"))
 }
 
 fn test_u32(bytes: &[u8], offset: usize) -> u32 {

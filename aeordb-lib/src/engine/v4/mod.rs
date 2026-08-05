@@ -11,6 +11,7 @@ pub mod dependency;
 pub mod entity;
 pub mod field_definition;
 pub mod gc;
+pub mod gc_audit;
 pub mod gc_mark;
 pub mod gc_state;
 pub mod gc_void;
