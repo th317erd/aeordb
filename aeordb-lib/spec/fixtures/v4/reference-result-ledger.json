@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-dependency-table-v1",
+  "tool_revision": "p0b2-parser-resolution-plan-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -340,6 +340,12 @@
       "result": "pass"
     },
     {
+      "fixture_id": "aivp-blake3-256-legacy-wasm-valid",
+      "expected": "policy:legacy-wasm32",
+      "observed": "policy:legacy-wasm32",
+      "result": "pass"
+    },
+    {
       "fixture_id": "aivp-sha512-native-valid",
       "expected": "policy:native",
       "observed": "policy:native",
@@ -349,6 +355,60 @@
       "fixture_id": "aivp-sha512-pure-wasm-valid",
       "expected": "policy:pure-wasm32",
       "observed": "policy:pure-wasm32",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aivp-sha512-legacy-wasm-valid",
+      "expected": "policy:legacy-wasm32",
+      "observed": "policy:legacy-wasm32",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-blake3-256-none-valid",
+      "expected": "parser-plan:none:candidates=0",
+      "observed": "parser-plan:none:candidates=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-blake3-256-explicit-plugin-valid",
+      "expected": "parser-plan:explicit-plugin:candidates=1",
+      "observed": "parser-plan:explicit-plugin:candidates=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-blake3-256-automatic-valid",
+      "expected": "parser-plan:automatic:candidates=4",
+      "observed": "parser-plan:automatic:candidates=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-blake3-256-automatic-legacy-valid",
+      "expected": "parser-plan:automatic:candidates=3",
+      "observed": "parser-plan:automatic:candidates=3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-sha512-none-valid",
+      "expected": "parser-plan:none:candidates=0",
+      "observed": "parser-plan:none:candidates=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-sha512-explicit-plugin-valid",
+      "expected": "parser-plan:explicit-plugin:candidates=1",
+      "observed": "parser-plan:explicit-plugin:candidates=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-sha512-automatic-valid",
+      "expected": "parser-plan:automatic:candidates=4",
+      "observed": "parser-plan:automatic:candidates=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aprp-sha512-automatic-legacy-valid",
+      "expected": "parser-plan:automatic:candidates=3",
+      "observed": "parser-plan:automatic:candidates=3",
       "result": "pass"
     }
   ]

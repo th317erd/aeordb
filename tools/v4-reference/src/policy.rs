@@ -30,10 +30,11 @@ pub struct PolicyFixtureCase {
   pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
-enum PolicyKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyKind {
   Native,
   PureWasm,
+  LegacyWasm,
 }
 
 impl PolicyKind {
@@ -41,6 +42,7 @@ impl PolicyKind {
     match self {
       Self::Native => "native",
       Self::PureWasm => "pure-wasm32",
+      Self::LegacyWasm => "legacy-wasm32",
     }
   }
 }
@@ -48,7 +50,7 @@ impl PolicyKind {
 pub fn fixture_cases() -> Vec<PolicyFixtureCase> {
   let mut cases = Vec::with_capacity(4);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
-    for kind in [PolicyKind::Native, PolicyKind::PureWasm] {
+    for kind in [PolicyKind::Native, PolicyKind::PureWasm, PolicyKind::LegacyWasm] {
       cases.push(PolicyFixtureCase {
         id: fixture_id(profile, kind),
         format: PolicyFormat::InvocationPolicyV1,
@@ -57,6 +59,7 @@ pub fn fixture_cases() -> Vec<PolicyFixtureCase> {
         relation: Some(match kind {
           PolicyKind::Native => "executor-profile:aeordb-native-deterministic-v1",
           PolicyKind::PureWasm => "executor-profile:wasmi-0.42.1-aeordb-pure-v1",
+          PolicyKind::LegacyWasm => "executor-profile:wasmi-0.42.1-aeordb-legacy-stubs-v0",
         }),
         canonical_key: None,
         bytes: build_policy(kind),
@@ -83,7 +86,7 @@ pub fn annotation_lines() -> Vec<String> {
   ]
 }
 
-fn build_policy(kind: PolicyKind) -> Vec<u8> {
+pub(crate) fn build_policy(kind: PolicyKind) -> Vec<u8> {
   let mut value = vec![0u8; POLICY_LENGTH];
   value[0..4].copy_from_slice(b"AIVP");
   put_u16(&mut value, 4, 1);
@@ -103,9 +106,9 @@ fn build_policy(kind: PolicyKind) -> Vec<u8> {
     PolicyKind::Native => {
       put_u16(&mut value, 16, 1);
     }
-    PolicyKind::PureWasm => {
+    PolicyKind::PureWasm | PolicyKind::LegacyWasm => {
       put_u16(&mut value, 16, 2);
-      put_u16(&mut value, 18, 1);
+      put_u16(&mut value, 18, if matches!(kind, PolicyKind::PureWasm) { 1 } else { 2 });
       put_u64(&mut value, 24, 8 * 1_024 * 1_024);
       put_u64(&mut value, 40, 64 * 1_024 * 1_024);
       put_u64(&mut value, 48, 50_000_000);
@@ -118,7 +121,7 @@ fn build_policy(kind: PolicyKind) -> Vec<u8> {
   value
 }
 
-fn decode_policy(value: &[u8]) -> Result<PolicyKind, &'static str> {
+pub(crate) fn decode_policy(value: &[u8]) -> Result<PolicyKind, &'static str> {
   if value.len() != POLICY_LENGTH {
     return Err("policy_length");
   }
@@ -168,7 +171,7 @@ fn decode_policy(value: &[u8]) -> Result<PolicyKind, &'static str> {
       }
       Ok(PolicyKind::Native)
     }
-    (2, 1) => {
+    (2, host @ (1 | 2)) => {
       if [request, memory, fuel, table_elements].contains(&0)
         || [request, memory, fuel, table_elements].contains(&u64::MAX)
         || [instances, memories, tables].contains(&0)
@@ -178,7 +181,7 @@ fn decode_policy(value: &[u8]) -> Result<PolicyKind, &'static str> {
       {
         return Err("policy_wasm_context");
       }
-      Ok(PolicyKind::PureWasm)
+      Ok(if host == 1 { PolicyKind::PureWasm } else { PolicyKind::LegacyWasm })
     }
     (1 | 2, _) => Err("policy_host_profile"),
     _ => Err("policy_backend"),
@@ -189,8 +192,10 @@ fn fixture_id(profile: HashProfile, kind: PolicyKind) -> &'static str {
   match (profile, kind) {
     (HashProfile::Blake3_256, PolicyKind::Native) => "aivp-blake3-256-native-valid",
     (HashProfile::Blake3_256, PolicyKind::PureWasm) => "aivp-blake3-256-pure-wasm-valid",
+    (HashProfile::Blake3_256, PolicyKind::LegacyWasm) => "aivp-blake3-256-legacy-wasm-valid",
     (HashProfile::Sha512, PolicyKind::Native) => "aivp-sha512-native-valid",
     (HashProfile::Sha512, PolicyKind::PureWasm) => "aivp-sha512-pure-wasm-valid",
+    (HashProfile::Sha512, PolicyKind::LegacyWasm) => "aivp-sha512-legacy-wasm-valid",
   }
 }
 
@@ -198,6 +203,7 @@ fn expected(kind: PolicyKind) -> &'static str {
   match kind {
     PolicyKind::Native => "policy:native",
     PolicyKind::PureWasm => "policy:pure-wasm32",
+    PolicyKind::LegacyWasm => "policy:legacy-wasm32",
   }
 }
 

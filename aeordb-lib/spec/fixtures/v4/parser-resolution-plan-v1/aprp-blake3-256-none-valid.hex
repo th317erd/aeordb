@@ -1,0 +1,12 @@
+# fixture: aprp-blake3-256-none-valid
+# contract: ParserResolutionPlanV1
+# hash: blake3-256 (32 bytes)
+# expected: parser-plan:none:candidates=0
+# relation: selector:metadata-or-always-missing
+# hex offsets are absolute within this fixture
+# plan +0x000 len 48: APRP header and semantic IDs
+# plan kind: 1; candidate_count: 0
+# plan +0x030 len 0: exact candidate records
+00000000: 41505250010030003000000000000000
+00000010: 01000000000000000000000000000000
+00000020: 00000000000000000000000000000000

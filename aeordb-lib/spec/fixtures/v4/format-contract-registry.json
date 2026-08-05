@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-dependency-table",
+  "coverage_stage": "p0b-2-parser-resolution-plan",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -393,11 +393,78 @@
       ],
       "fixture_ids_32": [
         "aivp-blake3-256-native-valid",
-        "aivp-blake3-256-pure-wasm-valid"
+        "aivp-blake3-256-pure-wasm-valid",
+        "aivp-blake3-256-legacy-wasm-valid"
       ],
       "fixture_ids_64": [
         "aivp-sha512-native-valid",
-        "aivp-sha512-pure-wasm-valid"
+        "aivp-sha512-pure-wasm-valid",
+        "aivp-sha512-legacy-wasm-valid"
+      ]
+    },
+    {
+      "id": "parser-resolution-plan-v1",
+      "family": "index-semantic-primitive",
+      "magic_ascii": "APRP",
+      "version": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "plan_magic", "rule": "ASCII APRP" },
+        { "offset": 4, "length": 2, "field": "plan_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "plan_header_length", "rule": "exactly 48" },
+        { "offset": 8, "length": 4, "field": "plan_total_length", "rule": "complete plan bytes, at most 128 KiB" },
+        { "offset": 12, "length": 4, "field": "plan_flags", "rule": "zero" },
+        { "offset": 16, "length": 2, "field": "plan_kind", "rule": "1 none, 2 explicit_plugin, or 3 automatic" },
+        { "offset": 18, "length": 2, "field": "resolution_semantics", "rule": "kind-specific corrected or migration-only ID" },
+        { "offset": 20, "length": 2, "field": "mime_semantics", "rule": "zero when inapplicable; otherwise corrected or migration-only ID" },
+        { "offset": 22, "length": 2, "field": "no_match_semantics", "rule": "zero when inapplicable; otherwise corrected or migration-only ID" },
+        { "offset": 24, "length": 4, "field": "candidate_count", "rule": "exact concatenated records; at most 514" },
+        { "offset": 28, "length": 4, "field": "mime_dependency_ordinal", "rule": "one-based automatic-plan dependency or zero" },
+        { "offset": 32, "length": 16, "field": "reserved", "rule": "zero" },
+        { "offset": 48, "length_formula": "sum(candidate_total_length)", "field": "candidates", "rule": "registry tier, raw JSON, then native suite" }
+      ],
+      "candidate_layout": [
+        { "offset": 0, "length": 4, "field": "candidate_total_length", "rule": "exactly 32 + M + 128" },
+        { "offset": 4, "length": 2, "field": "candidate_kind", "rule": "1 explicit, 2 registry, 3 raw_json, or 4 native_suite" },
+        { "offset": 6, "length": 2, "field": "match_semantics", "rule": "zero except corrected or migration registry matching" },
+        { "offset": 8, "length": 4, "field": "dependency_ordinal", "rule": "nonzero one-based exact dependency" },
+        { "offset": 12, "length": 4, "field": "invocation_policy_length", "rule": "exactly 128" },
+        { "offset": 16, "length": 4, "field": "match_length", "rule": "M; canonical MIME or exact migration bytes" },
+        { "offset": 20, "length": 4, "field": "candidate_flags", "rule": "zero" },
+        { "offset": 24, "length": 8, "field": "reserved", "rule": "zero" },
+        { "offset": 32, "length_formula": "M", "field": "match", "rule": "kind-specific bytes" },
+        { "offset_formula": "32 + M", "length": 128, "field": "invocation_policy", "rule": "complete InvocationPolicyV1" }
+      ],
+      "identity": ["complete plan bytes embedded in the enclosing ValueStoreDefinitionV1"],
+      "key_domain": "no standalone key; exact bytes participate in the enclosing ValueStoreId",
+      "checksum": "no independent checksum; enclosing ValueStoreDefinition identity plus IndexArtifact CRC/hash protect these bytes",
+      "body_formula": "48 + sum(32 + match_length + 128); complete length at most 131072",
+      "hard_cap": 131072,
+      "canonical_order": "none has no candidates; explicit has one explicit candidate; automatic has 0..512 raw-match-sorted registry candidates followed by exactly raw_json and native_suite",
+      "reserve_zero_ranges": [
+        { "start": 32, "length": 16 },
+        { "start_formula": "candidate + 24", "length": 8 }
+      ],
+      "malformed_behavior": "reject framing/flags/reserve, unknown or inapplicable semantics, zero/unresolved ordinals, candidate count/length disagreement, invalid MIME essence, duplicate/unsorted registry matches, tier/order mismatch, nested policy failure, and backend/policy mismatch",
+      "trailing_behavior": "plan_total_length and candidate_count consume the complete plan; every candidate length consumes its match and fixed policy exactly",
+      "bounded_decode": "validate the 48-byte header, 128 KiB cap, and 514-candidate cap before bounded traversal; validate each checked length before slicing and never allocate from an unvalidated count",
+      "producer_owner": "Child 05 ValueStore definition compiler through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/readers", "Child 05 parser executor", "Child 06 authoritative fallback", "Child 07 migration"],
+      "capability": "IndexDefinitionV1 bit 8 through the enclosing ValueStore definition",
+      "typed_hash_roles": [
+        { "field": "complete plan bytes in enclosing ValueStoreId preimage", "role": "identity" },
+        { "field": "dependency ordinals", "role": "graph-edge-authority through enclosing dependency table" }
+      ],
+      "fixture_ids_32": [
+        "aprp-blake3-256-none-valid",
+        "aprp-blake3-256-explicit-plugin-valid",
+        "aprp-blake3-256-automatic-valid",
+        "aprp-blake3-256-automatic-legacy-valid"
+      ],
+      "fixture_ids_64": [
+        "aprp-sha512-none-valid",
+        "aprp-sha512-explicit-plugin-valid",
+        "aprp-sha512-automatic-valid",
+        "aprp-sha512-automatic-legacy-valid"
       ]
     },
     {
@@ -602,10 +669,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 9,
-    "fixture_count": 58,
+    "fixture_family_count": 10,
+    "fixture_count": 68,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, and DependencyTableV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, parser/selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, DependencyTableV1, and ParserResolutionPlanV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, source selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

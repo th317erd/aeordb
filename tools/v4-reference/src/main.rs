@@ -3,6 +3,7 @@ mod core;
 mod definitions;
 mod dependency;
 mod index;
+mod parser;
 mod policy;
 
 use std::collections::BTreeMap;
@@ -20,10 +21,11 @@ use core::{CoreFormat, HashProfile};
 use dependency::DependencyFormat;
 use definitions::DefinitionFormat;
 use index::IndexFormat;
+use parser::ParserFormat;
 use policy::PolicyFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-dependency-table-v1";
+const TOOL_REVISION: &str = "p0b2-parser-resolution-plan-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -42,6 +44,7 @@ enum FixtureFormat {
   Dependency(DependencyFormat),
   Definition(DefinitionFormat),
   Index(IndexFormat),
+  Parser(ParserFormat),
   Policy(PolicyFormat),
 }
 
@@ -54,6 +57,7 @@ impl FixtureFormat {
       Self::Dependency(format) => format.id(),
       Self::Definition(format) => format.id(),
       Self::Index(format) => format.id(),
+      Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
     }
   }
@@ -66,6 +70,7 @@ impl FixtureFormat {
       Self::Dependency(format) => format.family(),
       Self::Definition(format) => format.family(),
       Self::Index(format) => format.family(),
+      Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
     }
   }
@@ -224,12 +229,12 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-dependency-table".to_string(),
+    stage: "p0b-2-parser-resolution-plan".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
       production_dependencies: Vec::new(),
-      provenance: "Independent implementation of ratified decision-log Round 7 and Rounds 10-15; no AeorDB crate dependency".to_string(),
+      provenance: "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency".to_string(),
       reviewer_status: "pending-owner-review-before-production-writer".to_string(),
     },
     contract_registry: "format-contract-registry.json".to_string(),
@@ -246,7 +251,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-dependency-table" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-parser-resolution-plan" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -454,6 +459,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(parser::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Parser(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases
 }
 
@@ -613,6 +627,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Dependency(_) => dependency::observe(case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
+    FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
   }
 }
@@ -627,6 +642,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Dependency(_)
     | FixtureFormat::Definition(_)
     | FixtureFormat::Index(_)
+    | FixtureFormat::Parser(_)
     | FixtureFormat::Policy(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
     }
@@ -680,6 +696,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Policy(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in policy::annotation_lines() {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Parser(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in parser::annotation_lines(&case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }
