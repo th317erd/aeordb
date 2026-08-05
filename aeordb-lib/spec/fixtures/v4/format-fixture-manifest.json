@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p0b-2-system-control",
+  "stage": "p0b-2-system-family",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p0b2-system-control-v1",
+    "revision": "p0b2-system-family-v1",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 434,
+  "fixture_count": 436,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -21,8 +21,8 @@
       "binary": "database-header-v4/header-blake3-256-valid-ab.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-valid-ab.hex",
       "byte_length": 2048,
-      "sha256": "dcbc3c0836b0c8168e73bec1a9ec8b629413dd0e5a9555b3c90a98140d88e343",
-      "blake3": "29e460334d4ae70c111d8478c228b9105675cad2076fabad2467e3be18d49afb",
+      "sha256": "2d700aa8142a011eb5c9464f51c612cbf69a1f18f3a6fd37767f1812e45986a5",
+      "blake3": "19f0b70e89a587f03b50c20567895ee0bfd1a58da28e285d20f1677b148bb4db",
       "canonical_key": null,
       "expected": "selected:42",
       "relation": "physical-instance-original"
@@ -36,8 +36,8 @@
       "binary": "database-header-v4/header-sha512-valid-ab.bin",
       "annotated_hex": "database-header-v4/header-sha512-valid-ab.hex",
       "byte_length": 2048,
-      "sha256": "898682dd892aeb29573ed92f5413309e8dc365f49d3f067e38b2b9fb06d9a1e6",
-      "blake3": "32187b009c08da3df70b3e5ee6ddb16d738fbacb16c7bdc6dabe103a9bc1e3e1",
+      "sha256": "f9f764d7e69a315011fc59fe3573f9d5c5483a3b48726ef2b481632ce24ae883",
+      "blake3": "84c919c5d43a7e81192cf714627218002f5dd216ac69c37d400d6d765977ada9",
       "canonical_key": null,
       "expected": "selected:42",
       "relation": null
@@ -51,8 +51,8 @@
       "binary": "database-header-v4/header-blake3-256-one-valid-slot.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-one-valid-slot.hex",
       "byte_length": 2048,
-      "sha256": "9aa16d3c139c8045fcc52f8e305606d43bee77f1d5d3efbe5cb49876929f03d0",
-      "blake3": "74118164ad37e5809c849d11cb83a0fef8cf14201edc84e33d148872d38565bd",
+      "sha256": "ea2e0b092155b271e431c876442aa0d41861f534c6d4aeefb5bc341c0133bfe6",
+      "blake3": "008b27bd38c6621ff6d799dcab0a722d5c248eff85423751ee64cd5cb2813d03",
       "canonical_key": null,
       "expected": "selected:42:redundancy-degraded",
       "relation": null
@@ -66,8 +66,8 @@
       "binary": "database-header-v4/header-blake3-256-equal-identical.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-equal-identical.hex",
       "byte_length": 2048,
-      "sha256": "25c6dab706a3205cede8cc055a04091257bfe308a5ce54e5514ef22722835980",
-      "blake3": "00346053e0d736fb57f49a3030e9bf9e00c94514399867c850a2247606f040b4",
+      "sha256": "e0e0f1397bd7aa2ee45850b28341be30e3859c6be7770a04b0cee3a9d760b276",
+      "blake3": "dbef33e619538878edb0a4ec713b83bc10ed6f5b984d29c8143b25d333df9a1b",
       "canonical_key": null,
       "expected": "selected:42",
       "relation": null
@@ -81,8 +81,8 @@
       "binary": "database-header-v4/header-blake3-256-equal-ambiguous.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-equal-ambiguous.hex",
       "byte_length": 2048,
-      "sha256": "8849f54c164865a2bfded7f15cc39ea27f9c80094a996dee896ae962d8f7cf06",
-      "blake3": "737e19f02c044eb46daa70bd25c9722ac95e735454b3d9d378e23fdad137ae43",
+      "sha256": "a7d174425c4b4f7d0e2c03c9fa2975d0a0eca23d7d186033107879a302d23de0",
+      "blake3": "0ff4e6c03138712c8faff2bd997519f97445e0dcfd09daad965e164c942d4070",
       "canonical_key": null,
       "expected": "error:ambiguous_equal_sequence",
       "relation": null
@@ -96,8 +96,8 @@
       "binary": "database-header-v4/header-blake3-256-no-valid-slot.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-no-valid-slot.hex",
       "byte_length": 2048,
-      "sha256": "d8a9a48b9726529e585bd018a8454b6a2d4b4b6cb345c678b3cf30185d36b998",
-      "blake3": "cdc3f2ce36d4c37e757b3018c98b6a8b02ba127ac2dd4863b3058594761124c2",
+      "sha256": "78a16dce3b6a840c897fdd775f9be27d53abae0a785fbc2d7539e8151f11333b",
+      "blake3": "3579f0a95333cca3d183dc279f358f96358b2082977a1e2d79cdceba7581fd96",
       "canonical_key": null,
       "expected": "error:no_valid_slot",
       "relation": null
@@ -111,8 +111,8 @@
       "binary": "database-header-v4/header-blake3-256-unknown-capability.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-unknown-capability.hex",
       "byte_length": 2048,
-      "sha256": "2fdad34eed493c26fa5b9e6dab688921ad58634518cdbbb8720cbbd8135bd2e0",
-      "blake3": "3d2a2c559ab4141231c1b15e247ca6949190bd1bd014512889963b78f3f39e21",
+      "sha256": "90d98a10a07fd7a16a4edf13865909c45b4b94e733297bd0e0c71ece91a69e79",
+      "blake3": "d1882146322c1c437509ffd3a720bed4daa37d4fd2a1a29e34cf59e5ef25de0d",
       "canonical_key": null,
       "expected": "error:unsupported_required_capability",
       "relation": null
@@ -126,8 +126,8 @@
       "binary": "database-header-v4/header-blake3-256-nonzero-reserved.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-nonzero-reserved.hex",
       "byte_length": 2048,
-      "sha256": "3c130b4ad1cac08031a9d8e22540b4289983268008d91ffaf80467e04cd1d46d",
-      "blake3": "ec62728f2c6af6ab415d6e7175bd3a4e8cfac8026fdb911b3ac9a88c26ab3b77",
+      "sha256": "2346216887ef849651e7998eebc2a61bf9654b53004c08a5e4bc72b00138dd25",
+      "blake3": "907e47ff9b5db09de179cf05d2dd05fdc49fbb758f824dd94313e6f1a57def8e",
       "canonical_key": null,
       "expected": "error:reserved_nonzero",
       "relation": null
@@ -141,8 +141,8 @@
       "binary": "database-header-v4/header-blake3-256-nonzero-hash-padding.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-nonzero-hash-padding.hex",
       "byte_length": 2048,
-      "sha256": "4ccc5f4e922732d5b912b7e0e8e5a49b690baa72b48899ec661e2774a1d0a30f",
-      "blake3": "ca557ce1c70acf76e49456433b73c3f8fc1637bf23b4504fec07da3bb5c7547e",
+      "sha256": "c65fd378865adc2c83be521656bb20373dbee14aeb38922c4f3f96ed23c623a6",
+      "blake3": "b8e326aee22b192d5d58ce2d1d891df73f17163642a564240881ee4c61582c6f",
       "canonical_key": null,
       "expected": "error:hash_padding_nonzero",
       "relation": null
@@ -156,8 +156,8 @@
       "binary": "database-header-v4/header-blake3-256-adopted-physical-id.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-adopted-physical-id.hex",
       "byte_length": 2048,
-      "sha256": "eb2eed806456e9c486d88571684708dbb3748d904adc14b8172da8bfa9aac451",
-      "blake3": "a7303fa1c282f4303c82ff1901fc7305807c50fcb2bdf7d14bcb32bdb2da78b9",
+      "sha256": "9b092d43c44139986cf154430dc7fe21431aa9bc800ffdb17c699283bcfbbefe",
+      "blake3": "2160c44a117164a13c7b1e4dafb3d1323621093c8c4d56ef4e9ca7658066e81c",
       "canonical_key": null,
       "expected": "selected:44",
       "relation": "adopts:header-blake3-256-valid-ab"
@@ -6311,6 +6311,36 @@
       "canonical_key": null,
       "expected": "cutover:external-journal:selected=12",
       "relation": "mirrors:side-by-side-cutover-control-body"
+    },
+    {
+      "id": "asfr-blake3-256-registry-v1-valid",
+      "format_id": "system-family-registry-v1",
+      "family": "SystemFamilyRegistryV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "system-family-registry-v1/asfr-blake3-256-registry-v1-valid.bin",
+      "annotated_hex": "system-family-registry-v1/asfr-blake3-256-registry-v1-valid.hex",
+      "byte_length": 3060,
+      "sha256": "46bff1cbd780b55533dce05612143e6882098b305c3e88454b67d3945a532f83",
+      "blake3": "a05c1b19069fcad9e6c6b7e2b94256410baa86c80d8d628e70b99895740adaf6",
+      "canonical_key": "37596631fd3f66bcf51d20fd0362a9185c647e41607451f81d8098455e7166e3",
+      "expected": "system-family:registry:descriptors=61:families=46",
+      "relation": "same-canonical-registry-bytes:selected-width-fingerprint"
+    },
+    {
+      "id": "asfr-sha512-registry-v1-valid",
+      "format_id": "system-family-registry-v1",
+      "family": "SystemFamilyRegistryV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "system-family-registry-v1/asfr-sha512-registry-v1-valid.bin",
+      "annotated_hex": "system-family-registry-v1/asfr-sha512-registry-v1-valid.hex",
+      "byte_length": 3060,
+      "sha256": "46bff1cbd780b55533dce05612143e6882098b305c3e88454b67d3945a532f83",
+      "blake3": "a05c1b19069fcad9e6c6b7e2b94256410baa86c80d8d628e70b99895740adaf6",
+      "canonical_key": "3787e9a7081b77979638f6cb4e1fd6c5bafb00ed4f8f3629d2c4de2bc6a450bee3e3fed07653d358ca0dc79070d8c73e1f2c704d0d84e60a617e5547968efe29",
+      "expected": "system-family:registry:descriptors=61:families=46",
+      "relation": "same-canonical-registry-bytes:selected-width-fingerprint"
     },
     {
       "id": "avst-blake3-256-metadata-hash-corrected-valid",

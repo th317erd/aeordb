@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-system-control",
+  "coverage_stage": "p0b-2-system-family",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -3263,13 +3263,82 @@
         "apos-sha512-aggregate-groups-valid",
         "apos-sha512-maximum-decoded-length-valid"
       ]
+    },
+    {
+      "id": "system-family-registry-v1",
+      "family": "binary-owned-system-classification",
+      "magic_ascii": "ASFR",
+      "version": 1,
+      "identity": "one immutable binary-owned registry selected by exact schema version and operational fingerprint",
+      "header_length": 32,
+      "descriptor_fixed_length": 32,
+      "family_count": 46,
+      "unknown_protected_family_id": "0xfffe",
+      "ordinary_user_data_index_policy": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "registry_magic", "rule": "ASCII ASFR" },
+        { "offset": 4, "length": 2, "field": "registry_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "registry_header_length", "rule": "exactly 32" },
+        { "offset": 8, "length": 4, "field": "registry_total_length", "rule": "32 + descriptors_length + 4, checked" },
+        { "offset": 12, "length": 4, "field": "descriptor_count", "rule": "nonzero and exact" },
+        { "offset": 16, "length": 4, "field": "descriptors_length", "rule": "exact bounded descriptor bytes" },
+        { "offset": 20, "length": 4, "field": "registry_flags", "rule": "zero" },
+        { "offset": 24, "length": 8, "field": "reserved", "rule": "zero" },
+        { "offset": 32, "length": "D", "field": "descriptors", "rule": "canonical descriptor-key order" },
+        { "offset": "32 + D", "length": 4, "field": "registry_crc32", "rule": "CRC-32/ISO-HDLC over all prior bytes" }
+      ],
+      "descriptor_layout": [
+        { "offset": 0, "length": 2, "field": "family_id", "rule": "permanent nonzero ID excluding runtime-only 0xfffe" },
+        { "offset": 2, "length": 1, "field": "storage_domain", "rule": "permanent checked enum" },
+        { "offset": 3, "length": 1, "field": "match_kind", "rule": "permanent checked enum compatible with storage domain" },
+        { "offset": 4, "length": 18, "field": "policy", "rule": "complete checked policies including IndexPolicy at offset 21" },
+        { "offset": 22, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 24, "length": 4, "field": "descriptor_flags", "rule": "zero in v1" },
+        { "offset": 28, "length": 2, "field": "matcher_length", "rule": "exact checked structured matcher length" },
+        { "offset": 30, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 32, "length": "M", "field": "matcher", "rule": "canonical structured matcher bytes" }
+      ],
+      "index_policy_registry": {
+        "0": "not_applicable",
+        "1": "include_under_ordinary_scope",
+        "2": "exclude_from_all_indexes",
+        "3": "canonical_projection_only"
+      },
+      "canonical_order": "lexicographic (family_id u16, storage_domain u8, match_kind u8, matcher bytes); duplicate keys reject and all descriptors of one family share one policy",
+      "body_formula": "32 + sum(32 + matcher_length) + 4",
+      "operational_fingerprint": "H('aeordb.system-family-registry.v1\\0' || complete registry including CRC)",
+      "semantic_projection_fingerprint": "H('aeordb.system-family-semantic-projection.v1\\0' || ordered semantic descriptors including IndexPolicy)",
+      "hard_cap": 1048576,
+      "checksum": "CRC-32/ISO-HDLC over complete registry before final checksum",
+      "reserve_zero_ranges": [
+        { "start": 20, "length": 12 },
+        { "descriptor_offset": 22, "length": 6 },
+        { "descriptor_offset": 30, "length": 2 }
+      ],
+      "malformed_behavior": "reject unknown enums, incompatible matcher domains, invalid paths/UTF-8/NUL, bad lengths/counts/order, duplicates, cross-descriptor family policy drift, reserves, trailing bytes, oversize values, or CRC mismatch; unknown protected runtime inputs classify as 0xfffe rather than ordinary data",
+      "trailing_behavior": "no bytes after final CRC",
+      "bounded_decode": "reject total bytes above 1 MiB before descriptor allocation; validate checked total/count/matcher lengths while scanning once",
+      "producer_owner": "binary-owned Child 01 registry reference and generated production constants",
+      "consumer_owners": [
+        "DatabaseHeaderV4 admission fingerprint",
+        "GC and protected traversal",
+        "backup/export/import/migration/replication",
+        "authorization, indexing, SSE, verify, and repair"
+      ],
+      "capability": "SystemFamilyRegistryV1 selected by DatabaseHeaderV4 version and selected-width fingerprint",
+      "typed_hash_roles": [
+        { "field": "operational fingerprint", "role": "admission fingerprint" },
+        { "field": "semantic projection fingerprint", "role": "query-semantics fingerprint" }
+      ],
+      "fixture_ids_32": ["asfr-blake3-256-registry-v1-valid"],
+      "fixture_ids_64": ["asfr-sha512-registry-v1-valid"]
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 20,
-    "fixture_count": 434,
+    "fixture_family_count": 21,
+    "fixture_count": 436,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, and the external side-by-side cutover journal",
-    "remaining_p0b_2_scope": "SystemFamily, remaining maxima, shared registry closure, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, and the complete 46-family SystemFamilyRegistryV1",
+    "remaining_p0b_2_scope": "remaining maxima, shared registry closure, and complete malformed mutation corpus"
   }
 }

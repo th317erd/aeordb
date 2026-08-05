@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2d-4 sweep, receipts, and receipt-backed Void authority
-- **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2d-3 bounded mark/workspace formats `b3f402f94e3ee8db1101cd012f19172415d57cfc`
+- **Current landing unit:** P0b-2g shared registries, maxima, and malformed-corpus closure
+- **Entry commit:** `0a36c3c695486e6120d77386cf28f7606b11553f`
+- **Last green commit:** P0b-2e system controls and cutover journal `0a36c3c695486e6120d77386cf28f7606b11553f`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** make the sweep/Void contract gate fail, freeze corrected proposals/receipts, authoritative Void catalogs/extents, immutable claims/directories, and settlement receipts at both hash widths
+- **Next action:** freeze the remaining shared enum/capability/maxima registries, mechanically prove format coverage and malformed mutation closure, then enter P0c generated contract constants
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -232,3 +232,15 @@
 - **Failure proof:** tests reject common framing/CRC/reserve failures, wrong immutable sequence, zero database identity after repaired CRC, malformed kind-specific fields, unsorted collections, broken presence/length formulas, torn external slots, and equal-sequence disagreement. Identity paths are recomputed from complete repeated identity and always use BLAKE3 independent of the database hash profile.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 133 tests; strict standalone Clippy passed; fresh verification passed all 434 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs. A fresh shared clone with the exact staged binary patch passed the same gate in 5.26 seconds at 389,464 KiB maximum RSS with zero swaps.
 - **Boundary:** this remains independent reference/fixture work only. No production `ControlStore`, FileRecord writer, cutover journal writer, route, startup behavior, or database changed. The expanded SystemFamily registry and final malformed/maxima closure remain in P0b.
+
+## P0b-2f SystemFamily Registry
+
+- **Entry:** `0a36c3c`; `development` matched `origin/development`, with only the three acknowledged untracked user paths present.
+- **Territory:** the independent source matrix produces the canonical ASFR bytes, manifest, both-width fixture identities, and DatabaseHeaderV4 fingerprint slot. Future GC, backup, migration, replication, authorization, indexing, SSE, verify, and repair consumers remain production work for later children.
+- **Red proof:** after all 434 prior fixtures passed, the campaign gate failed with `missing canonical SystemFamily registry binary` before the ASFR reference codec or fixture existed.
+- **Frozen contract:** the corrected Round 15 matrix has exactly 46 persisted families and 61 structured descriptors, including descendant permissions, conflicts, complete ControlStore coverage, eleven control tags, four external workspaces, and IndexPolicy at descriptor offset 21. Runtime-only unknown protected family `0xFFFE` is never persisted.
+- **Classification proof:** exact paths outrank descendant files, descendant files outrank descendant subtrees, deepest reserved segments resolve nested protected state, longest absolute prefixes win, duplicate cross-family matchers reject at construction, and unmatched protected segments become `0xFFFE` rather than ordinary data.
+- **Fingerprint proof:** the 3,060-byte registry yields selected-width operational fingerprints `37596631fd3f66bcf51d20fd0362a9185c647e41607451f81d8098455e7166e3` and `3787e9a7081b77979638f6cb4e1fd6c5bafb00ed4f8f3629d2c4de2bc6a450bee3e3fed07653d358ca0dc79070d8c73e1f2c704d0d84e60a617e5547968efe29`. The semantic projection includes semantic role and IndexPolicy but deliberately excludes transfer-policy changes.
+- **Failure proof:** every registry byte is CRC- or structure-protected. Repaired-CRC tests reject unknown/incompatible enums, reserved bytes, malformed paths/matchers, truncation, trailing bytes, count amplification, noncanonical order, duplicates, and per-family policy drift.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 142 tests; strict standalone Clippy passed; independent verification passed all 436 fixtures across 21 families; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
+- **Boundary:** no production registry reader, writer, classifier, GC walker, transfer path, route, or database changed. P0b now has only shared registry/maxima/malformed-corpus closure before generated production constants.

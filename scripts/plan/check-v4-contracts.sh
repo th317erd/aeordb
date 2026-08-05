@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-system-control" and
+  .coverage_stage == "p0b-2-system-family" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-system-control" and
+  .stage == "p0b-2-system-family" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -556,6 +556,40 @@ for result_prefix in "${required_p0b2_system_control_results[@]}"; do
     any(.fixtures[]; (.format_id == "system-control-v1" or .format_id == "cutover-journal-v1") and .hash_width == 64 and (.expected | startswith($result_prefix)))
   ' "$fixture_manifest" >/dev/null \
     || fail "P0b-2 system control/cutover artifact lacks both hash-width fixtures: $result_prefix"
+done
+
+system_family_binary="$repo_root/aeordb-lib/spec/fixtures/system-family-registry-v1.bin"
+system_family_manifest="$repo_root/aeordb-lib/spec/fixtures/system-family-registry-v1.manifest.json"
+[[ -f "$system_family_binary" ]] || fail "missing canonical SystemFamily registry binary"
+[[ -f "$system_family_manifest" ]] || fail "missing canonical SystemFamily registry manifest"
+jq -e '
+  .schema_version == 1 and .registry_schema_version == 1 and
+  .registry_magic == "ASFR" and .descriptor_count > 46 and .source_row_count == 46 and
+  (.family_ids | length) == 46 and (.family_ids | unique | length) == 46 and
+  (.family_ids | index("0x0019")) != null and
+  (.family_ids | index("0x001a")) != null and
+  (.descriptor_keys | length) == .descriptor_count and
+  (.descriptor_keys | unique | length) == .descriptor_count and
+  (.fingerprints.blake3_256 | test("^[0-9a-f]{64}$")) and
+  (.fingerprints.sha512 | test("^[0-9a-f]{128}$")) and
+  (.operational_control_tags | length) == 11 and
+  (.external_workspace_kinds | length) == 4
+' "$system_family_manifest" >/dev/null \
+  || fail "P0b-2 SystemFamily manifest is incomplete"
+jq -e '
+  .formats[] | select(.id == "system-family-registry-v1") |
+  .magic_ascii == "ASFR" and .version == 1 and .header_length == 32 and
+  .descriptor_fixed_length == 32 and .family_count == 46 and
+  .index_policy_registry == {"0":"not_applicable","1":"include_under_ordinary_scope","2":"exclude_from_all_indexes","3":"canonical_projection_only"} and
+  .unknown_protected_family_id == "0xfffe" and
+  .ordinary_user_data_index_policy == 1
+' "$contract_registry" >/dev/null \
+  || fail "P0b-2 SystemFamily contract registry is incomplete"
+for hash_width in 32 64; do
+  jq -e --argjson hash_width "$hash_width" '
+    any(.fixtures[]; .format_id == "system-family-registry-v1" and .hash_width == $hash_width and (.expected | startswith("system-family:registry:")))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 SystemFamily registry lacks hash-width fixture: $hash_width"
 done
 
 required_p0b2_definition_formats=(

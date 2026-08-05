@@ -1,0 +1,1456 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "fixture_builder_revision": "p0b2-system-family-v1",
+  "registry_magic": "ASFR",
+  "registry_schema_version": 1,
+  "binary": "system-family-registry-v1.bin",
+  "byte_length": 3060,
+  "sha256": "46bff1cbd780b55533dce05612143e6882098b305c3e88454b67d3945a532f83",
+  "crc32_iso_hdlc": "79732af8",
+  "source_row_count": 46,
+  "descriptor_count": 61,
+  "family_ids": [
+    "0x0001",
+    "0x0002",
+    "0x0003",
+    "0x0004",
+    "0x0005",
+    "0x0006",
+    "0x0007",
+    "0x0008",
+    "0x0009",
+    "0x0010",
+    "0x0011",
+    "0x0012",
+    "0x0013",
+    "0x0014",
+    "0x0015",
+    "0x0016",
+    "0x0017",
+    "0x0018",
+    "0x0019",
+    "0x001a",
+    "0x0020",
+    "0x0021",
+    "0x0022",
+    "0x0030",
+    "0x0031",
+    "0x0032",
+    "0x0033",
+    "0x0040",
+    "0x0041",
+    "0x0042",
+    "0x0043",
+    "0x0044",
+    "0x0050",
+    "0x0051",
+    "0x0052",
+    "0x0053",
+    "0x0054",
+    "0x0055",
+    "0x0056",
+    "0x0057",
+    "0x0060",
+    "0x0061",
+    "0x0062",
+    "0x0063",
+    "0x0070",
+    "0x0071"
+  ],
+  "descriptor_keys": [
+    "0x0001:01:01:2f2e61656f7264622d636f6e6669672f696e64657865732e6a736f6e",
+    "0x0002:01:03:0e002e61656f7264622d636f6e6669670c00696e64657865732e6a736f6e",
+    "0x0003:01:01:2f2e61656f7264622d636f6e6669672f706172736572732e6a736f6e",
+    "0x0004:01:01:2f2e61656f7264622d636f6e6669672f6c6966656379636c652e6a736f6e",
+    "0x0005:01:01:2f2e61656f7264622d636f6e6669672f63726f6e2e6a736f6e",
+    "0x0006:01:01:2f2e61656f7264622d636f6e6669672f776562686f6f6b732e6a736f6e",
+    "0x0007:01:01:2f2e61656f7264622d636f6e6669672f636f72732e6a736f6e",
+    "0x0008:01:04:0e002e61656f7264622d636f6e666967",
+    "0x0009:01:01:2f2e61656f7264622d636f6e6669672f72756e74696d652e6a736f6e",
+    "0x0010:01:02:2f2e61656f7264622d73797374656d2f75736572732f",
+    "0x0011:01:02:2f2e61656f7264622d73797374656d2f67726f7570732f",
+    "0x0012:01:02:2f2e61656f7264622d73797374656d2f7065726d697373696f6e732f",
+    "0x0013:01:02:2f2e61656f7264622d73797374656d2f6170692d6b6579732f",
+    "0x0014:01:02:2f2e61656f7264622d73797374656d2f726566726573682d746f6b656e732f",
+    "0x0015:01:02:2f2e61656f7264622d73797374656d2f6d616769632d6c696e6b732f",
+    "0x0016:01:02:2f2e61656f7264622d73797374656d2f636f6e6669672f",
+    "0x0017:01:01:2f2e61656f7264622d73797374656d2f656d61696c2d636f6e6669672e6a736f6e",
+    "0x0018:01:02:2f2e61656f7264622d73797374656d2f6a6f696e2d61756469742f",
+    "0x0019:01:01:2f2e61656f7264622d7065726d697373696f6e73",
+    "0x0019:01:03:13002e61656f7264622d7065726d697373696f6e730000",
+    "0x001a:01:01:2f2e61656f7264622d636f6e666c69637473",
+    "0x001a:01:02:2f2e61656f7264622d636f6e666c696374732f",
+    "0x0020:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f6e6f64655f6964",
+    "0x0021:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f7065657273",
+    "0x0022:01:02:2f2e61656f7264622d73797374656d2f73796e632d70656572732f",
+    "0x0030:01:02:2f2e61656f7264622d73797374656d2f706c7567696e732f",
+    "0x0031:01:02:2f2e61656f7264622d73797374656d2f706c7567696e2d616c69617365732f",
+    "0x0032:01:02:2f2e61656f7264622d73797374656d2f706c7567696e2d6172746966616374732f626c616b65332f",
+    "0x0033:01:02:2f2e61656f7264622d73797374656d2f73656d616e7469632d6f626a656374732f",
+    "0x0040:02:06:0500",
+    "0x0041:02:06:0700",
+    "0x0042:03:07:61656f7264622e7461736b2e763100",
+    "0x0042:04:08:0200",
+    "0x0043:01:01:2f2e61656f7264622d73797374656d2f636f6e74726f6c732f7631",
+    "0x0043:01:02:2f2e61656f7264622d73797374656d2f636f6e74726f6c732f76312f",
+    "0x0044:04:08:0100",
+    "0x0050:02:06:0900",
+    "0x0051:02:06:0a00",
+    "0x0052:02:06:0400",
+    "0x0053:02:06:0600",
+    "0x0053:04:08:0300",
+    "0x0054:04:08:0400",
+    "0x0054:04:08:0500",
+    "0x0055:04:08:0600",
+    "0x0055:04:08:0700",
+    "0x0055:04:08:0800",
+    "0x0056:04:08:0900",
+    "0x0057:04:08:0a00",
+    "0x0057:04:08:0b00",
+    "0x0060:01:04:0f002e61656f7264622d696e6465786573",
+    "0x0061:01:04:0c002e61656f7264622d6c6f6773",
+    "0x0062:01:01:2f2e61656f7264622d73797374656d2f736e617073686f7473",
+    "0x0062:01:02:2f2e61656f7264622d73797374656d2f736e617073686f74732f",
+    "0x0063:01:01:2f2e61656f7264622d73797374656d2f6170696b657973",
+    "0x0063:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f73796e63",
+    "0x0063:01:02:2f2e61656f7264622d73797374656d2f6170696b6579732f",
+    "0x0063:01:02:2f2e61656f7264622d73797374656d2f636c75737465722f73796e632f",
+    "0x0070:05:09:0100",
+    "0x0071:05:09:0200",
+    "0x0071:05:09:0300",
+    "0x0071:05:09:0400"
+  ],
+  "fingerprints": {
+    "blake3_256": "37596631fd3f66bcf51d20fd0362a9185c647e41607451f81d8098455e7166e3",
+    "sha512": "3787e9a7081b77979638f6cb4e1fd6c5bafb00ed4f8f3629d2c4de2bc6a450bee3e3fed07653d358ca0dc79070d8c73e1f2c704d0d84e60a617e5547968efe29"
+  },
+  "semantic_projection_fingerprints": {
+    "blake3_256": "281a92359368fdec709b47f34a12f82fb0b56c73801ddc02aab03c35bf2db649",
+    "sha512": "2c3ca10a8b7cf52f420956570875c16b1da18736357b58fc97186164c1edaf541d2743679ddc4f5fc7c5511db9bea2473b262fcdc1cabe6d09d6c61dee0233d3"
+  },
+  "operational_control_tags": {
+    "1": "legacy_root_and_root_lifecycle_evidence",
+    "10": "wal_hot_tail",
+    "11": "buffer_publication_controls",
+    "2": "background_task_registry",
+    "3": "void_allocator_hot_tail",
+    "4": "database_header_slots",
+    "5": "head_base_target_authority",
+    "6": "kv_blocks_pages",
+    "7": "kv_resize_buffers",
+    "8": "locator_snapshot",
+    "9": "database_nvt_region"
+  },
+  "external_workspace_kinds": {
+    "1": "emergency_spill",
+    "2": "migration_workspace",
+    "3": "gc_mark_workspace",
+    "4": "index_workspace"
+  },
+  "source_rows": [
+    {
+      "family_id": "0x0001",
+      "label": "root_index_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0001:01:01:2f2e61656f7264622d636f6e6669672f696e64657865732e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 1,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0002",
+      "label": "descendant_index_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0002:01:03:0e002e61656f7264622d636f6e6669670c00696e64657865732e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 1,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 1,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 1,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 1,
+        "absence_policy": 1,
+        "unknown_child_policy": 2,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0003",
+      "label": "parser_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0003:01:01:2f2e61656f7264622d636f6e6669672f706172736572732e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 1,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0004",
+      "label": "lifecycle_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0004:01:01:2f2e61656f7264622d636f6e6669672f6c6966656379636c652e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 6,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0005",
+      "label": "cron_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0005:01:01:2f2e61656f7264622d636f6e6669672f63726f6e2e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0006",
+      "label": "webhook_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0006:01:01:2f2e61656f7264622d636f6e6669672f776562686f6f6b732e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0007",
+      "label": "cors_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0007:01:01:2f2e61656f7264622d636f6e6669672f636f72732e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0008",
+      "label": "descendant_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0008:01:04:0e002e61656f7264622d636f6e666967"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 1,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 1,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 1,
+        "absence_policy": 1,
+        "unknown_child_policy": 2,
+        "index_policy": 1
+      }
+    },
+    {
+      "family_id": "0x0009",
+      "label": "runtime_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0009:01:01:2f2e61656f7264622d636f6e6669672f72756e74696d652e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 2,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 2,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 4,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0010",
+      "label": "users",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0010:01:02:2f2e61656f7264622d73797374656d2f75736572732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0011",
+      "label": "groups",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0011:01:02:2f2e61656f7264622d73797374656d2f67726f7570732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0012",
+      "label": "central_permissions",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0012:01:02:2f2e61656f7264622d73797374656d2f7065726d697373696f6e732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0013",
+      "label": "api_keys",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0013:01:02:2f2e61656f7264622d73797374656d2f6170692d6b6579732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 5,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 2,
+        "event_policy": 4,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0014",
+      "label": "refresh_tokens",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0014:01:02:2f2e61656f7264622d73797374656d2f726566726573682d746f6b656e732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 5,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 2,
+        "event_policy": 4,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0015",
+      "label": "magic_links",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0015:01:02:2f2e61656f7264622d73797374656d2f6d616769632d6c696e6b732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 5,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 2,
+        "event_policy": 4,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0016",
+      "label": "system_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0016:01:02:2f2e61656f7264622d73797374656d2f636f6e6669672f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 5,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 6,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 3,
+        "event_policy": 4,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0017",
+      "label": "email_config",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0017:01:01:2f2e61656f7264622d73797374656d2f656d61696c2d636f6e6669672e6a736f6e"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 5,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 3,
+        "event_policy": 4,
+        "absence_policy": 2,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0018",
+      "label": "join_audit",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0018:01:02:2f2e61656f7264622d73797374656d2f6a6f696e2d61756469742f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0019",
+      "label": "namespace_permissions",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0019:01:01:2f2e61656f7264622d7065726d697373696f6e73",
+        "0x0019:01:03:13002e61656f7264622d7065726d697373696f6e730000"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 1,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 1,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 1,
+        "absence_policy": 1,
+        "unknown_child_policy": 0,
+        "index_policy": 1
+      }
+    },
+    {
+      "family_id": "0x001a",
+      "label": "conflicts",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x001a:01:01:2f2e61656f7264622d636f6e666c69637473",
+        "0x001a:01:02:2f2e61656f7264622d636f6e666c696374732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0020",
+      "label": "node_id",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0020:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f6e6f64655f6964"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 2,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0021",
+      "label": "cluster_peers",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0021:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f7065657273"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0022",
+      "label": "sync_peers",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0022:01:02:2f2e61656f7264622d73797374656d2f73796e632d70656572732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0030",
+      "label": "legacy_plugins",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0030:01:02:2f2e61656f7264622d73797374656d2f706c7567696e732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 5,
+        "migration_policy": 4,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 2
+      }
+    },
+    {
+      "family_id": "0x0031",
+      "label": "plugin_aliases",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0031:01:02:2f2e61656f7264622d73797374656d2f706c7567696e2d616c69617365732f"
+      ],
+      "policy": {
+        "semantic_role": 1,
+        "gc_policy": 1,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0032",
+      "label": "plugin_artifacts",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0032:01:02:2f2e61656f7264622d73797374656d2f706c7567696e2d6172746966616374732f626c616b65332f"
+      ],
+      "policy": {
+        "semantic_role": 2,
+        "gc_policy": 5,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0033",
+      "label": "semantic_objects",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0033:01:02:2f2e61656f7264622d73797374656d2f73656d616e7469632d6f626a656374732f"
+      ],
+      "policy": {
+        "semantic_role": 3,
+        "gc_policy": 5,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 3
+      }
+    },
+    {
+      "family_id": "0x0040",
+      "label": "snapshots",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0040:02:06:0500"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 6,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0041",
+      "label": "forks",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0041:02:06:0700"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 6,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 2,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0042",
+      "label": "background_tasks",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0042:03:07:61656f7264622e7461736b2e763100",
+        "0x0042:04:08:0200"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 6,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0043",
+      "label": "control_store",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0043:01:01:2f2e61656f7264622d73797374656d2f636f6e74726f6c732f7631",
+        "0x0043:01:02:2f2e61656f7264622d73797374656d2f636f6e74726f6c732f76312f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 6,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 2,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0044",
+      "label": "legacy_root_lifecycle",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0044:04:08:0100"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 17,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 1,
+        "data_export_policy": 3,
+        "peer_replication_policy": 1,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 1,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 1,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0050",
+      "label": "index_artifacts",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0050:02:06:0900"
+      ],
+      "policy": {
+        "semantic_role": 4,
+        "gc_policy": 8,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 2,
+        "data_export_policy": 3,
+        "peer_replication_policy": 2,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 2,
+        "verify_policy": 3,
+        "repair_policy": 3,
+        "migration_policy": 3,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 4,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0051",
+      "label": "gc_artifacts",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0051:02:06:0a00"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 20,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 6,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0052",
+      "label": "deletion_records",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0052:02:06:0400"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0053",
+      "label": "void_allocator",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0053:02:06:0600",
+        "0x0053:04:08:0300"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0054",
+      "label": "database_authority",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0054:04:08:0400",
+        "0x0054:04:08:0500"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0055",
+      "label": "kv_authority",
+      "matcher_count": 3,
+      "descriptor_keys": [
+        "0x0055:04:08:0600",
+        "0x0055:04:08:0700",
+        "0x0055:04:08:0800"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0056",
+      "label": "database_nvt",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0056:04:08:0900"
+      ],
+      "policy": {
+        "semantic_role": 4,
+        "gc_policy": 8,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 3,
+        "repair_policy": 3,
+        "migration_policy": 3,
+        "spill_policy": 1,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 4,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0057",
+      "label": "wal_publication",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0057:04:08:0a00",
+        "0x0057:04:08:0b00"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 2,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0060",
+      "label": "legacy_indexes",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0060:01:04:0f002e61656f7264622d696e6465786573"
+      ],
+      "policy": {
+        "semantic_role": 4,
+        "gc_policy": 8,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 3,
+        "repair_policy": 3,
+        "migration_policy": 3,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 4,
+        "unknown_child_policy": 2,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0061",
+      "label": "nested_logs",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0061:01:04:0c002e61656f7264622d6c6f6773"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 4,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 1,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 3,
+        "absence_policy": 2,
+        "unknown_child_policy": 2,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0062",
+      "label": "legacy_snapshots",
+      "matcher_count": 2,
+      "descriptor_keys": [
+        "0x0062:01:01:2f2e61656f7264622d73797374656d2f736e617073686f7473",
+        "0x0062:01:02:2f2e61656f7264622d73797374656d2f736e617073686f74732f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 32,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 4,
+        "repair_policy": 5,
+        "migration_policy": 4,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 7,
+        "unknown_child_policy": 2,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0063",
+      "label": "legacy_aliases",
+      "matcher_count": 4,
+      "descriptor_keys": [
+        "0x0063:01:01:2f2e61656f7264622d73797374656d2f6170696b657973",
+        "0x0063:01:01:2f2e61656f7264622d73797374656d2f636c75737465722f73796e63",
+        "0x0063:01:02:2f2e61656f7264622d73797374656d2f6170696b6579732f",
+        "0x0063:01:02:2f2e61656f7264622d73797374656d2f636c75737465722f73796e632f"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 32,
+        "physical_copy_policy": 1,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 3,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 4,
+        "repair_policy": 5,
+        "migration_policy": 4,
+        "spill_policy": 1,
+        "sensitivity": 0,
+        "event_policy": 0,
+        "absence_policy": 7,
+        "unknown_child_policy": 2,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0070",
+      "label": "emergency_spill",
+      "matcher_count": 1,
+      "descriptor_keys": [
+        "0x0070:05:09:0100"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 2,
+        "physical_copy_policy": 4,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 4,
+        "migration_policy": 2,
+        "spill_policy": 3,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    },
+    {
+      "family_id": "0x0071",
+      "label": "external_workspaces",
+      "matcher_count": 3,
+      "descriptor_keys": [
+        "0x0071:05:09:0200",
+        "0x0071:05:09:0300",
+        "0x0071:05:09:0400"
+      ],
+      "policy": {
+        "semantic_role": 0,
+        "gc_policy": 6,
+        "physical_copy_policy": 4,
+        "logical_backup_policy": 3,
+        "data_export_policy": 3,
+        "peer_replication_policy": 4,
+        "cluster_join_policy": 3,
+        "client_sync_policy": 3,
+        "import_policy": 4,
+        "verify_policy": 2,
+        "repair_policy": 2,
+        "migration_policy": 2,
+        "spill_policy": 4,
+        "sensitivity": 1,
+        "event_policy": 3,
+        "absence_policy": 5,
+        "unknown_child_policy": 0,
+        "index_policy": 0
+      }
+    }
+  ]
+}

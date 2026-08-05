@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-system-control-v1",
+  "tool_revision": "p0b2-system-family-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -2521,6 +2521,18 @@
       "fixture_id": "cutover-sha512-external-journal-valid",
       "expected": "cutover:external-journal:selected=12",
       "observed": "cutover:external-journal:selected=12",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asfr-blake3-256-registry-v1-valid",
+      "expected": "system-family:registry:descriptors=61:families=46",
+      "observed": "system-family:registry:descriptors=61:families=46",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asfr-sha512-registry-v1-valid",
+      "expected": "system-family:registry:descriptors=61:families=46",
+      "observed": "system-family:registry:descriptors=61:families=46",
       "result": "pass"
     },
     {

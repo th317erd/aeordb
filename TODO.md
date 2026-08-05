@@ -34,7 +34,7 @@
         - [x] Freeze common framing, protected paths, identity repetition, A/B selection, and immutable-slot rules.
         - [x] Freeze index, configuration, repair, task, mutation, and root-publication controls.
         - [x] Freeze migration, durability, spill, and side-by-side cutover controls.
-      - [ ] Freeze the corrected expanded `SystemFamilyRegistryV1` fixture and fingerprints.
+      - [x] Freeze the corrected expanded `SystemFamilyRegistryV1` fixture and fingerprints.
       - [ ] Freeze shared persistent enum/capability registries, remaining maxima, and complete malformed mutation coverage.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 

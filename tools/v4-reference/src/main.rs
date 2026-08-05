@@ -18,6 +18,7 @@ mod position;
 mod selector;
 mod semantics;
 mod system_control;
+mod system_family;
 mod value_store;
 
 use std::collections::BTreeMap;
@@ -42,11 +43,12 @@ use policy::PolicyFormat;
 use position::PositionFormat;
 use selector::SelectorFormat;
 use system_control::SystemControlFormat;
+use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-system-control-v1";
-const FIXTURE_STAGE: &str = "p0b-2-system-control";
+const TOOL_REVISION: &str = "p0b2-system-family-v1";
+const FIXTURE_STAGE: &str = "p0b-2-system-family";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -72,6 +74,7 @@ enum FixtureFormat {
   Position(PositionFormat),
   Selector(SelectorFormat),
   SystemControl(SystemControlFormat),
+  SystemFamily(SystemFamilyFormat),
   ValueStore(ValueStoreFormat),
 }
 
@@ -91,6 +94,7 @@ impl FixtureFormat {
       Self::Position(format) => format.id(),
       Self::Selector(format) => format.id(),
       Self::SystemControl(format) => format.id(),
+      Self::SystemFamily(format) => format.id(),
       Self::ValueStore(format) => format.id(),
     }
   }
@@ -110,6 +114,7 @@ impl FixtureFormat {
       Self::Position(format) => format.family(),
       Self::Selector(format) => format.family(),
       Self::SystemControl(format) => format.family(),
+      Self::SystemFamily(format) => format.family(),
       Self::ValueStore(format) => format.family(),
     }
   }
@@ -230,6 +235,7 @@ fn main() -> DynResult<()> {
 fn generate(fixture_root: &Path) -> DynResult<()> {
   let spec_root = fixture_root.parent().and_then(Path::parent).ok_or("fixture root must be below spec/fixtures")?;
   semantics::generate(spec_root)?;
+  system_family::generate(fixture_root.parent().ok_or("fixture root must have a fixtures parent")?)?;
   let cases = fixture_cases();
 
   let mut entries = Vec::with_capacity(cases.len());
@@ -292,6 +298,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let spec_root = fixture_root.parent().and_then(Path::parent).ok_or("fixture root must be below spec/fixtures")?;
   semantics::verify(spec_root)?;
+  system_family::verify(fixture_root.parent().ok_or("fixture root must have a fixtures parent")?)?;
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
   if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != FIXTURE_STAGE {
@@ -556,6 +563,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(system_family::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::SystemFamily(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases.extend(value_store::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::ValueStore(case.format),
@@ -623,7 +639,7 @@ fn build_slot(fields: &HeaderFields) -> [u8; SLOT_LENGTH] {
     set_capability(&mut slot[352..384], bit);
   }
   put_u16(&mut slot, 384, 1);
-  put_hash_slot(&mut slot, 392, fields.profile.width(), 0x80);
+  put_hash_bytes(&mut slot, 392, &system_family::fingerprint(fields.profile));
   put_u64(&mut slot, 456, 9);
   slot[464..480].copy_from_slice(&fields.physical_instance_id);
   if fields.nonzero_reserved {
@@ -731,6 +747,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Position(_) => position::observe(case.profile, bytes),
     FixtureFormat::Selector(_) => selector::observe(case.profile, bytes),
     FixtureFormat::SystemControl(format) => system_control::observe(case.profile, format, bytes),
+    FixtureFormat::SystemFamily(_) => system_family::observe(case.profile, bytes),
     FixtureFormat::ValueStore(_) => value_store::observe(case.profile, bytes),
   }
 }
@@ -752,6 +769,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Position(_)
     | FixtureFormat::Selector(_)
     | FixtureFormat::SystemControl(_)
+    | FixtureFormat::SystemFamily(_)
     | FixtureFormat::ValueStore(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
     }
@@ -844,6 +862,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
         output.push_str(&format!("# {line}\n"));
       }
     }
+    FixtureFormat::SystemFamily(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in system_family::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
     FixtureFormat::ValueStore(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in value_store::annotation_lines(case.profile, &case.bytes) {
@@ -922,6 +946,11 @@ fn put_hash_slot(slot: &mut [u8], offset: usize, width: usize, start: u8) {
   for index in 0..width {
     slot[offset + index] = start.wrapping_add(index as u8);
   }
+}
+
+fn put_hash_bytes(slot: &mut [u8], offset: usize, hash: &[u8]) {
+  assert!(hash.len() <= 64);
+  slot[offset..offset + hash.len()].copy_from_slice(hash);
 }
 
 fn set_capability(bytes: &mut [u8], bit: usize) {
