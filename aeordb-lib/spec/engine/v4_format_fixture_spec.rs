@@ -2820,12 +2820,28 @@ fn system_control_bounds_reserves_enums_presence_paths_and_order_fail_closed() {
   let path_encoding = spill_body + spill_fixed + 4;
   invalid_path[path_encoding..path_encoding + 2].copy_from_slice(&1u16.to_le_bytes());
   let path_start = spill_body + spill_fixed + 72;
-  invalid_path[path_start] = 0xff;
+  invalid_path[path_start] = 0;
   repair_trailing_crc(&mut invalid_path);
   assert_eq!(
     decode_system_control(&invalid_path, HashAlgorithm::Blake3_256).unwrap_err().class(),
     MalformedInputClass::InvalidUtf8PathGlobOrNativePath
   );
+}
+
+#[test]
+fn emergency_spill_catalog_accepts_raw_non_utf8_unix_paths() {
+  let root = fixture_root();
+  let mut bytes = fs::read(root.join("system-control-v1/control-blake3-256-emergency-spill-catalog-valid.bin")).unwrap();
+  let spill_body = 32;
+  let spill_fixed = 44 + 32;
+  let path_encoding = spill_body + spill_fixed + 4;
+  bytes[path_encoding..path_encoding + 2].copy_from_slice(&1u16.to_le_bytes());
+  let path_start = spill_body + spill_fixed + 72;
+  bytes[path_start] = 0xff;
+  repair_trailing_crc(&mut bytes);
+
+  let decoded = decode_system_control(&bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(decoded.kind, SystemControlKindV1::EmergencySpillCatalog);
 }
 
 #[test]

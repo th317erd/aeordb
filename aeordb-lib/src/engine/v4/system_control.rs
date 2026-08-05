@@ -1254,13 +1254,17 @@ fn validate_spill_catalog(body: &[u8], algorithm: HashAlgorithm) -> FormatResult
     let path = &body[row_fixed_end..row_end];
     match u16_at(row, 4)? {
       1 => {
-        let path = std::str::from_utf8(path).map_err(|_| path_error("spill_catalog_unix_path", "Unix spill path is not UTF-8"))?;
-        if path.is_empty() || path.as_bytes().contains(&0) {
+        if path.is_empty() || path.contains(&0) {
           return Err(path_error("spill_catalog_unix_path", "Unix spill path is empty or contains NUL"));
         }
       }
-      2 if !path.len().is_multiple_of(2) => {
-        return Err(path_error("spill_catalog_windows_path", "Windows spill path has odd UTF-16 byte length"));
+      2 => {
+        if !path.len().is_multiple_of(2) {
+          return Err(path_error("spill_catalog_windows_path", "Windows spill path has odd UTF-16 byte length"));
+        }
+        if path.chunks_exact(2).any(|word| word == [0, 0]) {
+          return Err(path_error("spill_catalog_windows_path", "Windows spill path contains NUL"));
+        }
       }
       _ => {}
     }
