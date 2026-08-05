@@ -55,7 +55,7 @@
     - [ ] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
       - [x] Decode the common IndexArtifactV1 envelope, active pointers, and immutable manifests.
       - [x] Decode ArtifactDirectoryNodeV1 and all ordered page roles.
-      - [ ] Decode sparse NvtTileV1 hints with corruption-safe fallback metadata.
+      - [x] Decode sparse NvtTileV1 hints with corruption-safe fallback metadata.
       - [ ] Decode mutation journals and task checkpoints with chain/component bounds.
       - [ ] Decode APOS v1 position tokens and context/order contracts.
     - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.

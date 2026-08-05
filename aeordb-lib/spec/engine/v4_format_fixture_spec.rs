@@ -12,6 +12,7 @@ use aeordb::engine::v4::index_artifact::{
 use aeordb::engine::v4::index_page::{
   OrderedIndexArtifactV1, OrderedIndexRoleV1, compare_order_keys, decode_ordered_index_artifact, validate_scope_catalog_pair,
 };
+use aeordb::engine::v4::index_nvt::{coordinate_cell, decode_nvt_tile, verified_page_hint, verified_predecessor_or_fallback};
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
@@ -702,6 +703,95 @@ fn directory_physical_hints_are_optional_and_never_correctness_authority() {
     decode_ordered_index_artifact(&bytes, HashAlgorithm::Blake3_256).unwrap_err().class(),
     MalformedInputClass::NonzeroReservedOrPadding
   );
+}
+
+#[test]
+fn every_sparse_nvt_tile_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| row.format_id == "index-artifact-v1" && row.expected.starts_with("index:nvt-tile:"))
+    .collect();
+  assert_eq!(rows.len(), 2);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let tile = decode_nvt_tile(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(tile.entries.iter().map(|entry| entry.unwrap()).count(), tile.entries.len(), "fixture {} entry iterator", row.id);
+    let first = tile.entries.entry_at(0).unwrap();
+    let last = tile.entries.entry_at(tile.entries.len() - 1).unwrap();
+    let observed = format!(
+      "index:nvt-tile:resolution={}:start={}:cells={}:entries={}:span={}/{}:basis={}:approx={}",
+      tile.resolution,
+      tile.tile_start_cell,
+      tile.tile_cell_count,
+      tile.entries.len(),
+      first.relative_cell,
+      last.relative_cell,
+      tile.basis_posting_generation,
+      tile.approximate_postings
+    );
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(tile.key), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn sparse_nvt_rejects_malformed_tiles_and_treats_stale_hints_as_misses() {
+  let root = fixture_root();
+  let baseline = fs::read(root.join("index-artifact-v1/aidx-blake3-256-nvt-tile-valid.bin")).unwrap();
+  let body = 32 + 32 + 8;
+
+  for offset in [body + 4, body + 16, body + 24, body + 28, body + 40, body + 48, body + 56] {
+    let mut changed = baseline.clone();
+    changed[offset] ^= 1;
+    repair_trailing_crc(&mut changed);
+    assert!(decode_nvt_tile(&changed, HashAlgorithm::Blake3_256).is_err(), "tile header offset {offset} accepted");
+  }
+
+  let first_entry = body + 64;
+  let mut wrong_cell = baseline.clone();
+  wrong_cell[first_entry + 40..first_entry + 44].copy_from_slice(&3u32.to_le_bytes());
+  repair_trailing_crc(&mut wrong_cell);
+  assert_eq!(
+    decode_nvt_tile(&wrong_cell, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let mut wrong_sample = baseline.clone();
+  wrong_sample[first_entry + 32..first_entry + 40].fill(0);
+  repair_trailing_crc(&mut wrong_sample);
+  assert_eq!(
+    decode_nvt_tile(&wrong_sample, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let tile = decode_nvt_tile(&baseline, HashAlgorithm::Blake3_256).unwrap();
+  assert!(tile.predecessor_entry(2).is_none());
+  let first = tile.predecessor_entry(100).unwrap();
+  assert_eq!(first.relative_cell, 3);
+  assert_eq!(coordinate_cell(first.sample_coordinate, tile.resolution), Some(tile.tile_start_cell + u64::from(first.relative_cell)));
+  assert_eq!(verified_page_hint(first.predecessor_page_id, 300, 400, &[301, 302, 350]), Some(301));
+  assert_eq!(verified_page_hint(first.predecessor_page_id, 302, 400, &[302, 350]), None);
+  assert_eq!(verified_page_hint(Some(349), 300, 400, &[301, 302, 350]), None);
+  assert_eq!(verified_predecessor_or_fallback(Some(&tile), 100, 300, 400, &[301, 302, 350], 399), 301);
+  assert_eq!(verified_predecessor_or_fallback(Some(&tile), 100, 302, 400, &[302, 350], 399), 399);
+  assert_eq!(verified_predecessor_or_fallback(Some(&tile), 100, 300, 400, &[350, 302], 399), 399);
+  assert_eq!(coordinate_cell(u64::MAX, tile.resolution), Some(tile.resolution - 1));
+  assert_eq!(coordinate_cell(0, 0), None);
+
+  let original_key = tile.key.clone();
+  let mut changed_hint = baseline.clone();
+  changed_hint[first_entry + 8] ^= 0x80;
+  repair_trailing_crc(&mut changed_hint);
+  let changed = decode_nvt_tile(&changed_hint, HashAlgorithm::Blake3_256).unwrap();
+  assert_ne!(changed.key, original_key);
+
+  let mut corrupt = baseline;
+  corrupt[64] ^= 1;
+  let corrupt = decode_nvt_tile(&corrupt, HashAlgorithm::Blake3_256).ok();
+  assert_eq!(verified_predecessor_or_fallback(corrupt.as_ref(), 100, 300, 400, &[301, 302, 350], 399), 399);
 }
 
 #[test]
