@@ -51,6 +51,33 @@ fn test_entry_header_serialize_deserialize_roundtrip() {
 }
 
 #[test]
+fn legacy_entry_header_preserves_payload_schema_versions_byte_for_byte() {
+  for entry_version in [0, 1] {
+    let header = EntryHeader {
+      entry_version,
+      entry_type: EntryType::FileRecord,
+      flags: 0,
+      hash_algo: HashAlgorithm::Blake3_256,
+      compression_algo: CompressionAlgorithm::None,
+      encryption_algo: 0,
+      key_length: 4,
+      value_length: 8,
+      timestamp: 1_700_000_000_000,
+      total_length: EntryHeader::compute_total_length(HashAlgorithm::Blake3_256, 4, 8).unwrap(),
+      hash: vec![0x5a; HashAlgorithm::Blake3_256.hash_length()],
+    };
+    let bytes = header.serialize();
+    let before = bytes.clone();
+    let mut cursor = Cursor::new(&bytes);
+    let decoded = EntryHeader::deserialize(&mut cursor).unwrap();
+
+    assert_eq!(decoded.entry_version, entry_version);
+    assert_eq!(cursor.position(), bytes.len() as u64);
+    assert_eq!(bytes, before);
+  }
+}
+
+#[test]
 fn test_entry_header_with_blake3() {
   let key = b"hello";
   let value = b"world";

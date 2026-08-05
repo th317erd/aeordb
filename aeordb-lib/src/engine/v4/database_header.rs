@@ -1,5 +1,9 @@
-use std::io::Read;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::io::{self, Read, Seek, SeekFrom};
 
+use crate::engine::errors::EngineError;
+use crate::engine::file_header::{FileHeader, HEADER_REGION_SIZE, decode_active_header_region};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -54,6 +58,98 @@ pub struct SelectedDatabaseHeaderV4 {
   pub header: DatabaseHeaderV4,
   pub selected_slot: usize,
   pub redundancy_degraded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReadOnlyDatabaseHeader {
+  V3 { header: FileHeader, selected_slot: usize },
+  V4(SelectedDatabaseHeaderV4),
+}
+
+impl ReadOnlyDatabaseHeader {
+  pub fn version(&self) -> DatabaseHeaderVersion {
+    match self {
+      Self::V3 { .. } => DatabaseHeaderVersion::V3,
+      Self::V4(_) => DatabaseHeaderVersion::V4,
+    }
+  }
+
+  pub fn data_offset(&self) -> u64 {
+    match self {
+      Self::V3 { .. } => HEADER_REGION_SIZE as u64,
+      Self::V4(_) => DATABASE_HEADER_V4_DATA_OFFSET,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub enum DatabaseHeaderReadError {
+  Io(io::Error),
+  Probe(FormatError),
+  V3(EngineError),
+  V4(FormatError),
+}
+
+impl Display for DatabaseHeaderReadError {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Io(error) => write!(formatter, "database header I/O failed: {error}"),
+      Self::Probe(error) => write!(formatter, "database header format probe failed: {error}"),
+      Self::V3(error) => write!(formatter, "v3 database header is invalid: {error}"),
+      Self::V4(error) => write!(formatter, "v4 database header is invalid: {error}"),
+    }
+  }
+}
+
+impl Error for DatabaseHeaderReadError {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Io(error) => Some(error),
+      Self::Probe(error) => Some(error),
+      Self::V3(error) => Some(error),
+      Self::V4(error) => Some(error),
+    }
+  }
+}
+
+/// Probe and decode a v3 or v4 database header without writing either format.
+///
+/// The reader is always sought to byte zero before the probe and again before
+/// the selected fixed-size region is read. The returned variant keeps legacy
+/// and v4 policy separate for later capability admission.
+pub fn read_database_header_read_only(reader: &mut (impl Read + Seek)) -> Result<ReadOnlyDatabaseHeader, DatabaseHeaderReadError> {
+  reader.seek(SeekFrom::Start(0)).map_err(DatabaseHeaderReadError::Io)?;
+  let mut prefix = [0u8; 5];
+  let prefix_length = read_up_to(reader, &mut prefix).map_err(DatabaseHeaderReadError::Io)?;
+  let version = probe_header_version(&prefix[..prefix_length]).map_err(DatabaseHeaderReadError::Probe)?;
+  reader.seek(SeekFrom::Start(0)).map_err(DatabaseHeaderReadError::Io)?;
+
+  match version {
+    DatabaseHeaderVersion::V3 => {
+      let mut region = [0u8; HEADER_REGION_SIZE];
+      let region_length = read_up_to(reader, &mut region).map_err(DatabaseHeaderReadError::Io)?;
+      let (header, selected_slot) = decode_active_header_region(&region[..region_length]).map_err(DatabaseHeaderReadError::V3)?;
+      Ok(ReadOnlyDatabaseHeader::V3 { header, selected_slot })
+    }
+    DatabaseHeaderVersion::V4 => {
+      let mut region = [0u8; DATABASE_HEADER_V4_REGION_LENGTH];
+      let region_length = read_up_to(reader, &mut region).map_err(DatabaseHeaderReadError::Io)?;
+      decode_header_region(&region[..region_length]).map(ReadOnlyDatabaseHeader::V4).map_err(DatabaseHeaderReadError::V4)
+    }
+  }
+}
+
+fn read_up_to(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+  let mut filled = 0;
+  while filled < buffer.len() {
+    match reader.read(&mut buffer[filled..]) {
+      Ok(0) => break,
+      Ok(read) => filled += read,
+      Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+      Err(error) => return Err(error),
+    }
+  }
+  Ok(filled)
 }
 
 pub fn probe_header_version(prefix: &[u8]) -> FormatResult<DatabaseHeaderVersion> {

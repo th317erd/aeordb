@@ -1,8 +1,11 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_region, probe_header_version, read_header_region};
+use aeordb::engine::v4::database_header::{
+  DatabaseHeaderReadError, DatabaseHeaderVersion, ReadOnlyDatabaseHeader, decode_header_region, probe_header_version,
+  read_database_header_read_only, read_header_region,
+};
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
@@ -44,6 +47,7 @@ use aeordb::engine::v4::system_control::{
 use aeordb::engine::v4::system_family::decode_system_family_registry;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::HashAlgorithm;
+use aeordb::engine::file_header::{FileHeader, HEADER_REGION_SIZE};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -3238,6 +3242,97 @@ fn reading_a_header_region_does_not_modify_the_file() {
 }
 
 #[test]
+fn dispatching_a_legacy_header_region_does_not_modify_the_file() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("legacy.aeordb");
+  let mut source = Vec::with_capacity(HEADER_REGION_SIZE + 16);
+  source.extend_from_slice(&deterministic_v3_header(7).serialize());
+  source.extend_from_slice(&deterministic_v3_header(8).serialize());
+  source.extend_from_slice(b"legacy-data-tail");
+  fs::write(&path, &source).unwrap();
+
+  let before = fs::read(&path).unwrap();
+  let mut file = fs::File::open(&path).unwrap();
+  let ReadOnlyDatabaseHeader::V3 { header, selected_slot } = read_database_header_read_only(&mut file).unwrap() else {
+    panic!("v3 file dispatched to v4")
+  };
+  assert_eq!(header.sequence, 8);
+  assert_eq!(selected_slot, 1);
+  drop(file);
+  assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn read_only_database_header_dispatch_preserves_v3_and_v4_bytes() {
+  let mut legacy_a = deterministic_v3_header(7);
+  let mut legacy_b = deterministic_v3_header(8);
+  let mut legacy_bytes = Vec::with_capacity(HEADER_REGION_SIZE + 4);
+  legacy_bytes.extend_from_slice(&legacy_a.serialize());
+  legacy_bytes.extend_from_slice(&legacy_b.serialize());
+  legacy_bytes.extend_from_slice(b"data");
+  let before = legacy_bytes.clone();
+  let mut legacy = Cursor::new(&mut legacy_bytes);
+  let selected = read_database_header_read_only(&mut legacy).unwrap();
+  let ReadOnlyDatabaseHeader::V3 { header, selected_slot } = selected else {
+    panic!("v3 bytes dispatched to v4")
+  };
+  assert_eq!(header.sequence, 8);
+  assert_eq!(selected_slot, 1);
+  assert_eq!(legacy.into_inner(), &before);
+
+  legacy_a.sequence = 9;
+  legacy_b.sequence = 9;
+  let mut equal = Vec::new();
+  equal.extend_from_slice(&legacy_a.serialize());
+  legacy_b.entry_count += 1;
+  equal.extend_from_slice(&legacy_b.serialize());
+  let mut equal = Cursor::new(equal);
+  let ReadOnlyDatabaseHeader::V3 { selected_slot, .. } = read_database_header_read_only(&mut equal).unwrap() else {
+    panic!("v3 bytes dispatched to v4")
+  };
+  assert_eq!(selected_slot, 0, "legacy equal-sequence A-slot behavior is compatibility-frozen");
+
+  let mut v4_bytes = fs::read(fixture_root().join("database-header-v4/header-blake3-256-valid-ab.bin")).unwrap();
+  let before = v4_bytes.clone();
+  let mut v4 = Cursor::new(&mut v4_bytes);
+  let selected = read_database_header_read_only(&mut v4).unwrap();
+  let ReadOnlyDatabaseHeader::V4(selected) = selected else {
+    panic!("v4 bytes dispatched to v3")
+  };
+  assert_eq!(selected.header.slot_sequence, 42);
+  assert_eq!(v4.into_inner(), &before);
+}
+
+#[test]
+fn read_only_database_header_dispatch_rejects_short_unknown_and_cross_format_regions() {
+  let Err(DatabaseHeaderReadError::Probe(error)) = read_database_header_read_only(&mut Cursor::new(vec![0u8; 4])) else {
+    panic!("short header did not fail during format probing")
+  };
+  assert_eq!(error.class(), MalformedInputClass::TruncationOrTrailingBytes);
+
+  let mut unknown = vec![0u8; HEADER_REGION_SIZE];
+  unknown[..4].copy_from_slice(b"AEOR");
+  unknown[4] = 99;
+  let Err(DatabaseHeaderReadError::Probe(error)) = read_database_header_read_only(&mut Cursor::new(unknown)) else {
+    panic!("unknown header version did not fail during format probing")
+  };
+  assert_eq!(error.class(), MalformedInputClass::UnknownMagicOrVersion);
+
+  let mut truncated_v4 = vec![0u8; HEADER_REGION_SIZE];
+  truncated_v4[..4].copy_from_slice(b"AEOR");
+  truncated_v4[4] = 4;
+  let Err(DatabaseHeaderReadError::V4(error)) = read_database_header_read_only(&mut Cursor::new(truncated_v4)) else {
+    panic!("truncated v4 region did not retain its format error")
+  };
+  assert_eq!(error.class(), MalformedInputClass::TruncationOrTrailingBytes);
+
+  let mut truncated_v3 = vec![0u8; HEADER_REGION_SIZE - 1];
+  truncated_v3[..4].copy_from_slice(b"AEOR");
+  truncated_v3[4] = 3;
+  assert!(matches!(read_database_header_read_only(&mut Cursor::new(truncated_v3)), Err(DatabaseHeaderReadError::V3(_))));
+}
+
+#[test]
 fn bounded_reader_rejects_lengths_before_allocation() {
   let mut bytes = Vec::new();
   bytes.extend_from_slice(&u32::MAX.to_le_bytes());
@@ -3363,6 +3458,27 @@ fn system_family_descriptor_offsets(bytes: &[u8]) -> Vec<usize> {
   }
   assert_eq!(offset, bytes.len() - 4);
   offsets
+}
+
+fn deterministic_v3_header(sequence: u64) -> FileHeader {
+  let mut header = FileHeader::new(HashAlgorithm::Blake3_256);
+  header.sequence = sequence;
+  header.created_at = 1_700_000_000_000;
+  header.updated_at = 1_700_000_000_100;
+  header.kv_block_offset = HEADER_REGION_SIZE as u64;
+  header.kv_block_length = 4_096;
+  header.kv_block_version = 1;
+  header.nvt_offset = 4_608;
+  header.nvt_length = 1_024;
+  header.nvt_version = 1;
+  header.head_hash = (0x10..0x30).collect();
+  header.entry_count = 7;
+  header.buffer_kvs_offset = 5_632;
+  header.buffer_nvt_offset = 5_632;
+  header.hot_tail_offset = 5_632;
+  header.base_hash = (0x20..0x40).collect();
+  header.target_hash = (0x30..0x50).collect();
+  header
 }
 
 fn repair_position_crc_and_encode(decoded: &mut [u8]) -> Vec<u8> {

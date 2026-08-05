@@ -361,16 +361,28 @@ impl FileHeader {
 /// Returns the active header along with the slot index (0 or 1) it came from
 /// so the caller can write the NEXT update to the OTHER slot.
 pub fn read_active_header(file: &mut File) -> EngineResult<(FileHeader, usize)> {
-  let mut slot_a = [0u8; FILE_HEADER_SIZE];
-  let mut slot_b = [0u8; FILE_HEADER_SIZE];
-
+  let mut region = [0u8; HEADER_REGION_SIZE];
   file.seek(SeekFrom::Start(0))?;
-  file.read_exact(&mut slot_a)?;
-  file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64))?;
-  file.read_exact(&mut slot_b)?;
+  file.read_exact(&mut region)?;
+  decode_active_header_region(&region)
+}
 
-  let parsed_a = FileHeader::deserialize(&slot_a);
-  let parsed_b = FileHeader::deserialize(&slot_b);
+/// Decode the complete legacy v3 A/B header region without performing I/O.
+///
+/// This preserves the v3 selector exactly, including its historical choice of
+/// slot A when two valid slots have the same sequence. V4 uses a distinct
+/// fail-ambiguous selector; changing v3 behavior belongs to migration policy,
+/// not format dispatch.
+pub fn decode_active_header_region(region: &[u8]) -> EngineResult<(FileHeader, usize)> {
+  if region.len() != HEADER_REGION_SIZE {
+    return Err(EngineError::InvalidInput(format!("v3 header region must be {HEADER_REGION_SIZE} bytes, got {}", region.len())));
+  }
+
+  let slot_a: &[u8; FILE_HEADER_SIZE] = region[..FILE_HEADER_SIZE].try_into().expect("checked v3 slot A width");
+  let slot_b: &[u8; FILE_HEADER_SIZE] = region[FILE_HEADER_SIZE..].try_into().expect("checked v3 slot B width");
+
+  let parsed_a = FileHeader::deserialize(slot_a);
+  let parsed_b = FileHeader::deserialize(slot_b);
 
   match (parsed_a, parsed_b) {
     (Ok(a), Ok(b)) => {

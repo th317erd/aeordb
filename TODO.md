@@ -42,7 +42,7 @@
     - [x] Freeze route-class, configuration-property, dynamic-record, hard-transition, and cleanup-result ownership registries.
     - [x] Compile and test the generated contract module without activating v4 writers.
   - [ ] P1a: implement bounded v4 readers before any v4 writer is enabled.
-    - [ ] Characterize v3 header/entity open and byte-preservation behavior.
+    - [x] Characterize v3 header/entity open and byte-preservation behavior.
     - [x] Add checked bounded-reader primitives with allocation-before-validation guards.
     - [x] Decode ScopeDefinitionV1 and prove canonical owner/glob semantics and bounds.
     - [x] Decode ParserResolutionPlanV1 and prove candidate/context/MIME semantics and bounds.
@@ -66,7 +66,7 @@
       - [x] Decode audit catalogs, detail/summary pages, run summaries, evidence, and pins.
       - [x] Decode all SystemControlV1 kinds and the external cutover journal.
       - [x] Decode and validate the expanded SystemFamilyRegistryV1.
-    - [ ] Dispatch v3 and v4 database headers without rewriting either format on open.
+    - [x] Dispatch v3 and v4 database headers without rewriting either format on open.
     - [ ] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
     - [ ] Add mutation/fuzz corpus watchdogs and allocation ceilings.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
