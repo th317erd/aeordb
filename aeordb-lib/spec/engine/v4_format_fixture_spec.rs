@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_region, probe_header_version, read_header_region};
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
+use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
@@ -219,6 +220,168 @@ fn every_value_store_definition_fixture_matches_the_independent_oracle() {
     );
     assert_eq!(hex::encode(definition.value_store_id), row.canonical_key.unwrap(), "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_converter_and_field_index_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| row.format_id == "converter-definition-v1" || row.format_id == "field-index-definition-v1")
+    .collect();
+  assert_eq!(rows.len(), 100);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    let (observed, key) = if row.format_id == "converter-definition-v1" {
+      let definition = decode_converter_definition(&bytes, algorithm).unwrap();
+      (
+        format!("converter:{}:semantics={}", definition.name, if definition.corrected { 1 } else { definition.converter_id }),
+        definition.converter_fingerprint,
+      )
+    } else {
+      let definition = decode_field_index_definition(&bytes, algorithm).unwrap();
+      (
+        format!(
+          "field-index:{}:converter={}:operations=0x{:x}",
+          definition.strategy_name, definition.converter.name, definition.operations
+        ),
+        definition.index_id,
+      )
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(key), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn converter_and_field_index_reject_bounds_identity_and_cross_record_corruption() {
+  let root = fixture_root();
+  let converter = fs::read(root.join("converter-definition-v1/acnv-blake3-256-typed_exact_blake3_v1-valid.bin")).unwrap();
+
+  let mut unknown_converter = converter.clone();
+  unknown_converter[32..34].copy_from_slice(&0x7fffu16.to_le_bytes());
+  assert_eq!(
+    decode_converter_definition(&unknown_converter, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut wrong_source_mask = converter.clone();
+  wrong_source_mask[36..40].copy_from_slice(&0u32.to_le_bytes());
+  assert_eq!(
+    decode_converter_definition(&wrong_source_mask, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unknown_source_type = converter.clone();
+  unknown_source_type[36..40].copy_from_slice(&(1u32 << 31).to_le_bytes());
+  assert_eq!(
+    decode_converter_definition(&unknown_source_type, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut nonzero_converter_reserve = converter.clone();
+  nonzero_converter_reserve[16] = 1;
+  assert_eq!(
+    decode_converter_definition(&nonzero_converter_reserve, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut zero_converter_limit = converter.clone();
+  zero_converter_limit[64..72].fill(0);
+  assert_eq!(
+    decode_converter_definition(&zero_converter_limit, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut wrong_bundle_fingerprint = converter.clone();
+  wrong_bundle_fingerprint[88] ^= 1;
+  assert_eq!(
+    decode_converter_definition(&wrong_bundle_fingerprint, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut corrected_parameter = converter;
+  corrected_parameter.push(0);
+  corrected_parameter[8..12].copy_from_slice(&121u32.to_le_bytes());
+  corrected_parameter[56..60].copy_from_slice(&1u32.to_le_bytes());
+  assert_eq!(
+    decode_converter_definition(&corrected_parameter, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  assert_eq!(
+    decode_converter_definition(&vec![0; 65_537], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let legacy_string = fs::read(root.join("converter-definition-v1/acnv-blake3-256-string_v0-valid.bin")).unwrap();
+  let mut zero_legacy_bound = legacy_string;
+  zero_legacy_bound[120..124].fill(0);
+  assert_eq!(
+    decode_converter_definition(&zero_legacy_bound, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let field = fs::read(root.join("field-index-definition-v1/afix-blake3-256-typed_exact_blake3_v1-valid.bin")).unwrap();
+  let fixed = 64;
+
+  let mut zero_value_store = field.clone();
+  zero_value_store[32..64].fill(0);
+  assert_eq!(
+    decode_field_index_definition(&zero_value_store, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut unknown_operation = field.clone();
+  unknown_operation[fixed + 10..fixed + 18].copy_from_slice(&(3u64 | (1 << 63)).to_le_bytes());
+  assert_eq!(
+    decode_field_index_definition(&unknown_operation, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut wrong_strategy_fingerprint = field.clone();
+  wrong_strategy_fingerprint[fixed + 72] ^= 1;
+  assert_eq!(
+    decode_field_index_definition(&wrong_strategy_fingerprint, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut invalid_strategy_utf8 = field.clone();
+  invalid_strategy_utf8[136 + 32] = 0xff;
+  assert_eq!(
+    decode_field_index_definition(&invalid_strategy_utf8, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let mut nonzero_field_reserve = field.clone();
+  nonzero_field_reserve[fixed + 42] = 1;
+  assert_eq!(
+    decode_field_index_definition(&nonzero_field_reserve, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut zero_field_limit = field.clone();
+  zero_field_limit[fixed + 44..fixed + 48].fill(0);
+  assert_eq!(
+    decode_field_index_definition(&zero_field_limit, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let converter_start = 136 + 32 + 5;
+  let mut malformed_nested_converter = field;
+  malformed_nested_converter[converter_start + 88] ^= 1;
+  assert_eq!(
+    decode_field_index_definition(&malformed_nested_converter, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  assert_eq!(
+    decode_field_index_definition(&vec![0; 256 * 1_024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
 }
 
 #[test]

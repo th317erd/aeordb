@@ -356,3 +356,13 @@
 - **Malformed proof:** focused tests reject duplicate names and malformed fingerprints. Generation also rejects wrong row count/order/kind/ID/correction family, empty names, identity collisions, all-zero fingerprints, and noncanonical bundle file order.
 - **Green proof:** the independent reference suite passed 145 tests, strict reference Clippy passed, generated-module tests passed 3 tests, and the production v4 fixture target passed all 22 existing tests. The full contract gate reverified all 436 fixtures and passed with 93 routes and 36 docs.
 - **Boundary:** this is a machine-contract amendment only. Converter/field-index decoding remains the next landing; no writer, index runtime, migration, route, or database byte changed.
+
+## P1a-10 Converter and FieldIndex Definition Readers
+
+- **Entry:** `f3dfa5f`; branch matched `origin/development`, and unrelated user paths remained excluded.
+- **Territory:** 100 independent converter/field-index fixtures are the current producers. Immutable manifests, index planners, migration, and later index runtime consume these definitions. The generated semantic-bundle table is the sole production fingerprint authority.
+- **Red proof:** the focused production fixture test failed to compile on the absent `engine::v4::field_definition` module before implementation.
+- **Implementation:** added allocation-bounded, borrowed readers for all 25 converter definitions and their exact corrected/migration source masks, semantic IDs, parameters, limits, and generated behavior fingerprints. Added both-width FieldIndex decoding with selected-width ValueStoreId/IndexId, nested converter closure, six exact strategy mappings, operation sets, semantic IDs, names, fingerprints, reserves, and resource caps.
+- **Malformed proof:** focused tests reject unknown converter/source bits, source-mask disagreement, reserves, zero/excess limits, wrong fingerprints, corrected parameters, zero legacy string bounds, zero ValueStoreId, unknown operations, invalid strategy UTF-8, nested converter corruption, and one-byte-over-cap definitions with frozen error classes.
+- **Green proof:** all 100 independent fixtures match oracle summaries and canonical keys; the complete production v4 target passed 24 tests, and locked library `cargo check` passed. Strict root Clippy remains red on the 72-error pre-existing baseline; it reported no diagnostic in `field_definition.rs`.
+- **Boundary:** both readers are passive and no definition writer, manifest reader, index planner/runtime, migration, route, or database behavior changed.

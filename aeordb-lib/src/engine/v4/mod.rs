@@ -9,6 +9,7 @@ pub mod config_value;
 pub mod database_header;
 pub mod dependency;
 pub mod entity;
+pub mod field_definition;
 pub mod hash;
 pub mod namespace;
 pub mod parser_plan;
