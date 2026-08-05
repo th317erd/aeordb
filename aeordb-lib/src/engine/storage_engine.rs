@@ -1860,6 +1860,13 @@ impl StorageEngine {
   /// Use this for user-facing reads (GET /files/) where integrity matters.
   /// Internal engine reads use `get_entry()` without verification for performance.
   pub fn get_entry_verified(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
+    self.get_entry_verified_bounded(hash, u32::MAX)
+  }
+
+  /// Retrieve and verify an entry only when its encoded value is within a
+  /// caller-owned allocation bound. The header check and value read share one
+  /// writer read lock, so a concurrent append cannot invalidate the bound.
+  pub fn get_entry_verified_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<EntryData>> {
     let _operation = self.operation_guard("get_entry_verified")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash) {
@@ -1869,6 +1876,13 @@ impl StorageEngine {
 
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_verified")?;
+    let bounded_header = writer.read_entry_header_at_shared(kv_entry.offset)?;
+    if bounded_header.value_length > maximum_value_length {
+      return Err(EngineError::InvalidInput(format!(
+        "entry value length {} exceeds caller bound {}",
+        bounded_header.value_length, maximum_value_length
+      )));
+    }
     let (header, key, value) = writer.read_entry_at_shared_verified(kv_entry.offset)?;
 
     Ok(Some((header, key, value)))

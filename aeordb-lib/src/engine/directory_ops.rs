@@ -188,11 +188,11 @@ fn ensure_file_record_content_hash(engine: &StorageEngine, record: &mut FileReco
   Ok(())
 }
 
-fn store_file_record_entry(engine: &StorageEngine, key: &[u8], value: &[u8], flags: u8) -> EngineResult<()> {
+fn store_file_record_entry(engine: &StorageEngine, key: &[u8], value: &[u8], flags: u8, entry_version: u8) -> EngineResult<()> {
   if flags != 0 {
-    engine.store_entry_with_flags_and_version(EntryType::FileRecord, key, value, flags, CURRENT_FILE_RECORD_VERSION)?;
+    engine.store_entry_with_flags_and_version(EntryType::FileRecord, key, value, flags, entry_version)?;
   } else {
-    engine.store_entry_with_version(EntryType::FileRecord, key, value, CURRENT_FILE_RECORD_VERSION)?;
+    engine.store_entry_with_version(EntryType::FileRecord, key, value, entry_version)?;
   }
   Ok(())
 }
@@ -208,18 +208,28 @@ pub(crate) fn materialize_file_record_entries(
   record: &mut FileRecord,
   flags: u8,
 ) -> EngineResult<FileRecordKeys> {
+  materialize_file_record_entries_at_version(engine, normalized_path, record, flags, CURRENT_FILE_RECORD_VERSION)
+}
+
+fn materialize_file_record_entries_at_version(
+  engine: &StorageEngine,
+  normalized_path: &str,
+  record: &mut FileRecord,
+  flags: u8,
+  entry_version: u8,
+) -> EngineResult<FileRecordKeys> {
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
   ensure_file_record_content_hash(engine, record)?;
 
-  let file_value = record.serialize(hash_length)?;
+  let file_value = record.serialize_for_version(hash_length, entry_version)?;
   let content_key = file_content_hash(&file_value, &algo)?;
   let identity_key = file_identity_hash(normalized_path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
   let file_key = file_path_hash(normalized_path, &algo)?;
 
-  store_file_record_entry(engine, &content_key, &file_value, flags)?;
-  store_file_record_entry(engine, &identity_key, &file_value, flags)?;
-  store_file_record_entry(engine, &file_key, &file_value, flags)?;
+  store_file_record_entry(engine, &content_key, &file_value, flags, entry_version)?;
+  store_file_record_entry(engine, &identity_key, &file_value, flags, entry_version)?;
+  store_file_record_entry(engine, &file_key, &file_value, flags, entry_version)?;
 
   Ok(FileRecordKeys { identity_key })
 }
@@ -246,6 +256,14 @@ pub(crate) struct FileRecordPublishResult {
 }
 
 pub(crate) fn publish_file_record_entries(engine: &StorageEngine, input: FileRecordPublishInput) -> EngineResult<FileRecordPublishResult> {
+  publish_file_record_entries_at_version(engine, input, CURRENT_FILE_RECORD_VERSION)
+}
+
+fn publish_file_record_entries_at_version(
+  engine: &StorageEngine,
+  input: FileRecordPublishInput,
+  entry_version: u8,
+) -> EngineResult<FileRecordPublishResult> {
   let normalized = normalize_path(&input.normalized_path);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
@@ -271,7 +289,7 @@ pub(crate) fn publish_file_record_entries(engine: &StorageEngine, input: FileRec
     file_record.created_at = created_at_override;
   }
 
-  let keys = materialize_file_record_entries(engine, &normalized, &mut file_record, input.flags)?;
+  let keys = materialize_file_record_entries_at_version(engine, &normalized, &mut file_record, input.flags, entry_version)?;
   let content_type = file_record.content_type.clone();
   let child_entry = ChildEntry {
     entry_type: EntryType::FileRecord.to_u8(),
@@ -503,6 +521,22 @@ impl<'a> DirectoryOps<'a> {
   /// from any `Read` source without buffering the whole file.
   pub fn store_file_buffered(&self, ctx: &RequestContext, path: &str, data: &[u8], content_type: Option<&str>) -> EngineResult<FileRecord> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
+  }
+
+  pub(crate) fn store_transition_control_v0(&self, path: &str, data: &[u8]) -> EngineResult<FileRecord> {
+    let normalized = normalize_path(path);
+    if !normalized.starts_with("/.aeordb-system/controls/v1/") {
+      return Err(EngineError::InvalidInput("transition control writer requires a canonical ControlStore path".to_string()));
+    }
+    self.store_file_internal_inner(
+      &RequestContext::system(),
+      &normalized,
+      data,
+      Some("application/octet-stream"),
+      CompressionAlgorithm::None,
+      0,
+      false,
+    )
   }
 
   /// Store multiple small files from fully-buffered byte vectors.
@@ -781,7 +815,7 @@ impl<'a> DirectoryOps<'a> {
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
     let timer_start = std::time::Instant::now();
-    let result = self.store_file_internal_inner(ctx, path, data, content_type, compression_algo);
+    let result = self.store_file_internal_inner(ctx, path, data, content_type, compression_algo, CURRENT_FILE_RECORD_VERSION, true);
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
     result
@@ -795,6 +829,8 @@ impl<'a> DirectoryOps<'a> {
     data: &[u8],
     content_type: Option<&str>,
     compression_algo: CompressionAlgorithm,
+    file_record_version: u8,
+    emit_event: bool,
   ) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
 
@@ -856,7 +892,7 @@ impl<'a> DirectoryOps<'a> {
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine);
 
     let total_size = data.len() as u64;
-    let published = publish_file_record_entries(
+    let published = publish_file_record_entries_at_version(
       self.engine,
       FileRecordPublishInput {
         normalized_path: normalized,
@@ -868,12 +904,15 @@ impl<'a> DirectoryOps<'a> {
         created_at_override: None,
         prefer_existing_created_at: true,
       },
+      file_record_version,
     )?;
 
     self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
     txn.commit_after(namespace)?;
     self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
+    if emit_event {
+      ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
+    }
 
     Ok(published.file_record)
   }

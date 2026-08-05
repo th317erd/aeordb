@@ -28,22 +28,42 @@ impl FileRecord {
     self.serialize_v1(hash_length)
   }
 
+  pub fn serialize_for_version(&self, hash_length: usize, version: u8) -> EngineResult<Vec<u8>> {
+    match version {
+      0 => self.serialize_v0(hash_length),
+      1 => self.serialize_v1(hash_length),
+      _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  pub fn serialize_v0(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
+    let path_bytes = self.path.as_bytes();
+    let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
+    self.validate_common_lengths(hash_length, path_bytes, content_type_bytes)?;
+
+    let capacity =
+      2 + path_bytes.len() + 2 + content_type_bytes.len() + 8 + 8 + 8 + 4 + self.metadata.len() + 4 + self.chunk_hashes.len() * hash_length;
+    let mut buffer = Vec::with_capacity(capacity);
+    buffer.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+    buffer.extend_from_slice(path_bytes);
+    buffer.extend_from_slice(&(content_type_bytes.len() as u16).to_le_bytes());
+    buffer.extend_from_slice(content_type_bytes);
+    buffer.extend_from_slice(&self.total_size.to_le_bytes());
+    buffer.extend_from_slice(&self.created_at.to_le_bytes());
+    buffer.extend_from_slice(&self.updated_at.to_le_bytes());
+    buffer.extend_from_slice(&(self.metadata.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&self.metadata);
+    buffer.extend_from_slice(&(self.chunk_hashes.len() as u32).to_le_bytes());
+    for hash in &self.chunk_hashes {
+      buffer.extend_from_slice(hash);
+    }
+    Ok(buffer)
+  }
+
   pub fn serialize_v1(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
     let path_bytes = self.path.as_bytes();
     let content_type_bytes = self.content_type.as_deref().unwrap_or("").as_bytes();
-
-    if path_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len())));
-    }
-    if content_type_bytes.len() > u16::MAX as usize {
-      return Err(EngineError::InvalidInput(format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len())));
-    }
-    if self.metadata.len() > u32::MAX as usize {
-      return Err(EngineError::InvalidInput(format!("Metadata too large: {} bytes exceeds u32 max", self.metadata.len())));
-    }
-    if self.chunk_hashes.len() > u32::MAX as usize {
-      return Err(EngineError::InvalidInput(format!("Too many chunk hashes: {} exceeds u32 max", self.chunk_hashes.len())));
-    }
+    self.validate_common_lengths(hash_length, path_bytes, content_type_bytes)?;
     if self.content_hash.len() != hash_length {
       return Err(EngineError::InvalidInput(format!(
         "Content hash length {} does not match expected hash length {}",
@@ -89,7 +109,32 @@ impl FileRecord {
     Ok(buffer)
   }
 
+  fn validate_common_lengths(&self, hash_length: usize, path_bytes: &[u8], content_type_bytes: &[u8]) -> EngineResult<()> {
+    if hash_length == 0 {
+      return Err(EngineError::InvalidInput("FileRecord hash length must be nonzero".to_string()));
+    }
+    if path_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(format!("Path too long: {} bytes exceeds u16 max (65535)", path_bytes.len())));
+    }
+    if content_type_bytes.len() > u16::MAX as usize {
+      return Err(EngineError::InvalidInput(format!("Content type too long: {} bytes exceeds u16 max (65535)", content_type_bytes.len())));
+    }
+    if self.metadata.len() > u32::MAX as usize {
+      return Err(EngineError::InvalidInput(format!("Metadata too large: {} bytes exceeds u32 max", self.metadata.len())));
+    }
+    if self.chunk_hashes.len() > u32::MAX as usize {
+      return Err(EngineError::InvalidInput(format!("Too many chunk hashes: {} exceeds u32 max", self.chunk_hashes.len())));
+    }
+    if self.chunk_hashes.iter().any(|hash| hash.len() != hash_length) {
+      return Err(EngineError::InvalidInput(format!("Chunk hash length does not match expected hash length {}", hash_length)));
+    }
+    Ok(())
+  }
+
   pub fn deserialize(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
+    if hash_length == 0 {
+      return Err(EngineError::InvalidInput("FileRecord hash length must be nonzero".to_string()));
+    }
     match version {
       0 => Self::deserialize_v0(data, hash_length),
       1 => Self::deserialize_v1(data, hash_length),
@@ -118,11 +163,7 @@ impl FileRecord {
     let metadata = read_bytes(data, &mut offset, metadata_length)?;
 
     let chunk_count = read_u32(data, &mut offset)? as usize;
-    let mut chunk_hashes = Vec::with_capacity(chunk_count);
-    for _ in 0..chunk_count {
-      let hash = read_bytes(data, &mut offset, hash_length)?;
-      chunk_hashes.push(hash);
-    }
+    let chunk_hashes = Self::read_chunk_hashes(data, &mut offset, hash_length, chunk_count)?;
 
     if offset != data.len() {
       return Err(EngineError::InvalidInput(format!("Invalid FileRecord v0 trailing bytes: {} bytes", data.len().saturating_sub(offset),)));
@@ -149,16 +190,29 @@ impl FileRecord {
     let metadata = read_bytes(data, &mut offset, metadata_length)?;
 
     let chunk_count = read_u32(data, &mut offset)? as usize;
-    let mut chunk_hashes = Vec::with_capacity(chunk_count);
-    for _ in 0..chunk_count {
-      let hash = read_bytes(data, &mut offset, hash_length)?;
-      chunk_hashes.push(hash);
-    }
+    let chunk_hashes = Self::read_chunk_hashes(data, &mut offset, hash_length, chunk_count)?;
 
     if offset != data.len() {
       return Err(EngineError::InvalidInput(format!("Invalid FileRecord v1 trailing bytes: {} bytes", data.len().saturating_sub(offset),)));
     }
 
     Ok(Self { path, content_type, total_size, created_at, updated_at, metadata, content_hash, chunk_hashes })
+  }
+
+  fn read_chunk_hashes(data: &[u8], offset: &mut usize, hash_length: usize, chunk_count: usize) -> EngineResult<Vec<Vec<u8>>> {
+    let encoded_length =
+      chunk_count.checked_mul(hash_length).ok_or_else(|| EngineError::InvalidInput("FileRecord chunk hash length overflow".to_string()))?;
+    let remaining = data.len().saturating_sub(*offset);
+    if encoded_length != remaining {
+      return Err(EngineError::InvalidInput(format!(
+        "FileRecord chunk count requires {} bytes, but {} bytes remain",
+        encoded_length, remaining
+      )));
+    }
+    let mut chunk_hashes = Vec::with_capacity(chunk_count);
+    for _ in 0..chunk_count {
+      chunk_hashes.push(read_bytes(data, offset, hash_length)?);
+    }
+    Ok(chunk_hashes)
   }
 }

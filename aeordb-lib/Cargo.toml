@@ -763,6 +763,10 @@ name = "v4_platform_probe_spec"
 path = "spec/engine/v4_platform_probe_spec.rs"
 
 [[test]]
+name = "v3_transition_control_store_spec"
+path = "spec/engine/v3_transition_control_store_spec.rs"
+
+[[test]]
 name = "v3_contract_facade_spec"
 path = "spec/engine/v3_contract_facade_spec.rs"
 

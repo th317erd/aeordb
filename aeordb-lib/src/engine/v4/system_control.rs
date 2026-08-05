@@ -135,6 +135,10 @@ impl SystemControlKindV1 {
       _ => ONE_MIB,
     }
   }
+
+  pub fn encoded_cap(self) -> usize {
+    HEADER_LENGTH + self.body_cap() + CRC_LENGTH
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
