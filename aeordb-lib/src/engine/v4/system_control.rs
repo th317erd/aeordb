@@ -185,6 +185,50 @@ pub struct SystemControlSelectionV1<'a> {
   pub redundancy_degraded: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurabilityLatchBodyV1 {
+  pub database_id: [u8; 16],
+  pub latch_generation: u64,
+  pub first_failure_at_ms: i64,
+  pub latest_failure_at_ms: i64,
+  pub severity: u16,
+  pub state: u16,
+  pub failed_operation: u16,
+  pub os_error_class: u16,
+  pub os_error_code: i32,
+  pub flags: u32,
+  pub last_selected_header_sequence: u64,
+  pub last_durable_write_sequence: u64,
+  pub last_durable_publication_sequence: u64,
+  pub emergency_spill_catalog_payload_hash: Vec<u8>,
+  pub evidence_digest: Vec<u8>,
+  pub diagnostic: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmergencySpillCatalogRowV1 {
+  pub source_location_class: u16,
+  pub replay_state: u16,
+  pub path_encoding: u16,
+  pub flags: u16,
+  pub created_at_ms: i64,
+  pub creation_sequence: u64,
+  pub file_length: u64,
+  pub complete_file_digest: Vec<u8>,
+  pub native_path: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmergencySpillCatalogBodyV1 {
+  pub database_id: [u8; 16],
+  pub catalog_generation: u64,
+  pub discovered_at_ms: i64,
+  pub state: u16,
+  pub flags: u16,
+  pub repair_receipt_hash: Vec<u8>,
+  pub rows: Vec<EmergencySpillCatalogRowV1>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CutoverJournalSelectionV1<'a> {
   pub selected_slot: SystemControlSlotV1,
@@ -238,6 +282,167 @@ pub fn decode_system_control(bytes: &[u8], algorithm: HashAlgorithm) -> FormatRe
     return Err(identity_error("system_control_immutable_sequence", "immutable controls require sequence one"));
   }
   Ok(SystemControlV1 { kind, sequence, database_id: &body[..16], identity, body })
+}
+
+pub fn decode_durability_latch_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<DurabilityLatchBodyV1> {
+  validate_durability_latch(body, algorithm)?;
+  let hash_width = algorithm.hash_length();
+  let fixed = 88 + 2 * hash_width;
+  Ok(DurabilityLatchBodyV1 {
+    database_id: body[..16].try_into().expect("validated durability latch database ID width"),
+    latch_generation: u64_at(body, 16)?,
+    first_failure_at_ms: i64_at(body, 24)?,
+    latest_failure_at_ms: i64_at(body, 32)?,
+    severity: u16_at(body, 40)?,
+    state: u16_at(body, 42)?,
+    failed_operation: u16_at(body, 44)?,
+    os_error_class: u16_at(body, 46)?,
+    os_error_code: i32_at(body, 48)?,
+    flags: u32_at(body, 52)?,
+    last_selected_header_sequence: u64_at(body, 56)?,
+    last_durable_write_sequence: u64_at(body, 64)?,
+    last_durable_publication_sequence: u64_at(body, 72)?,
+    emergency_spill_catalog_payload_hash: body[80..80 + hash_width].to_vec(),
+    evidence_digest: body[80 + hash_width..80 + 2 * hash_width].to_vec(),
+    diagnostic: body[fixed..].to_vec(),
+  })
+}
+
+pub fn decode_emergency_spill_catalog_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<EmergencySpillCatalogBodyV1> {
+  validate_spill_catalog(body, algorithm)?;
+  let hash_width = algorithm.hash_length();
+  let fixed = 44 + hash_width;
+  let row_count = usize::try_from(u32_at(body, 36)?).map_err(|_| overflow_error("spill row count"))?;
+  let mut rows = Vec::with_capacity(row_count);
+  let mut cursor = fixed;
+  for _ in 0..row_count {
+    let path_length = usize::try_from(u32_at(body, cursor + 64)?).map_err(|_| overflow_error("spill path length"))?;
+    let path_start = checked_add(cursor, 72, "spill row fixed body")?;
+    let path_end = checked_add(path_start, path_length, "spill row path")?;
+    rows.push(EmergencySpillCatalogRowV1 {
+      source_location_class: u16_at(body, cursor)?,
+      replay_state: u16_at(body, cursor + 2)?,
+      path_encoding: u16_at(body, cursor + 4)?,
+      flags: u16_at(body, cursor + 6)?,
+      created_at_ms: i64_at(body, cursor + 8)?,
+      creation_sequence: u64_at(body, cursor + 16)?,
+      file_length: u64_at(body, cursor + 24)?,
+      complete_file_digest: body[cursor + 32..cursor + 64].to_vec(),
+      native_path: body[path_start..path_end].to_vec(),
+    });
+    cursor = path_end;
+  }
+  Ok(EmergencySpillCatalogBodyV1 {
+    database_id: body[..16].try_into().expect("validated spill catalog database ID width"),
+    catalog_generation: u64_at(body, 16)?,
+    discovered_at_ms: i64_at(body, 24)?,
+    state: u16_at(body, 32)?,
+    flags: u16_at(body, 34)?,
+    repair_receipt_hash: body[44..fixed].to_vec(),
+    rows,
+  })
+}
+
+pub fn encode_durability_latch_control(sequence: u64, latch: &DurabilityLatchBodyV1, algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  let hash_width = algorithm.hash_length();
+  require_hash_width(&latch.emergency_spill_catalog_payload_hash, hash_width, "durability spill catalog payload hash")?;
+  require_hash_width(&latch.evidence_digest, hash_width, "durability evidence digest")?;
+  let diagnostic_length = u32::try_from(latch.diagnostic.len()).map_err(|_| overflow_error("durability diagnostic length"))?;
+  let capacity = checked_add(88 + 2 * hash_width, latch.diagnostic.len(), "durability latch body")?;
+  let mut body = Vec::with_capacity(capacity);
+  body.extend_from_slice(&latch.database_id);
+  body.extend_from_slice(&latch.latch_generation.to_le_bytes());
+  body.extend_from_slice(&latch.first_failure_at_ms.to_le_bytes());
+  body.extend_from_slice(&latch.latest_failure_at_ms.to_le_bytes());
+  body.extend_from_slice(&latch.severity.to_le_bytes());
+  body.extend_from_slice(&latch.state.to_le_bytes());
+  body.extend_from_slice(&latch.failed_operation.to_le_bytes());
+  body.extend_from_slice(&latch.os_error_class.to_le_bytes());
+  body.extend_from_slice(&latch.os_error_code.to_le_bytes());
+  body.extend_from_slice(&latch.flags.to_le_bytes());
+  body.extend_from_slice(&latch.last_selected_header_sequence.to_le_bytes());
+  body.extend_from_slice(&latch.last_durable_write_sequence.to_le_bytes());
+  body.extend_from_slice(&latch.last_durable_publication_sequence.to_le_bytes());
+  body.extend_from_slice(&latch.emergency_spill_catalog_payload_hash);
+  body.extend_from_slice(&latch.evidence_digest);
+  body.extend_from_slice(&diagnostic_length.to_le_bytes());
+  body.extend_from_slice(&0u32.to_le_bytes());
+  body.extend_from_slice(&latch.diagnostic);
+  encode_system_control(SystemControlKindV1::DurabilityLatch, sequence, &body, algorithm)
+}
+
+pub fn encode_emergency_spill_catalog_control(
+  sequence: u64,
+  catalog: &EmergencySpillCatalogBodyV1,
+  algorithm: HashAlgorithm,
+) -> FormatResult<Vec<u8>> {
+  let hash_width = algorithm.hash_length();
+  require_hash_width(&catalog.repair_receipt_hash, hash_width, "spill repair receipt hash")?;
+  let mut row_bytes = Vec::new();
+  for row in &catalog.rows {
+    require_hash_width(&row.complete_file_digest, 32, "spill complete-file BLAKE3 digest")?;
+    let path_length = u32::try_from(row.native_path.len()).map_err(|_| overflow_error("spill path length"))?;
+    row_bytes.extend_from_slice(&row.source_location_class.to_le_bytes());
+    row_bytes.extend_from_slice(&row.replay_state.to_le_bytes());
+    row_bytes.extend_from_slice(&row.path_encoding.to_le_bytes());
+    row_bytes.extend_from_slice(&row.flags.to_le_bytes());
+    row_bytes.extend_from_slice(&row.created_at_ms.to_le_bytes());
+    row_bytes.extend_from_slice(&row.creation_sequence.to_le_bytes());
+    row_bytes.extend_from_slice(&row.file_length.to_le_bytes());
+    row_bytes.extend_from_slice(&row.complete_file_digest);
+    row_bytes.extend_from_slice(&path_length.to_le_bytes());
+    row_bytes.extend_from_slice(&0u32.to_le_bytes());
+    row_bytes.extend_from_slice(&row.native_path);
+  }
+  let row_count = u32::try_from(catalog.rows.len()).map_err(|_| overflow_error("spill row count"))?;
+  let rows_length = u32::try_from(row_bytes.len()).map_err(|_| overflow_error("spill rows length"))?;
+  let capacity = checked_add(44 + hash_width, row_bytes.len(), "spill catalog body")?;
+  let mut body = Vec::with_capacity(capacity);
+  body.extend_from_slice(&catalog.database_id);
+  body.extend_from_slice(&catalog.catalog_generation.to_le_bytes());
+  body.extend_from_slice(&catalog.discovered_at_ms.to_le_bytes());
+  body.extend_from_slice(&catalog.state.to_le_bytes());
+  body.extend_from_slice(&catalog.flags.to_le_bytes());
+  body.extend_from_slice(&row_count.to_le_bytes());
+  body.extend_from_slice(&rows_length.to_le_bytes());
+  body.extend_from_slice(&catalog.repair_receipt_hash);
+  body.extend_from_slice(&row_bytes);
+  encode_system_control(SystemControlKindV1::EmergencySpillCatalog, sequence, &body, algorithm)
+}
+
+fn encode_system_control(kind: SystemControlKindV1, sequence: u64, body: &[u8], algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  if sequence == 0 {
+    return Err(identity_error("system_control_sequence", "control sequence must be nonzero"));
+  }
+  if body.len() > kind.body_cap() {
+    return Err(amplification_error("system_control_body_cap", body.len(), kind.body_cap()));
+  }
+  let total = checked_add(checked_add(HEADER_LENGTH, body.len(), "control body")?, CRC_LENGTH, "control CRC")?;
+  let total_u32 = u32::try_from(total).map_err(|_| overflow_error("control total length"))?;
+  let body_length = u32::try_from(body.len()).map_err(|_| overflow_error("control body length"))?;
+  let mut bytes = vec![0u8; total];
+  bytes[..4].copy_from_slice(kind.magic());
+  bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+  bytes[6..8].copy_from_slice(&(HEADER_LENGTH as u16).to_le_bytes());
+  bytes[8..12].copy_from_slice(&total_u32.to_le_bytes());
+  bytes[16..24].copy_from_slice(&sequence.to_le_bytes());
+  bytes[24..28].copy_from_slice(&body_length.to_le_bytes());
+  bytes[HEADER_LENGTH..HEADER_LENGTH + body.len()].copy_from_slice(body);
+  let crc_offset = bytes.len() - CRC_LENGTH;
+  let crc = crc32fast::hash(&bytes[..crc_offset]);
+  bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+  let decoded = decode_system_control(&bytes, algorithm)?;
+  if decoded.kind != kind || decoded.sequence != sequence {
+    return Err(identity_error("system_control_encode_roundtrip", "encoded control did not round-trip its kind and sequence"));
+  }
+  Ok(bytes)
+}
+
+fn require_hash_width(bytes: &[u8], expected: usize, context: &'static str) -> FormatResult<()> {
+  if bytes.len() != expected {
+    return Err(overflow_error(format!("{context} has width {}, expected {expected}", bytes.len())));
+  }
+  Ok(())
 }
 
 pub fn select_system_control_pair<'a>(algorithm: HashAlgorithm, a: &'a [u8], b: &'a [u8]) -> FormatResult<SystemControlSelectionV1<'a>> {

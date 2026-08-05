@@ -10,7 +10,10 @@ use aeordb::engine::native_durability::{
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
 use aeordb::engine::v4::reader::MalformedInputClass;
-use aeordb::engine::v4::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_system_control, system_control_path};
+use aeordb::engine::v4::system_control::{
+  SystemControlKindV1, SystemControlSlotV1, decode_durability_latch_body, decode_emergency_spill_catalog_body, decode_system_control,
+  encode_durability_latch_control, encode_emergency_spill_catalog_control, system_control_path,
+};
 
 fn fixture_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/system-control-v1")
@@ -301,4 +304,66 @@ fn control_store_selects_and_verifies_immutable_i_slots() {
     ControlStoreSlotsV1 { a: Some(&immutable), b: None, immutable: None },
   )
   .is_err());
+}
+
+#[test]
+fn production_durability_latch_encoder_matches_independent_fixtures() {
+  for (algorithm, fixture_name) in [
+    (HashAlgorithm::Blake3_256, "control-blake3-256-durability-latch-valid.bin"),
+    (HashAlgorithm::Sha512, "control-sha512-durability-latch-valid.bin"),
+  ] {
+    let expected = fixture(fixture_name);
+    let control = decode_system_control(&expected, algorithm).unwrap();
+    let latch = decode_durability_latch_body(control.body, algorithm).unwrap();
+
+    assert_eq!(latch.latch_generation, 2);
+    assert_eq!(latch.first_failure_at_ms, 1_700_000_015_000);
+    assert_eq!(latch.latest_failure_at_ms, 1_700_000_016_000);
+    assert_eq!(latch.os_error_code, 28);
+    assert_eq!(encode_durability_latch_control(control.sequence, &latch, algorithm).unwrap(), expected);
+  }
+}
+
+#[test]
+fn production_spill_catalog_encoder_matches_independent_fixtures() {
+  for (algorithm, fixture_name) in [
+    (HashAlgorithm::Blake3_256, "control-blake3-256-emergency-spill-catalog-valid.bin"),
+    (HashAlgorithm::Sha512, "control-sha512-emergency-spill-catalog-valid.bin"),
+  ] {
+    let expected = fixture(fixture_name);
+    let control = decode_system_control(&expected, algorithm).unwrap();
+    let catalog = decode_emergency_spill_catalog_body(control.body, algorithm).unwrap();
+
+    assert_eq!(catalog.catalog_generation, 1);
+    assert_eq!(catalog.rows.len(), 1);
+    assert_eq!(catalog.rows[0].file_length, 4_096);
+    assert_eq!(catalog.rows[0].native_path, b"/var/lib/aeordb/spill/hot-tail-0001.bin");
+    assert_eq!(encode_emergency_spill_catalog_control(control.sequence, &catalog, algorithm).unwrap(), expected);
+  }
+}
+
+#[test]
+fn production_control_encoders_reject_invalid_sequences_widths_and_state_closure() {
+  let latch_bytes = fixture("control-blake3-256-durability-latch-valid.bin");
+  let latch_control = decode_system_control(&latch_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let mut latch = decode_durability_latch_body(latch_control.body, HashAlgorithm::Blake3_256).unwrap();
+
+  assert_eq!(
+    encode_durability_latch_control(0, &latch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  latch.latest_failure_at_ms = latch.first_failure_at_ms - 1;
+  assert_eq!(
+    encode_durability_latch_control(1, &latch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let spill_bytes = fixture("control-blake3-256-emergency-spill-catalog-valid.bin");
+  let spill_control = decode_system_control(&spill_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let mut catalog = decode_emergency_spill_catalog_body(spill_control.body, HashAlgorithm::Blake3_256).unwrap();
+  catalog.rows[0].complete_file_digest.pop();
+  assert_eq!(
+    encode_emergency_spill_catalog_control(1, &catalog, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
 }

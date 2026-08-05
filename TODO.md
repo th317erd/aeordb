@@ -92,7 +92,7 @@
       - [x] Add the red `v3_contract_facade_spec` for commit classes, operation IDs, ordering, and hard-frontier waiter behavior.
       - [x] Implement the non-activating coordinator shell and platform-adapter contract.
       - [x] Run focused and adjacent regressions and record evidence; commit/push is the landing action.
-    - [ ] P2a-2: implement grouped hard-frontier commit and the complete platform failure matrix.
+    - [x] P2a-2: implement grouped hard-frontier commit and the complete platform failure matrix.
       - [x] Make every successful namespace mutation explicitly await fallible transaction completion; `Drop` may clean up failed paths but may never be the acknowledgement owner.
       - [x] Add red tests for compatible-group execution, one barrier per group, mixed-plan refusal, and all-waiter failure.
       - [x] Freeze typed OS error/retry dispositions and bounded retry behavior, including uncertain-completion no-replay.
@@ -105,6 +105,15 @@
       - [x] Halt the in-process hard frontier on grouped/setup/unwind failures, wake every pending waiter, reject later hard tickets, and retire terminal waiter records.
       - [x] Publish batch SSE events and acknowledged-write counters only after hard-authority completion.
     - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
+      - [x] Add production SystemControlV1 encoders for durability latches and spill catalogs that byte-match the independent fixtures.
+      - [ ] Add the v3-compatible ControlStore A/B FileRecord reader/writer with dependency-first hard publication.
+      - [ ] Upgrade external spill evidence with stable incident/database identity, complete digests, ordering, and no-follow validation.
+      - [ ] Preserve first/latest serious-failure evidence and reject every later write while keeping reads/status/repair available.
+      - [ ] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
+      - [ ] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.
+      - [ ] Drain durability waiters during shutdown and keep status available while shutdown or repair is blocked.
+      - [ ] Add checked install/deploy downgrade refusal while latch/spill/repair state is active.
+      - [ ] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
 
