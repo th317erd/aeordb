@@ -6,6 +6,9 @@ use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_r
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
+use aeordb::engine::v4::index_artifact::{
+  IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
+};
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
@@ -382,6 +385,135 @@ fn converter_and_field_index_reject_bounds_identity_and_cross_record_corruption(
     decode_field_index_definition(&vec![0; 256 * 1_024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
     MalformedInputClass::AllocationAmplification
   );
+}
+
+#[test]
+fn every_index_pointer_and_manifest_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| {
+      row.format_id == "index-artifact-v1" && (row.expected.starts_with("index:pointer:") || row.expected.starts_with("index:manifest:"))
+    })
+    .collect();
+  assert_eq!(rows.len(), 28);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let decoded = decode_index_control_or_manifest(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let (observed, key) = match decoded {
+      IndexControlOrManifestV1::Pointer(pointer) => (
+        format!("index:pointer:{}:slot-{}:sequence={}", pointer.kind.name(), if pointer.slot == 0 { 'a' } else { 'b' }, pointer.sequence),
+        pointer.key,
+      ),
+      IndexControlOrManifestV1::Manifest(manifest) => (
+        format!(
+          "index:manifest:{}:generation={}:roots={}",
+          manifest.kind.name(),
+          manifest.generation,
+          if manifest.populated { "populated" } else { "empty" }
+        ),
+        manifest.key,
+      ),
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(key), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn index_pointer_and_manifest_reject_integrity_selector_capability_and_closure_corruption() {
+  let root = fixture_root();
+  let pointer = fs::read(root.join("index-artifact-v1/aidx-blake3-256-field-index-pointer-a.bin")).unwrap();
+
+  let mut bad_crc = pointer.clone();
+  *bad_crc.last_mut().unwrap() ^= 1;
+  assert_eq!(
+    decode_index_control_or_manifest(&bad_crc, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::ChecksumOrIntegrityMismatch
+  );
+
+  let mut bad_slot = pointer.clone();
+  bad_slot[64] = 2;
+  repair_trailing_crc(&mut bad_slot);
+  assert_eq!(
+    decode_index_control_or_manifest(&bad_slot, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+  );
+
+  let mut zero_sequence = pointer;
+  zero_sequence[65..73].fill(0);
+  repair_trailing_crc(&mut zero_sequence);
+  assert_eq!(
+    decode_index_control_or_manifest(&zero_sequence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let manifest = fs::read(root.join("index-artifact-v1/aidx-blake3-256-field-index-manifest-populated.bin")).unwrap();
+  let body_start = 72;
+
+  let mut unknown_capability = manifest.clone();
+  unknown_capability[body_start + 7] = 1;
+  repair_trailing_crc(&mut unknown_capability);
+  assert_eq!(
+    decode_index_control_or_manifest(&unknown_capability, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownRequiredCapability
+  );
+
+  let mut generation_mismatch = manifest.clone();
+  generation_mismatch[64..72].copy_from_slice(&4_099u64.to_le_bytes());
+  repair_trailing_crc(&mut generation_mismatch);
+  assert_eq!(
+    decode_index_control_or_manifest(&generation_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut owner_mismatch = manifest.clone();
+  owner_mismatch[32] ^= 1;
+  repair_trailing_crc(&mut owner_mismatch);
+  assert_eq!(
+    decode_index_control_or_manifest(&owner_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let presence_offset = body_start + 70 + 32;
+  let mut root_presence_mismatch = manifest;
+  root_presence_mismatch[presence_offset] = 0;
+  repair_trailing_crc(&mut root_presence_mismatch);
+  assert_eq!(
+    decode_index_control_or_manifest(&root_presence_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  assert_eq!(
+    decode_index_control_or_manifest(&vec![0; 1_048_577], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
+fn index_pointer_pair_selection_is_deterministic_and_fails_ambiguous() {
+  let root = fixture_root();
+  let a_bytes = fs::read(root.join("index-artifact-v1/aidx-blake3-256-field-index-pointer-a.bin")).unwrap();
+  let b_bytes = fs::read(root.join("index-artifact-v1/aidx-blake3-256-field-index-pointer-b-max-sequence.bin")).unwrap();
+  let a = decode_active_pointer(&a_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let b = decode_active_pointer(&b_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(select_active_pointer(&a, &b).unwrap().slot, 1);
+
+  let mut equal_bytes = b_bytes.clone();
+  equal_bytes[65..73].copy_from_slice(&1u64.to_le_bytes());
+  equal_bytes[73..105].copy_from_slice(a.target_manifest_hash);
+  repair_trailing_crc(&mut equal_bytes);
+  let equal = decode_active_pointer(&equal_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(select_active_pointer(&a, &equal).unwrap().slot, 0);
+
+  let mut ambiguous_bytes = equal_bytes;
+  ambiguous_bytes[73] ^= 1;
+  repair_trailing_crc(&mut ambiguous_bytes);
+  let ambiguous = decode_active_pointer(&ambiguous_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(select_active_pointer(&a, &ambiguous).unwrap_err().class(), MalformedInputClass::AmbiguousEqualSequenceSelector);
+  assert_eq!(select_active_pointer(&a, &a).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
 }
 
 #[test]
