@@ -10,6 +10,7 @@ use aeordb::engine::v4::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_active_control, decode_gc_artifact_envelope, decode_physical_incarnation,
   select_gc_active_control,
 };
+use aeordb::engine::v4::gc_state::{GcStateArtifactV1, decode_gc_state_artifact, validate_gc_directory_page};
 use aeordb::engine::v4::index_artifact::{
   IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
 };
@@ -1431,6 +1432,146 @@ fn physical_incarnation_reader_closes_v0_v1_and_range_invariants() {
 }
 
 #[test]
+fn every_gc_lifecycle_and_inventory_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| row.format_id == "gc-artifact-v1" && !row.expected.starts_with("gc:control:"))
+    .filter(|row| {
+      row.expected.starts_with("gc:page:candidate:")
+        || row.expected.starts_with("gc:page:root-expiry:")
+        || row.expected.starts_with("gc:page:root-candidate:")
+        || row.expected.starts_with("gc:page:physical-inventory:")
+        || row.expected.starts_with("gc:directory:candidates:")
+        || row.expected.starts_with("gc:directory:root-expiry:")
+        || row.expected.starts_with("gc:directory:root-candidates:")
+        || row.expected.starts_with("gc:directory:physical-inventory:")
+        || row.expected.starts_with("gc:delta:candidate:")
+        || row.expected.starts_with("gc:manifest:root-expiry:")
+        || row.expected.starts_with("gc:manifest:root-lifecycle:")
+        || row.expected.starts_with("gc:manifest:physical-inventory:")
+        || row.expected.starts_with("gc:manifest:quarantine:")
+        || row.expected.starts_with("gc:commit:root-retirement:")
+        || row.expected.starts_with("gc:proof:root-object-reclaim:")
+        || row.expected.starts_with("gc:journal:retirement:")
+    })
+    .collect();
+  assert_eq!(rows.len(), 40);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let artifact = decode_gc_state_artifact(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(artifact.summary(), row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(artifact.key()), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn gc_lifecycle_pages_manifests_and_retirement_reject_semantic_corruption() {
+  let root = fixture_root();
+  let candidate = fs::read(root.join("gc-artifact-v1/agca-blake3-256-candidate-page-valid.bin")).unwrap();
+  let candidate_body = 32 + test_u16(&candidate, 16) as usize;
+  let mut bad_page = candidate.clone();
+  bad_page[candidate_body + 40] = 1;
+  repair_trailing_crc(&mut bad_page);
+  assert_eq!(
+    decode_gc_state_artifact(&bad_page, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let directory = fs::read(root.join("gc-artifact-v1/agca-blake3-256-candidates-directory-valid.bin")).unwrap();
+  let decoded_page = decode_gc_state_artifact(&candidate, HashAlgorithm::Blake3_256).unwrap();
+  let decoded_directory = decode_gc_state_artifact(&directory, HashAlgorithm::Blake3_256).unwrap();
+  let (GcStateArtifactV1::Page(page), GcStateArtifactV1::Directory(directory)) = (&decoded_page, &decoded_directory) else {
+    panic!("expected candidate page and directory");
+  };
+  validate_gc_directory_page(directory, page).unwrap();
+
+  let mut generic_database = candidate.clone();
+  generic_database[32] ^= 0x40;
+  repair_trailing_crc(&mut generic_database);
+  let generic_database = decode_gc_state_artifact(&generic_database, HashAlgorithm::Blake3_256).unwrap();
+  let GcStateArtifactV1::Page(generic_page) = generic_database else {
+    panic!("expected generic candidate page");
+  };
+  assert_ne!(generic_page.database_id, page.database_id);
+
+  let mut stale_directory_bytes = fs::read(root.join("gc-artifact-v1/agca-blake3-256-candidates-directory-valid.bin")).unwrap();
+  let body_start = 32 + test_u16(&stale_directory_bytes, 16) as usize;
+  let lower_length = test_u32(&stale_directory_bytes, body_start + 16) as usize;
+  let upper_length = test_u32(&stale_directory_bytes, body_start + 20) as usize;
+  let child_hash = body_start + 80 + lower_length + upper_length + 16;
+  stale_directory_bytes[child_hash] ^= 1;
+  repair_trailing_crc(&mut stale_directory_bytes);
+  let stale_directory = decode_gc_state_artifact(&stale_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let GcStateArtifactV1::Directory(stale_directory) = stale_directory else {
+    panic!("expected stale directory");
+  };
+  assert_eq!(validate_gc_directory_page(&stale_directory, page).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let delta = fs::read(root.join("gc-artifact-v1/agca-blake3-256-candidate-delta-valid.bin")).unwrap();
+  let delta_body = 32 + test_u16(&delta, 16) as usize;
+  let mut invalid_operation = delta;
+  invalid_operation[delta_body + 16 + 32] = 3;
+  repair_trailing_crc(&mut invalid_operation);
+  assert_eq!(
+    decode_gc_state_artifact(&invalid_operation, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let lifecycle = fs::read(root.join("gc-artifact-v1/agca-blake3-256-root-lifecycle-manifest-populated.bin")).unwrap();
+  let lifecycle_body = 32 + test_u16(&lifecycle, 16) as usize;
+  let mut count_mismatch = lifecycle;
+  count_mismatch[lifecycle_body + 76 + 3 * 32..lifecycle_body + 84 + 3 * 32].copy_from_slice(&2u64.to_le_bytes());
+  repair_trailing_crc(&mut count_mismatch);
+  assert_eq!(
+    decode_gc_state_artifact(&count_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let inventory = fs::read(root.join("gc-artifact-v1/agca-blake3-256-physical-inventory-manifest-empty.bin")).unwrap();
+  let inventory_body = 32 + test_u16(&inventory, 16) as usize;
+  let mut unknown_capability = inventory;
+  unknown_capability[inventory_body + 4] ^= 1;
+  repair_trailing_crc(&mut unknown_capability);
+  assert_eq!(
+    decode_gc_state_artifact(&unknown_capability, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let quarantine = fs::read(root.join("gc-artifact-v1/agca-blake3-256-quarantine-manifest-empty.bin")).unwrap();
+  let quarantine_body = 32 + test_u16(&quarantine, 16) as usize;
+  let mut missing_lifecycle = quarantine;
+  missing_lifecycle[quarantine_body + 52 + 5 * 32..quarantine_body + 52 + 6 * 32].fill(0);
+  repair_trailing_crc(&mut missing_lifecycle);
+  assert_eq!(
+    decode_gc_state_artifact(&missing_lifecycle, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let retirement = fs::read(root.join("gc-artifact-v1/agca-blake3-256-root-retirement-commit-valid.bin")).unwrap();
+  let retirement_body = 32 + test_u16(&retirement, 16) as usize;
+  let mut bad_retirement_reserve = retirement;
+  bad_retirement_reserve[retirement_body + 66 + 32] = 1;
+  repair_trailing_crc(&mut bad_retirement_reserve);
+  assert_eq!(
+    decode_gc_state_artifact(&bad_retirement_reserve, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let proof = fs::read(root.join("gc-artifact-v1/agca-blake3-256-root-object-reclaim-proof-valid.bin")).unwrap();
+  let proof_body = 32 + test_u16(&proof, 16) as usize;
+  let mut zero_incarnations = proof;
+  zero_incarnations[proof_body + 24 + 4 * 32..proof_body + 32 + 4 * 32].fill(0);
+  repair_trailing_crc(&mut zero_incarnations);
+  assert_eq!(
+    decode_gc_state_artifact(&zero_incarnations, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
 fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
   let root = fixture_root();
   let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
@@ -1797,6 +1938,10 @@ fn hash_algorithm(name: &str) -> HashAlgorithm {
 
 fn test_u32(bytes: &[u8], offset: usize) -> u32 {
   u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn test_u16(bytes: &[u8], offset: usize) -> u16 {
+  u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
 }
 
 fn repair_entity_header_crc(entity: &mut [u8], hash_width: usize) {
