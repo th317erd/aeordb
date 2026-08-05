@@ -1,9 +1,12 @@
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use aeordb::engine::append_writer::AppendWriter;
+use aeordb::engine::durability_coordinator::{DurabilityCoordinator, DurabilityOperation};
 use aeordb::engine::entry_header::CURRENT_ENTRY_VERSION;
 use aeordb::engine::entry_type::EntryType;
-use aeordb::engine::file_header::{FILE_HEADER_SIZE, HEADER_REGION_SIZE};
+use aeordb::engine::file_header::{
+  FILE_HEADER_SIZE, FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated, write_initial_header,
+};
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 
 fn create_temp_path() -> tempfile::TempDir {
@@ -216,6 +219,59 @@ fn test_file_header_update() {
   assert_eq!(reopened.file_header().entry_count, 999);
   assert_eq!(reopened.file_header().kv_block_offset, 4096);
   assert!(reopened.file_header().resize_in_progress);
+}
+
+#[test]
+fn coordinated_header_publication_preserves_v3_bytes_and_records_readback() {
+  let temp_directory = create_temp_path();
+  let file_path = temp_directory.path().join("coordinated-header.aeor");
+  let mut writer = AppendWriter::create(&file_path).unwrap();
+  let old_sequence = writer.file_header().sequence;
+  let mut updated = writer.file_header().clone();
+  updated.entry_count = 77;
+
+  writer.update_header(&updated).unwrap();
+  let snapshot = writer.durability_snapshot().unwrap();
+  assert_eq!(snapshot.hard_frontier, 1);
+  assert_eq!(snapshot.failed, 0);
+  assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
+  assert!(snapshot.ledger.last().unwrap().succeeded);
+
+  drop(writer);
+  let mut file = std::fs::OpenOptions::new().read(true).open(&file_path).unwrap();
+  let (active, slot) = read_active_header(&mut file).unwrap();
+  assert_eq!(slot, 1);
+  assert_eq!(active.sequence, old_sequence + 1);
+  assert_eq!(active.entry_count, 77);
+  let mut bytes = vec![0u8; FILE_HEADER_SIZE];
+  file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64)).unwrap();
+  file.read_exact(&mut bytes).unwrap();
+  assert_eq!(bytes, active.serialize());
+}
+
+#[test]
+fn coordinated_header_publication_refuses_write_failure_without_touching_inactive_slot() {
+  let temp_directory = create_temp_path();
+  let file_path = temp_directory.path().join("read-only-header.aeor");
+  let mut initial = FileHeader::new(HashAlgorithm::Blake3_256);
+  {
+    let mut file = std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&file_path).unwrap();
+    write_initial_header(&mut file, &mut initial).unwrap();
+  }
+
+  let coordinator = DurabilityCoordinator::new();
+  let mut read_only = std::fs::OpenOptions::new().read(true).open(&file_path).unwrap();
+  let mut replacement = initial.clone();
+  replacement.entry_count = 99;
+  assert!(write_header_to_inactive_slot_coordinated(&mut read_only, &mut replacement, 0, &coordinator).is_err());
+
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.hard_frontier, 0);
+  assert_eq!(snapshot.failed, 1);
+  assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityWrite);
+  assert!(!snapshot.ledger.last().unwrap().succeeded);
+  let bytes = std::fs::read(&file_path).unwrap();
+  assert!(bytes[FILE_HEADER_SIZE..HEADER_REGION_SIZE].iter().all(|byte| *byte == 0));
 }
 
 #[test]

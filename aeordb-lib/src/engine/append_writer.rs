@@ -5,6 +5,7 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Read exactly `buf.len()` bytes at `offset` without modifying the file's
 /// seek position. Equivalent to Unix `pread` / Windows `seek_read`. Loops
@@ -35,7 +36,10 @@ use crate::engine::entry_header::{EntryHeader, CURRENT_ENTRY_VERSION};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot, write_initial_header, FileHeader, HEADER_REGION_SIZE};
+use crate::engine::durability_coordinator::{DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot};
+use crate::engine::file_header::{
+  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated, write_initial_header,
+};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 pub struct AppendWriter {
@@ -47,6 +51,7 @@ pub struct AppendWriter {
   /// Which slot (0 or 1) the most recent header read came from. The next
   /// update writes to the opposite slot. See file_header::read_active_header.
   active_slot: usize,
+  durability_coordinator: Arc<DurabilityCoordinator>,
 }
 
 impl AppendWriter {
@@ -61,7 +66,15 @@ impl AppendWriter {
     let reader = File::open(path)?;
     let current_offset = HEADER_REGION_SIZE as u64;
 
-    Ok(AppendWriter { file, reader, file_path: path.to_path_buf(), file_header, current_offset, active_slot: 0 })
+    Ok(AppendWriter {
+      file,
+      reader,
+      file_path: path.to_path_buf(),
+      file_header,
+      current_offset,
+      active_slot: 0,
+      durability_coordinator: Arc::new(DurabilityCoordinator::new()),
+    })
   }
 
   pub fn open(path: &Path) -> EngineResult<Self> {
@@ -72,7 +85,15 @@ impl AppendWriter {
     let reader = File::open(path)?;
     let current_offset = file.seek(SeekFrom::End(0))?;
 
-    Ok(AppendWriter { file, reader, file_path: path.to_path_buf(), file_header, current_offset, active_slot })
+    Ok(AppendWriter {
+      file,
+      reader,
+      file_path: path.to_path_buf(),
+      file_header,
+      current_offset,
+      active_slot,
+      durability_coordinator: Arc::new(DurabilityCoordinator::new()),
+    })
   }
 
   pub fn file_path(&self) -> &Path {
@@ -119,7 +140,7 @@ impl AppendWriter {
     new_header.sequence = self.file_header.sequence;
     new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
 
-    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
+    write_header_to_inactive_slot_coordinated(&mut self.file, &mut new_header, self.active_slot, &self.durability_coordinator)?;
 
     self.file_header = new_header;
     self.active_slot = 1 - self.active_slot;
@@ -581,6 +602,14 @@ impl AppendWriter {
     &self.file_header
   }
 
+  pub fn durability_coordinator(&self) -> Arc<DurabilityCoordinator> {
+    Arc::clone(&self.durability_coordinator)
+  }
+
+  pub fn durability_snapshot(&self) -> Result<DurabilityCoordinatorSnapshot, DurabilityCoordinatorError> {
+    self.durability_coordinator.snapshot()
+  }
+
   /// Update the in-memory header without writing either on-disk header slot.
   ///
   /// Transactional callers use this to make the current engine instance see
@@ -605,9 +634,7 @@ impl AppendWriter {
     let mut new_header = header.clone();
     new_header.sequence = self.file_header.sequence;
     new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
-    write_header_to_inactive_slot(&mut self.file, &mut new_header, self.active_slot)?;
-    // sync_all for the full-durability semantics the old API promised.
-    self.file.sync_all()?;
+    write_header_to_inactive_slot_coordinated(&mut self.file, &mut new_header, self.active_slot, &self.durability_coordinator)?;
     self.file_header = new_header;
     self.active_slot = 1 - self.active_slot;
     Ok(())

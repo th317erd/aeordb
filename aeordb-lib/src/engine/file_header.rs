@@ -3,6 +3,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::durability_coordinator::{
+  CommitClass, DurabilityCommitPlan, DurabilityCoordinator, DurabilityFailureDisposition, DurabilityGroupExecutor, DurabilityOperation,
+  DurabilityWaiterState, classify_native_durability_error,
+};
+use crate::engine::native_durability::{
+  NativeDurabilityError, NativeDurabilityOperation, sync_file_data_native, verify_file_bytes_native, write_file_at_native,
+};
 
 /// Size of a single header slot. The on-disk layout has TWO of these (slot A
 /// at byte 0, slot B at byte FILE_HEADER_SIZE). Most callsites that need
@@ -412,21 +419,77 @@ pub fn decode_active_header_region(region: &[u8]) -> EngineResult<(FileHeader, u
 /// next read (we wrote the new slot to the INACTIVE one), so the database
 /// rolls back cleanly to the previous consistent state.
 pub fn write_header_to_inactive_slot(file: &mut File, header: &mut FileHeader, active_slot: usize) -> EngineResult<()> {
+  write_header_to_inactive_slot_coordinated(file, header, active_slot, &DurabilityCoordinator::new())
+}
+
+pub fn write_header_to_inactive_slot_coordinated(
+  file: &mut File,
+  header: &mut FileHeader,
+  active_slot: usize,
+  coordinator: &DurabilityCoordinator,
+) -> EngineResult<()> {
+  if active_slot > 1 {
+    return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
+  }
   // Increment sequence — the new slot must win on next read.
   header.sequence = header.sequence.wrapping_add(1);
 
   let bytes = header.serialize();
   let target_slot = 1 - active_slot;
   let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
+  let plan = DurabilityCommitPlan::new(
+    CommitClass::HardAuthority,
+    vec![
+      DurabilityOperation::DependencyAppend,
+      DurabilityOperation::DataBarrier,
+      DurabilityOperation::AuthorityWrite,
+      DurabilityOperation::HeaderAb,
+      DurabilityOperation::AuthorityBarrier,
+      DurabilityOperation::AuthorityReadback,
+    ],
+  )
+  .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+  let ticket = coordinator.admit_sized(plan, FILE_HEADER_SIZE as u64).map_err(coordinator_error)?;
+  let mut executor = V3HeaderPublicationExecutor { file, slot_offset, bytes: &bytes };
+  coordinator.execute_group(&[ticket], &mut executor).map_err(coordinator_error)?;
+  match coordinator.take_waiter_state(ticket).map_err(coordinator_error)? {
+    DurabilityWaiterState::Succeeded(_) => Ok(()),
+    DurabilityWaiterState::Failed(failure) => Err(EngineError::DurabilityFailure(failure.message)),
+    DurabilityWaiterState::Pending => {
+      Err(EngineError::DurabilityFailure("v3 header publication remained pending after execution".to_string()))
+    }
+  }
+}
 
-  // Barrier: durable-ize prior writes first.
-  file.sync_data()?;
+fn coordinator_error(error: crate::engine::durability_coordinator::DurabilityCoordinatorError) -> EngineError {
+  EngineError::DurabilityFailure(error.to_string())
+}
 
-  file.seek(SeekFrom::Start(slot_offset))?;
-  file.write_all(&bytes)?;
-  file.sync_data()?;
+struct V3HeaderPublicationExecutor<'a> {
+  file: &'a File,
+  slot_offset: u64,
+  bytes: &'a [u8; FILE_HEADER_SIZE],
+}
 
-  Ok(())
+impl DurabilityGroupExecutor for V3HeaderPublicationExecutor<'_> {
+  type Error = NativeDurabilityError;
+
+  fn execute_group(&mut self, _sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
+    match operation {
+      DurabilityOperation::DependencyAppend | DurabilityOperation::HeaderAb => Ok(()),
+      DurabilityOperation::DataBarrier | DurabilityOperation::AuthorityBarrier => sync_file_data_native(self.file),
+      DurabilityOperation::AuthorityWrite => write_file_at_native(self.file, self.slot_offset, self.bytes),
+      DurabilityOperation::AuthorityReadback => verify_file_bytes_native(self.file, self.slot_offset, self.bytes),
+      _ => Err(NativeDurabilityError::invalid(
+        NativeDurabilityOperation::WriteAt,
+        format!("unsupported operation in v3 header publication plan: {operation:?}"),
+      )),
+    }
+  }
+
+  fn classify_error(&self, _operation: DurabilityOperation, error: &Self::Error, mutation_started: bool) -> DurabilityFailureDisposition {
+    classify_native_durability_error(error, mutation_started)
+  }
 }
 
 /// Write the initial header to slot A only (slot B left zeroed). Used by

@@ -93,6 +93,11 @@
       - [x] Implement the non-activating coordinator shell and platform-adapter contract.
       - [x] Run focused and adjacent regressions and record evidence; commit/push is the landing action.
     - [ ] P2a-2: implement grouped hard-frontier commit and the complete platform failure matrix.
+      - [x] Add red tests for compatible-group execution, one barrier per group, mixed-plan refusal, and all-waiter failure.
+      - [x] Freeze typed OS error/retry dispositions and bounded retry behavior, including uncertain-completion no-replay.
+      - [x] Route v3 A/B header publication and read-back through the coordinator/platform adapter.
+      - [ ] Converge transaction, timer, KV flush/resize, direct in-place writes, and shutdown barriers without changing v3 bytes.
+      - [ ] Add architecture gates that prohibit raw durability operations outside the coordinator/platform adapter allowlist.
     - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.

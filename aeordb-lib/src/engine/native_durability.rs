@@ -22,6 +22,7 @@ pub enum NativeDurabilityErrorClass {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeDurabilityOperation {
+  WriteAt,
   DataBarrier,
   FileBarrier,
   ParentDirectorySync,
@@ -35,6 +36,7 @@ pub enum NativeDurabilityOperation {
 impl NativeDurabilityOperation {
   fn name(self) -> &'static str {
     match self {
+      Self::WriteAt => "write_at",
       Self::DataBarrier => "data_barrier",
       Self::FileBarrier => "file_barrier",
       Self::ParentDirectorySync => "parent_directory_sync",
@@ -68,6 +70,14 @@ impl NativeDurabilityError {
     self.class == NativeDurabilityErrorClass::Unsupported
   }
 
+  pub fn io_error_kind(&self) -> Option<io::ErrorKind> {
+    self.source.as_ref().map(io::Error::kind)
+  }
+
+  pub fn raw_os_error(&self) -> Option<i32> {
+    self.source.as_ref().and_then(io::Error::raw_os_error)
+  }
+
   fn io(operation: NativeDurabilityOperation, source: io::Error) -> Self {
     Self { operation, class: NativeDurabilityErrorClass::Io, message: source.to_string(), source: Some(source) }
   }
@@ -98,7 +108,7 @@ impl NativeDurabilityError {
     }
   }
 
-  fn invalid(operation: NativeDurabilityOperation, message: impl Into<String>) -> Self {
+  pub(crate) fn invalid(operation: NativeDurabilityOperation, message: impl Into<String>) -> Self {
     Self { operation, class: NativeDurabilityErrorClass::InvalidInput, message: message.into(), source: None }
   }
 }
@@ -177,6 +187,23 @@ pub struct NativeDurabilityProbeReport {
 
 pub fn sync_file_data_native(file: &File) -> NativeDurabilityResult<()> {
   sync_data_platform(file).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::DataBarrier, error))
+}
+
+pub fn write_file_at_native(file: &File, offset: u64, bytes: &[u8]) -> NativeDurabilityResult<()> {
+  write_all_at_platform(file, offset, bytes).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::WriteAt, error))
+}
+
+pub fn verify_file_bytes_native(file: &File, offset: u64, expected: &[u8]) -> NativeDurabilityResult<()> {
+  let mut actual = vec![0u8; expected.len()];
+  read_exact_at_platform(file, offset, &mut actual)
+    .map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ReadBack, error))?;
+  if actual != expected {
+    return Err(NativeDurabilityError::verification(
+      NativeDurabilityOperation::ReadBack,
+      format!("read-back bytes differ at offset {offset} for {} bytes", expected.len()),
+    ));
+  }
+  Ok(())
 }
 
 pub fn sync_file_all_native(file: &File) -> NativeDurabilityResult<()> {
@@ -346,6 +373,62 @@ fn sync_rename_parents(from: &Path, to: &Path) -> NativeDurabilityResult<()> {
 
 fn parent_or_current(path: &Path) -> &Path {
   path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(unix)]
+fn write_all_at_platform(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+  use std::os::unix::fs::FileExt;
+  let mut written = 0usize;
+  while written < bytes.len() {
+    let count = file.write_at(&bytes[written..], offset + written as u64)?;
+    if count == 0 {
+      return Err(io::Error::from(io::ErrorKind::WriteZero));
+    }
+    written += count;
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn write_all_at_platform(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+  use std::os::windows::fs::FileExt;
+  let mut written = 0usize;
+  while written < bytes.len() {
+    let count = file.seek_write(&bytes[written..], offset + written as u64)?;
+    if count == 0 {
+      return Err(io::Error::from(io::ErrorKind::WriteZero));
+    }
+    written += count;
+  }
+  Ok(())
+}
+
+#[cfg(unix)]
+fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+  use std::os::unix::fs::FileExt;
+  let mut read = 0usize;
+  while read < bytes.len() {
+    let count = file.read_at(&mut bytes[read..], offset + read as u64)?;
+    if count == 0 {
+      return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
+    read += count;
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+  use std::os::windows::fs::FileExt;
+  let mut read = 0usize;
+  while read < bytes.len() {
+    let count = file.seek_read(&mut bytes[read..], offset + read as u64)?;
+    if count == 0 {
+      return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
+    read += count;
+  }
+  Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
