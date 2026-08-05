@@ -17,6 +17,7 @@ pub mod index_page;
 pub mod index_task;
 pub mod namespace;
 pub mod parser_plan;
+pub mod position;
 pub mod reader;
 pub mod scope;
 pub mod source_selector;

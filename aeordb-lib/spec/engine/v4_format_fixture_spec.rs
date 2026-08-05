@@ -17,6 +17,7 @@ use aeordb::engine::v4::index_nvt::{coordinate_cell, decode_nvt_tile, verified_p
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
+use aeordb::engine::v4::position::{PositionContextV1, PositionRouteV1, decode_logical_position, validate_position_context};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
 use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_selector};
@@ -1039,6 +1040,256 @@ fn every_index_task_kind_has_a_closed_phase_registry() {
 }
 
 #[test]
+fn every_logical_position_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "logical-position-v1").collect();
+  assert_eq!(rows.len(), 10);
+
+  for row in rows {
+    let token = fs::read(root.join(row.binary)).unwrap();
+    let position = decode_logical_position(&token, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(position.components().map(|component| component.unwrap()).count(), position.component_count as usize);
+    let identity = format!(
+      "tuple={}:order={}:root={}:file={}:revision={}",
+      position.sort_tuple().len(),
+      hex::encode(&position.order_fingerprint()[..4]),
+      hex::encode(&position.namespace_root()[..4]),
+      hex::encode(&position.file_key_tie()[..4]),
+      hex::encode(&position.record_revision_tie()[..4])
+    );
+    let observed = if position.decoded_len() == 1_048_576 {
+      format!(
+        "position:maximum:route={}:components={}:decoded={}:{identity}",
+        position.route.name(),
+        position.component_count,
+        position.decoded_len()
+      )
+    } else {
+      format!("position:{}:components={}:decoded={}:{identity}", position.route.name(), position.component_count, position.decoded_len())
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(row.canonical_key, None, "public APOS token has no KV key");
+  }
+}
+
+#[test]
+fn logical_positions_reject_malformed_framing_components_and_amplification() {
+  use base64::Engine as _;
+  use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+  let root = fixture_root();
+  let token = fs::read(root.join("logical-position-v1/apos-blake3-256-query-valid.bin")).unwrap();
+  let decoded = URL_SAFE_NO_PAD.decode(&token).unwrap();
+
+  let mut padded = token.clone();
+  padded.push(b'=');
+  assert_eq!(
+    decode_logical_position(&padded, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+  assert_eq!(
+    decode_logical_position(&vec![b'a'; 1_398_103], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  assert!(decode_logical_position(b"not+base64/url", HashAlgorithm::Blake3_256).is_err());
+
+  let mut bad_crc_decoded = decoded.clone();
+  let bad_crc_offset = bad_crc_decoded.len() - 4;
+  bad_crc_decoded[bad_crc_offset] ^= 1;
+  let bad_crc = URL_SAFE_NO_PAD.encode(bad_crc_decoded).into_bytes();
+  assert_eq!(
+    decode_logical_position(&bad_crc, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::ChecksumOrIntegrityMismatch
+  );
+
+  for (offset, value, class) in [
+    (6usize, 99u16, MalformedInputClass::UnknownTypeKindOrEnum),
+    (12, HashAlgorithm::Sha512.to_u16(), MalformedInputClass::CrossRecordClosureMismatch),
+  ] {
+    let mut changed = decoded.clone();
+    changed[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    let changed = repair_position_crc_and_encode(&mut changed);
+    assert_eq!(decode_logical_position(&changed, HashAlgorithm::Blake3_256).unwrap_err().class(), class);
+  }
+
+  for offset in [0usize, 4] {
+    let mut changed = decoded.clone();
+    changed[offset] ^= 0x80;
+    let changed = repair_position_crc_and_encode(&mut changed);
+    assert_eq!(
+      decode_logical_position(&changed, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::UnknownMagicOrVersion
+    );
+  }
+
+  let mut wrong_length = decoded.clone();
+  wrong_length[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+  let wrong_length = repair_position_crc_and_encode(&mut wrong_length);
+  assert_eq!(
+    decode_logical_position(&wrong_length, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+
+  let mut excessive_count = decoded.clone();
+  excessive_count[14] = 33;
+  let excessive_count = repair_position_crc_and_encode(&mut excessive_count);
+  assert_eq!(
+    decode_logical_position(&excessive_count, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut nonzero_flags = decoded.clone();
+  nonzero_flags[15] = 1;
+  let nonzero_flags = repair_position_crc_and_encode(&mut nonzero_flags);
+  assert_eq!(
+    decode_logical_position(&nonzero_flags, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  for range in [16..48, 48..80, 84..116, 116..148] {
+    let mut zero_identity = decoded.clone();
+    zero_identity[range].fill(0);
+    let zero_identity = repair_position_crc_and_encode(&mut zero_identity);
+    assert_eq!(
+      decode_logical_position(&zero_identity, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch
+    );
+  }
+
+  let tuple_start = 20 + 4 * 32;
+  let mut bad_utf8 = decoded.clone();
+  bad_utf8[tuple_start + 8] = 0xff;
+  let bad_utf8 = repair_position_crc_and_encode(&mut bad_utf8);
+  assert_eq!(
+    decode_logical_position(&bad_utf8, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let mut component_reserved = decoded.clone();
+  component_reserved[tuple_start + 3] = 1;
+  let component_reserved = repair_position_crc_and_encode(&mut component_reserved);
+  assert_eq!(
+    decode_logical_position(&component_reserved, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut unknown_comparator = decoded.clone();
+  unknown_comparator[tuple_start..tuple_start + 2].copy_from_slice(&1u16.to_le_bytes());
+  let unknown_comparator = repair_position_crc_and_encode(&mut unknown_comparator);
+  assert_eq!(
+    decode_logical_position(&unknown_comparator, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let first_component_length = 8 + test_u32(&decoded, tuple_start + 4) as usize;
+  let mut invalid_state = decoded.clone();
+  invalid_state[tuple_start + first_component_length + 2] = 3;
+  let invalid_state = repair_position_crc_and_encode(&mut invalid_state);
+  assert_eq!(
+    decode_logical_position(&invalid_state, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+  );
+
+  let mut truncated_component = decoded.clone();
+  truncated_component[tuple_start + 4..tuple_start + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+  let truncated_component = repair_position_crc_and_encode(&mut truncated_component);
+  assert_eq!(
+    decode_logical_position(&truncated_component, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+
+  let mut wrong_count = decoded;
+  wrong_count[14] = 2;
+  let wrong_count = repair_position_crc_and_encode(&mut wrong_count);
+  assert_eq!(
+    decode_logical_position(&wrong_count, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn logical_positions_close_every_present_comparator_payload() {
+  use base64::Engine as _;
+  use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+  let root = fixture_root();
+  let token = fs::read(root.join("logical-position-v1/apos-blake3-256-directory-listing-valid.bin")).unwrap();
+  let decoded = URL_SAFE_NO_PAD.decode(token).unwrap();
+  let tuple_start = 20 + 4 * 32;
+
+  for tag in [4u16, 5, 7] {
+    let mut changed = decoded.clone();
+    changed[tuple_start..tuple_start + 2].copy_from_slice(&tag.to_le_bytes());
+    let changed = repair_position_crc_and_encode(&mut changed);
+    decode_logical_position(&changed, HashAlgorithm::Blake3_256).unwrap();
+  }
+
+  for value in [f64::NAN, f64::INFINITY, -0.0] {
+    let mut changed = decoded.clone();
+    changed[tuple_start..tuple_start + 2].copy_from_slice(&6u16.to_le_bytes());
+    changed[tuple_start + 8..tuple_start + 16].copy_from_slice(&value.to_le_bytes());
+    let changed = repair_position_crc_and_encode(&mut changed);
+    assert_eq!(
+      decode_logical_position(&changed, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+    );
+  }
+
+  let maximum = fs::read(root.join("logical-position-v1/apos-blake3-256-maximum-decoded-length-valid.bin")).unwrap();
+  let mut maximum = URL_SAFE_NO_PAD.decode(maximum).unwrap();
+  maximum[tuple_start + 8] = 2;
+  let maximum = repair_position_crc_and_encode(&mut maximum);
+  assert_eq!(
+    decode_logical_position(&maximum, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn logical_position_context_revalidates_route_root_order_and_resolved_ties() {
+  let root = fixture_root();
+  let token = fs::read(root.join("logical-position-v1/apos-blake3-256-query-valid.bin")).unwrap();
+  let position = decode_logical_position(&token, HashAlgorithm::Blake3_256).unwrap();
+  let context = PositionContextV1 {
+    route: PositionRouteV1::Query,
+    namespace_root: position.namespace_root(),
+    order_fingerprint: position.order_fingerprint(),
+    file_key_tie: position.file_key_tie(),
+    record_revision_tie: position.record_revision_tie(),
+    sort_tuple: position.sort_tuple(),
+  };
+  validate_position_context(&position, context).unwrap();
+
+  let mut changed_root = position.namespace_root().to_vec();
+  changed_root[0] ^= 1;
+  let root_mismatch = PositionContextV1 { namespace_root: &changed_root, ..context };
+  assert_eq!(validate_position_context(&position, root_mismatch).unwrap_err().code(), "position_root_mismatch");
+
+  let mut changed_order = position.order_fingerprint().to_vec();
+  changed_order[0] ^= 1;
+  let order_mismatch = PositionContextV1 { order_fingerprint: &changed_order, ..context };
+  assert_eq!(validate_position_context(&position, order_mismatch).unwrap_err().code(), "position_order_mismatch");
+
+  let route_mismatch = PositionContextV1 { route: PositionRouteV1::DirectoryListing, ..context };
+  assert_eq!(validate_position_context(&position, route_mismatch).unwrap_err().code(), "invalid_position_cursor");
+
+  let mut changed_tuple = position.sort_tuple().to_vec();
+  changed_tuple[0] ^= 1;
+  let tuple_mismatch = PositionContextV1 { sort_tuple: &changed_tuple, ..context };
+  assert_eq!(validate_position_context(&position, tuple_mismatch).unwrap_err().code(), "invalid_position_cursor");
+
+  let mut changed_file = position.file_key_tie().to_vec();
+  changed_file[0] ^= 1;
+  let file_mismatch = PositionContextV1 { file_key_tie: &changed_file, ..context };
+  assert_eq!(validate_position_context(&position, file_mismatch).unwrap_err().code(), "invalid_position_cursor");
+
+  let mut changed_revision = position.record_revision_tie().to_vec();
+  changed_revision[0] ^= 1;
+  let revision_mismatch = PositionContextV1 { record_revision_tie: &changed_revision, ..context };
+  assert_eq!(validate_position_context(&position, revision_mismatch).unwrap_err().code(), "invalid_position_cursor");
+}
+
+#[test]
 fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
   let root = fixture_root();
   let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
@@ -1418,6 +1669,14 @@ fn repair_trailing_crc(value: &mut [u8]) {
   let crc_offset = value.len() - 4;
   let crc = crc32fast::hash(&value[..crc_offset]);
   value[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+}
+
+fn repair_position_crc_and_encode(decoded: &mut [u8]) -> Vec<u8> {
+  use base64::Engine as _;
+  use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+  repair_trailing_crc(decoded);
+  URL_SAFE_NO_PAD.encode(decoded).into_bytes()
 }
 
 fn canonical_frame(tag: u8, payload: &[u8]) -> Vec<u8> {

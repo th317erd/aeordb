@@ -52,12 +52,12 @@
       - [x] Extend the generated machine contract with the frozen 37-row semantic bundle registry.
       - [x] Decode all converter definitions and validate semantic fingerprints/parameters.
       - [x] Decode all field-index definitions and validate exact strategy/converter/operation closure.
-    - [ ] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
+    - [x] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
       - [x] Decode the common IndexArtifactV1 envelope, active pointers, and immutable manifests.
       - [x] Decode ArtifactDirectoryNodeV1 and all ordered page roles.
       - [x] Decode sparse NvtTileV1 hints with corruption-safe fallback metadata.
       - [x] Decode mutation journals and task checkpoints with chain/component bounds.
-      - [ ] Decode APOS v1 position tokens and context/order contracts.
+      - [x] Decode APOS v1 position tokens and context/order contracts.
     - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.
     - [ ] Dispatch v3 and v4 database headers without rewriting either format on open.
     - [ ] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
