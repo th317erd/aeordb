@@ -289,3 +289,11 @@
 - **Malformed proof:** focused mutations reject header CRC and content-integrity corruption, unknown EntryType, unreserved sequence, over-cap lengths, trailing bytes, unknown capability bits, zero authority edges, semantic CRC corruption, and semantic trailing data. Review split length, reserve, enum, zero-edge, ordering, and cross-record failures into their frozen error classes.
 - **Green proof:** the focused target passed 10 tests covering 24 independent header/entity/namespace/semantic fixtures. The legacy `entry_header_spec`, `entry_format_spec`, and `file_record_spec` suites plus the v4 target passed 87 tests, and locked `cargo check -p aeordb --lib` passed.
 - **Boundary:** these readers remain disconnected from startup and production writes. Remaining families, streaming entity verification, v3 preservation, admission, and mutation/fuzz corpus work remain in P1.
+
+## P1a-3 Canonical Configuration Value Reader
+
+- **Entry:** `ace9175`; no unrelated worktree paths were touched.
+- **Red proof:** the v4 fixture target failed on the absent `engine::v4::config_value` module before production parsing existed.
+- **Implementation:** added a zero-copy recursive validator for all ten permanent canonical tags with separate frozen config, source-value, and audit-value bounds. It validates every frame before descent, caps value/scalar/key/member/depth amplification, preserves array order, requires strictly increasing UTF-8 map keys, rejects numeric aliases/nonfinite/negative-zero values, and consumes every byte exactly.
+- **Green proof:** all six both-width independent canonical-value fixtures match their oracle summaries. Focused malformed tests reject small-u64 aliases, negative zero, unordered map keys, and one byte beyond the hard cap. The complete v4 target passed 12 tests and locked library `cargo check` passed.
+- **Boundary:** only validation/read behavior exists; no canonical config writer, semantic compiler, configuration resolver, or active v4 path changed.

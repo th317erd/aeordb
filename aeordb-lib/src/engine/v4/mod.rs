@@ -5,6 +5,7 @@
 
 #[rustfmt::skip]
 pub mod contract_generated;
+pub mod config_value;
 pub mod database_header;
 pub mod entity;
 pub mod hash;

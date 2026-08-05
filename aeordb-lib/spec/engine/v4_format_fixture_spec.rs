@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, decode_header_region, probe_header_version, read_header_region};
+use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
@@ -91,6 +92,51 @@ fn every_namespace_and_semantic_fixture_matches_the_independent_oracle() {
     assert_eq!(observed, row.expected, "fixture {}", row.id);
     assert_eq!(hex::encode(key), row.canonical_key.unwrap(), "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_canonical_config_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "canonical-config-value-v1").collect();
+  assert_eq!(rows.len(), 6);
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let summary = validate_canonical_value(&bytes, CanonicalValueBounds::CONFIG).unwrap();
+    assert_eq!(format!("config:{}:{}={}", summary.tag_name, summary.detail_name, summary.detail), row.expected, "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn canonical_config_rejects_aliases_order_depth_and_amplification() {
+  let small_u64 = canonical_frame(0x05, &1u64.to_le_bytes());
+  assert_eq!(
+    validate_canonical_value(&small_u64, CanonicalValueBounds::CONFIG).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let negative_zero = canonical_frame(0x06, &(-0.0f64).to_bits().to_le_bytes());
+  assert_eq!(
+    validate_canonical_value(&negative_zero, CanonicalValueBounds::CONFIG).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+  );
+
+  let null = canonical_frame(0x01, &[]);
+  let mut map = 2u32.to_le_bytes().to_vec();
+  for key in [b"z".as_slice(), b"a".as_slice()] {
+    map.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    map.extend_from_slice(key);
+    map.extend_from_slice(&null);
+  }
+  assert_eq!(
+    validate_canonical_value(&canonical_frame(0x0a, &map), CanonicalValueBounds::CONFIG).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let oversized = vec![0u8; CanonicalValueBounds::CONFIG.maximum_value_length + 1];
+  assert_eq!(
+    validate_canonical_value(&oversized, CanonicalValueBounds::CONFIG).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
 }
 
 #[test]
@@ -252,4 +298,12 @@ fn repair_trailing_crc(value: &mut [u8]) {
   let crc_offset = value.len() - 4;
   let crc = crc32fast::hash(&value[..crc_offset]);
   value[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+}
+
+fn canonical_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
+  let mut value = Vec::with_capacity(5 + payload.len());
+  value.push(tag);
+  value.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+  value.extend_from_slice(payload);
+  value
 }
