@@ -34,18 +34,22 @@ pub struct DependencyFixtureCase {
 }
 
 #[derive(Clone)]
-struct DependencyRecord {
-  kind: u16,
-  role: u16,
-  flags: u32,
-  abi: u16,
-  executor_profile: u16,
-  fingerprint_semantics: u16,
-  artifact_kind: u16,
-  artifact_length: u64,
-  fingerprint: [u8; 32],
-  dependency_id: String,
-  version: String,
+pub(crate) struct DependencyRecord {
+  pub kind: u16,
+  pub role: u16,
+  pub flags: u32,
+  pub abi: u16,
+  pub executor_profile: u16,
+  pub fingerprint_semantics: u16,
+  pub artifact_kind: u16,
+  pub artifact_length: u64,
+  pub fingerprint: [u8; 32],
+  pub dependency_id: String,
+  pub version: String,
+}
+
+pub(crate) struct DecodedDependencyTable {
+  pub records: Vec<DependencyRecord>,
 }
 
 pub fn fixture_cases() -> Vec<DependencyFixtureCase> {
@@ -74,7 +78,7 @@ pub fn fixture_cases() -> Vec<DependencyFixtureCase> {
 
 pub fn observe(_profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
   match decode_table(bytes) {
-    Ok(count) => (format!("dependencies:records={count}"), None),
+    Ok(table) => (format!("dependencies:records={}", table.records.len()), None),
     Err(error) => (format!("error:{error}"), None),
   }
 }
@@ -120,7 +124,7 @@ fn wasm_record() -> DependencyRecord {
   }
 }
 
-fn build_table(records: &[DependencyRecord]) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn build_table(records: &[DependencyRecord]) -> Result<Vec<u8>, &'static str> {
   if records.len() > MAX_RECORDS {
     return Err("dependency_record_count");
   }
@@ -169,7 +173,7 @@ fn build_record(record: &DependencyRecord) -> Result<Vec<u8>, &'static str> {
   Ok(value)
 }
 
-fn decode_table(value: &[u8]) -> Result<usize, &'static str> {
+pub(crate) fn decode_table(value: &[u8]) -> Result<DecodedDependencyTable, &'static str> {
   if value.len() < TABLE_HEADER_LENGTH || value.len() > TABLE_MAX_LENGTH {
     return Err("dependency_table_length");
   }
@@ -189,18 +193,20 @@ fn decode_table(value: &[u8]) -> Result<usize, &'static str> {
   }
   let mut cursor = TABLE_HEADER_LENGTH;
   let mut previous: Option<DependencyRecord> = None;
+  let mut records = Vec::with_capacity(count);
   for _ in 0..count {
     let (record, next) = decode_record(value, cursor)?;
     if previous.as_ref().is_some_and(|previous| compare_records(previous, &record) != Ordering::Less) {
       return Err("dependency_record_order");
     }
-    previous = Some(record);
+    previous = Some(record.clone());
+    records.push(record);
     cursor = next;
   }
   if cursor != value.len() {
     return Err("dependency_record_count_mismatch");
   }
-  Ok(count)
+  Ok(DecodedDependencyTable { records })
 }
 
 fn decode_record(value: &[u8], start: usize) -> Result<(DependencyRecord, usize), &'static str> {
@@ -339,7 +345,7 @@ fn is_canonical_semver(value: &str) -> bool {
     && !value.ends_with(['-', '+', '.'])
 }
 
-fn digest32(value: &[u8]) -> [u8; 32] {
+pub(crate) fn digest32(value: &[u8]) -> [u8; 32] {
   *blake3::hash(value).as_bytes()
 }
 

@@ -38,7 +38,7 @@ pub struct SelectorFixtureCase {
 }
 
 #[derive(Clone)]
-enum Segment {
+pub(crate) enum Segment {
   ObjectKey(String),
   NumericIndex(u64),
   FanOut,
@@ -130,7 +130,7 @@ fn selector_header(kind: u16, total_length: usize, item_count: usize, regex_sema
   value
 }
 
-fn build_metadata(metadata_id: u16) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn build_metadata(metadata_id: u16) -> Result<Vec<u8>, &'static str> {
   let mut value = selector_header(1, 40, 0, 0, 0);
   value.resize(40, 0);
   put_u16(&mut value, 32, metadata_id);
@@ -138,7 +138,7 @@ fn build_metadata(metadata_id: u16) -> Result<Vec<u8>, &'static str> {
   Ok(value)
 }
 
-fn build_json_path(segments: &[Segment]) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn build_json_path(segments: &[Segment]) -> Result<Vec<u8>, &'static str> {
   if segments.len() > MAX_SEGMENTS {
     return Err("selector_item_count");
   }
@@ -156,7 +156,7 @@ fn build_json_path(segments: &[Segment]) -> Result<Vec<u8>, &'static str> {
   Ok(value)
 }
 
-fn build_mapper(mapper_contract: u16, dependency_ordinal: u32, arguments: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn build_mapper(mapper_contract: u16, dependency_ordinal: u32, arguments: &[u8]) -> Result<Vec<u8>, &'static str> {
   let policy_kind = match mapper_contract {
     1 => PolicyKind::LegacyWasm,
     2 => PolicyKind::PureWasm,
@@ -183,7 +183,7 @@ fn build_mapper(mapper_contract: u16, dependency_ordinal: u32, arguments: &[u8])
   Ok(value)
 }
 
-fn build_always_missing() -> Vec<u8> {
+pub(crate) fn build_always_missing() -> Vec<u8> {
   selector_header(4, SELECTOR_HEADER_LENGTH, 0, 0, 0)
 }
 
@@ -322,7 +322,7 @@ fn compile_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, 
     .map_err(|_| "selector_segment_regex")
 }
 
-fn canonical_null() -> Vec<u8> {
+pub(crate) fn canonical_null() -> Vec<u8> {
   vec![1, 0, 0, 0, 0]
 }
 

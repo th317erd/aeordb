@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-source-selector",
+  "coverage_stage": "p0b-2-value-store-definition",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -547,6 +547,87 @@
       ]
     },
     {
+      "id": "value-store-definition-v1",
+      "family": "index-semantic-definition",
+      "magic_ascii": "AVST",
+      "version": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "definition_magic", "rule": "ASCII AVST" },
+        { "offset": 4, "length": 2, "field": "definition_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "definition_header_length", "rule": "exactly 32" },
+        { "offset": 8, "length": 4, "field": "definition_total_length", "rule": "exactly 112 + H + F + S + P + D" },
+        { "offset": 12, "length": 4, "field": "definition_flags", "rule": "zero" },
+        { "offset": 16, "length": 16, "field": "definition_reserved", "rule": "zero" },
+        { "offset": 32, "length_formula": "H", "field": "scope_id", "rule": "nonzero approved ScopeDefinition ID" },
+        { "offset_formula": "32 + H", "length": 4, "field": "field_name_length", "rule": "F; 1..4096" },
+        { "offset_formula": "36 + H", "length": 4, "field": "source_selector_length", "rule": "S; complete SourceSelectorV1, at most 4096" },
+        { "offset_formula": "40 + H", "length": 4, "field": "parser_plan_length", "rule": "P; complete ParserResolutionPlanV1, at most 131072" },
+        { "offset_formula": "44 + H", "length": 4, "field": "dependency_table_length", "rule": "D; complete DependencyTableV1, at most 262144" },
+        { "offset_formula": "48 + H", "length": 20, "field": "semantic_ids", "rule": "ten u16 compatibility-table IDs" },
+        { "offset_formula": "68 + H", "length": 4, "field": "max_source_values_per_document", "rule": "nonzero exact limit" },
+        { "offset_formula": "72 + H", "length": 8, "field": "reserved", "rule": "zero" },
+        { "offset_formula": "80 + H", "length": 8, "field": "max_canonical_source_bytes_per_document", "rule": "nonzero exact limit" },
+        { "offset_formula": "88 + H", "length": 8, "field": "max_document_input_bytes", "rule": "zero for metadata; finite corrected ordinary limit or migration sentinel" },
+        { "offset_formula": "96 + H", "length": 8, "field": "max_selector_work_items_per_document", "rule": "finite corrected JSON limit, migration sentinel, or zero when inapplicable" },
+        { "offset_formula": "104 + H", "length": 8, "field": "max_selector_examined_bytes_per_document", "rule": "finite corrected JSON limit, migration sentinel, or zero when inapplicable" },
+        { "offset_formula": "112 + H", "length_formula": "F", "field": "field_name", "rule": "canonical UTF-8 metadata or ordinary field name" },
+        { "offset_formula": "112 + H + F", "length_formula": "S", "field": "source_selector", "rule": "exact nested selector" },
+        { "offset_formula": "112 + H + F + S", "length_formula": "P", "field": "parser_plan", "rule": "exact nested parser plan" },
+        { "offset_formula": "112 + H + F + S + P", "length_formula": "D", "field": "dependency_table", "rule": "exact nested dependency table" }
+      ],
+      "semantic_id_order": [
+        "source_value_codec",
+        "metadata_source_semantics",
+        "source_selector_semantics",
+        "parser_resolution_semantics",
+        "missing_semantics",
+        "null_semantics",
+        "extraction_error_semantics",
+        "multi_value_ordering",
+        "duplicate_value_semantics",
+        "unindexable_semantics"
+      ],
+      "identity": ["ValueStoreId derived from complete canonical definition including exact child records and limits"],
+      "key_domain": "H('aeordb.index.value-store-definition.v1\\0' || complete canonical ValueStoreDefinitionV1)",
+      "checksum": "no independent checksum; enclosing IndexArtifact CRC, immutable artifact hash, and ValueStoreId recomputation protect these bytes",
+      "body_formula": "112 + H + F + S + P + D, with F 1..4096, S at most 4096, P at most 131072, D at most 262144, and total at most 524288",
+      "hard_cap": 524288,
+      "canonical_order": "fixed envelope/scope/lengths/semantics/limits, field name, complete selector, complete parser plan, then canonical dependency table",
+      "reserve_zero_ranges": [
+        { "start": 16, "length": 16 },
+        { "start_formula": "72 + H", "length": 8 }
+      ],
+      "malformed_behavior": "reject envelope/flags/reserve, zero or wrong-width scope ID, checked child length/formula/cap failures, malformed child records, invalid field names, metadata/ordinary selector-plan disagreement, corrected/legacy semantic mixing, inapplicable or sentinel limits, unresolved/cross-role/cross-ABI/cross-executor ordinals, policy-family mismatch, missing selector capability, and unused dependencies",
+      "trailing_behavior": "definition_total_length and F/S/P/D consume the complete definition; every nested record independently consumes exact bytes",
+      "bounded_decode": "validate the 32-byte envelope, hash-width-specific 112 + H fixed prefix, 512 KiB total cap, and all child caps with checked arithmetic before slicing; nested decoders preflight their own counts and lengths",
+      "producer_owner": "Child 05 semantic definition compiler and Child 07 migration through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/readers", "Child 03 semantic state", "Child 05 value-store/index runtime", "Child 06 planner/fallback", "Child 07 migration"],
+      "capability": "IndexDefinitionV1 bit 8",
+      "typed_hash_roles": [
+        { "field": "ValueStoreId/canonical key", "role": "identity" },
+        { "field": "ScopeId", "role": "graph-edge-authority" },
+        { "field": "dependency ordinals and table", "role": "executor graph-edge-authority" }
+      ],
+      "fixture_ids_32": [
+        "avst-blake3-256-metadata-hash-corrected-valid",
+        "avst-blake3-256-metadata-created-at-legacy-valid",
+        "avst-blake3-256-json-corrected-valid",
+        "avst-blake3-256-mapper-corrected-valid",
+        "avst-blake3-256-json-legacy-valid",
+        "avst-blake3-256-mapper-legacy-valid",
+        "avst-blake3-256-always-missing-legacy-valid"
+      ],
+      "fixture_ids_64": [
+        "avst-sha512-metadata-hash-corrected-valid",
+        "avst-sha512-metadata-created-at-legacy-valid",
+        "avst-sha512-json-corrected-valid",
+        "avst-sha512-mapper-corrected-valid",
+        "avst-sha512-json-legacy-valid",
+        "avst-sha512-mapper-legacy-valid",
+        "avst-sha512-always-missing-legacy-valid"
+      ]
+    },
+    {
       "id": "canonical-config-value-v1",
       "family": "index-semantic-primitive",
       "version": 1,
@@ -748,10 +829,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 11,
-    "fixture_count": 82,
+    "fixture_family_count": 12,
+    "fixture_count": 96,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, DependencyTableV1, ParserResolutionPlanV1, and SourceSelectorV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, DependencyTableV1, ParserResolutionPlanV1, SourceSelectorV1, and ValueStoreDefinitionV1",
+    "remaining_p0b_2_scope": "Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

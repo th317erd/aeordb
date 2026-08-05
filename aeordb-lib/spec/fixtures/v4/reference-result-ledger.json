@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-source-selector-v1",
+  "tool_revision": "p0b2-value-store-definition-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -493,6 +493,90 @@
       "fixture_id": "asel-sha512-maximum-length-valid",
       "expected": "selector:plugin-mapper:items=0",
       "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-metadata-hash-corrected-valid",
+      "expected": "value-store:field=@hash:selector=1:dependencies=0",
+      "observed": "value-store:field=@hash:selector=1:dependencies=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-metadata-created-at-legacy-valid",
+      "expected": "value-store:field=@created_at:selector=1:dependencies=0",
+      "observed": "value-store:field=@created_at:selector=1:dependencies=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-json-corrected-valid",
+      "expected": "value-store:field=messages:selector=2:dependencies=5",
+      "observed": "value-store:field=messages:selector=2:dependencies=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-mapper-corrected-valid",
+      "expected": "value-store:field=summary:selector=3:dependencies=2",
+      "observed": "value-store:field=summary:selector=3:dependencies=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-json-legacy-valid",
+      "expected": "value-store:field=messages:selector=2:dependencies=5",
+      "observed": "value-store:field=messages:selector=2:dependencies=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-mapper-legacy-valid",
+      "expected": "value-store:field=summary:selector=3:dependencies=2",
+      "observed": "value-store:field=summary:selector=3:dependencies=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-always-missing-legacy-valid",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
+      "observed": "value-store:field=legacy_missing:selector=4:dependencies=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-metadata-hash-corrected-valid",
+      "expected": "value-store:field=@hash:selector=1:dependencies=0",
+      "observed": "value-store:field=@hash:selector=1:dependencies=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-metadata-created-at-legacy-valid",
+      "expected": "value-store:field=@created_at:selector=1:dependencies=0",
+      "observed": "value-store:field=@created_at:selector=1:dependencies=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-json-corrected-valid",
+      "expected": "value-store:field=messages:selector=2:dependencies=5",
+      "observed": "value-store:field=messages:selector=2:dependencies=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-mapper-corrected-valid",
+      "expected": "value-store:field=summary:selector=3:dependencies=2",
+      "observed": "value-store:field=summary:selector=3:dependencies=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-json-legacy-valid",
+      "expected": "value-store:field=messages:selector=2:dependencies=5",
+      "observed": "value-store:field=messages:selector=2:dependencies=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-mapper-legacy-valid",
+      "expected": "value-store:field=summary:selector=3:dependencies=2",
+      "observed": "value-store:field=summary:selector=3:dependencies=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-always-missing-legacy-valid",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
+      "observed": "value-store:field=legacy_missing:selector=4:dependencies=4",
       "result": "pass"
     }
   ]

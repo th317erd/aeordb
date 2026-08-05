@@ -35,22 +35,22 @@ pub struct ParserFixtureCase {
 }
 
 #[derive(Clone)]
-struct Candidate {
-  kind: u16,
-  match_semantics: u16,
-  dependency_ordinal: u32,
-  match_bytes: Vec<u8>,
-  policy: Vec<u8>,
+pub(crate) struct Candidate {
+  pub kind: u16,
+  pub match_semantics: u16,
+  pub dependency_ordinal: u32,
+  pub match_bytes: Vec<u8>,
+  pub policy: Vec<u8>,
 }
 
 #[derive(Clone)]
-struct ParserPlan {
-  kind: u16,
-  resolution_semantics: u16,
-  mime_semantics: u16,
-  no_match_semantics: u16,
-  mime_dependency_ordinal: u32,
-  candidates: Vec<Candidate>,
+pub(crate) struct ParserPlan {
+  pub kind: u16,
+  pub resolution_semantics: u16,
+  pub mime_semantics: u16,
+  pub no_match_semantics: u16,
+  pub mime_dependency_ordinal: u32,
+  pub candidates: Vec<Candidate>,
 }
 
 #[derive(Clone)]
@@ -59,6 +59,7 @@ struct DecodedCandidate {
   match_semantics: u16,
   dependency_ordinal: u32,
   match_bytes: Vec<u8>,
+  policy_kind: PolicyKind,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -69,6 +70,8 @@ pub(crate) struct DecodedPlan {
   pub no_match_semantics: u16,
   pub mime_dependency_ordinal: u32,
   pub candidate_dependencies: Vec<(u16, u32)>,
+  pub candidate_match_semantics: Vec<u16>,
+  pub candidate_policy_kinds: Vec<PolicyKind>,
 }
 
 pub fn fixture_cases() -> Vec<ParserFixtureCase> {
@@ -155,7 +158,7 @@ pub fn annotation_lines(bytes: &[u8]) -> Vec<String> {
   ]
 }
 
-fn wasm_candidate(kind: u16, dependency_ordinal: u32, match_bytes: Vec<u8>) -> Candidate {
+pub(crate) fn wasm_candidate(kind: u16, dependency_ordinal: u32, match_bytes: Vec<u8>) -> Candidate {
   Candidate {
     kind,
     match_semantics: if kind == 2 { 1 } else { 0 },
@@ -165,15 +168,15 @@ fn wasm_candidate(kind: u16, dependency_ordinal: u32, match_bytes: Vec<u8>) -> C
   }
 }
 
-fn native_candidate(kind: u16, dependency_ordinal: u32) -> Candidate {
+pub(crate) fn native_candidate(kind: u16, dependency_ordinal: u32) -> Candidate {
   Candidate { kind, match_semantics: 0, dependency_ordinal, match_bytes: Vec::new(), policy: policy::build_policy(PolicyKind::Native) }
 }
 
-fn legacy_wasm_candidate(dependency_ordinal: u32, match_bytes: Vec<u8>) -> Candidate {
+pub(crate) fn legacy_wasm_candidate(dependency_ordinal: u32, match_bytes: Vec<u8>) -> Candidate {
   Candidate { kind: 2, match_semantics: 2, dependency_ordinal, match_bytes, policy: policy::build_policy(PolicyKind::LegacyWasm) }
 }
 
-fn build_plan(plan: &ParserPlan) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn build_plan(plan: &ParserPlan) -> Result<Vec<u8>, &'static str> {
   let mut body = Vec::new();
   for candidate in &plan.candidates {
     let encoded = build_candidate(candidate)?;
@@ -288,6 +291,8 @@ pub(crate) fn decode_plan(value: &[u8]) -> Result<DecodedPlan, &'static str> {
     no_match_semantics,
     mime_dependency_ordinal,
     candidate_dependencies: candidates.iter().map(|candidate| (candidate.kind, candidate.dependency_ordinal)).collect(),
+    candidate_match_semantics: candidates.iter().map(|candidate| candidate.match_semantics).collect(),
+    candidate_policy_kinds: candidates.iter().map(|candidate| candidate.policy_kind).collect(),
   })
 }
 
@@ -342,7 +347,7 @@ fn decode_candidate(value: &[u8], start: usize) -> Result<(DecodedCandidate, usi
     1..=4 => return Err("parser_candidate_context"),
     _ => return Err("parser_candidate_kind"),
   }
-  Ok((DecodedCandidate { kind, match_semantics, dependency_ordinal, match_bytes }, end))
+  Ok((DecodedCandidate { kind, match_semantics, dependency_ordinal, match_bytes, policy_kind: backend }, end))
 }
 
 fn validate_automatic_plan(

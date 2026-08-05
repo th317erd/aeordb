@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2b-3f ValueStoreDefinitionV1
+- **Current landing unit:** P0b-2b-4 ConverterDefinitionV1 and FieldIndexDefinitionV1
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-3d ParserResolutionPlanV1 `2aa3be77c681f2e3ed0e96f2e0602faad18f3ef0`
+- **Last green commit:** P0b-2b-3e SourceSelectorV1 `3c9e67189293ce3b72ea6fd0d4edc3be5af5b383`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze the parent `ValueStoreDefinitionV1` with field/selector/parser agreement, semantic-family validation, and exact dependency role/ABI/executor/artifact ordinal resolution
+- **Next action:** freeze ConverterDefinitionV1 and FieldIndexDefinitionV1, then their immutable manifest families in dependency order
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -87,3 +87,12 @@
 - **Failure proof:** selector/segment framing, checked lengths/counts, reserves, unknown/inapplicable kinds and semantics, metadata IDs, empty/invalid UTF-8 keys, segment flags/tags, malformed regex, nested config/policy failures, zero mapper ordinals, mapper-policy host mismatch, exact-cap acceptance, oversize rejection, and all fixture-byte integrity/identity effects are covered. AeorRegexV1 is pinned to `regex 1.12.3` with default Unicode features and has search, case-folding, Unicode-class, malformed-pattern, and unsupported-lookaround conformance tests.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 47 tests in 1.49 seconds; strict standalone Clippy passed; fresh generation/verification passed all 82 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** selector-local structure and nested config/policy bytes are authoritative here. Field/plan agreement and exact mapper dependency role/ABI/executor/artifact compatibility remain the enclosing ValueStore definition's responsibility. No production selector evaluator, mapper executor, reader/writer, or persistent database path changed.
+
+## P0b-2b-3f ValueStore Definitions
+
+- **Red proof:** the 82-fixture campaign gate first failed with `P0b-2 definition format is absent from the contract registry: value-store-definition-v1` before the parent codec or fixtures existed.
+- **Frozen contracts:** exact hash-width-dependent `ValueStoreDefinitionV1` envelope/body and ValueStoreId domain; field/selector/parser/dependency child framing; corrected and migration semantic families; source/document/traversal limits; metadata/ordinary field agreement; and exact parser, MIME-router, raw/native parser, mapper, and selector dependency roles from corrected Rounds 8A/9.
+- **Independent corpus:** fourteen fixtures cover corrected and legacy metadata, corrected JSON and mapper, migration JSON and mapper, and canonical migration-only always-missing definitions under both hash profiles; the complete corpus now contains 96 fixtures.
+- **Failure proof:** envelope/formula/cap/reserve/scope/field failures, child allocation amplification, nested decoder errors, corrected/legacy semantic mixing, inapplicable/unbounded limits, field-selector-parser disagreement, out-of-range and cross-role ordinals, corrected/legacy policy mismatch, duplicate selector capabilities, unused dependencies, and all fixture-byte integrity/identity effects are covered.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 54 tests in 5.36 seconds; strict standalone Clippy passed; fresh generation/verification passed all 96 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** this completes the independent ValueStore semantic closure only. No production codec, parser/selector executor, index runtime, writer, migration, route, or database path changed.

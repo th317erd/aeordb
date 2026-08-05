@@ -9,10 +9,10 @@
     - [x] Freeze CanonicalConfigValueV1 tags, JSON normalization, duplicate-key handling, and binary bounds.
     - [x] Freeze InvocationPolicyV1 native/WASM call-site resource semantics and fixed framing.
     - [x] Freeze DependencyTableV1 executable identity, canonical ordering, and native/WASM role contracts.
-    - [ ] Freeze ValueStoreDefinitionV1, source selectors, parser resolution, and dependency framing.
+    - [x] Freeze ValueStoreDefinitionV1, source selectors, parser resolution, and dependency framing.
       - [x] Freeze ParserResolutionPlanV1 candidate order, semantics, resource policies, and bounds.
       - [x] Freeze SourceSelectorV1 metadata, JSON-path, plugin-mapper, and migration-only forms.
-      - [ ] Freeze the parent ValueStoreDefinitionV1 and all cross-record semantic/ordinal invariants.
+      - [x] Freeze the parent ValueStoreDefinitionV1 and all cross-record semantic/ordinal invariants.
     - [ ] Freeze ConverterDefinitionV1, FieldIndexDefinitionV1, and immutable index manifests.
     - [ ] Freeze index pages, NVT tiles, journals, checkpoints, and remaining persistent families.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
