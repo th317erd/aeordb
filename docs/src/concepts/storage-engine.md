@@ -291,6 +291,13 @@ aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
 
 Repair orders matching artifacts by creation time, oldest first, and prompts before replay unless `--yes` is passed. Replay only copies verified WAL-tail bytes back into the database file. The external `hot-tail.bin` and `index-buffer.json` files are reported as evidence, but are not treated as primary data: after the WAL tail is restored, repair forces a WAL-to-EOF KV rebuild, re-derives reusable gaps with the void gap scanner, and publishes a new hot tail. When verify/repair finishes cleanly, each artifact directory receives an `applied.json` marker and future startups ignore it.
 
+The durability latch, spill catalog, and repair phase are also persistent
+deployment authority. A binary that does not understand that authority must not
+replace a compatible binary while any of those states remain active. AeorDB's
+checked installers use a bounded read-only inspector and the
+`aeordb.v3-transition-recovery.v1` capability to enforce this rule. See
+[Deployment Safety](../operations/deployment-safety.md).
+
 ## Crash Recovery
 
 The recovery hierarchy, from least to most damage:

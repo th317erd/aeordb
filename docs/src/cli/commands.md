@@ -104,6 +104,52 @@ The shutdown drain window defaults to 600 seconds. Set `AEORDB_SHUTDOWN_OPERATIO
 
 ---
 
+## `aeordb deployment-capabilities`
+
+Report machine-readable binary capabilities used by checked installers.
+
+```bash
+aeordb deployment-capabilities [--json] [--require CAPABILITY]
+```
+
+The current transition-recovery capability is
+`aeordb.v3-transition-recovery.v1`. `--require` exits `0` when supported and
+`3` when unsupported. Inspection errors exit `1`; an old binary that does not
+recognize this command normally exits `2`.
+
+```bash
+aeordb deployment-capabilities --json
+aeordb deployment-capabilities \
+  --require aeordb.v3-transition-recovery.v1
+```
+
+---
+
+## `aeordb deployment-check`
+
+Read-only inspection used before replacing a binary that may open an existing
+database.
+
+```bash
+aeordb deployment-check \
+  --database /var/lib/aeordb/data.aeordb \
+  [--candidate-capability CAPABILITY] \
+  [--json]
+```
+
+The check validates bounded v3 header, hot-tail, KV, persistent durability
+control, and external spill state without opening the mutable engine. It exits
+`0` when replacement is allowed, `3` when policy refuses it, and `1` when
+inspection cannot prove a safe answer. Corrupt or unsupported state fails
+closed.
+
+A candidate without the transition-recovery capability may proceed only when
+the database is quiescent and has no active durability latch, unapplied spill,
+or incomplete repair. See [Deployment Safety](../operations/deployment-safety.md)
+for the policy matrix and installer behavior.
+
+---
+
 ## `aeordb verify`
 
 Verify database integrity and optionally repair recoverable issues.

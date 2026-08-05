@@ -104,7 +104,7 @@
       - [x] Activate bounded multi-waiter grouping in the live authority owner; facade-level grouping alone is not production group commit.
       - [x] Halt the in-process hard frontier on grouped/setup/unwind failures, wake every pending waiter, reject later hard tickets, and retire terminal waiter records.
       - [x] Publish batch SSE events and acknowledged-write counters only after hard-authority completion.
-    - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
+    - [x] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
       - [x] Add production SystemControlV1 encoders for durability latches and spill catalogs that byte-match the independent fixtures.
       - [x] Add the v3-compatible ControlStore A/B FileRecord reader/writer with dependency-first hard publication.
       - [x] Upgrade external spill evidence with stable incident/database identity, complete digests, ordering, and no-follow validation.
@@ -114,8 +114,13 @@
       - [x] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
       - [x] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.
       - [x] Drain durability waiters during shutdown and keep status available while shutdown or repair is blocked.
-      - [ ] Add checked install/deploy downgrade refusal while latch/spill/repair state is active.
-      - [ ] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
+      - [x] Add checked install/deploy downgrade refusal while latch/spill/repair state is active.
+        - [x] Add a bounded, read-only v3 transition-state inspector that never opens writer authority or mutates database bytes.
+        - [x] Freeze a machine-readable binary deployment-capability handshake and fail-closed candidate policy.
+        - [x] Make local install and FS-Server1 deploy run the checked gate before replacing a binary, with old-service restoration on refusal.
+        - [x] Cover active, repairing, cleared, external-spill, hot-tail, corrupt, unsupported, and first-upgrade paths.
+        - [x] Document checked rollback/install behavior and record live disposable-database evidence.
+      - [x] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
 

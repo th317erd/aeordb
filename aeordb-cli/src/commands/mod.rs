@@ -1,3 +1,4 @@
+pub mod deployment;
 pub mod diff;
 pub mod emergency_reset;
 pub mod export;

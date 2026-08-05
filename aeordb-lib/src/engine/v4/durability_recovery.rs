@@ -19,7 +19,7 @@ const SPILL_CATALOG_PRESENT: u32 = 1;
 const SPILL_CATALOG_PAYLOAD_DOMAIN: &[u8] = b"aeordb.emergency-spill-catalog-payload.v1\0";
 const REPAIR_RECEIPT_DOMAIN: &[u8] = b"aeordb.durability-repair-receipt.v1\0";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PersistentDurabilityRecoveryState {
   pub database_id: [u8; 16],
   pub blocks_writes: bool,
@@ -118,6 +118,14 @@ pub fn inspect_persistent_durability_recovery(engine: &StorageEngine) -> EngineR
   let store = V3TransitionControlStore::new(engine);
   let latch = store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[])?;
   let catalog = store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[])?;
+  classify_persistent_durability_recovery(engine.hash_algo(), latch, catalog)
+}
+
+pub fn classify_persistent_durability_recovery(
+  algorithm: crate::engine::HashAlgorithm,
+  latch: Option<LoadedMutableControlV1>,
+  catalog: Option<LoadedMutableControlV1>,
+) -> EngineResult<Option<PersistentDurabilityRecoveryState>> {
   if latch.is_none() && catalog.is_none() {
     return Ok(None);
   }
@@ -126,15 +134,15 @@ pub fn inspect_persistent_durability_recovery(engine: &StorageEngine) -> EngineR
   let latch_body = latch
     .as_ref()
     .map(|selected| {
-      let control = decode_system_control(&selected.bytes, engine.hash_algo()).map_err(format_error)?;
-      decode_durability_latch_body(control.body, engine.hash_algo()).map_err(format_error)
+      let control = decode_system_control(&selected.bytes, algorithm).map_err(format_error)?;
+      decode_durability_latch_body(control.body, algorithm).map_err(format_error)
     })
     .transpose()?;
   let catalog_control =
-    catalog.as_ref().map(|selected| decode_system_control(&selected.bytes, engine.hash_algo()).map_err(format_error)).transpose()?;
+    catalog.as_ref().map(|selected| decode_system_control(&selected.bytes, algorithm).map_err(format_error)).transpose()?;
   let catalog_body = catalog_control
     .as_ref()
-    .map(|control| decode_emergency_spill_catalog_body(control.body, engine.hash_algo()).map_err(format_error))
+    .map(|control| decode_emergency_spill_catalog_body(control.body, algorithm).map_err(format_error))
     .transpose()?;
 
   let catalog_presence_consistent =
@@ -143,7 +151,7 @@ pub fn inspect_persistent_durability_recovery(engine: &StorageEngine) -> EngineR
   if let Some(latch_body) = latch_body.as_ref() {
     if latch_body.flags & SPILL_CATALOG_PRESENT != 0 {
       if let Some(catalog_control) = catalog_control.as_ref() {
-        let expected = digest_parts(engine.hash_algo(), &[SPILL_CATALOG_PAYLOAD_DOMAIN, catalog_control.body]);
+        let expected = digest_parts(algorithm, &[SPILL_CATALOG_PAYLOAD_DOMAIN, catalog_control.body]);
         if latch_body.emergency_spill_catalog_payload_hash != expected {
           catalog_reference_consistent = false;
           if latch_body.state == LATCH_CLEARED && catalog_body.as_ref().is_none_or(|body| body.state == CATALOG_COMPLETE) {

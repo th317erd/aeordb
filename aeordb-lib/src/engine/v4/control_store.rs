@@ -72,25 +72,7 @@ impl<'a> V3TransitionControlStore<'a> {
     let b_path = system_control_path(kind, identity, SystemControlSlotV1::B).map_err(format_error)?;
     let a = self.load_slot(kind, &a_path)?;
     let b = self.load_slot(kind, &b_path)?;
-    let selection = match (a.as_deref(), b.as_deref()) {
-      (None, None) => return Ok(None),
-      (Some(a), Some(b)) => select_system_control_pair(self.engine.hash_algo(), a, b).map_err(format_error)?,
-      (Some(bytes), None) => select_single_mutable(self.engine.hash_algo(), SystemControlSlotV1::A, bytes).map_err(format_error)?,
-      (None, Some(bytes)) => select_single_mutable(self.engine.hash_algo(), SystemControlSlotV1::B, bytes).map_err(format_error)?,
-    };
-    verify_kind_and_identity(&selection.control, kind, identity).map_err(format_error)?;
-    let bytes = match selection.selected_slot {
-      SystemControlSlotV1::A => a.as_ref().expect("selected A slot is present").clone(),
-      SystemControlSlotV1::B => b.as_ref().expect("selected B slot is present").clone(),
-      SystemControlSlotV1::Immutable => unreachable!("mutable selection cannot choose immutable slot"),
-    };
-    Ok(Some(LoadedMutableControlV1 {
-      database_id: selection.control.database_id.try_into().expect("validated control database ID width"),
-      selected_slot: selection.selected_slot,
-      sequence: selection.control.sequence,
-      redundancy_degraded: selection.redundancy_degraded,
-      bytes,
-    }))
+    discover_mutable_control(self.engine.hash_algo(), kind, identity, a, b).map_err(format_error)
   }
 
   pub fn publish_mutable(
@@ -170,6 +152,42 @@ impl<'a> V3TransitionControlStore<'a> {
     }
     Ok(Some(bytes))
   }
+}
+
+/// Select one mutable A/B control from already bounded slot bytes.
+///
+/// This is shared by the live v3 ControlStore and deployment's read-only
+/// database inspector so both paths apply exactly the same sequence, identity,
+/// and torn-slot policy.
+pub fn discover_mutable_control(
+  algorithm: HashAlgorithm,
+  kind: SystemControlKindV1,
+  identity: &[u8],
+  a: Option<Vec<u8>>,
+  b: Option<Vec<u8>>,
+) -> FormatResult<Option<LoadedMutableControlV1>> {
+  if kind.is_immutable() {
+    return Err(identity_error("control_store_discover_immutable", "mutable discovery cannot select an immutable control"));
+  }
+  let selection = match (a.as_deref(), b.as_deref()) {
+    (None, None) => return Ok(None),
+    (Some(a), Some(b)) => select_system_control_pair(algorithm, a, b)?,
+    (Some(bytes), None) => select_single_mutable(algorithm, SystemControlSlotV1::A, bytes)?,
+    (None, Some(bytes)) => select_single_mutable(algorithm, SystemControlSlotV1::B, bytes)?,
+  };
+  verify_kind_and_identity(&selection.control, kind, identity)?;
+  let bytes = match selection.selected_slot {
+    SystemControlSlotV1::A => a.as_ref().expect("selected A slot is present").clone(),
+    SystemControlSlotV1::B => b.as_ref().expect("selected B slot is present").clone(),
+    SystemControlSlotV1::Immutable => unreachable!("mutable selection cannot choose immutable slot"),
+  };
+  Ok(Some(LoadedMutableControlV1 {
+    database_id: selection.control.database_id.try_into().expect("validated control database ID width"),
+    selected_slot: selection.selected_slot,
+    sequence: selection.control.sequence,
+    redundancy_degraded: selection.redundancy_degraded,
+    bytes,
+  }))
 }
 
 pub fn select_control_store_read<'a>(

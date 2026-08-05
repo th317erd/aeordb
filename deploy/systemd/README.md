@@ -40,17 +40,33 @@ scripts/deploy-fs-server1.sh
 
 The script:
 
-- builds `aeordb` with `cargo build --release -p aeordb-cli --bin aeordb -j 6`
-- installs that release binary locally to `~/.local/bin/aeordb` and verifies the hash
-- copies the binary and this systemd unit to `FS-Server1`
-- installs the unit and reloads systemd before stopping the service
+- builds `aeordb` with `cargo build --release -p aeordb-cli --bin aeordb -j 4`
+- copies the binary, systemd unit, and checked-replacement helper to `FS-Server1`
 - stops AeorDB with the unit's long shutdown timeout
+- inspects the database read-only before replacement; a candidate without the
+  transition-recovery capability is refused while a durability latch, unapplied
+  emergency spill, or incomplete repair remains active
+- on a refused gate, removes temporary artifacts and restarts the untouched old
+  service when it was previously active
 - backs up the previous remote binary as `/opt/aeordb/bin/aeordb.bak.<timestamp>`
-- installs the new binary, starts the service, and polls `/system/health`
+- installs the unit and binary, starts the service, and polls `/system/health`
+- verifies the remote hash, then installs that release binary locally to
+  `~/.local/bin/aeordb`
 - writes a local deploy log under `deploy/logs/`
 
 The log directory is intentionally ignored by git. It may include operational
 hostnames, health output, and journal excerpts.
+
+The checked deployment defaults to
+`/mnt/storage/aeordb/files.taraani.org.aeordb` and runs inspection as the
+`aeordb` service user. Override `REMOTE_DATABASE`, `REMOTE_RUN_USER`,
+`REMOTE_RUN_HOME`, or `REMOTE_EMERGENCY_SPILL_DIR` when the service layout
+differs. The spill-directory value must match the service configuration.
+
+If startup or health fails after installation, the script leaves the candidate
+installed for diagnosis instead of blindly running an older writer against
+state that the candidate may already have published. See the complete policy in
+[`docs/src/operations/deployment-safety.md`](../../docs/src/operations/deployment-safety.md).
 
 ## Startup Health
 

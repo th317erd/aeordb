@@ -64,6 +64,13 @@ aeordb start -D /tmp/example.aeordb
 
 That starts the HTTP server on `http://127.0.0.1:6830` with self-contained auth, prints a one-time root API key, and creates `/tmp/example.aeordb` if it doesn't exist. `Ctrl-C` to shut down.
 
+When replacing a binary used by an existing database, pass that database to the
+installer so it can enforce the durability-transition safety gate:
+
+```bash
+./scripts/install-local.sh --database /var/lib/aeordb/data.aeordb
+```
+
 For development builds and tests:
 
 ```bash

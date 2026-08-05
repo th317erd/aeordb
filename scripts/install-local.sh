@@ -5,18 +5,19 @@
 #   ./scripts/install-local.sh
 #
 # Install an already-built binary:
-#   ./scripts/install-local.sh --from /tmp/codex/aeordb-release-20260605/aeordb
+#   ./scripts/install-local.sh --from /path/to/aeordb --database /path/to/data.aeordb
 #
 # Environment:
 #   AEORDB_INSTALL_BIN_DIR   install directory (default: $HOME/.local/bin)
-#   CARGO_JOBS               cargo build jobs (default: 6)
+#   CARGO_JOBS               cargo build jobs (default: 4)
 #   DEBUGGABLE_RELEASE       preserve debuggable release build settings (default: 1)
+#   AEORDB_INSTALL_DATABASE  database checked before binary replacement
 
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install-local.sh [--from PATH] [--bin-dir DIR]
+Usage: scripts/install-local.sh [--from PATH] [--bin-dir DIR] [--database PATH]...
 
 Builds target/release/aeordb and installs it to ~/.local/bin/aeordb by
 default. If --from is supplied, installs that binary instead of building.
@@ -24,15 +25,22 @@ default. If --from is supplied, installs that binary instead of building.
 Options:
   --from PATH       Install an already-built aeordb binary.
   --bin-dir DIR     Install directory. Defaults to AEORDB_INSTALL_BIN_DIR or ~/.local/bin.
+  --database PATH   Check this database before replacement. Repeat for multiple databases.
   -h, --help        Show this help.
 EOF
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/deployment-safety.sh
+source "$repo_root/scripts/lib/deployment-safety.sh"
 bin_dir="${AEORDB_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 source_binary=""
-cargo_jobs="${CARGO_JOBS:-6}"
+cargo_jobs="${CARGO_JOBS:-4}"
 debuggable_release="${DEBUGGABLE_RELEASE:-1}"
+databases=()
+if [ -n "${AEORDB_INSTALL_DATABASE:-}" ]; then
+  databases+=("$AEORDB_INSTALL_DATABASE")
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +58,14 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       bin_dir="$2"
+      shift 2
+      ;;
+    --database)
+      if [ "$#" -lt 2 ]; then
+        echo "error: --database requires a path" >&2
+        exit 2
+      fi
+      databases+=("$2")
       shift 2
       ;;
     -h|--help)
@@ -94,10 +110,23 @@ if [ ! -x "$source_binary" ]; then
   exit 1
 fi
 
+installed="$bin_dir/aeordb"
+if [ "${#databases[@]}" -gt 0 ]; then
+  echo "Running checked AeorDB replacement gate..."
+  for database in "${databases[@]}"; do
+    if [ ! -f "$database" ]; then
+      echo "error: database not found for deployment check: $database" >&2
+      exit 1
+    fi
+    aeordb_checked_replacement "$installed" "$source_binary" "$database"
+  done
+else
+  echo "warning: no --database supplied; no local database transition state was inspected" >&2
+fi
+
 mkdir -p "$bin_dir"
 install -m 0755 "$source_binary" "$bin_dir/aeordb"
 
-installed="$bin_dir/aeordb"
 echo "Installed: $installed"
 "$installed" --version
 

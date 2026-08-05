@@ -233,6 +233,27 @@ enum Commands {
     #[arg(long)]
     path_history: bool,
   },
+  /// Report binary capabilities used by checked install/deploy tooling
+  DeploymentCapabilities {
+    /// Emit the versioned machine-readable capability report.
+    #[arg(long)]
+    json: bool,
+    /// Exit 0 only when this exact deployment capability is supported.
+    #[arg(long)]
+    require: Option<String>,
+  },
+  /// Check whether a candidate may replace the current binary for a database
+  DeploymentCheck {
+    /// Database to inspect without opening mutable engine authority.
+    #[arg(short = 'D', long)]
+    database: String,
+    /// Exact capability advertised by the candidate; omit for a pre-P2 binary.
+    #[arg(long)]
+    candidate_capability: Option<String>,
+    /// Emit one machine-readable state and decision object.
+    #[arg(long)]
+    json: bool,
+  },
 }
 
 #[tokio::main]
@@ -384,6 +405,24 @@ async fn main() {
         diff_checkpoint: diff_checkpoint.as_deref(),
         path_history,
       });
+    }
+    Commands::DeploymentCapabilities { json, require } => match commands::deployment::print_capabilities(json, require.as_deref()) {
+      Ok(true) => {}
+      Ok(false) => std::process::exit(3),
+      Err(error) => {
+        eprintln!("Deployment capability report failed: {error}");
+        std::process::exit(1);
+      }
+    },
+    Commands::DeploymentCheck { database, candidate_capability, json } => {
+      match commands::deployment::check_database(&database, candidate_capability.as_deref(), json) {
+        Ok(decision) if decision.allowed => {}
+        Ok(_) => std::process::exit(3),
+        Err(error) => {
+          eprintln!("Deployment transition-state inspection failed: {error}");
+          std::process::exit(1);
+        }
+      }
     }
   }
 }

@@ -22,6 +22,16 @@ cd aeordb
 ./scripts/install-local.sh
 ```
 
+When replacing a binary that opens an existing database, identify the database
+so the installer can enforce the durability-transition gate:
+
+```bash
+./scripts/install-local.sh --database /var/lib/aeordb/data.aeordb
+```
+
+Repeat `--database` for every local database the binary may open. Without it,
+the installer warns that no database transition state was inspected.
+
 The binary is installed at:
 
 ```
@@ -60,6 +70,17 @@ If you already have a built release binary, install it without rebuilding:
 ```bash
 ./scripts/install-local.sh --from /path/to/aeordb
 ```
+
+For an existing database:
+
+```bash
+./scripts/install-local.sh \
+  --from /path/to/aeordb \
+  --database /var/lib/aeordb/data.aeordb
+```
+
+See [Deployment Safety](../operations/deployment-safety.md) for downgrade
+refusal, quiescence, capability, and rollback behavior.
 
 ## Optional: Add to PATH
 

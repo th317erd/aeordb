@@ -6,10 +6,15 @@ SERVICE="${SERVICE:-aeordb}"
 REMOTE_BIN="${REMOTE_BIN:-/opt/aeordb/bin/aeordb}"
 REMOTE_TMP="${REMOTE_TMP:-/tmp/aeordb-new}"
 REMOTE_UNIT="${REMOTE_UNIT:-/etc/systemd/system/aeordb.service}"
+REMOTE_DATABASE="${REMOTE_DATABASE:-/mnt/storage/aeordb/files.taraani.org.aeordb}"
+REMOTE_RUN_USER="${REMOTE_RUN_USER:-aeordb}"
+REMOTE_RUN_HOME="${REMOTE_RUN_HOME:-/opt/aeordb/home}"
+REMOTE_EMERGENCY_SPILL_DIR="${REMOTE_EMERGENCY_SPILL_DIR:-}"
 LOCAL_BIN="${LOCAL_BIN:-target/release/aeordb}"
 LOCAL_UNIT="${LOCAL_UNIT:-deploy/systemd/aeordb.service}"
+LOCAL_SAFETY="${LOCAL_SAFETY:-scripts/lib/deployment-safety.sh}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:6830/system/health}"
-CARGO_JOBS="${CARGO_JOBS:-6}"
+CARGO_JOBS="${CARGO_JOBS:-4}"
 STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-1800}"
 STOP_WAIT_SECONDS="${STOP_WAIT_SECONDS:-2100}"
 INSTALL_LOCAL="${INSTALL_LOCAL:-1}"
@@ -50,6 +55,7 @@ echo "== AeorDB deploy to $HOST =="
 echo "timestamp=$timestamp"
 echo "service=$SERVICE"
 echo "remote_bin=$REMOTE_BIN"
+echo "remote_database=$REMOTE_DATABASE"
 echo "health_url=$HEALTH_URL"
 echo "stop_wait_seconds=$STOP_WAIT_SECONDS"
 echo "install_local=$INSTALL_LOCAL"
@@ -74,31 +80,6 @@ if command -v readelf >/dev/null 2>&1; then
 fi
 echo
 
-case "$INSTALL_LOCAL" in
-  1|true|yes)
-    echo "== Install local binary =="
-    install -d -m 0755 "$(dirname "$LOCAL_INSTALL_BIN")"
-    install -m 0755 "$LOCAL_BIN" "$LOCAL_INSTALL_BIN"
-    "$LOCAL_INSTALL_BIN" --version
-    local_install_sha="$(sha256sum "$LOCAL_INSTALL_BIN" | awk '{print $1}')"
-    echo "local_install_sha256=$local_install_sha"
-    if [ "$local_install_sha" != "$local_sha" ]; then
-      echo "Local install SHA mismatch: built=$local_sha installed=$local_install_sha"
-      exit 1
-    fi
-    echo
-    ;;
-  0|false|no)
-    echo "== Install local binary =="
-    echo "skipped"
-    echo
-    ;;
-  *)
-    echo "Invalid INSTALL_LOCAL value: $INSTALL_LOCAL"
-    exit 2
-    ;;
-esac
-
 echo "== Remote preflight =="
 ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
   echo host=\$(hostname)
@@ -109,23 +90,20 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
 "
 echo
 
+service_was_active="$(ssh "${SSH_OPTS[@]}" "$HOST" "if systemctl is-active --quiet '$SERVICE'; then echo 1; else echo 0; fi")"
+echo "service_was_active=$service_was_active"
+
 remote_tmp_bin="$REMOTE_TMP.$timestamp"
 remote_tmp_unit="/tmp/aeordb.service.$timestamp"
+remote_tmp_safety="/tmp/aeordb-deployment-safety.$timestamp.sh"
 
 echo "== Copy artifacts =="
 scp -q "${SCP_OPTS[@]}" "$LOCAL_BIN" "$HOST:$remote_tmp_bin"
 scp -q "${SCP_OPTS[@]}" "$LOCAL_UNIT" "$HOST:$remote_tmp_unit"
+scp -q "${SCP_OPTS[@]}" "$LOCAL_SAFETY" "$HOST:$remote_tmp_safety"
 echo "copied_binary=$remote_tmp_bin"
 echo "copied_unit=$remote_tmp_unit"
-echo
-
-echo "== Install unit before stop =="
-ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
-  sudo install -o root -g root -m 0644 '$remote_tmp_unit' '$REMOTE_UNIT'
-  sudo rm -f '$remote_tmp_unit'
-  sudo systemctl daemon-reload
-  systemctl show -p TimeoutStopUSec '$SERVICE'
-"
+echo "copied_safety_helper=$remote_tmp_safety"
 echo
 
 echo "== Stop service cleanly =="
@@ -151,17 +129,48 @@ if [ "$stop_status" -ne 0 ]; then
 fi
 echo
 
-echo "== Install binary =="
-ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
+echo "== Checked deployment compatibility =="
+if ! ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
+  sudo -u '$REMOTE_RUN_USER' env \
+    HOME='$REMOTE_RUN_HOME' \
+    AEORDB_EMERGENCY_SPILL_DIR='$REMOTE_EMERGENCY_SPILL_DIR' \
+    bash -c 'set -euo pipefail; source \"\$1\"; aeordb_checked_replacement \"\$2\" \"\$3\" \"\$4\"' \
+    aeordb-deployment-check '$remote_tmp_safety' '$REMOTE_BIN' '$remote_tmp_bin' '$REMOTE_DATABASE'
+"; then
+  echo "Deployment compatibility check failed; the existing binary and unit were not replaced."
+  ssh "${SSH_OPTS[@]}" "$HOST" "sudo rm -f '$remote_tmp_bin' '$remote_tmp_unit' '$remote_tmp_safety'; if [ '$service_was_active' = 1 ]; then sudo systemctl start '$SERVICE'; fi" || true
+  exit 1
+fi
+echo
+
+echo "== Install unit and binary =="
+if ! ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
+  if [ -f '$REMOTE_UNIT' ]; then
+    sudo cp -a '$REMOTE_UNIT' '$REMOTE_UNIT.bak.$timestamp'
+    echo unit_backup='$REMOTE_UNIT.bak.$timestamp'
+  fi
+  sudo install -o root -g root -m 0644 '$remote_tmp_unit' '$REMOTE_UNIT'
+  sudo rm -f '$remote_tmp_unit'
+  sudo systemctl daemon-reload
   sudo install -d -o root -g root -m 0755 \"\$(dirname '$REMOTE_BIN')\"
   if [ -x '$REMOTE_BIN' ]; then
     sudo cp -a '$REMOTE_BIN' '$REMOTE_BIN.bak.$timestamp'
     echo backup='$REMOTE_BIN.bak.$timestamp'
   fi
   sudo install -o root -g root -m 0755 '$remote_tmp_bin' '$REMOTE_BIN'
-  sudo rm -f '$remote_tmp_bin'
+  sudo rm -f '$remote_tmp_bin' '$remote_tmp_safety'
   sha256sum '$REMOTE_BIN'
-"
+"; then
+  echo "Remote install failed; restoring the previous binary/unit before restarting."
+  ssh "${SSH_OPTS[@]}" "$HOST" "set -euo pipefail
+    if [ -f '$REMOTE_BIN.bak.$timestamp' ]; then sudo cp -a '$REMOTE_BIN.bak.$timestamp' '$REMOTE_BIN'; fi
+    if [ -f '$REMOTE_UNIT.bak.$timestamp' ]; then sudo cp -a '$REMOTE_UNIT.bak.$timestamp' '$REMOTE_UNIT'; fi
+    sudo rm -f '$remote_tmp_bin' '$remote_tmp_unit' '$remote_tmp_safety'
+    sudo systemctl daemon-reload
+    if [ '$service_was_active' = 1 ]; then sudo systemctl start '$SERVICE'; fi
+  " || true
+  exit 1
+fi
 echo
 
 echo "== Start service =="
@@ -208,6 +217,29 @@ if [ "$remote_sha" != "$local_sha" ]; then
   echo "Remote SHA mismatch: local=$local_sha remote=$remote_sha"
   exit 1
 fi
+
+case "$INSTALL_LOCAL" in
+  1|true|yes)
+    echo "== Install local binary =="
+    AEORDB_INSTALL_BIN_DIR="$(dirname "$LOCAL_INSTALL_BIN")" scripts/install-local.sh --from "$LOCAL_BIN"
+    local_install_sha="$(sha256sum "$LOCAL_INSTALL_BIN" | awk '{print $1}')"
+    echo "local_install_sha256=$local_install_sha"
+    if [ "$local_install_sha" != "$local_sha" ]; then
+      echo "Local install SHA mismatch: built=$local_sha installed=$local_install_sha"
+      exit 1
+    fi
+    echo
+    ;;
+  0|false|no)
+    echo "== Install local binary =="
+    echo "skipped"
+    echo
+    ;;
+  *)
+    echo "Invalid INSTALL_LOCAL value: $INSTALL_LOCAL"
+    exit 2
+    ;;
+esac
 
 echo
 echo "Deploy complete."
