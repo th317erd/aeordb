@@ -6,7 +6,8 @@
     - [x] Freeze DatabaseHeaderV4, core entity/namespace/semantic formats, and their malformed corpus.
     - [x] Freeze the common IndexArtifactV1 envelope and all three A/B active-pointer kinds.
     - [x] Freeze the canonical definition envelope, ScopeDefinitionV1, ScopeId, path/glob, FileKey, and internal-path semantics.
-    - [ ] Freeze CanonicalConfigValueV1, ValueStoreDefinitionV1, source selectors, and dependency framing.
+    - [x] Freeze CanonicalConfigValueV1 tags, JSON normalization, duplicate-key handling, and binary bounds.
+    - [ ] Freeze ValueStoreDefinitionV1, source selectors, and dependency framing.
     - [ ] Freeze ConverterDefinitionV1, FieldIndexDefinitionV1, and immutable index manifests.
     - [ ] Freeze index pages, NVT tiles, journals, checkpoints, and remaining persistent families.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.

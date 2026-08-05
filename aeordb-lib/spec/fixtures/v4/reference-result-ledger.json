@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-scope-definition-v1",
+  "tool_revision": "p0b2-canonical-config-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -61,6 +61,42 @@
       "fixture_id": "header-blake3-256-adopted-physical-id",
       "expected": "selected:44",
       "observed": "selected:44",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-blake3-256-all-tags-valid",
+      "expected": "config:map:members=7",
+      "observed": "config:map:members=7",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-blake3-256-numeric-boundaries-valid",
+      "expected": "config:array:members=6",
+      "observed": "config:array:members=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-blake3-256-maximum-string-valid",
+      "expected": "config:utf8:bytes=65536",
+      "observed": "config:utf8:bytes=65536",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-sha512-all-tags-valid",
+      "expected": "config:map:members=7",
+      "observed": "config:map:members=7",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-sha512-numeric-boundaries-valid",
+      "expected": "config:array:members=6",
+      "observed": "config:array:members=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "config-sha512-maximum-string-valid",
+      "expected": "config:utf8:bytes=65536",
+      "observed": "config:utf8:bytes=65536",
       "result": "pass"
     },
     {

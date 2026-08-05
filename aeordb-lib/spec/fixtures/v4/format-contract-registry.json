@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-scope-definition",
+  "coverage_stage": "p0b-2-canonical-config",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -289,6 +289,62 @@
       ]
     },
     {
+      "id": "canonical-config-value-v1",
+      "family": "index-semantic-primitive",
+      "version": 1,
+      "tag_registry": {
+        "0x00": "invalid-never-emitted",
+        "0x01": "null",
+        "0x02": "false",
+        "0x03": "true",
+        "0x04": "i64",
+        "0x05": "u64",
+        "0x06": "f64",
+        "0x07": "utf8",
+        "0x08": "bytes",
+        "0x09": "array",
+        "0x0a": "map"
+      },
+      "layout": [
+        { "offset": 0, "length": 1, "field": "value_tag", "rule": "permanent nonzero tag" },
+        { "offset": 1, "length": 4, "field": "payload_length", "rule": "exact little-endian byte count" },
+        { "offset": 5, "length_formula": "L", "field": "payload", "rule": "tag-specific canonical payload" }
+      ],
+      "identity": ["complete canonical bytes as part of the enclosing semantic definition ID"],
+      "key_domain": "no standalone key; complete bytes participate in ScopeId, ValueStoreId, ConverterFingerprint, or IndexId as applicable",
+      "checksum": "no independent checksum; enclosing definition owner-ID recomputation plus IndexArtifact CRC and immutable artifact hash protect these bytes",
+      "body_formula": "5 + L recursively; arrays/maps begin with count u32 LE and contain exact self-framed children",
+      "hard_cap": 262144,
+      "canonical_order": "arrays retain order; map keys are unique and strictly increasing by raw UTF-8 bytes; numbers have one canonical class and representation",
+      "reserve_zero_ranges": [
+        { "start": 0, "length": 0, "rule": "v1 has no reserved bytes" }
+      ],
+      "malformed_behavior": "reject unknown/zero tags, length overflow/disagreement, wrong scalar payload size, nonfinite or negative-zero f64, small u64 aliases, invalid UTF-8, duplicate/unordered keys, count mismatch, oversize scalar/value/member set, excess depth, truncation, and trailing bytes",
+      "trailing_behavior": "payload_length and recursive child counts consume the complete value exactly",
+      "bounded_decode": "validate the 5-byte frame and 256 KiB cap before payload access; recurse through at most 32 containers and 65535 members without allocating from unvalidated counts",
+      "producer_owner": "Child 05 semantic definition compiler through Child 01 codec",
+      "consumer_owners": [
+        "Child 01 fixture/readers",
+        "Child 03 semantic compiler",
+        "Child 05 index definition compiler",
+        "Child 07 migration"
+      ],
+      "capability": "IndexDefinitionV1 bit 8 through the enclosing definition/manifest",
+      "typed_hash_roles": [
+        { "field": "complete canonical bytes in enclosing semantic ID preimage", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "config-blake3-256-all-tags-valid",
+        "config-blake3-256-numeric-boundaries-valid",
+        "config-blake3-256-maximum-string-valid"
+      ],
+      "fixture_ids_64": [
+        "config-sha512-all-tags-valid",
+        "config-sha512-numeric-boundaries-valid",
+        "config-sha512-maximum-string-valid"
+      ]
+    },
+    {
       "id": "scope-definition-v1",
       "family": "index-semantic-definition",
       "magic_ascii": "ASCP",
@@ -434,10 +490,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 6,
-    "fixture_count": 42,
+    "fixture_family_count": 7,
+    "fixture_count": 48,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, and ScopeDefinitionV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, canonical config values/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, and ScopeDefinitionV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }
