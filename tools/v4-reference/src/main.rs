@@ -1,6 +1,7 @@
 mod config;
 mod core;
 mod definitions;
+mod dependency;
 mod index;
 mod policy;
 
@@ -16,12 +17,13 @@ use sha2::{Digest, Sha256};
 
 use config::ConfigFormat;
 use core::{CoreFormat, HashProfile};
+use dependency::DependencyFormat;
 use definitions::DefinitionFormat;
 use index::IndexFormat;
 use policy::PolicyFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-invocation-policy-v1";
+const TOOL_REVISION: &str = "p0b2-dependency-table-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -37,6 +39,7 @@ enum FixtureFormat {
   DatabaseHeaderV4,
   Config(ConfigFormat),
   Core(CoreFormat),
+  Dependency(DependencyFormat),
   Definition(DefinitionFormat),
   Index(IndexFormat),
   Policy(PolicyFormat),
@@ -48,6 +51,7 @@ impl FixtureFormat {
       Self::DatabaseHeaderV4 => "database-header-v4",
       Self::Config(format) => format.id(),
       Self::Core(format) => format.id(),
+      Self::Dependency(format) => format.id(),
       Self::Definition(format) => format.id(),
       Self::Index(format) => format.id(),
       Self::Policy(format) => format.id(),
@@ -59,6 +63,7 @@ impl FixtureFormat {
       Self::DatabaseHeaderV4 => "DatabaseHeaderV4",
       Self::Config(format) => format.family(),
       Self::Core(format) => format.family(),
+      Self::Dependency(format) => format.family(),
       Self::Definition(format) => format.family(),
       Self::Index(format) => format.family(),
       Self::Policy(format) => format.family(),
@@ -219,7 +224,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-invocation-policy".to_string(),
+    stage: "p0b-2-dependency-table".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -241,7 +246,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-invocation-policy" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-dependency-table" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -398,6 +403,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
   cases.extend(config::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::Config(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
+  cases.extend(dependency::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Dependency(case.format),
     profile: case.profile,
     expected: case.expected,
     relation: case.relation,
@@ -596,6 +610,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     }
     FixtureFormat::Config(_) => config::observe(case.profile, bytes),
     FixtureFormat::Core(format) => core::observe(format, case.profile, bytes),
+    FixtureFormat::Dependency(_) => dependency::observe(case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
@@ -609,6 +624,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::DatabaseHeaderV4 => output.push_str("# contract: DatabaseHeaderV4, two 1024-byte slots, data offset 2048\n"),
     FixtureFormat::Config(_)
     | FixtureFormat::Core(_)
+    | FixtureFormat::Dependency(_)
     | FixtureFormat::Definition(_)
     | FixtureFormat::Index(_)
     | FixtureFormat::Policy(_) => {
@@ -646,6 +662,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Definition(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in definitions::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Dependency(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in dependency::annotation_lines(&case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

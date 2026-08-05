@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-invocation-policy-v1",
+  "tool_revision": "p0b2-dependency-table-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -97,6 +97,42 @@
       "fixture_id": "config-sha512-maximum-string-valid",
       "expected": "config:utf8:bytes=65536",
       "observed": "config:utf8:bytes=65536",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-blake3-256-empty-valid",
+      "expected": "dependencies:records=0",
+      "observed": "dependencies:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-blake3-256-native-parser-resolution-valid",
+      "expected": "dependencies:records=1",
+      "observed": "dependencies:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-blake3-256-wasm-mapper-valid",
+      "expected": "dependencies:records=1",
+      "observed": "dependencies:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-sha512-empty-valid",
+      "expected": "dependencies:records=0",
+      "observed": "dependencies:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-sha512-native-parser-resolution-valid",
+      "expected": "dependencies:records=1",
+      "observed": "dependencies:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "adpt-sha512-wasm-mapper-valid",
+      "expected": "dependencies:records=1",
+      "observed": "dependencies:records=1",
       "result": "pass"
     },
     {

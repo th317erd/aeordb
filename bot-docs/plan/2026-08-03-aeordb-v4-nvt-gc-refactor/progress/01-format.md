@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2b-3c ParserResolutionPlanV1, DependencyTableV1, SourceSelectorV1, and ValueStoreDefinitionV1
+- **Current landing unit:** P0b-2b-3d ParserResolutionPlanV1, SourceSelectorV1, and ValueStoreDefinitionV1
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-3a CanonicalConfigValueV1 `f31a5b2d1f4004c7499b88673a682be01e6829c0`
+- **Last green commit:** P0b-2b-3b InvocationPolicyV1 `4ca8c97edb4e023ee821163dcc7e4fb276bf3947`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze the remaining corrected Round 8A/9 ValueStore closure in dependency order: dependency records and empty table, parser plan/candidates, source selectors, then the parent `ValueStoreDefinitionV1`
+- **Next action:** freeze the remaining corrected Round 8A/9 ValueStore closure in dependency order: parser plan/candidates, source selectors, then the parent `ValueStoreDefinitionV1`
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -60,3 +60,12 @@
 - **Failure proof:** exact-length/framing, semantic IDs, reserve bytes, native/WASM field applicability, host-profile coupling, finite corrected limits, 64 KiB WASM-page alignment, WASM32 address-space bounds, and zero/sentinel failures are covered. Every byte is rejected structurally or changes the enclosing ValueStore identity input.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 29 tests in 0.16 seconds; strict standalone Clippy passed; fresh generation/verification passed all 52 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
 - **Boundary:** no executor, plugin ABI, production policy reader/writer, or persistent state changed. Parser candidates and mapper selectors remain writer-disabled until their child records are frozen.
+
+## P0b-2b-3c Dependency Tables
+
+- **Red proof:** the 52-fixture campaign gate first failed with `P0b-2 definition format is absent from the contract registry: dependency-table-v1`.
+- **Frozen contracts:** exact `DependencyTableV1` and 96-byte record framing; executable kind, role, ABI, executor, fingerprint, artifact, flag, namespace-ID, SemVer, canonical ordering, deduplication, ordinal, and 256 KiB/1,024-record bounds from Round 9.
+- **Independent corpus:** six fixtures cover the canonical empty table, a native parser-resolution dependency, and a corrected WASM mapper dependency under both hash profiles; the complete corpus now contains 58 fixtures.
+- **Failure proof:** table/record framing, checked lengths/counts, reserves, ordering/duplicates, flags, canonical IDs/versions, nonzero fingerprints, artifact requirements, and native/WASM role/ABI/executor combinations fail closed.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 33 tests in 0.17 seconds; strict standalone Clippy passed; fresh generation/verification passed all 58 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** dependency records describe immutable executor identity only. No plugin archive, alias, executor, mutable registry, production reader/writer, or persistent database path changed.

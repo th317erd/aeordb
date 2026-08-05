@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-invocation-policy" and
+  .coverage_stage == "p0b-2-dependency-table" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-invocation-policy" and
+  .stage == "p0b-2-dependency-table" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -241,6 +241,7 @@ jq -e '
 
 required_p0b2_definition_formats=(
   canonical-config-value-v1
+  dependency-table-v1
   invocation-policy-v1
   scope-definition-v1
 )

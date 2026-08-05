@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-invocation-policy",
+  "coverage_stage": "p0b-2-dependency-table",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -289,6 +289,55 @@
       ]
     },
     {
+      "id": "dependency-table-v1",
+      "family": "index-semantic-dependencies",
+      "magic_ascii": "ADPT",
+      "version": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "table_magic", "rule": "ASCII ADPT" },
+        { "offset": 4, "length": 2, "field": "table_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "table_header_length", "rule": "exactly 32" },
+        { "offset": 8, "length": 4, "field": "table_total_length", "rule": "complete table bytes" },
+        { "offset": 12, "length": 4, "field": "table_flags", "rule": "zero" },
+        { "offset": 16, "length": 4, "field": "record_count", "rule": "0..1024" },
+        { "offset": 20, "length": 4, "field": "record_bytes_length", "rule": "total minus 32" },
+        { "offset": 24, "length": 8, "field": "table_reserved", "rule": "zero" },
+        { "offset": 32, "length_formula": "R", "field": "records", "rule": "strict canonical order" }
+      ],
+      "record_formula": "96 + dependency_id_length + version_length",
+      "identity": ["complete canonical table bytes embedded in ValueStoreDefinitionV1"],
+      "key_domain": "no standalone key; exact bytes participate in ValueStoreId",
+      "checksum": "no independent checksum; enclosing ValueStoreDefinition identity plus IndexArtifact CRC/hash protect these bytes",
+      "body_formula": "32 + sum(record lengths), at most 1024 records and 256 KiB",
+      "hard_cap": 262144,
+      "canonical_order": "deduplicated records sorted by the exact Round 9 kind/role/ID/version/ABI/profile/fingerprint/artifact/flags tuple",
+      "reserve_zero_ranges": [
+        { "start": 24, "length": 8 },
+        { "start_formula": "each record +28", "length": 4 },
+        { "start_formula": "each record +72", "length": 24 }
+      ],
+      "malformed_behavior": "reject framing/count/length/reserve errors, duplicate or unordered records, unknown kinds, invalid flags/IDs/SemVer, zero fingerprints, and role/ABI/executor/fingerprint/artifact mismatches",
+      "trailing_behavior": "table and record lengths plus record_count consume all bytes exactly",
+      "bounded_decode": "validate 32-byte table and 256 KiB cap before records; validate each 96-byte prefix and checked variable lengths before UTF-8 access",
+      "producer_owner": "Child 05 ValueStore definition compiler through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/readers", "Child 05 builders/executors", "Child 06 fallback", "Child 07 migration/plugin retention"],
+      "capability": "IndexDefinitionV1 bit 8 through the enclosing ValueStore definition",
+      "typed_hash_roles": [
+        { "field": "fingerprint", "role": "fingerprint" },
+        { "field": "complete table bytes in ValueStoreId preimage", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "adpt-blake3-256-empty-valid",
+        "adpt-blake3-256-native-parser-resolution-valid",
+        "adpt-blake3-256-wasm-mapper-valid"
+      ],
+      "fixture_ids_64": [
+        "adpt-sha512-empty-valid",
+        "adpt-sha512-native-parser-resolution-valid",
+        "adpt-sha512-wasm-mapper-valid"
+      ]
+    },
+    {
       "id": "invocation-policy-v1",
       "family": "index-execution-policy",
       "magic_ascii": "AIVP",
@@ -553,10 +602,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 8,
-    "fixture_count": 52,
+    "fixture_family_count": 9,
+    "fixture_count": 58,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, and InvocationPolicyV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, parser/dependency/selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, and DependencyTableV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, parser/selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

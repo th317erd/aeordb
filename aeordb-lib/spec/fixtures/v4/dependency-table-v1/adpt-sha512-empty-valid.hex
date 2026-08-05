@@ -1,0 +1,11 @@
+# fixture: adpt-sha512-empty-valid
+# contract: DependencyTableV1
+# hash: sha512 (64 bytes)
+# expected: dependencies:records=0
+# relation: canonical-empty-table
+# hex offsets are absolute within this fixture
+# table +0x000 len 32: ADPT header
+# table record_count: 0
+# table +0x020 len 0: canonical dependency records
+00000000: 41445054010020002000000000000000
+00000010: 00000000000000000000000000000000
