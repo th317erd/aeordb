@@ -7,11 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::entry_type::EntryType;
 use crate::engine::file_header::read_active_header;
 use crate::engine::hot_tail;
 use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_VOID};
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::v4::durability_recovery::DurabilityRepairVerification;
+use crate::engine::v4::hash::digest_parts;
 
 /// Structured B-tree directory issue used by repair logic. The CLI still
 /// renders `btree_directory_issues` as strings for human-readable output.
@@ -191,6 +194,48 @@ pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
   check_snapshot_integrity(engine, &mut report);
 
   report
+}
+
+/// Run the final clean verification pass for an explicit durability repair.
+/// The returned proof is opaque outside the engine and is bound to the exact
+/// header/coordinator frontier observed after the scan.
+pub fn verify_durability_repair(engine: &StorageEngine, db_path: &str) -> EngineResult<(VerifyReport, DurabilityRepairVerification)> {
+  let recovery = engine
+    .persistent_durability_recovery()
+    .filter(|recovery| recovery.blocks_writes && recovery.latch_state == Some(2))
+    .ok_or_else(|| EngineError::InvalidInput("durability repair verification requires an active repair-verifying latch".to_string()))?;
+  let report = verify(engine, db_path);
+  if report.has_issues() {
+    return Err(EngineError::DurabilityFailure("durability repair verification still reports unresolved database issues".to_string()));
+  }
+  let selected_header_sequence = engine.writer_read_lock()?.file_header().sequence;
+  let durable_sequence = engine.durability_snapshot()?.hard_frontier;
+  if selected_header_sequence == 0 || durable_sequence == 0 {
+    return Err(EngineError::DurabilityFailure(
+      "durability repair verification did not observe nonzero header/frontier evidence".to_string(),
+    ));
+  }
+
+  let mut summary = Vec::with_capacity(16 + 11 * 8 + 2);
+  summary.extend_from_slice(&recovery.database_id);
+  summary.extend_from_slice(&engine.hash_algo().to_u16().to_le_bytes());
+  for value in [
+    report.file_size,
+    report.total_entries,
+    report.valid_entries,
+    report.chunks,
+    report.file_records,
+    report.directory_indexes,
+    report.kv_entries,
+    report.directories_checked,
+    report.snapshots_checked,
+    selected_header_sequence,
+    durable_sequence,
+  ] {
+    summary.extend_from_slice(&value.to_le_bytes());
+  }
+  let evidence_digest = digest_parts(engine.hash_algo(), &[b"aeordb.durability-repair-verification.v1\0", &summary]);
+  Ok((report, DurabilityRepairVerification::new(evidence_digest, selected_header_sequence, durable_sequence)))
 }
 
 /// Run verify with auto-repair (KV rebuild + directory tree rebuild).

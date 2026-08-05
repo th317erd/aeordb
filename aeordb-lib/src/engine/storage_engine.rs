@@ -443,6 +443,7 @@ pub struct StorageEngine {
   shutdown_complete: AtomicBool,
   durability_failure: Mutex<Option<DurabilityFailureState>>,
   persistent_durability_recovery: Mutex<Option<crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState>>,
+  durability_repair_owner: Mutex<Option<std::thread::ThreadId>>,
   emergency_spill: Mutex<Option<EmergencySpillReport>>,
   last_published_hot_tail_offset: AtomicU64,
   durability_coordinator: Arc<DurabilityCoordinator>,
@@ -527,6 +528,31 @@ impl StorageEngine {
     self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
   }
 
+  pub fn begin_explicit_durability_repair(&self) -> EngineResult<crate::engine::v4::durability_recovery::ExplicitDurabilityRepair<'_>> {
+    crate::engine::v4::durability_recovery::ExplicitDurabilityRepair::begin(self)
+  }
+
+  pub(crate) fn refresh_persistent_durability_recovery(&self) -> EngineResult<()> {
+    let recovery = crate::engine::v4::durability_recovery::inspect_persistent_durability_recovery(self)?;
+    *self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = recovery;
+    Ok(())
+  }
+
+  pub(crate) fn acquire_durability_repair_authority(&self) -> EngineResult<DurabilityRepairAuthorityGuard<'_>> {
+    let owner = std::thread::current().id();
+    let mut active = self.durability_repair_owner.lock().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    if active.is_some() {
+      return Err(EngineError::DurabilityFailure("an explicit durability repair session is already active".to_string()));
+    }
+    *active = Some(owner);
+    Ok(DurabilityRepairAuthorityGuard { engine: self, owner })
+  }
+
+  fn current_thread_has_durability_repair_authority(&self) -> bool {
+    let owner = std::thread::current().id();
+    self.durability_repair_owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() == Some(&owner)
+  }
+
   pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
     self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))
   }
@@ -536,13 +562,17 @@ impl StorageEngine {
   }
 
   pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
+    let has_repair_authority = self.current_thread_has_durability_repair_authority();
     if let Some(recovery) = self.persistent_durability_recovery() {
-      if recovery.blocks_writes {
+      if recovery.blocks_writes && !has_repair_authority {
         return Err(EngineError::DurabilityFailure(format!("database is read-only until explicit repair completes: {}", recovery.reason)));
       }
     }
-    if let Some(failure) = self.durability_failure() {
-      return Err(EngineError::DurabilityFailure(format!("database is read-only after serious durability failure: {}", failure)));
+    if let Some(failure) = self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+      return Err(EngineError::DurabilityFailure(format!(
+        "database is read-only after serious durability failure: {}",
+        failure.latest_failure
+      )));
     }
     Ok(())
   }
@@ -1238,6 +1268,7 @@ impl StorageEngine {
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
       persistent_durability_recovery: Mutex::new(None),
+      durability_repair_owner: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(hot_tail_offset),
       durability_coordinator,
@@ -1476,6 +1507,7 @@ impl StorageEngine {
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
       persistent_durability_recovery: Mutex::new(None),
+      durability_repair_owner: Mutex::new(None),
       emergency_spill: Mutex::new(None),
       last_published_hot_tail_offset: AtomicU64::new(file_header.hot_tail_offset),
       durability_coordinator,
@@ -1537,8 +1569,7 @@ impl StorageEngine {
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer();
-    let persistent_recovery = crate::engine::v4::durability_recovery::inspect_persistent_durability_recovery(&engine)?;
-    *engine.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = persistent_recovery;
+    engine.refresh_persistent_durability_recovery()?;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -3944,6 +3975,22 @@ mod tests {
 
   #[test]
   #[serial]
+  fn repair_authority_never_bypasses_a_new_runtime_durability_failure() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let spill_dir = temp_dir.path().join("spill");
+    let _restore = SpillTestEnv::new(&spill_dir);
+    let engine_path = temp_dir.path().join("repair-runtime-failure.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let _authority = engine.acquire_durability_repair_authority().unwrap();
+
+    engine.record_durability_failure("failure during explicit repair", "synthetic EIO");
+
+    let error = engine.ensure_writable().unwrap_err();
+    assert!(error.to_string().contains("failure during explicit repair"), "{error}");
+  }
+
+  #[test]
+  #[serial]
   fn later_failure_retries_external_spill_with_the_original_incident_identity() {
     let temp_dir = tempfile::tempdir().unwrap();
     let blocked_root = temp_dir.path().join("blocked-root");
@@ -4086,6 +4133,20 @@ mod tests {
 thread_local! {
   static NAMESPACE_WRITE_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
   static ENGINE_OPERATION_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct DurabilityRepairAuthorityGuard<'a> {
+  engine: &'a StorageEngine,
+  owner: std::thread::ThreadId,
+}
+
+impl Drop for DurabilityRepairAuthorityGuard<'_> {
+  fn drop(&mut self) {
+    let mut active = self.engine.durability_repair_owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if active.as_ref() == Some(&self.owner) {
+      *active = None;
+    }
+  }
 }
 
 pub(crate) struct NamespaceWriteGuard<'a> {

@@ -11,8 +11,10 @@ use aeordb::engine::v4::database_header::{DatabaseHeaderVersion, read_database_h
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::system_control::{
   DurabilityLatchBodyV1, EmergencySpillCatalogBodyV1, EmergencySpillCatalogRowV1, SystemControlKindV1, SystemControlSlotV1,
-  decode_system_control, encode_durability_latch_control, encode_emergency_spill_catalog_control, system_control_path,
+  decode_emergency_spill_catalog_body, decode_system_control, encode_durability_latch_control, encode_emergency_spill_catalog_control,
+  system_control_path,
 };
+use aeordb::engine::verify;
 use aeordb::engine::{EntryType, HashAlgorithm, RequestContext, StorageEngine};
 
 fn fixture_root() -> PathBuf {
@@ -135,6 +137,173 @@ fn completed_persistent_recovery_controls_preserve_identity_without_blocking_wri
   assert_eq!(recovery.database_id, database_id);
   assert!(!recovery.blocks_writes);
   DirectoryOps::new(&reopened).store_file_buffered(&RequestContext::system(), "/accepted.txt", b"accepted", Some("text/plain")).unwrap();
+}
+
+#[test]
+fn explicit_repair_is_thread_scoped_and_clears_only_after_hard_proof() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-repair.aeordb");
+  let database_id = [0x46; 16];
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    publish_recovery_controls(&engine, database_id, true);
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let original_evidence = selected_latch_evidence(&reopened, database_id);
+  let repair = reopened.begin_explicit_durability_repair().unwrap();
+  let repairing = reopened.persistent_durability_recovery().unwrap();
+  assert_eq!(repairing.latch_state, Some(2));
+  assert_eq!(repairing.catalog_state, Some(2));
+  assert_eq!(repairing.latch_sequence, Some(2));
+  assert_eq!(repairing.catalog_sequence, Some(2));
+  assert!(repairing.blocks_writes);
+
+  DirectoryOps::new(repair.engine())
+    .store_file_buffered(&RequestContext::system(), "/repair-evidence.txt", b"verified during repair", Some("text/plain"))
+    .unwrap();
+  std::thread::scope(|scope| {
+    let engine = repair.engine();
+    scope
+      .spawn(move || {
+        let error = DirectoryOps::new(engine)
+          .store_file_buffered(&RequestContext::system(), "/foreign-thread.txt", b"rejected", Some("text/plain"))
+          .unwrap_err();
+        assert!(error.to_string().contains("explicit repair"), "{error}");
+      })
+      .join()
+      .unwrap();
+  });
+
+  let (report, verification) = verify::verify_durability_repair(repair.engine(), db_path.to_str().unwrap()).unwrap();
+  assert!(!report.has_issues());
+  let receipt = repair.complete(verification).unwrap();
+  assert_eq!(receipt.database_id, database_id);
+  assert_ne!(receipt.repair_receipt_hash, vec![0; 32]);
+  let completed = reopened.persistent_durability_recovery().unwrap();
+  assert_eq!(completed.latch_state, Some(3));
+  assert_eq!(completed.catalog_state, Some(3));
+  assert_eq!(completed.latch_sequence, Some(3));
+  assert_eq!(completed.catalog_sequence, Some(3));
+  assert!(!completed.blocks_writes);
+  assert_eq!(selected_latch_evidence(&reopened, database_id), original_evidence);
+  DirectoryOps::new(&reopened)
+    .store_file_buffered(&RequestContext::system(), "/after-repair.txt", b"writable", Some("text/plain"))
+    .unwrap();
+  reopened.shutdown().unwrap();
+  drop(reopened);
+
+  let final_reopen = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  assert!(!final_reopen.persistent_durability_recovery().unwrap().blocks_writes);
+  assert_eq!(DirectoryOps::new(&final_reopen).read_file_buffered("/repair-evidence.txt").unwrap(), b"verified during repair");
+}
+
+#[test]
+fn repair_resumes_after_catalog_publication_crashes_before_latch_publication() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-partial-publication.aeordb");
+  let database_id = [0x49; 16];
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    publish_recovery_controls(&engine, database_id, true);
+    let store = V3TransitionControlStore::new(&engine);
+    let selected = store.load_mutable(SystemControlKindV1::EmergencySpillCatalog, database_id, &[]).unwrap().unwrap();
+    let control = decode_system_control(&selected.bytes, HashAlgorithm::Blake3_256).unwrap();
+    let mut catalog = decode_emergency_spill_catalog_body(control.body, HashAlgorithm::Blake3_256).unwrap();
+    catalog.catalog_generation = 2;
+    catalog.state = 2;
+    let bytes = encode_emergency_spill_catalog_control(2, &catalog, HashAlgorithm::Blake3_256).unwrap();
+    store.publish_mutable(SystemControlKindV1::EmergencySpillCatalog, database_id, &[], &bytes).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let partial = reopened.persistent_durability_recovery().unwrap();
+  assert!(partial.blocks_writes);
+  assert!(partial.reason.contains("partially advanced"), "{}", partial.reason);
+  assert_eq!(partial.latch_sequence, Some(1));
+  assert_eq!(partial.catalog_sequence, Some(2));
+
+  let repair = reopened.begin_explicit_durability_repair().unwrap();
+  let resumed = reopened.persistent_durability_recovery().unwrap();
+  assert_eq!(resumed.latch_state, Some(2));
+  assert_eq!(resumed.catalog_state, Some(2));
+  let (_, verification) = verify::verify_durability_repair(repair.engine(), db_path.to_str().unwrap()).unwrap();
+  repair.complete(verification).unwrap();
+  assert!(!reopened.persistent_durability_recovery().unwrap().blocks_writes);
+}
+
+#[test]
+fn dropping_explicit_repair_keeps_recovery_latched_and_restart_blocked() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-repair-drop.aeordb");
+  let database_id = [0x47; 16];
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    publish_recovery_controls(&engine, database_id, true);
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  drop(reopened.begin_explicit_durability_repair().unwrap());
+  assert!(reopened.persistent_durability_recovery().unwrap().blocks_writes);
+  let error = DirectoryOps::new(&reopened)
+    .store_file_buffered(&RequestContext::system(), "/must-remain-rejected.txt", b"rejected", Some("text/plain"))
+    .unwrap_err();
+  assert!(error.to_string().contains("explicit repair"), "{error}");
+  drop(reopened);
+
+  let final_reopen = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let recovery = final_reopen.persistent_durability_recovery().unwrap();
+  assert_eq!(recovery.latch_state, Some(2));
+  assert_eq!(recovery.catalog_state, Some(2));
+  assert!(recovery.blocks_writes);
+}
+
+#[test]
+fn explicit_repair_rejects_a_verification_proof_after_intervening_mutation() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-stale-proof.aeordb");
+  let database_id = [0x48; 16];
+  {
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    publish_recovery_controls(&engine, database_id, true);
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  let repair = reopened.begin_explicit_durability_repair().unwrap();
+  let (_, verification) = verify::verify_durability_repair(repair.engine(), db_path.to_str().unwrap()).unwrap();
+  DirectoryOps::new(repair.engine())
+    .store_file_buffered(&RequestContext::system(), "/after-verification.txt", b"changed", Some("text/plain"))
+    .unwrap();
+  let error = repair.complete(verification).unwrap_err();
+  assert!(error.to_string().contains("changed after durability repair verification"), "{error}");
+  assert!(reopened.persistent_durability_recovery().unwrap().blocks_writes);
+  let error = DirectoryOps::new(&reopened)
+    .store_file_buffered(&RequestContext::system(), "/ordinary-write.txt", b"rejected", Some("text/plain"))
+    .unwrap_err();
+  assert!(error.to_string().contains("explicit repair"), "{error}");
+}
+
+#[test]
+fn explicit_repair_refuses_when_no_recovery_authority_is_active() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-no-repair.aeordb");
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  let error = match engine.begin_explicit_durability_repair() {
+    Ok(_) => panic!("healthy database must not grant repair write authority"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("no active durability recovery"), "{error}");
+}
+
+fn selected_latch_evidence(engine: &StorageEngine, database_id: [u8; 16]) -> Vec<u8> {
+  let selected =
+    V3TransitionControlStore::new(engine).load_mutable(SystemControlKindV1::DurabilityLatch, database_id, &[]).unwrap().unwrap();
+  let control = decode_system_control(&selected.bytes, engine.hash_algo()).unwrap();
+  aeordb::engine::v4::system_control::decode_durability_latch_body(control.body, engine.hash_algo()).unwrap().evidence_digest
 }
 
 #[test]
